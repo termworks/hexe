@@ -3,6 +3,39 @@ local section = HEXE_SECTION
 
 -- events API is provided by runtime: hx.events.on/off/once/debounce/throttle
 
+local function load_layout_config()
+  local getenv = os and os.getenv
+  if type(getenv) ~= "function" then
+    return { keybingings = {}, default_layout = nil }
+  end
+
+  local xdg = getenv("XDG_CONFIG_HOME")
+  local home = getenv("HOME")
+  local cfg_dir = nil
+  if xdg and xdg ~= "" then
+    cfg_dir = xdg .. "/hexe"
+  elseif home and home ~= "" then
+    cfg_dir = home .. "/.config/hexe"
+  end
+
+  if not cfg_dir then
+    return { keybingings = {}, default_layout = nil }
+  end
+
+  local ok, cfg = pcall(dofile, cfg_dir .. "/layout.lua")
+  if not ok or type(cfg) ~= "table" then
+    return { keybingings = {}, default_layout = nil }
+  end
+
+  if type(cfg.keybingings) ~= "table" then
+    cfg.keybingings = {}
+  end
+
+  return cfg
+end
+
+local layout_cfg = load_layout_config()
+
 -- ============================================================================
 -- MUX Configuration (Terminal UI)
 -- ============================================================================
@@ -20,7 +53,7 @@ if section == nil or section == "mux" then
   })
 
   -- Keybindings
-  hx.mux.keymap.set({
+  local keymaps = {
     { key = { hx.key.ctrl, hx.key.alt, hx.key.q }, action = { type = hx.action.mux_quit } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.d }, action = { type = hx.action.mux_detach } },
 
@@ -50,16 +83,16 @@ if section == nil or section == "mux" then
     { key = { hx.key.ctrl, hx.key.alt, hx.key.left }, action = { type = hx.action.focus_move, dir = "left" } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.right }, action = { type = hx.action.focus_move, dir = "right" } },
 
-    { key = { hx.key.ctrl, hx.key.alt, hx.key["1"] }, action = { type = hx.action.float_toggle, float = "1" } },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key["2"] }, action = { type = hx.action.float_toggle, float = "2" } },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key["3"] }, action = { type = hx.action.float_toggle, float = "3" } },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key["4"] }, action = { type = hx.action.float_toggle, float = "4" } },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key["0"] }, action = { type = hx.action.float_toggle, float = "p" } },
-
     -- Pokemon sprite overlay
     { key = { hx.key.ctrl, hx.key.alt, hx.key.p }, action = { type = hx.action.sprite_toggle }, mode = hx.mode.act_and_consume },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.shift, hx.key.p }, action = { type = hx.action.sprite_toggle }, mode = hx.mode.act_and_consume },
-  })
+  }
+
+  for _, km in ipairs(layout_cfg.keybingings) do
+    table.insert(keymaps, km)
+  end
+
+  hx.mux.keymap.set(keymaps)
 
   -- Default float settings
   hx.mux.float.set_defaults({
@@ -264,91 +297,9 @@ end
 -- SES Configuration (Session Manager)
 -- ============================================================================
 if section == nil or section == "ses" then
-  -- Define default layout
-  hx.ses.layout.define({
-    name = "default",
-    enabled = true,
-    tabs = {
-      {
-        name = "main",
-        enabled = true,
-        root = { cwd = "." },
-      },
-    },
-    floats = {
-      {
-        key = "1",
-        enabled = true,
-        title = "opencode",
-        attributes = { per_cwd = true, inherit_env = true },
-        command = "/env/bin/opencode",
-      },
-      {
-        key = "2",
-        enabled = true,
-        attributes = { per_cwd = true, inherit_env = true },
-        title = "opencode",
-        command = "/env/bin/opencode",
-      },
-      {
-        key = "3",
-        enabled = true,
-        attributes = { per_cwd = true, inherit_env = true },
-        title = "claude",
-        command = "/env/bin/bun x --package @anthropic-ai/claude-code claude",
-      },
-      {
-        key = "p",
-        enabled = true,
-        title = "scratchpad",
-        position = { x = 100, y = 50 },
-        size = { width = 40, height = 80 },
-        padding = { x = 2, y = 1 },
-        attributes = { global = false, navigatable = true, inherit_env = true },
-        style = {
-          shadow = { color = 236 },
-          border = {
-            chars = {
-              top_left = "╔",
-              top_right = "╗",
-              bottom_left = "╚",
-              bottom_right = "╝",
-              horizontal = "═",
-              vertical = "║",
-              left_t = "╠",
-              right_t = "╣",
-              top_t = "╦",
-              bottom_t = "╩",
-              cross = "╬",
-            },
-          },
-          title = {
-            name = "title",
-            value = function(ctx)
-              local t = hx.segment.title(ctx)
-              return {
-                { text = " ", style = "bg:0 fg:1" },
-                { text = t, style = "bg:1 fg:0" },
-                { text = " ", style = "bg:0 fg:1" },
-              }
-            end,
-            position = "topright",
-          },
-        },
-      },
-      {
-        key = "0",
-        enabled = true,
-        title = "sandbox",
-        isolation = {
-          profile = "sandbox",  -- Full isolation + network allowed
-          memory = "512M",
-          pids = 100,
-          cpu = "50000 100000",  -- 0.5 cores max
-        },
-      },
-    },
-  })
+  if layout_cfg.default_layout then
+    hx.ses.layout.define(layout_cfg.default_layout)
+  end
 end
 
 -- ============================================================================
