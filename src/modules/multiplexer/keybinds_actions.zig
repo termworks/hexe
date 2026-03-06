@@ -348,6 +348,45 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (dir) |d| return focus_move.perform(state, d);
             return true;
         },
+        .layout_save => {
+            var items = std.ArrayList([]const u8).empty;
+            defer items.deinit(state.allocator);
+
+            const local_item = state.allocator.dupe(u8, "local") catch return true;
+            const global_item = state.allocator.dupe(u8, "global") catch {
+                state.allocator.free(local_item);
+                return true;
+            };
+            const both_item = state.allocator.dupe(u8, "both") catch {
+                state.allocator.free(local_item);
+                state.allocator.free(global_item);
+                return true;
+            };
+
+            items.append(state.allocator, local_item) catch {
+                state.allocator.free(local_item);
+                state.allocator.free(global_item);
+                state.allocator.free(both_item);
+                return true;
+            };
+            items.append(state.allocator, global_item) catch {
+                state.allocator.free(global_item);
+                state.allocator.free(both_item);
+                return true;
+            };
+            items.append(state.allocator, both_item) catch {
+                state.allocator.free(both_item);
+                return true;
+            };
+
+            state.popups.showPickerOwned(items.items, .{ .title = "Save layout scope" }) catch {
+                for (items.items) |item| state.allocator.free(item);
+                return true;
+            };
+            state.pending_action = .layout_save_choose;
+            state.needs_render = true;
+            return true;
+        },
     }
 }
 

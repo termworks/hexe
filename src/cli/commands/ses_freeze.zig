@@ -6,8 +6,14 @@ const com = @import("com.zig");
 
 const print = std.debug.print;
 
+pub const LayoutSaveScope = enum {
+    local,
+    global,
+    both,
+};
+
 /// Save current mux layout to .hexe.lua in CWD and register in sessions.json.
-pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
+pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void {
     const wire = core.wire;
     const posix = std.posix;
 
@@ -91,12 +97,19 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
     const default_name = std.fs.path.basename(cwd);
     const layout_name = if (session_name.len > 0) session_name else default_name;
 
+    const write_local = scope == .local or scope == .both;
     const output_path = ".hexe.lua";
     const tmp_path = ".hexe.lua.tmp";
-    const file = std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch {
-        print("Error: cannot create {s}\n", .{tmp_path});
-        return;
-    };
+    const file = if (write_local)
+        (std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch {
+            print("Error: cannot create {s}\n", .{tmp_path});
+            return;
+        })
+    else
+        (std.fs.cwd().createFile("/dev/null", .{ .truncate = true }) catch {
+            print("Error: cannot open /dev/null\n", .{});
+            return;
+        });
     defer file.close();
 
     file.writeAll("return {\n") catch return;
@@ -106,24 +119,14 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
     // Tabs
     const tabs_val = root_obj.get("tabs") orelse {
         file.writeAll("}\n") catch {};
-        std.fs.cwd().rename(tmp_path, output_path) catch {
-            print("Error: cannot write {s}\n", .{output_path});
-            return;
-        };
-        try session_config.upsertLayoutRegistryEntry(allocator, layout_name, cwd);
-        print("Saved {s} ({s})\n", .{ output_path, layout_name });
+        try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
         return;
     };
     const tabs_arr = switch (tabs_val) {
         .array => |a| a,
         else => {
             file.writeAll("}\n") catch {};
-            std.fs.cwd().rename(tmp_path, output_path) catch {
-                print("Error: cannot write {s}\n", .{output_path});
-                return;
-            };
-            try session_config.upsertLayoutRegistryEntry(allocator, layout_name, cwd);
-            print("Saved {s} ({s})\n", .{ output_path, layout_name });
+            try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
             return;
         },
     };
@@ -277,12 +280,26 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
     }
 
     file.writeAll("}\n") catch return;
-    std.fs.cwd().rename(tmp_path, output_path) catch {
-        print("Error: cannot write {s}\n", .{output_path});
-        return;
-    };
-    try session_config.upsertLayoutRegistryEntry(allocator, layout_name, cwd);
-    print("Saved {s} ({s})\n", .{ output_path, layout_name });
+    try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
+}
+
+fn finalizeSave(allocator: std.mem.Allocator, scope: LayoutSaveScope, output_path: []const u8, tmp_path: []const u8, layout_name: []const u8, cwd: []const u8) !void {
+    if (scope == .local or scope == .both) {
+        std.fs.cwd().rename(tmp_path, output_path) catch {
+            print("Error: cannot write {s}\n", .{output_path});
+            return;
+        };
+    }
+
+    if (scope == .global or scope == .both) {
+        try session_config.upsertLayoutRegistryEntry(allocator, layout_name, cwd);
+    }
+
+    switch (scope) {
+        .local => print("Saved local layout: {s}\n", .{output_path}),
+        .global => print("Saved global layout entry: {s} -> {s}\n", .{ layout_name, cwd }),
+        .both => print("Saved local+global layout: {s} ({s})\n", .{ output_path, layout_name }),
+    }
 }
 
 /// Helper: formatted write to a File using a stack buffer.

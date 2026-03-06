@@ -358,6 +358,7 @@ fn parseSimpleAction(action_str: []const u8) ?config.Config.BindAction {
     if (std.mem.eql(u8, action_str, "tab.next")) return .tab_next;
     if (std.mem.eql(u8, action_str, "tab.prev")) return .tab_prev;
     if (std.mem.eql(u8, action_str, "tab.close")) return .tab_close;
+    if (std.mem.eql(u8, action_str, "layout.save")) return .layout_save;
     return null;
 }
 

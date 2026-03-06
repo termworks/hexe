@@ -230,6 +230,31 @@ fn resolveFocusedPaneForInput(state: *State) ?*Pane {
     return state.currentLayout().getFocusedPane();
 }
 
+fn runLayoutSaveWithScope(state: *State, scope: []const u8) void {
+    var env_map_opt = std.process.getEnvMap(state.allocator) catch null;
+    defer if (env_map_opt) |*m| m.deinit();
+
+    if (env_map_opt) |*env_map| {
+        if (state.getCurrentFocusedUuid()) |uuid| {
+            env_map.put("HEXE_PANE_UUID", uuid[0..]) catch {};
+            env_map.put("HEXE_FOCUSED_PANE_UUID", uuid[0..]) catch {};
+        }
+    }
+
+    var child = std.process.Child.init(&.{ "hexe", "lay", "save", "--scope", scope }, state.allocator);
+    if (env_map_opt) |*env_map| child.env_map = env_map;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    child.spawn() catch {
+        state.notifications.showFor("layout save spawn failed", 1400);
+        return;
+    };
+    _ = child.wait() catch {};
+    state.notifications.showFor("layout save requested", 1200);
+}
+
 fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
     if (!state.popups.isBlocked()) return false;
     defer freeParsedEventPayload(state, parsed_event);
@@ -264,6 +289,19 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                     }
                     state.pending_action = null;
                     state.adopt_selected_uuid = null;
+                    state.popups.clearResults();
+                },
+                .layout_save_choose => {
+                    if (state.popups.getPickerResult()) |selected| {
+                        const scope = switch (selected) {
+                            0 => "local",
+                            1 => "global",
+                            2 => "both",
+                            else => "both",
+                        };
+                        runLayoutSaveWithScope(state, scope);
+                    }
+                    state.pending_action = null;
                     state.popups.clearResults();
                 },
                 else => {

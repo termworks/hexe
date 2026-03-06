@@ -7,6 +7,7 @@ pub const runMuxFloat = @import("mux_float.zig").runMuxFloat;
 pub const runMuxRecord = @import("mux_record.zig").runMuxRecord;
 pub const runSesOpen = @import("ses_open.zig").runSesOpen;
 pub const runSesFreeze = @import("ses_freeze.zig").runSesFreeze;
+pub const LayoutSaveScope = @import("ses_freeze.zig").LayoutSaveScope;
 pub const runPodList = @import("pod_list.zig").runPodList;
 pub const runPodSend = @import("pod_send.zig").runPodSend;
 pub const runPodNew = @import("pod_new.zig").runPodNew;

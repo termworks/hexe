@@ -82,6 +82,7 @@ if section == nil or section == "mux" then
     { key = { hx.key.ctrl, hx.key.alt, hx.key.down }, action = { type = hx.action.focus_move, dir = "down" } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.left }, action = { type = hx.action.focus_move, dir = "left" } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.right }, action = { type = hx.action.focus_move, dir = "right" } },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.s }, action = { type = hx.action.layout_save } },
 
     -- Pokemon sprite overlay
     { key = { hx.key.ctrl, hx.key.alt, hx.key.p }, action = { type = hx.action.sprite_toggle }, mode = hx.mode.act_and_consume },

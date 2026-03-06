@@ -246,6 +246,7 @@ pub fn main() !void {
 
     var layout_save = app.createCommand("save", "Save current session as .hexe.lua");
     try layout_save.addArg(Arg.singleValueOption("instance", 'I', null));
+    try layout_save.addArg(Arg.singleValueOption("scope", null, null));
 
     try layout_cmd.addSubcommands(&[_]yazap.Command{ layout_list, layout_open, layout_save });
 
@@ -584,7 +585,12 @@ pub fn main() !void {
         if (layout_matches.subcommandMatches("save")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            try cli_cmds.runSesFreeze(allocator);
+            const scope_raw = m.getSingleValue("scope") orelse "both";
+            const scope = std.meta.stringToEnum(cli_cmds.LayoutSaveScope, scope_raw) orelse {
+                print("Error: invalid --scope (use local|global|both)\n", .{});
+                return;
+            };
+            try cli_cmds.runSesFreeze(allocator, scope);
             return;
         }
     } else if (matches.subcommandMatches("pod")) |pod_matches| {
