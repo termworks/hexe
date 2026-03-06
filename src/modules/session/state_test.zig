@@ -225,7 +225,7 @@ test "resolveSessionName: unique name returned as-is" {
     defer ses_state.deinit();
 
     const name = "alpha";
-    const resolved = ses_state.resolveSessionName(name) orelse return error.AllocationFailed;
+    const resolved = ses_state.resolveSessionName(name, null) orelse return error.AllocationFailed;
     // Note: resolved is allocated with page_allocator (SesState.allocator), not testing.allocator
     defer ses_state.allocator.free(resolved);
 
@@ -244,10 +244,26 @@ test "resolveSessionName: conflicting name gets suffix" {
     }
 
     // Try to resolve "alpha" - should get "alpha-2"
-    const resolved = ses_state.resolveSessionName("alpha") orelse return error.AllocationFailed;
+    const resolved = ses_state.resolveSessionName("alpha", null) orelse return error.AllocationFailed;
     defer ses_state.allocator.free(resolved);
 
     try testing.expectEqualStrings("alpha-2", resolved);
+}
+
+test "resolveSessionName: ignores current client on re-register" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const fd: std.posix.fd_t = 100;
+    const client_id = try ses_state.addClient(fd);
+    if (ses_state.getClient(client_id)) |client| {
+        client.session_name = try ses_state.allocator.dupe(u8, "alpha");
+    }
+
+    const resolved = ses_state.resolveSessionName("alpha", client_id) orelse return error.AllocationFailed;
+    defer ses_state.allocator.free(resolved);
+
+    try testing.expectEqualStrings("alpha", resolved);
 }
 
 // ============================================================================

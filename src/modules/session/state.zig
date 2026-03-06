@@ -538,7 +538,8 @@ pub const SesState = struct {
     }
 
     /// Check if a session name is already in use by a detached session or connected client.
-    fn isSessionNameInUse(self: *SesState, name: []const u8) bool {
+    /// Optionally excludes one client id (used during re-register).
+    fn isSessionNameInUse(self: *SesState, name: []const u8, exclude_client_id: ?usize) bool {
         // Check detached sessions
         var iter = self.detached_sessions.valueIterator();
         while (iter.next()) |detached| {
@@ -547,7 +548,10 @@ pub const SesState = struct {
             }
         }
         // Check connected clients
-        for (self.clients.items) |*client| {
+        for (self.clients.items, 0..) |*client, idx| {
+            if (exclude_client_id) |exclude| {
+                if (idx == exclude) continue;
+            }
             if (client.session_name) |client_name| {
                 if (std.ascii.eqlIgnoreCase(client_name, name)) {
                     return true;
@@ -560,18 +564,21 @@ pub const SesState = struct {
     /// Resolve a session name to ensure uniqueness.
     /// If name conflicts, appends "-2", "-3", etc. until unique.
     /// Returns allocated string that caller must free.
-    pub fn resolveSessionName(self: *SesState, requested_name: []const u8) ?[]u8 {
+    pub fn resolveSessionName(self: *SesState, requested_name: []const u8, exclude_client_id: ?usize) ?[]u8 {
+        const trimmed = std.mem.trim(u8, requested_name, " \t\r\n");
+        const base_name = if (trimmed.len > 0) trimmed else "session";
+
         // If name is not in use, just return a copy
-        if (!self.isSessionNameInUse(requested_name)) {
-            return self.allocator.dupe(u8, requested_name) catch null;
+        if (!self.isSessionNameInUse(base_name, exclude_client_id)) {
+            return self.allocator.dupe(u8, base_name) catch null;
         }
 
         // Name is in use, try appending suffix
         var suffix: u32 = 2;
         var buf: [128]u8 = undefined;
         while (suffix < 100) : (suffix += 1) {
-            const resolved = std.fmt.bufPrint(&buf, "{s}-{d}", .{ requested_name, suffix }) catch break;
-            if (!self.isSessionNameInUse(resolved)) {
+            const resolved = std.fmt.bufPrint(&buf, "{s}-{d}", .{ base_name, suffix }) catch break;
+            if (!self.isSessionNameInUse(resolved, exclude_client_id)) {
                 return self.allocator.dupe(u8, resolved) catch null;
             }
         }
@@ -580,7 +587,7 @@ pub const SesState = struct {
         var uuid_bytes: [4]u8 = undefined;
         std.crypto.random.bytes(&uuid_bytes);
         const hex = std.fmt.bytesToHex(&uuid_bytes, .lower);
-        const fallback = std.fmt.bufPrint(&buf, "{s}-{s}", .{ requested_name, hex }) catch return null;
+        const fallback = std.fmt.bufPrint(&buf, "{s}-{s}", .{ base_name, hex }) catch return null;
         return self.allocator.dupe(u8, fallback) catch null;
     }
 

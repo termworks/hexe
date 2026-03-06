@@ -231,28 +231,26 @@ fn resolveFocusedPaneForInput(state: *State) ?*Pane {
 }
 
 fn runLayoutSaveWithScope(state: *State, scope: []const u8) void {
-    var env_map_opt = std.process.getEnvMap(state.allocator) catch null;
-    defer if (env_map_opt) |*m| m.deinit();
-
-    if (env_map_opt) |*env_map| {
-        if (state.getCurrentFocusedUuid()) |uuid| {
-            env_map.put("HEXE_PANE_UUID", uuid[0..]) catch {};
-            env_map.put("HEXE_FOCUSED_PANE_UUID", uuid[0..]) catch {};
-        }
-    }
-
-    var child = std.process.Child.init(&.{ "hexe", "lay", "save", "--scope", scope }, state.allocator);
-    if (env_map_opt) |*env_map| child.env_map = env_map;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch {
-        state.notifications.showFor("layout save spawn failed", 1400);
+    const pane = resolveFocusedPaneForInput(state) orelse {
+        state.notifications.showFor("no focused pane for layout save", 1400);
         return;
     };
-    _ = child.wait() catch {};
-    state.notifications.showFor("layout save requested", 1200);
+
+    const cmd = std.fmt.allocPrint(state.allocator, "hexe lay save --scope {s}", .{scope}) catch {
+        state.notifications.showFor("layout save alloc failed", 1400);
+        return;
+    };
+    defer state.allocator.free(cmd);
+
+    pane.write(cmd) catch {
+        state.notifications.showFor("layout save send failed", 1400);
+        return;
+    };
+    pane.write("\n") catch {
+        state.notifications.showFor("layout save send failed", 1400);
+        return;
+    };
+    state.notifications.showFor("layout save command sent", 1200);
 }
 
 fn runLayoutOpenDetached(state: *State) void {
@@ -284,6 +282,31 @@ fn replaceFromLocalLayout(state: *State) void {
         state.notifications.showFor("failed to parse .hexe.lua", 1500);
         return;
     };
+
+    if (cfg.name) |desired_name| {
+        const name_owned = state.allocator.dupe(u8, desired_name) catch null;
+        if (name_owned) |new_name| {
+            if (state.session_name_owned) |old| {
+                state.allocator.free(old);
+            }
+            state.session_name = new_name;
+            state.session_name_owned = new_name;
+
+            state.ses_client.updateSession(state.uuid, state.session_name) catch {};
+            if (state.ses_client.resolved_name) |resolved| {
+                if (!std.mem.eql(u8, resolved, state.session_name)) {
+                    const resolved_owned = state.allocator.dupe(u8, resolved) catch null;
+                    if (resolved_owned) |rn| {
+                        if (state.session_name_owned) |old2| {
+                            state.allocator.free(old2);
+                        }
+                        state.session_name = rn;
+                        state.session_name_owned = rn;
+                    }
+                }
+            }
+        }
+    }
 
     state.replaceWithSessionConfig(cfg, null) catch {
         state.notifications.showFor("failed to apply local layout", 1500);

@@ -1065,7 +1065,7 @@ pub const Server = struct {
 
         // Resolve session name to ensure uniqueness (avoid collisions with detached sessions)
         const resolved_name: ?[]u8 = if (name_slice.len > 0)
-            self.ses_state.resolveSessionName(name_slice)
+            self.ses_state.resolveSessionName(name_slice, client_id)
         else
             null;
         defer if (resolved_name) |rn| self.allocator.free(rn);

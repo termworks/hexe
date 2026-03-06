@@ -81,21 +81,17 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         },
     };
 
-    // Get session name
-    const session_name = if (root_obj.get("session_name")) |n|
-        switch (n) {
-            .string => |s| s,
-            else => "session",
-        }
-    else
-        "session";
-
     // Get current working directory as root and registry path
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = std.posix.getcwd(&cwd_buf) catch "/tmp";
 
-    const default_name = std.fs.path.basename(cwd);
-    const layout_name = if (session_name.len > 0) session_name else default_name;
+    const used_names = try collectUsedLayoutNames(allocator);
+    defer {
+        for (used_names) |n| allocator.free(n);
+        if (used_names.len > 0) allocator.free(used_names);
+    }
+    const layout_name = try promptLayoutName(allocator, used_names);
+    defer allocator.free(layout_name);
 
     const write_local = scope == .local or scope == .both;
     const output_path = ".hexe.lua";
@@ -283,6 +279,122 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
 
     file.writeAll("  }\n}\n") catch return;
     try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
+}
+
+fn promptLayoutName(allocator: std.mem.Allocator, used_names: []const []const u8) ![]u8 {
+    const stdout = std.fs.File.stdout();
+    const stdin_fd = std.posix.STDIN_FILENO;
+
+    var buf: [256]u8 = undefined;
+    while (true) {
+        try stdout.writeAll("Layout name: ");
+        const n = std.posix.read(stdin_fd, buf[0..]) catch return error.EndOfStream;
+        if (n == 0) return error.EndOfStream;
+
+        const raw = std.mem.trim(u8, buf[0..n], " \t\r\n");
+        if (raw.len == 0) {
+            try stdout.writeAll("Name is required\n");
+            continue;
+        }
+
+        var has_path_sep = false;
+        for (raw) |ch| {
+            if (ch == '/' or ch == '\\') {
+                has_path_sep = true;
+                break;
+            }
+        }
+        if (has_path_sep) {
+            try stdout.writeAll("Name cannot contain '/' or '\\\'\n");
+            continue;
+        }
+
+        for (used_names) |used| {
+            if (std.ascii.eqlIgnoreCase(used, raw)) {
+                try stdout.writeAll("Name already in use (mux/saved). Choose another\n");
+                has_path_sep = true;
+                break;
+            }
+        }
+        if (has_path_sep) continue;
+
+        return try allocator.dupe(u8, raw);
+    }
+}
+
+fn collectUsedLayoutNames(allocator: std.mem.Allocator) ![][]u8 {
+    var names = std.ArrayList([]u8).empty;
+    errdefer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+
+    // names from sessions.json
+    var registry = try session_config.loadLayoutRegistry(allocator);
+    defer session_config.deinitLayoutRegistry(allocator, &registry);
+    for (registry.entries) |entry| {
+        try names.append(allocator, try allocator.dupe(u8, entry.name));
+    }
+
+    // names from running/detached mux sessions in SES
+    const wire = core.wire;
+    const posix = std.posix;
+    const fd = com.connectSesCliChannel(allocator) orelse return names.toOwnedSlice(allocator);
+    defer posix.close(fd);
+
+    const flag: [1]u8 = .{0};
+    wire.writeControl(fd, .status, &flag) catch return names.toOwnedSlice(allocator);
+
+    const hdr = wire.readControlHeader(fd) catch return names.toOwnedSlice(allocator);
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    if (msg_type != .status or hdr.payload_len < @sizeOf(wire.StatusResp)) return names.toOwnedSlice(allocator);
+
+    const payload = allocator.alloc(u8, hdr.payload_len) catch return names.toOwnedSlice(allocator);
+    defer allocator.free(payload);
+    wire.readExact(fd, payload) catch return names.toOwnedSlice(allocator);
+
+    var off: usize = 0;
+    const status_hdr = std.mem.bytesToValue(wire.StatusResp, payload[off..][0..@sizeOf(wire.StatusResp)]);
+    off += @sizeOf(wire.StatusResp);
+
+    var ci: u16 = 0;
+    while (ci < status_hdr.client_count) : (ci += 1) {
+        if (off + @sizeOf(wire.StatusClient) > payload.len) break;
+        const sc = std.mem.bytesToValue(wire.StatusClient, payload[off..][0..@sizeOf(wire.StatusClient)]);
+        off += @sizeOf(wire.StatusClient);
+
+        if (off + sc.name_len > payload.len) break;
+        const name = payload[off .. off + sc.name_len];
+        off += sc.name_len;
+        if (name.len > 0) try names.append(allocator, try allocator.dupe(u8, name));
+
+        if (off + sc.mux_state_len > payload.len) break;
+        off += sc.mux_state_len;
+
+        var pi: u16 = 0;
+        while (pi < sc.pane_count) : (pi += 1) {
+            if (off + @sizeOf(wire.StatusPaneEntry) > payload.len) break;
+            const pe = std.mem.bytesToValue(wire.StatusPaneEntry, payload[off..][0..@sizeOf(wire.StatusPaneEntry)]);
+            off += @sizeOf(wire.StatusPaneEntry);
+            if (off + pe.name_len + pe.sticky_pwd_len > payload.len) break;
+            off += pe.name_len + pe.sticky_pwd_len;
+        }
+    }
+
+    var di: u16 = 0;
+    while (di < status_hdr.detached_count) : (di += 1) {
+        if (off + @sizeOf(wire.DetachedSessionEntry) > payload.len) break;
+        const de = std.mem.bytesToValue(wire.DetachedSessionEntry, payload[off..][0..@sizeOf(wire.DetachedSessionEntry)]);
+        off += @sizeOf(wire.DetachedSessionEntry);
+        if (off + de.name_len > payload.len) break;
+        const name = payload[off .. off + de.name_len];
+        off += de.name_len;
+        if (name.len > 0) try names.append(allocator, try allocator.dupe(u8, name));
+        if (off + de.mux_state_len > payload.len) break;
+        off += de.mux_state_len;
+    }
+
+    return names.toOwnedSlice(allocator);
 }
 
 fn finalizeSave(allocator: std.mem.Allocator, scope: LayoutSaveScope, output_path: []const u8, tmp_path: []const u8, layout_name: []const u8, cwd: []const u8) !void {
