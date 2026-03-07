@@ -217,6 +217,10 @@ fn deinitShpConfig(config: *ShpConfig, allocator: std.mem.Allocator) void {
         if (config.left.len > 0) allocator.free(config.left);
         if (config.right.len > 0) allocator.free(config.right);
     }
+    if (config.lua_runtime) |rt| {
+        rt.deinit();
+        allocator.destroy(rt);
+    }
     config.* = .{ .left = &[_]core.Segment{}, .right = &[_]core.Segment{}, .has_config = false, .lua_runtime = null };
 }
 
