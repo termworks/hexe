@@ -545,6 +545,7 @@ pub fn runMainLoop(state: *State) !void {
     // Main loop.
     while (state.running) {
         applyDeferredPaneExits(state);
+        state.flushPendingMuxVtWrites();
         ensureSesVtWatcherArmed(state, &ses_vt_watcher, &ses_vt_buffer);
         ensureSesCtlWatcherArmed(state, &ses_ctl_watcher, &ses_ctl_buffer);
         ensureStdinWatcherArmed(state, &stdin_watcher, &stdin_buffer);

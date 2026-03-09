@@ -3,8 +3,7 @@ return {
     { key = { hx.key.ctrl, hx.key.alt, hx.key["1"] }, action = { type = hx.action.float_toggle, float = "1" } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key["2"] }, action = { type = hx.action.float_toggle, float = "2" } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key["3"] }, action = { type = hx.action.float_toggle, float = "3" } },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key["4"] }, action = { type = hx.action.float_toggle, float = "4" } },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key["0"] }, action = { type = hx.action.float_toggle, float = "p" } },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key["0"] }, action = { type = hx.action.float_toggle, float = "0" } },
   },
 
   layout = {
@@ -37,7 +36,8 @@ return {
         enabled = true,
         attributes = { per_cwd = true, inherit_env = true },
         title = "claude",
-        command = "/env/bin/bun x --package @anthropic-ai/claude-code claude",
+        -- command = "/env/bin/bun x --package @anthropic-ai/claude-code claude",
+        command = "/env/bin/codex",
       },
       {
         key = "p",

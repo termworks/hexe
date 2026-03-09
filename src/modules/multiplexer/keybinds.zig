@@ -67,7 +67,7 @@ pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, pars
                 fpane.scrollToBottom();
                 state.needs_render = true;
             }
-            fpane.write(bytes) catch {};
+            state.writePaneInput(fpane, bytes);
             return;
         }
     }
@@ -84,7 +84,7 @@ pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, pars
             pane.scrollToBottom();
             state.needs_render = true;
         }
-        pane.write(bytes) catch {};
+        state.writePaneInput(pane, bytes);
     }
 }
 

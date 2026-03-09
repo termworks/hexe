@@ -24,6 +24,7 @@ const NotificationManager = pop.notification.NotificationManager;
 const OverlayManager = pop.overlay.OverlayManager;
 
 const Pane = @import("pane.zig").Pane;
+const VtWriteQueue = @import("vt_write_queue.zig").Queue;
 
 const BindKey = core.Config.BindKey;
 const BindAction = core.Config.BindAction;
@@ -37,6 +38,8 @@ const state_session = @import("state_session.zig");
 const mouse_selection = @import("mouse_selection.zig");
 
 pub const TabFocusKind = enum { split, float };
+
+const max_pending_mux_vt_bytes: usize = 8 * 1024 * 1024;
 
 pub const PaneShellInfo = struct {
     cmd: ?[]u8 = null,
@@ -188,6 +191,9 @@ pub const State = struct {
     csi_reply_buf: std.ArrayList(u8),
     csi_reply_in_progress: bool,
 
+    mux_vt_write_queue: VtWriteQueue,
+    mux_vt_write_overflow_notified: bool,
+
     // Stdin input can arrive split across reads. When using escape-sequence based
     // encodings (CSI-u, mouse events, etc) we must not forward partial sequences
     // into the focused pane. Keep a small tail buffer to stitch reads.
@@ -196,6 +202,8 @@ pub const State = struct {
 
     // Track bracketed paste mode to suppress keycast during paste
     in_bracketed_paste: bool = false,
+    bracketed_paste_target_uuid: ?[32]u8 = null,
+    bracketed_paste_buf: std.ArrayList(u8) = .empty,
 
     // Terminal capability query lifecycle for custom event loop mode.
     terminal_query_in_flight: bool = false,
@@ -350,6 +358,9 @@ pub const State = struct {
             .csi_reply_target_enqueued_ms = .empty,
             .csi_reply_buf = .empty,
             .csi_reply_in_progress = false,
+
+            .mux_vt_write_queue = .{},
+            .mux_vt_write_overflow_notified = false,
 
             .terminal_query_in_flight = false,
             .terminal_query_deadline_ms = 0,
@@ -506,6 +517,8 @@ pub const State = struct {
         self.csi_reply_targets.deinit(self.allocator);
         self.csi_reply_target_enqueued_ms.deinit(self.allocator);
         self.csi_reply_buf.deinit(self.allocator);
+        self.mux_vt_write_queue.deinit(self.allocator);
+        self.bracketed_paste_buf.deinit(self.allocator);
         self.renderer.deinit();
         self.ses_client.deinit();
         self.notifications.deinit();
@@ -580,6 +593,63 @@ pub const State = struct {
             return next;
         }
         return null;
+    }
+
+    fn handleMuxVtWriteFailure(self: *State, fd: posix.fd_t) void {
+        self.mux_vt_write_queue.clear();
+        if (self.ses_client.vt_fd) |live_fd| {
+            if (live_fd == fd) {
+                posix.close(live_fd);
+                self.ses_client.vt_fd = null;
+            }
+        }
+        self.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+        self.needs_render = true;
+    }
+
+    fn noteMuxVtQueueOverflow(self: *State) void {
+        if (self.mux_vt_write_overflow_notified) return;
+        self.mux_vt_write_overflow_notified = true;
+        self.notifications.showFor("Pane input queue full; some pasted bytes were dropped", 3000);
+        self.needs_render = true;
+    }
+
+    pub fn flushPendingMuxVtWrites(self: *State) void {
+        const fd = self.ses_client.getVtFd() orelse return;
+        self.mux_vt_write_queue.flushToFd(fd) catch {
+            self.handleMuxVtWriteFailure(fd);
+            return;
+        };
+        if (self.mux_vt_write_queue.queuedBytes() == 0) {
+            self.mux_vt_write_overflow_notified = false;
+        }
+    }
+
+    pub fn writePaneInput(self: *State, pane: *Pane, data: []const u8) void {
+        if (data.len == 0) return;
+
+        switch (pane.backend) {
+            .local => pane.write(data) catch {},
+            .pod => |pod| {
+                self.flushPendingMuxVtWrites();
+                const frame_type = @intFromEnum(core.pod_protocol.FrameType.input);
+                const queued = self.mux_vt_write_queue.enqueueFrame(
+                    self.allocator,
+                    pod.pane_id,
+                    frame_type,
+                    data,
+                    max_pending_mux_vt_bytes,
+                ) catch {
+                    self.noteMuxVtQueueOverflow();
+                    return;
+                };
+                if (!queued) {
+                    self.noteMuxVtQueueOverflow();
+                    return;
+                }
+                self.flushPendingMuxVtWrites();
+            },
+        }
     }
 
     pub const PendingKeyTimerKind = enum { delayed_press, tap_pending, hold, hold_fired, repeat_wait, repeat_active, repeat_locked };

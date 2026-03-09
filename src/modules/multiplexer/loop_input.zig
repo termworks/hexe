@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("core");
+const ghostty = @import("ghostty-vt");
 const vaxis = @import("vaxis");
 
 const State = @import("state.zig").State;
@@ -187,13 +188,60 @@ fn forwardPasteToFocusedPane(state: *State, txt: []const u8) void {
             pane.scrollToBottom();
             state.needs_render = true;
         }
-        pane.write(txt) catch {};
+        sendEncodedPasteToPane(state, pane, txt);
     }
 }
 
-fn forwardBracketedPasteBoundary(state: *State, is_start: bool) void {
-    const seq: []const u8 = if (is_start) "\x1b[200~" else "\x1b[201~";
-    forwardSanitizedToFocusedPane(state, seq, null);
+fn sendEncodedPasteToPane(state: *State, pane: *Pane, txt: []const u8) void {
+    if (txt.len == 0) return;
+
+    const opts = ghostty.input.PasteOptions.fromTerminal(&pane.vt.terminal);
+    const vecs = ghostty.input.encodePaste(txt, opts) catch |err| switch (err) {
+        error.MutableRequired => {
+            const copy = state.allocator.dupe(u8, txt) catch return;
+            defer state.allocator.free(copy);
+            const parts = ghostty.input.encodePaste(copy, opts);
+            for (parts) |part| {
+                if (part.len == 0) continue;
+                state.writePaneInput(pane, part);
+            }
+            return;
+        },
+    };
+
+    for (vecs) |part| {
+        if (part.len == 0) continue;
+        state.writePaneInput(pane, part);
+    }
+}
+
+fn beginBracketedPaste(state: *State) void {
+    state.in_bracketed_paste = true;
+    state.bracketed_paste_target_uuid = if (resolveFocusedPaneForInput(state)) |pane| pane.uuid else null;
+    state.bracketed_paste_buf.clearRetainingCapacity();
+}
+
+fn appendBracketedPasteBytes(state: *State, bytes: []const u8) void {
+    if (!state.in_bracketed_paste) return;
+    if (bytes.len == 0) return;
+    state.bracketed_paste_buf.appendSlice(state.allocator, bytes) catch {};
+}
+
+fn finishBracketedPaste(state: *State) void {
+    defer {
+        state.in_bracketed_paste = false;
+        state.bracketed_paste_target_uuid = null;
+        state.bracketed_paste_buf.clearRetainingCapacity();
+    }
+
+    const uuid = state.bracketed_paste_target_uuid orelse return;
+    const pane = state.findPaneByUuid(uuid) orelse return;
+    if (pane.popups.isBlocked()) return;
+    if (pane.isScrolled()) {
+        pane.scrollToBottom();
+        state.needs_render = true;
+    }
+    sendEncodedPasteToPane(state, pane, state.bracketed_paste_buf.items);
 }
 
 fn applyInBandWinsize(state: *State, ws: vaxis.Winsize) void {
@@ -540,14 +588,9 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
             forwardPasteToFocusedPane(state, txt);
             return true;
         },
-        .paste_start => {
-            forwardBracketedPasteBoundary(state, true);
-            return true;
-        },
-        .paste_end => {
-            forwardBracketedPasteBoundary(state, false);
-            return true;
-        },
+        .paste_start,
+        .paste_end,
+        => return true,
         .winsize => |ws| {
             applyInBandWinsize(state, ws);
             return true;
@@ -682,6 +725,48 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
                 continue;
             }
 
+            if (state.in_bracketed_paste) {
+                if (res.event) |ev| {
+                    switch (ev) {
+                        .paste_end => {
+                            freeParsedEventPayload(state, res.event);
+                            finishBracketedPaste(state);
+                            i += res.n;
+                            continue;
+                        },
+                        .paste_start => {
+                            freeParsedEventPayload(state, res.event);
+                            i += res.n;
+                            continue;
+                        },
+                        else => {},
+                    }
+                }
+
+                appendBracketedPasteBytes(state, inp[i .. i + res.n]);
+                freeParsedEventPayload(state, res.event);
+                i += res.n;
+                continue;
+            }
+
+            if (res.event) |ev| {
+                switch (ev) {
+                    .paste_start => {
+                        freeParsedEventPayload(state, res.event);
+                        beginBracketedPaste(state);
+                        i += res.n;
+                        continue;
+                    },
+                    .paste_end => {
+                        freeParsedEventPayload(state, res.event);
+                        finishBracketedPaste(state);
+                        i += res.n;
+                        continue;
+                    },
+                    else => {},
+                }
+            }
+
             const dispatch = dispatchParsedEvent(state, res);
             parsed_event_for_popup = dispatch.parsed_event;
             if (dispatch.quit) {
@@ -741,7 +826,7 @@ fn dequeueLiveOscReplyTarget(state: *State) ?[32]u8 {
 fn routeCapturedOscReply(state: *State) void {
     if (state.osc_reply_target_uuid) |uuid| {
         if (state.findPaneByUuid(uuid)) |pane| {
-            pane.write(state.osc_reply_buf.items) catch {};
+            state.writePaneInput(pane, state.osc_reply_buf.items);
         }
     }
 }
@@ -762,7 +847,7 @@ fn dequeueLiveCsiReplyTarget(state: *State) ?[32]u8 {
 fn routeCapturedCsiReply(state: *State) void {
     if (state.csi_reply_target_uuid) |uuid| {
         if (state.findPaneByUuid(uuid)) |pane| {
-            pane.write(state.csi_reply_buf.items) catch {};
+            state.writePaneInput(pane, state.csi_reply_buf.items);
         }
     }
 }
