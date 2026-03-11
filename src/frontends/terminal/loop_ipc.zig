@@ -106,7 +106,9 @@ fn handleSessionState(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     defer state.allocator.free(session_json);
     wire.readExact(fd, session_json) catch return;
 
-    _ = state.applySessionSnapshot(session_json);
+    var snapshot = state.runtime.parseSessionSnapshotJson(session_json) catch return;
+    defer snapshot.deinit();
+    _ = state.applySessionSnapshot(&snapshot);
 }
 
 fn handleNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {

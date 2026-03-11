@@ -100,6 +100,12 @@ pub const FrontendRuntime = struct {
         return session_model.SessionSnapshot.fromJson(self.allocator, session_state_json);
     }
 
+    pub fn drainPendingSessionSnapshot(self: *FrontendRuntime) ?session_model.SessionSnapshot {
+        const session_json = self.client.drainPendingSessionState() orelse return null;
+        defer self.allocator.free(session_json);
+        return self.parseSessionSnapshotJson(session_json) catch null;
+    }
+
     pub fn replaceProjectionFromSnapshot(
         self: *FrontendRuntime,
         snapshot: *const session_model.SessionSnapshot,

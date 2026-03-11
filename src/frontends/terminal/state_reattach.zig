@@ -1070,14 +1070,8 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     return true;
 }
 
-pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool {
-    var snapshot = self.runtime.parseSessionSnapshotJson(session_state_json) catch |e| {
-        mux.debugLog("applySessionSnapshot: snapshot parse failed: {s}", .{@errorName(e)});
-        return false;
-    };
-    defer snapshot.deinit();
-
-    if (applySnapshotIncrementally(self, &snapshot)) {
+pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) bool {
+    if (applySnapshotIncrementally(self, snapshot)) {
         mux.debugLog("applySessionSnapshot: incrementally applied tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
         return true;
     }
@@ -1196,7 +1190,7 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
         self.rememberFloatingFocus(self.view.floats.items[idx]);
     }
 
-    if (!self.replaceAttachedSessionSnapshot(&snapshot)) return false;
+    if (!self.replaceAttachedSessionSnapshot(snapshot)) return false;
     self.renderer.invalidate();
     self.force_full_render = true;
     self.needs_render = true;

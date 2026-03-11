@@ -760,8 +760,8 @@ pub const State = struct {
         return state_tabs.reattachSession(self, session_id_prefix);
     }
 
-    pub fn applySessionSnapshot(self: *State, session_state_json: []const u8) bool {
-        return state_tabs.applySessionSnapshot(self, session_state_json);
+    pub fn applySessionSnapshot(self: *State, snapshot: *const core.session_model.SessionSnapshot) bool {
+        return state_tabs.applySessionSnapshot(self, snapshot);
     }
 
     pub fn attachOrphanedPane(self: *State, uuid_prefix: []const u8) bool {

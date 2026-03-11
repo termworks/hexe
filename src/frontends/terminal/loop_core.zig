@@ -92,9 +92,9 @@ fn applyDeferredPaneExits(state: *State) void {
 }
 
 fn applyDeferredSessionSnapshots(state: *State) void {
-    const session_json = state.frontend_client.drainPendingSessionState() orelse return;
-    defer state.allocator.free(session_json);
-    _ = state.applySessionSnapshot(session_json);
+    var snapshot = state.runtime.drainPendingSessionSnapshot() orelse return;
+    defer snapshot.deinit();
+    _ = state.applySessionSnapshot(&snapshot);
 }
 
 fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
