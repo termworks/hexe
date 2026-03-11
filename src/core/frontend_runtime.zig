@@ -8,6 +8,18 @@ const SessionProjection = @import("session_projection.zig").SessionProjection;
 const wire = @import("wire.zig");
 
 pub const FrontendRuntime = struct {
+    pub const ReattachSnapshotResult = struct {
+        snapshot: session_model.SessionSnapshot,
+        pane_uuids: [][32]u8,
+        allocator: std.mem.Allocator,
+
+        pub fn deinit(self: *ReattachSnapshotResult) void {
+            self.snapshot.deinit();
+            self.allocator.free(self.pane_uuids);
+            self.* = undefined;
+        }
+    };
+
     allocator: std.mem.Allocator,
     client: FrontendClient,
     projection: SessionProjection,
@@ -104,6 +116,24 @@ pub const FrontendRuntime = struct {
         const session_json = self.client.drainPendingSessionState() orelse return null;
         defer self.allocator.free(session_json);
         return self.parseSessionSnapshotJson(session_json) catch null;
+    }
+
+    pub fn reattachSessionSnapshot(self: *FrontendRuntime, session_id_prefix: []const u8) !?ReattachSnapshotResult {
+        const result = try self.client.reattachSession(session_id_prefix);
+        if (result == null) return null;
+
+        const reattach = result.?;
+        errdefer self.allocator.free(reattach.pane_uuids);
+        defer self.allocator.free(reattach.session_state_json);
+
+        var snapshot = try self.parseSessionSnapshotJson(reattach.session_state_json);
+        errdefer snapshot.deinit();
+
+        return .{
+            .snapshot = snapshot,
+            .pane_uuids = reattach.pane_uuids,
+            .allocator = self.allocator,
+        };
     }
 
     pub fn replaceProjectionFromSnapshot(

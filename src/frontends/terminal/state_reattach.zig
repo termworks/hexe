@@ -728,28 +728,20 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     // Try to reattach session (server supports prefix matching).
-    mux.debugLog("reattachSession: calling frontend_client.reattachSession", .{});
-    const result = self.frontend_client.reattachSession(session_id_prefix) catch |e| {
-        mux.debugLog("reattachSession: frontend_client.reattachSession failed: {s}", .{@errorName(e)});
+    mux.debugLog("reattachSession: calling runtime.reattachSessionSnapshot", .{});
+    const result = self.runtime.reattachSessionSnapshot(session_id_prefix) catch |e| {
+        mux.debugLog("reattachSession: runtime.reattachSessionSnapshot failed: {s}", .{@errorName(e)});
         return false;
     };
     if (result == null) {
-        mux.debugLog("reattachSession: frontend_client.reattachSession returned null (session not found)", .{});
+        mux.debugLog("reattachSession: runtime.reattachSessionSnapshot returned null (session not found)", .{});
         return false;
     }
 
-    const reattach_result = result.?;
-    mux.debugLog("reattachSession: got result with {d} panes, state_json_len={d}", .{ reattach_result.pane_uuids.len, reattach_result.session_state_json.len });
-    defer {
-        self.allocator.free(reattach_result.session_state_json);
-        self.allocator.free(reattach_result.pane_uuids);
-    }
-
-    var snapshot = self.runtime.parseSessionSnapshotJson(reattach_result.session_state_json) catch |e| {
-        mux.debugLog("reattachSession: snapshot parse failed: {s}", .{@errorName(e)});
-        return false;
-    };
-    defer snapshot.deinit();
+    var reattach_result = result.?;
+    defer reattach_result.deinit();
+    mux.debugLog("reattachSession: got parsed result with {d} panes", .{reattach_result.pane_uuids.len});
+    const snapshot = &reattach_result.snapshot;
 
     // Check timeout after JSON parsing
     {
@@ -1002,7 +994,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.rememberFloatingFocus(self.view.floats.items[idx]);
     }
 
-    if (!self.replaceAttachedSessionSnapshot(&snapshot)) return false;
+    if (!self.replaceAttachedSessionSnapshot(snapshot)) return false;
     if (!self.setSessionIdentity(snapshot.uuid, restored_name)) return false;
 
     self.renderer.invalidate();
