@@ -79,8 +79,7 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
         tab.deinit();
     }
     self.tabs.clearRetainingCapacity();
-    self.tab_last_floating_uuid.clearRetainingCapacity();
-    self.tab_last_focus_kind.clearRetainingCapacity();
+    self.clearTabFocusMemory();
     self.active_tab = 0;
 
     try applySessionConfig(self, config, tab_filter);
@@ -88,14 +87,10 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
 
 fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     // Generate tab name
-    const name_owned = self.allocator.dupe(u8, tab_config.name) catch
-        try core.ipc.generateTabName(self.allocator, self.session_name, self.tab_counter);
-
-    if (self.tab_counter < 999) {
-        self.tab_counter += 1;
-    } else {
-        self.tab_counter = 0;
-    }
+    const name_owned = self.allocator.dupe(u8, tab_config.name) catch blk: {
+        const tab_counter = self.takeNextTabCounter();
+        break :blk try core.ipc.generateTabName(self.allocator, self.sessionName(), tab_counter);
+    };
 
     var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
 
@@ -115,8 +110,7 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     }
 
     try self.tabs.append(self.allocator, tab);
-    try self.tab_last_floating_uuid.append(self.allocator, null);
-    try self.tab_last_focus_kind.append(self.allocator, .split);
+    if (!self.appendTabFocusMemory()) return error.OutOfMemory;
 
     self.active_tab = self.tabs.items.len - 1;
     const created_tab = &self.tabs.items[self.active_tab];

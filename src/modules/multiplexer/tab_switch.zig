@@ -8,16 +8,14 @@ const isFloatRenderableOnTab = float_util.isFloatRenderableOnTab;
 
 fn restoreTabFocus(state: *State, old_uuid: ?[32]u8) void {
     // Restore float only if last focus kind was float.
-    if (state.tab_last_focus_kind.items.len > state.active_tab and state.tab_last_focus_kind.items[state.active_tab] == .float) {
-        if (state.tab_last_floating_uuid.items.len > state.active_tab) {
-            if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
-                for (state.floats.items, 0..) |pane, fi| {
-                    if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                    if (!isFloatRenderableOnTab(pane, state.active_tab)) continue;
-                    state.active_floating = fi;
-                    state.syncPaneFocus(pane, old_uuid);
-                    return;
-                }
+    if (state.lastFocusKindForTab(state.active_tab) == .float) {
+        if (state.lastFloatingUuidForTab(state.active_tab)) |uuid| {
+            for (state.floats.items, 0..) |pane, fi| {
+                if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
+                if (!isFloatRenderableOnTab(pane, state.active_tab)) continue;
+                state.active_floating = fi;
+                state.syncPaneFocus(pane, old_uuid);
+                return;
             }
         }
     }

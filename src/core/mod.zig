@@ -22,6 +22,7 @@ pub const resource_limits = @import("resource_limits.zig");
 pub const isolation_voidbox = @import("isolation_voidbox.zig");
 pub const session_config = @import("session_config.zig");
 pub const session_model = @import("session_model.zig");
+pub const frontend_session_cache = @import("frontend_session_cache.zig");
 pub const frontend_client = @import("frontend_client.zig");
 pub const recording = @import("recording/mod.zig");
 
@@ -32,6 +33,8 @@ pub const FrontendClient = frontend_client.SesClient;
 pub const FrontendTransport = frontend_client.Transport;
 pub const FrontendDetachedSessionInfo = frontend_client.DetachedSessionInfo;
 pub const FrontendOrphanedPaneInfo = frontend_client.OrphanedPaneInfo;
+pub const FrontendSessionCache = frontend_session_cache.FrontendSessionCache;
+pub const FrontendTabFocusKind = frontend_session_cache.TabFocusKind;
 pub const FrontendKind = wire.FrontendKind;
 pub const FrontendTransportKind = wire.FrontendTransportKind;
 

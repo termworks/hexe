@@ -154,7 +154,7 @@ fn populateFloatTitleContext(state: *State, pane: *Pane, ctx: *shp.Context, now_
     ctx.now_ms = now_ms;
     ctx.tab_count = @intCast(@min(state.tabs.items.len, @as(usize, std.math.maxInt(u16))));
     ctx.active_tab = @intCast(state.active_tab);
-    ctx.session_name = state.session_name;
+    ctx.session_name = state.sessionName();
     ctx.focus_is_float = true;
     ctx.focus_is_split = false;
     ctx.alt_screen = pane.vt.inAltScreen();
@@ -331,7 +331,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // Draw status bar if enabled.
     if (state.config.tabs.status.enabled) {
-        statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.active_tab, state.session_name);
+        statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.active_tab, state.sessionName());
     }
 
     // Check if active float has dim_background set (focus mode)

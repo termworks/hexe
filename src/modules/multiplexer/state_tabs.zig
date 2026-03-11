@@ -83,16 +83,11 @@ pub fn createTab(self: anytype) !void {
     }
 
     // Generate tab name in format "session-N" (e.g., "alpha-1", "beta-2")
-    const name_owned = try core.ipc.generateTabName(self.allocator, self.session_name, self.tab_counter);
-
-    // Increment tab counter with overflow protection.
-    // If counter approaches maximum, wrap to 0 to prevent corruption.
-    if (self.tab_counter < 999) {
-        self.tab_counter += 1;
-    } else {
+    const tab_counter = self.takeNextTabCounter();
+    if (tab_counter == 999) {
         mux.debugLog("VALIDATION: tab_counter reached limit, wrapping to 0", .{});
-        self.tab_counter = 0;
     }
+    const name_owned = try core.ipc.generateTabName(self.allocator, self.sessionName(), tab_counter);
     var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
     const tab_uuid = tab.uuid;
     const tab_name = tab.name;
@@ -104,9 +99,7 @@ pub fn createTab(self: anytype) !void {
     tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
     const first_pane = try tab.layout.createFirstPane(cwd);
     try self.tabs.append(self.allocator, tab);
-    // Keep per-tab float focus state in sync.
-    try self.tab_last_floating_uuid.append(self.allocator, null);
-    try self.tab_last_focus_kind.append(self.allocator, .split);
+    if (!self.appendTabFocusMemory()) return error.OutOfMemory;
     self.active_tab = self.tabs.items.len - 1;
     self.syncPaneAux(first_pane, parent_uuid);
     self.syncSessionTabAdded(tab_uuid, tab_name, first_pane.uuid);
@@ -154,8 +147,7 @@ pub fn closeCurrentTab(self: anytype) bool {
 
     var tab = self.tabs.orderedRemove(self.active_tab);
     tab.deinit();
-    _ = self.tab_last_floating_uuid.orderedRemove(self.active_tab);
-    _ = self.tab_last_focus_kind.orderedRemove(self.active_tab);
+    self.removeTabFocusMemory(self.active_tab);
     if (self.active_tab >= self.tabs.items.len) {
         self.active_tab = self.tabs.items.len - 1;
     }

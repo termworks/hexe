@@ -6,7 +6,6 @@ const SesClient = core.FrontendClient;
 const Pane = @import("pane.zig").Pane;
 const helpers = @import("helpers.zig");
 const layout_mod = @import("layout.zig");
-const TabFocusKind = @import("state.zig").TabFocusKind;
 const lua_events = @import("lua_events.zig");
 
 fn buildSessionLayoutNode(
@@ -48,10 +47,10 @@ fn buildSessionLayoutNode(
 }
 
 pub fn buildSessionSnapshot(self: anytype) !core.session_model.SessionSnapshot {
-    var snapshot = try core.session_model.SessionSnapshot.initMinimal(self.allocator, self.uuid, self.session_name);
+    var snapshot = try core.session_model.SessionSnapshot.initMinimal(self.allocator, self.sessionUuid(), self.sessionName());
     errdefer snapshot.deinit();
 
-    snapshot.tab_counter = self.tab_counter;
+    snapshot.tab_counter = self.sessionTabCounter();
     if (self.tabs.items.len > 0) {
         snapshot.active_tab = @min(self.active_tab, self.tabs.items.len - 1);
     } else {
@@ -131,19 +130,12 @@ fn setLayoutFocusedSplitId(self: anytype, pane: *Pane) void {
 
 fn rememberFloatingFocus(self: anytype, pane: *Pane) void {
     if (!pane.floating) return;
-    if (self.tab_last_floating_uuid.items.len == 0) return;
-    if (self.active_tab >= self.tab_last_floating_uuid.items.len) return;
-    self.tab_last_floating_uuid.items[self.active_tab] = pane.uuid;
-    if (self.active_tab < self.tab_last_focus_kind.items.len) {
-        self.tab_last_focus_kind.items[self.active_tab] = .float;
-    }
+    self.rememberFloatingFocus(pane);
 }
 
 fn rememberSplitFocus(self: anytype, pane: *Pane) void {
     if (pane.floating) return;
-    if (self.active_tab < self.tab_last_focus_kind.items.len) {
-        self.tab_last_focus_kind.items[self.active_tab] = .split;
-    }
+    self.rememberSplitFocus();
 }
 
 pub fn syncStateToSes(self: anytype) void {

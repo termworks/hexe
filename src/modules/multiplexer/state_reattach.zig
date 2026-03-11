@@ -169,8 +169,7 @@ fn clearStateForRestore(self: anytype) void {
 
     self.active_tab = 0;
     self.active_floating = null;
-    self.tab_last_floating_uuid.clearRetainingCapacity();
-    self.tab_last_focus_kind.clearRetainingCapacity();
+    self.clearTabFocusMemory();
 }
 
 fn deinitTabPreservingPanes(tab: *Tab) void {
@@ -210,8 +209,7 @@ fn clearStatePreservingPanes(self: anytype) void {
     self.floats.clearRetainingCapacity();
     self.active_tab = 0;
     self.active_floating = null;
-    self.tab_last_floating_uuid.clearRetainingCapacity();
-    self.tab_last_focus_kind.clearRetainingCapacity();
+    self.clearTabFocusMemory();
 }
 
 fn clearPaneAuxCaches(self: anytype, uuid: [32]u8) void {
@@ -628,15 +626,9 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     clearStateForRestore(self);
-    self.uuid = snapshot.uuid;
-
     const restored_name = normalizeRestoredSessionName(snapshot.session_name);
-    if (self.session_name_owned) |old| self.allocator.free(old);
-    const duped_name = self.allocator.dupe(u8, restored_name) catch return false;
-    self.session_name = duped_name;
-    self.session_name_owned = duped_name;
-
-    self.tab_counter = if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter;
+    if (!self.setSessionIdentity(snapshot.uuid, restored_name)) return false;
+    self.setSessionTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
     const wanted_active_tab = snapshot.active_tab;
 
     var uuid_pane_map = std.AutoHashMap([32]u8, AdoptInfo).init(self.allocator);
@@ -750,15 +742,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         };
     }
 
-    self.tab_last_floating_uuid.clearRetainingCapacity();
-    for (0..self.tabs.items.len) |_| {
-        self.tab_last_floating_uuid.append(self.allocator, null) catch return false;
-    }
-
-    self.tab_last_focus_kind.clearRetainingCapacity();
-    for (0..self.tabs.items.len) |_| {
-        self.tab_last_focus_kind.append(self.allocator, .split) catch return false;
-    }
+    if (!self.resetTabFocusMemory()) return false;
 
     for (snapshot.floats.items) |float_state| {
         const pane = restoreFloatPane(self, float_state, &uuid_pane_map, null, false, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
@@ -870,13 +854,11 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
     if (self.active_floating) |idx| {
-        if (self.active_tab < self.tab_last_floating_uuid.items.len) {
-            self.tab_last_floating_uuid.items[self.active_tab] = self.floats.items[idx].uuid;
-        }
-        if (self.active_tab < self.tab_last_focus_kind.items.len) {
-            self.tab_last_focus_kind.items[self.active_tab] = .float;
-        }
+        self.rememberFloatingFocus(self.floats.items[idx]);
     }
+
+    if (!self.replaceAttachedSessionSnapshot(snapshot.clone(self.allocator) catch return false)) return false;
+    if (!self.setSessionIdentity(snapshot.uuid, restored_name)) return false;
 
     self.renderer.invalidate();
     self.force_full_render = true;
@@ -909,8 +891,9 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Re-register with restored UUID/name before requesting backlog replay.
     // This releases the attach session lock and stabilizes client identity first.
-    mux.debugLog("reattachSession: calling updateSession uuid={s} name={s}", .{ self.uuid[0..8], self.session_name });
-    self.ses_client.updateSession(self.uuid, self.session_name) catch |e| {
+    const session_uuid = self.sessionUuid();
+    mux.debugLog("reattachSession: calling updateSession uuid={s} name={s}", .{ session_uuid[0..8], self.sessionName() });
+    self.ses_client.updateSession(session_uuid, self.sessionName()) catch |e| {
         core.logging.logError("mux", "updateSession failed in restoreLayout", e);
         mux.debugLog("reattachSession: updateSession FAILED: {s}", .{@errorName(e)});
     };
@@ -958,14 +941,8 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
     captureExistingPaneViews(self, &existing_views);
     clearStatePreservingPanes(self);
 
-    self.uuid = snapshot.uuid;
-    if (self.session_name_owned) |old| self.allocator.free(old);
-    const name_owned = self.allocator.dupe(u8, snapshot.session_name) catch return false;
-    self.session_name = name_owned;
-    self.session_name_owned = name_owned;
-    self.ses_client.session_id = snapshot.uuid;
-    self.ses_client.session_name = self.session_name;
-    self.tab_counter = if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter;
+    if (!self.setSessionIdentity(snapshot.uuid, snapshot.session_name)) return false;
+    self.setSessionTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
 
     const wanted_active_tab = snapshot.active_tab;
 
@@ -1025,15 +1002,7 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
         };
     }
 
-    self.tab_last_floating_uuid.clearRetainingCapacity();
-    for (0..self.tabs.items.len) |_| {
-        self.tab_last_floating_uuid.append(self.allocator, null) catch return false;
-    }
-
-    self.tab_last_focus_kind.clearRetainingCapacity();
-    for (0..self.tabs.items.len) |_| {
-        self.tab_last_focus_kind.append(self.allocator, .split) catch return false;
-    }
+    if (!self.resetTabFocusMemory()) return false;
 
     for (snapshot.floats.items) |float_state| {
         const pane = restoreFloatPane(self, float_state, &uuid_pane_map, &existing_views, true, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
@@ -1075,14 +1044,10 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
         }
     }
     if (self.active_floating) |idx| {
-        if (self.active_tab < self.tab_last_floating_uuid.items.len) {
-            self.tab_last_floating_uuid.items[self.active_tab] = self.floats.items[idx].uuid;
-        }
-        if (self.active_tab < self.tab_last_focus_kind.items.len) {
-            self.tab_last_focus_kind.items[self.active_tab] = .float;
-        }
+        self.rememberFloatingFocus(self.floats.items[idx]);
     }
 
+    if (!self.replaceAttachedSessionSnapshot(snapshot.clone(self.allocator) catch return false)) return false;
     self.renderer.invalidate();
     self.force_full_render = true;
     self.needs_render = true;

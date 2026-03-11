@@ -212,11 +212,7 @@ pub fn run(mux_args: MuxArgs) !void {
 
     // Set custom session name if provided.
     if (mux_args.name) |custom_name| {
-        const duped = allocator.dupe(u8, custom_name) catch null;
-        if (duped) |d| {
-            state.session_name = d;
-            state.session_name_owned = d;
-        }
+        _ = state.setSessionName(custom_name);
     }
 
     // Set HEXE_MUX_SOCKET as a flag for shell integrations.
@@ -232,30 +228,20 @@ pub fn run(mux_args: MuxArgs) !void {
 
     // If server resolved to a different name (collision avoidance), update state.
     if (state.ses_client.resolved_name) |resolved| {
-        if (!std.mem.eql(u8, resolved, state.session_name)) {
-            debugLog("session name resolved from '{s}' to '{s}'", .{ state.session_name, resolved });
+        if (!std.mem.eql(u8, resolved, state.sessionName())) {
+            debugLog("session name resolved from '{s}' to '{s}'", .{ state.sessionName(), resolved });
 
             // Notify user about name collision
             const msg = std.fmt.allocPrint(
                 allocator,
                 "Session name changed: '{s}' -> '{s}' (collision)",
-                .{ state.session_name, resolved },
+                .{ state.sessionName(), resolved },
             ) catch null;
             if (msg) |m| {
                 state.notifications.showFor(m, 4000);
                 allocator.free(m);
             }
-
-            // Free old owned name if any
-            if (state.session_name_owned) |old| {
-                allocator.free(old);
-            }
-            // Duplicate and store the resolved name
-            const duped = allocator.dupe(u8, resolved) catch null;
-            if (duped) |d| {
-                state.session_name = d;
-                state.session_name_owned = d;
-            }
+            _ = state.setSessionName(resolved);
         }
     }
 
@@ -267,7 +253,8 @@ pub fn run(mux_args: MuxArgs) !void {
     // Export session ID so child panes can identify their parent mux.
     // Must happen BEFORE createTab/reattach which fork pane shells.
     var session_id_z: [33]u8 = undefined;
-    @memcpy(session_id_z[0..32], &state.uuid);
+    const session_uuid = state.sessionUuid();
+    @memcpy(session_id_z[0..32], &session_uuid);
     session_id_z[32] = 0;
     _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
 
@@ -278,7 +265,8 @@ pub fn run(mux_args: MuxArgs) !void {
             debugLog("attach: reattachSession succeeded", .{});
             state.notifications.show("Session reattached");
             // Reattach may change state.uuid — update env for subsequent panes.
-            @memcpy(session_id_z[0..32], &state.uuid);
+            const reattached_uuid = state.sessionUuid();
+            @memcpy(session_id_z[0..32], &reattached_uuid);
             _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
         } else if (state.attachOrphanedPane(uuid_prefix)) {
             debugLog("attach: attachOrphanedPane succeeded", .{});
@@ -310,25 +298,11 @@ pub fn run(mux_args: MuxArgs) !void {
 
         // Prefer layout-config name when provided.
         if (config.name) |loaded_name| {
-            const duped = allocator.dupe(u8, loaded_name) catch null;
-            if (duped) |d| {
-                if (state.session_name_owned) |old| {
-                    allocator.free(old);
-                }
-                state.session_name = d;
-                state.session_name_owned = d;
-
-                state.ses_client.updateSession(state.uuid, state.session_name) catch {};
+            if (state.setSessionName(loaded_name)) {
+                state.ses_client.updateSession(state.sessionUuid(), state.sessionName()) catch {};
                 if (state.ses_client.resolved_name) |resolved| {
-                    if (!std.mem.eql(u8, resolved, state.session_name)) {
-                        const resolved_duped = allocator.dupe(u8, resolved) catch null;
-                        if (resolved_duped) |rn| {
-                            if (state.session_name_owned) |old2| {
-                                allocator.free(old2);
-                            }
-                            state.session_name = rn;
-                            state.session_name_owned = rn;
-                        }
+                    if (!std.mem.eql(u8, resolved, state.sessionName())) {
+                        _ = state.setSessionName(resolved);
                     }
                 }
             }

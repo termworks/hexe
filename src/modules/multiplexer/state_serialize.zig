@@ -23,11 +23,12 @@ pub fn serializeState(self: anytype) ![]const u8 {
 
     // Mux UUID and session name (persistent identity).
     try writer.writeAll("\"uuid\":");
-    try writeJsonString(writer, self.uuid[0..]);
+    const session_uuid = self.sessionUuid();
+    try writeJsonString(writer, session_uuid[0..]);
     try writer.writeAll(",\"session_name\":");
-    try writeJsonString(writer, self.session_name);
+    try writeJsonString(writer, self.sessionName());
     try writer.writeAll(",");
-    try writer.print("\"tab_counter\":{d},", .{self.tab_counter});
+    try writer.print("\"tab_counter\":{d},", .{self.sessionTabCounter()});
 
     // Active tab/float.
     try writer.print("\"active_tab\":{d},", .{self.active_tab});

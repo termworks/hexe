@@ -610,10 +610,59 @@ src/modules/multiplexer -> src/frontends/terminal
 Do not block the rewrite on this rename. The architectural separation matters
 more than the directory name.
 
-## Five Big Commits
+## Rewrite Phases
 
-The implementation should happen in five large slices, not a long tail of small
-plumbing commits.
+The rewrite is now split into two bounded phases:
+
+- Phase 1: establish SES authority and a shared frontend protocol/client
+- Phase 2: finish the terminal frontend cut until mux is UI-only
+
+Phase 1 is already mostly done in the current branch history.
+Phase 2 is still required for full separation.
+
+### Phase 1: Foundational Cut
+
+This was the first bounded rewrite pass. It established:
+
+- canonical SES session snapshots
+- SES-owned tab/float/layout/focus mutations
+- SES-only pane/pod ownership
+- terminal restore from SES snapshots
+- shared frontend client in `src/core/frontend_client.zig`
+
+That was necessary, but it is not the end state.
+
+### Phase 2: Full Frontend Separation
+
+This is the remaining work required to make the terminal mux a frontend only.
+
+Important:
+
+- `src/modules/multiplexer/state.zig` still owns `tabs`, `active_tab`,
+  `floats`, and `active_floating`
+- the terminal frontend still rebuilds and materializes session structure in
+  `state_reattach.zig`
+- the frontend still mixes session cache, viewport/layout materialization, and
+  UI state inside one `State`
+
+So the current state is:
+
+```text
+SES = canonical session authority
+terminal mux = frontend + local session cache/view-model
+```
+
+The target state is:
+
+```text
+SES = session authority
+frontend session client/cache = transport + snapshot/event cache
+terminal mux = UI only
+```
+
+The implementation should continue in multiple large slices, but it now needs a
+second bounded phase rather than pretending the work already fits inside the
+original five-commit sketch.
 
 ### Commit 1: Introduce canonical SES session model
 
@@ -687,6 +736,12 @@ Success criteria:
 - terminal frontend can die and reattach without being the source of session truth
 - there is a clear boundary between session cache and UI-only state
 
+This is not sufficient for the final goal by itself.
+
+After this point, the terminal frontend may still hold a local session
+cache/view-model. Full conversion requires moving even that layer out of the
+terminal-specific runtime.
+
 ### Commit 5: Transport abstraction and remote liblink attach
 
 Goal:
@@ -707,6 +762,174 @@ Success criteria:
 - terminal frontend can attach to local SES
 - terminal frontend can attach to remote SES over liblink
 - remote does not require a separate session model
+
+## Remaining Work For Full Separation
+
+The following phase is now explicit and should be completed in up to 10 more
+commits.
+
+### Phase 2 Commit 1: Extract frontend session cache from terminal state
+
+Goal:
+
+- stop storing session cache directly inside terminal `State`
+
+Work:
+
+- introduce a dedicated frontend session cache module under `src/core/`
+- move tab/float/focus/session snapshot data there
+- make terminal `State` reference that cache instead of owning it structurally
+
+Success criteria:
+
+- terminal `State` no longer defines the canonical attached session cache shape
+
+### Phase 2 Commit 2: Split UI layout objects from session layout objects
+
+Goal:
+
+- stop treating terminal layout objects as the same thing as attached session state
+
+Work:
+
+- define a frontend-neutral attached layout cache
+- keep terminal `Layout` as a render/input object only
+- map session cache nodes to terminal layout objects during presentation
+
+Success criteria:
+
+- terminal `Layout` is no longer the attached session model
+
+### Phase 2 Commit 3: Move tab/focus/float navigation onto cache APIs
+
+Goal:
+
+- remove direct terminal ownership of current tab/float/focus semantics
+
+Work:
+
+- replace direct `tabs.items[...]`, `active_tab`, and `active_floating`
+  authority flows with frontend cache queries/commands
+- make terminal navigation consume cache state and send commands, not define truth
+
+Success criteria:
+
+- tab/focus/float behavior is driven by cache + SES, not terminal `State` fields
+
+### Phase 2 Commit 4: Make snapshot apply incremental
+
+Goal:
+
+- stop rebuilding large parts of the terminal session presentation on every
+  structural update
+
+Work:
+
+- add frontend snapshot delta / patch application
+- keep stable pane view reuse, but apply mutations through cache updates first
+- limit terminal rebuilds to presentation materialization
+
+Success criteria:
+
+- the frontend consumes snapshot/patch updates without treating itself as the
+  structural owner
+
+### Phase 2 Commit 5: Move pane/session metadata caches out of terminal state
+
+Goal:
+
+- remove non-UI metadata ownership from the terminal runtime
+
+Work:
+
+- move pane names, cwd/process snapshots, session identity mirrors, and similar
+  attached-session caches into the shared frontend cache/client layer
+
+Success criteria:
+
+- terminal `State` only keeps data that is needed for rendering or interaction
+
+### Phase 2 Commit 6: Reduce terminal state to UI concerns only
+
+Goal:
+
+- make the terminal state object visibly frontend-only
+
+Work:
+
+- keep renderer, VT instances, overlays, notifications, mouse/input state,
+  selection state, popups, timers, and keybinding runtime
+- remove session-graph ownership fields from terminal `State`
+
+Success criteria:
+
+- `src/modules/multiplexer/state.zig` reads like a UI runtime, not a session model
+
+### Phase 2 Commit 7: Formalize frontend attach lifecycle
+
+Goal:
+
+- make attach/detach/reattach belong to the shared frontend layer, not to the
+  terminal-specific runtime
+
+Work:
+
+- move attach session flow, backlog replay coordination, and stolen-session
+  handling into the shared frontend client/cache layer
+
+Success criteria:
+
+- another frontend could reuse attach logic without depending on terminal code
+
+### Phase 2 Commit 8: Add remote transport to shared frontend client
+
+Goal:
+
+- make local and remote attach use the same frontend layer
+
+Work:
+
+- add `liblink` transport under `src/core/frontend_client.zig`
+- keep session protocol identical
+- do not reintroduce remote-specific session modeling
+
+Success criteria:
+
+- the same frontend client can attach over local IPC or liblink
+
+### Phase 2 Commit 9: Make terminal frontend transport-agnostic
+
+Goal:
+
+- remove local-only assumptions from terminal startup/attach code
+
+Work:
+
+- make terminal frontend choose a frontend-client transport instead of assuming
+  local SES
+- keep terminal runtime unaware of local-vs-remote session semantics
+
+Success criteria:
+
+- terminal UI can target either local or remote SES without architectural forks
+
+### Phase 2 Commit 10: Final cleanup and naming cut
+
+Goal:
+
+- finish the separation visibly and remove transitional language
+
+Work:
+
+- delete remaining mux-specific protocol naming where inappropriate
+- remove leftover transition shims/aliases
+- if the tree is stable enough, rename `src/modules/multiplexer` to
+  `src/frontends/terminal`
+
+Success criteria:
+
+- the terminal frontend is obviously one frontend among several possible clients
+- there is no ambiguity about SES vs frontend ownership
 
 ## What To Defer Until After The Separation
 
@@ -759,7 +982,8 @@ These rules should be enforced while refactoring:
 4. Remote support must reuse the same session protocol as local support.
 5. New feature work on the old mux JSON sync path should stop.
 6. The rewrite must be delivered in multiple slices, not one huge dump.
-7. The whole rewrite should be completed in fewer than 10 commits.
+7. Phase 1 stays as delivered; the remaining full separation is allowed one
+   additional bounded phase of up to 10 more commits.
 8. Each slice must be committed before starting the next slice.
 9. Each commit message must be one line, title only.
 
@@ -768,6 +992,7 @@ These rules should be enforced while refactoring:
 We are done when all of this is true:
 
 - terminal mux can only act as a frontend
+- terminal mux does not own attached session cache structure
 - SES owns session structure and lifecycle
 - SES owns all pane/pod creation
 - attach uses SES snapshot + replay, not mux JSON restore

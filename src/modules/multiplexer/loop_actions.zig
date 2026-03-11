@@ -312,13 +312,14 @@ pub fn performDetach(state: *State) void {
     defer state.allocator.free(session_state_json);
 
     // Detach session with our UUID - panes stay grouped with full state.
-    state.ses_client.detachSession(state.uuid, session_state_json) catch {
+    const session_uuid = state.sessionUuid();
+    state.ses_client.detachSession(session_uuid, session_state_json) catch {
         std.debug.print("\nDetach failed - panes orphaned\n", .{});
         state.running = false;
         return;
     };
     // Print session_id (our UUID) so user can reattach.
-    std.debug.print("\nSession detached: {s}\nReattach with: hexe mux attach {s}\n", .{ state.uuid, state.uuid[0..8] });
+    std.debug.print("\nSession detached: {s}\nReattach with: hexe mux attach {s}\n", .{ session_uuid, session_uuid[0..8] });
     state.running = false;
 }
 

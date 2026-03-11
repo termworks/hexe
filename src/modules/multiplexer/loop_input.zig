@@ -333,25 +333,11 @@ fn replaceFromLocalLayout(state: *State) void {
     defer cfg.deinit(state.allocator);
 
     if (cfg.name) |desired_name| {
-        const name_owned = state.allocator.dupe(u8, desired_name) catch null;
-        if (name_owned) |new_name| {
-            if (state.session_name_owned) |old| {
-                state.allocator.free(old);
-            }
-            state.session_name = new_name;
-            state.session_name_owned = new_name;
-
-            state.ses_client.updateSession(state.uuid, state.session_name) catch {};
+        if (state.setSessionName(desired_name)) {
+            state.ses_client.updateSession(state.sessionUuid(), state.sessionName()) catch {};
             if (state.ses_client.resolved_name) |resolved| {
-                if (!std.mem.eql(u8, resolved, state.session_name)) {
-                    const resolved_owned = state.allocator.dupe(u8, resolved) catch null;
-                    if (resolved_owned) |rn| {
-                        if (state.session_name_owned) |old2| {
-                            state.allocator.free(old2);
-                        }
-                        state.session_name = rn;
-                        state.session_name_owned = rn;
-                    }
+                if (!std.mem.eql(u8, resolved, state.sessionName())) {
+                    _ = state.setSessionName(resolved);
                 }
             }
         }

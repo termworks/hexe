@@ -309,21 +309,17 @@ fn swapFloatPositions(a: *Pane, b: *Pane) void {
 }
 
 fn restoreFocusInTab(state: *State, old_uuid: ?[32]u8) void {
-    if (state.tab_last_focus_kind.items.len > state.active_tab and
-        state.tab_last_focus_kind.items[state.active_tab] == .float)
-    {
-        if (state.tab_last_floating_uuid.items.len > state.active_tab) {
-            if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
-                for (state.floats.items, 0..) |pane, fi| {
-                    if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                    if (!pane.isVisibleOnTab(state.active_tab)) continue;
-                    if (pane.parent_tab) |parent| {
-                        if (parent != state.active_tab) continue;
-                    }
-                    state.active_floating = fi;
-                    state.syncPaneFocus(pane, old_uuid);
-                    return;
+    if (state.lastFocusKindForTab(state.active_tab) == .float) {
+        if (state.lastFloatingUuidForTab(state.active_tab)) |uuid| {
+            for (state.floats.items, 0..) |pane, fi| {
+                if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
+                if (!pane.isVisibleOnTab(state.active_tab)) continue;
+                if (pane.parent_tab) |parent| {
+                    if (parent != state.active_tab) continue;
                 }
+                state.active_floating = fi;
+                state.syncPaneFocus(pane, old_uuid);
+                return;
             }
         }
     }

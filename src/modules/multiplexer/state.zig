@@ -15,6 +15,7 @@ const Layout = layout_mod.Layout;
 
 const Renderer = @import("render_core.zig").Renderer;
 
+const FrontendSessionCache = core.FrontendSessionCache;
 const SesClient = core.FrontendClient;
 const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
@@ -36,7 +37,7 @@ const state_sync = @import("state_sync.zig");
 const state_session = @import("state_session.zig");
 const mouse_selection = @import("mouse_selection.zig");
 
-pub const TabFocusKind = enum { split, float };
+pub const TabFocusKind = core.FrontendTabFocusKind;
 
 const max_pending_mux_vt_bytes: usize = 8 * 1024 * 1024;
 
@@ -122,14 +123,10 @@ pub const State = struct {
     config: core.Config,
     pop_config: pop.PopConfig,
     ses_config: core.SesConfig,
+    session_cache: FrontendSessionCache,
     active_layout_floats: []const core.LayoutFloatDef,
     tabs: std.ArrayList(Tab),
     active_tab: usize,
-    /// Per-tab remembered floating focus (by pane UUID).
-    /// This is used to restore float focus when switching tabs.
-    tab_last_floating_uuid: std.ArrayList(?[32]u8),
-    /// Remembers whether the last focus in a tab was a split or a float.
-    tab_last_focus_kind: std.ArrayList(TabFocusKind),
     floats: std.ArrayList(*Pane),
     active_floating: ?usize,
     running: bool,
@@ -166,12 +163,6 @@ pub const State = struct {
     pending_pop_scope: pop.Scope,
     pending_pop_tab: usize,
     pending_pop_pane: ?*Pane,
-    uuid: [32]u8,
-    session_name: []const u8,
-    session_name_owned: ?[]const u8,
-
-    /// Tab counter for generating unique tab names (session-N format)
-    tab_counter: usize = 0,
 
     /// Monotonically increasing version counter for state sync.
     /// SES uses this to reject stale/out-of-order updates.
@@ -306,11 +297,10 @@ pub const State = struct {
             .config = cfg,
             .pop_config = pop_cfg,
             .ses_config = ses_cfg,
+            .session_cache = try FrontendSessionCache.init(allocator, uuid, session_name),
             .active_layout_floats = layout_floats,
             .tabs = .empty,
             .active_tab = 0,
-            .tab_last_floating_uuid = .empty,
-            .tab_last_focus_kind = .empty,
             .floats = .empty,
             .active_floating = null,
             .running = true,
@@ -340,9 +330,6 @@ pub const State = struct {
             .pending_pop_scope = .mux,
             .pending_pop_tab = 0,
             .pending_pop_pane = null,
-            .uuid = uuid,
-            .session_name = session_name,
-            .session_name_owned = null,
 
             .osc_reply_target_uuid = null,
             .osc_reply_targets = .empty,
@@ -504,8 +491,7 @@ pub const State = struct {
             tab.deinit();
         }
         self.tabs.deinit(self.allocator);
-        self.tab_last_floating_uuid.deinit(self.allocator);
-        self.tab_last_focus_kind.deinit(self.allocator);
+        self.session_cache.deinit();
         self.config.deinit();
         var ses_cfg = self.ses_config;
         ses_cfg.deinit(self.allocator);
@@ -531,9 +517,6 @@ pub const State = struct {
         self.pending_float_requests.deinit();
 
         self.float_rename_buf.deinit(self.allocator);
-        if (self.session_name_owned) |owned| {
-            self.allocator.free(owned);
-        }
     }
 
     pub fn enqueueOscReplyTarget(self: *State, uuid: [32]u8) void {
@@ -673,6 +656,78 @@ pub const State = struct {
 
     pub fn currentLayout(self: *State) *Layout {
         return state_tabs.currentLayout(self);
+    }
+
+    pub fn sessionUuid(self: *const State) [32]u8 {
+        return self.session_cache.sessionUuid();
+    }
+
+    pub fn sessionName(self: *const State) []const u8 {
+        return self.session_cache.sessionName();
+    }
+
+    pub fn sessionTabCounter(self: *const State) usize {
+        return self.session_cache.tab_counter;
+    }
+
+    pub fn setSessionIdentity(self: *State, uuid: [32]u8, session_name: []const u8) bool {
+        self.session_cache.setSessionIdentity(uuid, session_name) catch return false;
+        self.ses_client.session_id = self.session_cache.sessionUuid();
+        self.ses_client.session_name = self.session_cache.sessionName();
+        return true;
+    }
+
+    pub fn setSessionName(self: *State, session_name: []const u8) bool {
+        return self.setSessionIdentity(self.sessionUuid(), session_name);
+    }
+
+    pub fn setSessionTabCounter(self: *State, tab_counter: usize) void {
+        self.session_cache.setTabCounter(tab_counter);
+    }
+
+    pub fn takeNextTabCounter(self: *State) usize {
+        return self.session_cache.takeNextTabCounter();
+    }
+
+    pub fn replaceAttachedSessionSnapshot(self: *State, snapshot: core.session_model.SessionSnapshot) bool {
+        self.session_cache.replaceAttachedSnapshotOwned(snapshot) catch return false;
+        self.ses_client.session_id = self.session_cache.sessionUuid();
+        self.ses_client.session_name = self.session_cache.sessionName();
+        return true;
+    }
+
+    pub fn resetTabFocusMemory(self: *State) bool {
+        self.session_cache.resetTabFocusMemory(self.tabs.items.len) catch return false;
+        return true;
+    }
+
+    pub fn clearTabFocusMemory(self: *State) void {
+        self.session_cache.clearTabFocusMemory();
+    }
+
+    pub fn appendTabFocusMemory(self: *State) bool {
+        self.session_cache.appendTabFocusMemory() catch return false;
+        return true;
+    }
+
+    pub fn removeTabFocusMemory(self: *State, idx: usize) void {
+        self.session_cache.removeTabFocusMemory(idx);
+    }
+
+    pub fn rememberFloatingFocus(self: *State, pane: *Pane) void {
+        self.session_cache.rememberFloatingFocus(self.active_tab, pane.uuid);
+    }
+
+    pub fn rememberSplitFocus(self: *State) void {
+        self.session_cache.rememberSplitFocus(self.active_tab);
+    }
+
+    pub fn lastFocusKindForTab(self: *const State, idx: usize) ?TabFocusKind {
+        return self.session_cache.lastFocusKind(idx);
+    }
+
+    pub fn lastFloatingUuidForTab(self: *const State, idx: usize) ?[32]u8 {
+        return self.session_cache.lastFloatingUuid(idx);
     }
 
     pub fn findPaneByUuid(self: *State, uuid: [32]u8) ?*Pane {
