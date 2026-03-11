@@ -37,12 +37,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("vaxis");
 
-    // Get liblink dependency
-    const liblink_mod = if (b.lazyDependency("liblink", .{
-        .target = target,
-        .optimize = optimize,
-    })) |liblink_dep| liblink_dep.module("liblink") else null;
-
     // Create core module
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/mod.zig"),
@@ -62,9 +56,6 @@ pub fn build(b: *std.Build) void {
     }
     core_module.addImport("vaxis", vaxis_mod);
     core_module.addImport("xev", xev_mod);
-    if (liblink_mod) |ll| {
-        core_module.addImport("liblink", ll);
-    }
 
     // Create shell module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{
