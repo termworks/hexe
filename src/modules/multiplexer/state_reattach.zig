@@ -167,8 +167,9 @@ fn clearStateForRestore(self: anytype) void {
         }
     }
 
-    self.active_tab = 0;
-    self.active_floating = null;
+    self.setActiveTabIndex(0);
+    self.setActiveFloatingIndex(null);
+    self.setFocusedPaneUuid(null);
     self.clearTabFocusMemory();
 }
 
@@ -204,8 +205,9 @@ fn clearStatePreservingPanes(self: anytype) void {
     }
 
     self.floats.clearRetainingCapacity();
-    self.active_tab = 0;
-    self.active_floating = null;
+    self.setActiveTabIndex(0);
+    self.setActiveFloatingIndex(null);
+    self.setFocusedPaneUuid(null);
     self.clearTabFocusMemory();
 }
 
@@ -837,20 +839,20 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Apply restored active indices now that all state is present.
     if (self.tabs.items.len > 0) {
-        self.active_tab = @min(wanted_active_tab, self.tabs.items.len - 1);
+        self.setActiveTabIndex(@min(wanted_active_tab, self.tabs.items.len - 1));
     } else {
-        self.active_tab = 0;
+        self.setActiveTabIndex(0);
     }
-    self.active_floating = null;
+    self.setActiveFloatingIndex(null);
     if (snapshot.active_float_uuid) |active_float_uuid| {
         for (self.floats.items, 0..) |pane, idx| {
             if (std.mem.eql(u8, &pane.uuid, &active_float_uuid)) {
-                self.active_floating = idx;
+                self.setActiveFloatingIndex(idx);
                 break;
             }
         }
     }
-    if (self.active_floating) |idx| {
+    if (self.activeFloatingIndex()) |idx| {
         self.rememberFloatingFocus(self.floats.items[idx]);
     }
 
@@ -1027,20 +1029,20 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
     self.resizeFloatingPanes();
 
     if (self.tabs.items.len > 0) {
-        self.active_tab = @min(wanted_active_tab, self.tabs.items.len - 1);
+        self.setActiveTabIndex(@min(wanted_active_tab, self.tabs.items.len - 1));
     } else {
-        self.active_tab = 0;
+        self.setActiveTabIndex(0);
     }
-    self.active_floating = null;
+    self.setActiveFloatingIndex(null);
     if (snapshot.active_float_uuid) |active_float_uuid| {
         for (self.floats.items, 0..) |pane, idx| {
             if (std.mem.eql(u8, &pane.uuid, &active_float_uuid)) {
-                self.active_floating = idx;
+                self.setActiveFloatingIndex(idx);
                 break;
             }
         }
     }
-    if (self.active_floating) |idx| {
+    if (self.activeFloatingIndex()) |idx| {
         self.rememberFloatingFocus(self.floats.items[idx]);
     }
 
@@ -1136,8 +1138,8 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
                 failed_tab.deinit();
                 return false;
             }
-            self.active_tab = self.tabs.items.len - 1;
-            self.syncSessionTabAdded(tab_uuid, self.tabName(self.active_tab), pane.uuid);
+            self.setActiveTabIndex(self.tabs.items.len - 1);
+            self.syncSessionTabAdded(tab_uuid, self.tabName(self.activeTabIndex()), pane.uuid);
             self.renderer.invalidate();
             self.force_full_render = true;
             return true;

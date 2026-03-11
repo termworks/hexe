@@ -242,7 +242,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.detach_mode) {
                 return true; // Silently ignore during detach
             }
-            state.active_floating = null;
+            state.setActiveFloatingIndex(null);
             state.createTab() catch |e| {
                 core.logging.logError("mux", "createTab failed", e);
             };

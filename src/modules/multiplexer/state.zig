@@ -670,6 +670,24 @@ pub const State = struct {
         return self.session_cache.tab_counter;
     }
 
+    pub fn activeTabIndex(self: *const State) usize {
+        return self.session_cache.activeTab(self.tabs.items.len);
+    }
+
+    pub fn setActiveTabIndex(self: *State, idx: usize) void {
+        const clamped = if (self.tabs.items.len == 0) 0 else @min(idx, self.tabs.items.len - 1);
+        self.session_cache.setActiveTab(clamped);
+        self.active_tab = clamped;
+    }
+
+    pub fn focusedPaneUuid(self: *const State) ?[32]u8 {
+        return self.session_cache.focusedPaneUuid();
+    }
+
+    pub fn setFocusedPaneUuid(self: *State, uuid: ?[32]u8) void {
+        self.session_cache.setFocusedPaneUuid(uuid);
+    }
+
     pub fn setSessionIdentity(self: *State, uuid: [32]u8, session_name: []const u8) bool {
         self.session_cache.setSessionIdentity(uuid, session_name) catch return false;
         self.ses_client.session_id = self.session_cache.sessionUuid();
@@ -693,6 +711,8 @@ pub const State = struct {
         self.session_cache.replaceAttachedSnapshotOwned(snapshot) catch return false;
         self.ses_client.session_id = self.session_cache.sessionUuid();
         self.ses_client.session_name = self.session_cache.sessionName();
+        self.setActiveTabIndex(self.session_cache.activeTab(self.tabs.items.len));
+        self.setActiveFloatingUuid(self.session_cache.activeFloatUuid());
         return true;
     }
 
@@ -724,6 +744,50 @@ pub const State = struct {
 
     pub fn tabName(self: *const State, idx: usize) []const u8 {
         return self.session_cache.tabName(idx) orelse "tab";
+    }
+
+    pub fn activeFloatingIndex(self: *State) ?usize {
+        if (self.session_cache.activeFloatUuid()) |uuid| {
+            if (self.active_floating) |idx| {
+                if (idx < self.floats.items.len and std.mem.eql(u8, &self.floats.items[idx].uuid, &uuid)) {
+                    return idx;
+                }
+            }
+            for (self.floats.items, 0..) |pane, idx| {
+                if (std.mem.eql(u8, &pane.uuid, &uuid)) {
+                    self.active_floating = idx;
+                    return idx;
+                }
+            }
+        }
+        self.active_floating = null;
+        self.session_cache.setActiveFloatUuid(null);
+        return null;
+    }
+
+    pub fn setActiveFloatingIndex(self: *State, idx: ?usize) void {
+        if (idx) |value| {
+            if (value < self.floats.items.len) {
+                self.active_floating = value;
+                self.session_cache.setActiveFloatUuid(self.floats.items[value].uuid);
+                return;
+            }
+        }
+        self.active_floating = null;
+        self.session_cache.setActiveFloatUuid(null);
+    }
+
+    pub fn setActiveFloatingUuid(self: *State, uuid: ?[32]u8) void {
+        self.session_cache.setActiveFloatUuid(uuid);
+        if (uuid) |live_uuid| {
+            for (self.floats.items, 0..) |pane, idx| {
+                if (std.mem.eql(u8, &pane.uuid, &live_uuid)) {
+                    self.active_floating = idx;
+                    return;
+                }
+            }
+        }
+        self.active_floating = null;
     }
 
     pub fn appendTabFocusMemory(self: *State) bool {

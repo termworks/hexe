@@ -107,9 +107,9 @@ pub fn createTab(self: anytype) !void {
     self.allocator.free(name_owned);
     if (!self.appendTabFocusMemory()) return error.OutOfMemory;
     errdefer self.removeTabFocusMemory(self.tabs.items.len - 1);
-    self.active_tab = self.tabs.items.len - 1;
+    self.setActiveTabIndex(self.tabs.items.len - 1);
     self.syncPaneAux(first_pane, parent_uuid);
-    self.syncSessionTabAdded(tab_uuid, self.tabName(self.active_tab), first_pane.uuid);
+    self.syncSessionTabAdded(tab_uuid, self.tabName(self.activeTabIndex()), first_pane.uuid);
     self.renderer.invalidate();
     self.force_full_render = true;
 }
@@ -134,11 +134,11 @@ pub fn closeCurrentTab(self: anytype) bool {
                 self.allocator.destroy(fp);
                 _ = self.floats.orderedRemove(i);
                 // Clear active_floating if it was this float.
-                if (self.active_floating) |afi| {
+                if (self.activeFloatingIndex()) |afi| {
                     if (afi == i) {
-                        self.active_floating = null;
+                        self.setActiveFloatingIndex(null);
                     } else if (afi > i) {
-                        self.active_floating = afi - 1;
+                        self.setActiveFloatingIndex(afi - 1);
                     }
                 }
                 self.syncSessionFloatRemoved(fp.uuid);
@@ -156,14 +156,16 @@ pub fn closeCurrentTab(self: anytype) bool {
     tab.deinit();
     self.removeTabMeta(self.active_tab);
     self.removeTabFocusMemory(self.active_tab);
-    if (self.active_tab >= self.tabs.items.len) {
-        self.active_tab = self.tabs.items.len - 1;
+    if (self.activeTabIndex() >= self.tabs.items.len) {
+        self.setActiveTabIndex(self.tabs.items.len - 1);
+    } else {
+        self.setActiveTabIndex(self.activeTabIndex());
     }
-    if (self.active_floating) |afi| {
+    if (self.activeFloatingIndex()) |afi| {
         if (afi < self.floats.items.len) {
             self.syncPaneFocus(self.floats.items[afi], null);
         } else if (self.currentLayout().getFocusedPane()) |pane| {
-            self.active_floating = null;
+            self.setActiveFloatingIndex(null);
             self.syncPaneFocus(pane, null);
         }
     } else if (self.currentLayout().getFocusedPane()) |pane| {
@@ -305,8 +307,8 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
 /// Switch to next tab.
 pub fn nextTab(self: anytype) void {
     if (self.tabs.items.len > 1) {
-        const prev_tab = self.active_tab;
-        tab_switch.switchToTab(self, (self.active_tab + 1) % self.tabs.items.len);
+        const prev_tab = self.activeTabIndex();
+        tab_switch.switchToTab(self, (self.activeTabIndex() + 1) % self.tabs.items.len);
 
         if (self.config._lua_runtime) |rt| {
             rt.lua.createTable(0, 6);
@@ -314,7 +316,7 @@ pub fn nextTab(self: anytype) void {
             rt.lua.setField(-2, "event");
             rt.lua.pushInteger(@intCast(prev_tab + 1));
             rt.lua.setField(-2, "previous_tab");
-            rt.lua.pushInteger(@intCast(self.active_tab + 1));
+            rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
             rt.lua.setField(-2, "active_tab");
             rt.lua.pushInteger(@intCast(self.tabs.items.len));
             rt.lua.setField(-2, "tab_count");
@@ -328,8 +330,8 @@ pub fn nextTab(self: anytype) void {
 /// Switch to previous tab.
 pub fn prevTab(self: anytype) void {
     if (self.tabs.items.len > 1) {
-        const prev_tab = self.active_tab;
-        tab_switch.switchToTab(self, if (self.active_tab == 0) self.tabs.items.len - 1 else self.active_tab - 1);
+        const prev_tab = self.activeTabIndex();
+        tab_switch.switchToTab(self, if (self.activeTabIndex() == 0) self.tabs.items.len - 1 else self.activeTabIndex() - 1);
 
         if (self.config._lua_runtime) |rt| {
             rt.lua.createTable(0, 6);
@@ -337,7 +339,7 @@ pub fn prevTab(self: anytype) void {
             rt.lua.setField(-2, "event");
             rt.lua.pushInteger(@intCast(prev_tab + 1));
             rt.lua.setField(-2, "previous_tab");
-            rt.lua.pushInteger(@intCast(self.active_tab + 1));
+            rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
             rt.lua.setField(-2, "active_tab");
             rt.lua.pushInteger(@intCast(self.tabs.items.len));
             rt.lua.setField(-2, "tab_count");

@@ -32,9 +32,9 @@ pub fn enterPaneSelectMode(state: *State, swap: bool) void {
     }
 
     for (state.floats.items) |pane| {
-        if (!pane.isVisibleOnTab(state.active_tab)) continue;
+        if (!pane.isVisibleOnTab(state.activeTabIndex())) continue;
         if (pane.parent_tab) |parent| {
-            if (parent != state.active_tab) continue;
+            if (parent != state.activeTabIndex()) continue;
         }
 
         if (pop.overlay.labelForIndex(label_idx)) |label| {
@@ -57,13 +57,13 @@ pub fn enterPaneSelectMode(state: *State, swap: bool) void {
 pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
     for (state.floats.items, 0..) |pane, i| {
         if (std.mem.eql(u8, &pane.uuid, &uuid)) {
-            if (!pane.isVisibleOnTab(state.active_tab)) continue;
+            if (!pane.isVisibleOnTab(state.activeTabIndex())) continue;
             if (pane.parent_tab) |parent| {
-                if (parent != state.active_tab) continue;
+                if (parent != state.activeTabIndex()) continue;
             }
 
             state.unfocusAllPanes();
-            state.active_floating = i;
+            state.setActiveFloatingIndex(i);
             pane.focused = true;
             state.syncPaneFocus(pane, null);
             state.needs_render = true;
@@ -77,7 +77,7 @@ pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
         const pane = entry.value_ptr.*;
         if (std.mem.eql(u8, &pane.uuid, &uuid)) {
             state.unfocusAllPanes();
-            state.active_floating = null;
+            state.setActiveFloatingIndex(null);
             layout.focused_split_id = entry.key_ptr.*;
             pane.focused = true;
             state.syncPaneFocus(pane, null);
@@ -154,22 +154,22 @@ pub fn handlePaneSelectEvent(state: *State, parsed_event: ?vaxis.Event) bool {
 /// Does NOT wrap around - stays on last tab if already there.
 pub fn switchToNextTab(state: *State) void {
     if (state.tabs.items.len <= 1) return;
-    if (state.active_tab >= state.tabs.items.len - 1) return;
+    if (state.activeTabIndex() >= state.tabs.items.len - 1) return;
 
     const old_uuid = state.getCurrentFocusedUuid();
 
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         if (idx < state.floats.items.len) {
             const fp = state.floats.items[idx];
             state.syncPaneUnfocus(fp);
-            state.active_floating = null;
+            state.setActiveFloatingIndex(null);
             state.cursor_needs_restore = true;
         }
     } else if (state.currentLayout().getFocusedPane()) |old_pane| {
         state.syncPaneUnfocus(old_pane);
     }
 
-    state.active_tab += 1;
+    state.setActiveTabIndex(state.activeTabIndex() + 1);
     restoreFocusInTab(state, old_uuid);
     state.renderer.invalidate();
     state.force_full_render = true;
@@ -180,22 +180,22 @@ pub fn switchToNextTab(state: *State) void {
 /// Does NOT wrap around - stays on first tab if already there.
 pub fn switchToPrevTab(state: *State) void {
     if (state.tabs.items.len <= 1) return;
-    if (state.active_tab == 0) return;
+    if (state.activeTabIndex() == 0) return;
 
     const old_uuid = state.getCurrentFocusedUuid();
 
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         if (idx < state.floats.items.len) {
             const fp = state.floats.items[idx];
             state.syncPaneUnfocus(fp);
-            state.active_floating = null;
+            state.setActiveFloatingIndex(null);
             state.cursor_needs_restore = true;
         }
     } else if (state.currentLayout().getFocusedPane()) |old_pane| {
         state.syncPaneUnfocus(old_pane);
     }
 
-    state.active_tab -= 1;
+    state.setActiveTabIndex(state.activeTabIndex() - 1);
     restoreFocusInTab(state, old_uuid);
     state.renderer.invalidate();
     state.force_full_render = true;
@@ -203,7 +203,7 @@ pub fn switchToPrevTab(state: *State) void {
 }
 
 fn getCurrentFocusedPane(state: *State) ?*Pane {
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         if (idx < state.floats.items.len) return state.floats.items[idx];
     }
     return state.currentLayout().getFocusedPane();
@@ -309,15 +309,16 @@ fn swapFloatPositions(a: *Pane, b: *Pane) void {
 }
 
 fn restoreFocusInTab(state: *State, old_uuid: ?[32]u8) void {
-    if (state.lastFocusKindForTab(state.active_tab) == .float) {
-        if (state.lastFloatingUuidForTab(state.active_tab)) |uuid| {
+    const active_tab = state.activeTabIndex();
+    if (state.lastFocusKindForTab(active_tab) == .float) {
+        if (state.lastFloatingUuidForTab(active_tab)) |uuid| {
             for (state.floats.items, 0..) |pane, fi| {
                 if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                if (!pane.isVisibleOnTab(state.active_tab)) continue;
+                if (!pane.isVisibleOnTab(active_tab)) continue;
                 if (pane.parent_tab) |parent| {
-                    if (parent != state.active_tab) continue;
+                    if (parent != active_tab) continue;
                 }
-                state.active_floating = fi;
+                state.setActiveFloatingIndex(fi);
                 state.syncPaneFocus(pane, old_uuid);
                 return;
             }

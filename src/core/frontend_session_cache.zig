@@ -20,6 +20,9 @@ pub const FrontendSessionCache = struct {
     session_uuid: [32]u8,
     session_name_owned: []u8,
     tab_counter: usize = 0,
+    active_tab: usize = 0,
+    active_float_uuid: ?[32]u8 = null,
+    focused_pane_uuid: ?[32]u8 = null,
     attached_snapshot: ?session_model.SessionSnapshot = null,
     tabs: std.ArrayList(TabMeta),
     tab_last_floating_uuid: std.ArrayList(?[32]u8),
@@ -91,6 +94,40 @@ pub const FrontendSessionCache = struct {
         return current;
     }
 
+    pub fn activeTab(self: *const FrontendSessionCache, tab_count: usize) usize {
+        if (tab_count == 0) return 0;
+        return @min(self.active_tab, tab_count - 1);
+    }
+
+    pub fn setActiveTab(self: *FrontendSessionCache, active_tab: usize) void {
+        self.active_tab = active_tab;
+        if (self.attached_snapshot) |*snapshot| {
+            snapshot.active_tab = active_tab;
+        }
+    }
+
+    pub fn activeFloatUuid(self: *const FrontendSessionCache) ?[32]u8 {
+        return self.active_float_uuid;
+    }
+
+    pub fn setActiveFloatUuid(self: *FrontendSessionCache, uuid: ?[32]u8) void {
+        self.active_float_uuid = uuid;
+        if (self.attached_snapshot) |*snapshot| {
+            snapshot.active_float_uuid = uuid;
+        }
+    }
+
+    pub fn focusedPaneUuid(self: *const FrontendSessionCache) ?[32]u8 {
+        return self.focused_pane_uuid;
+    }
+
+    pub fn setFocusedPaneUuid(self: *FrontendSessionCache, uuid: ?[32]u8) void {
+        self.focused_pane_uuid = uuid;
+        if (self.attached_snapshot) |*snapshot| {
+            snapshot.focused_pane_uuid = uuid;
+        }
+    }
+
     pub fn replaceAttachedSnapshotOwned(
         self: *FrontendSessionCache,
         snapshot: session_model.SessionSnapshot,
@@ -99,6 +136,9 @@ pub const FrontendSessionCache = struct {
         self.attached_snapshot = snapshot;
         try self.setSessionIdentity(snapshot.uuid, snapshot.session_name);
         self.setTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
+        self.setActiveTab(snapshot.active_tab);
+        self.setActiveFloatUuid(snapshot.active_float_uuid);
+        self.setFocusedPaneUuid(snapshot.focused_pane_uuid);
         try self.replaceTabMetaFromSnapshot(snapshot.tabs.items);
         try self.resetTabFocusMemory(snapshot.tabs.items.len);
     }

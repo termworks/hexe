@@ -52,15 +52,12 @@ pub fn buildSessionSnapshot(self: anytype) !core.session_model.SessionSnapshot {
 
     snapshot.tab_counter = self.sessionTabCounter();
     if (self.tabs.items.len > 0) {
-        snapshot.active_tab = @min(self.active_tab, self.tabs.items.len - 1);
+        snapshot.active_tab = self.activeTabIndex();
     } else {
         snapshot.active_tab = 0;
     }
-    snapshot.active_float_uuid = if (self.active_floating) |idx|
-        if (idx < self.floats.items.len) self.floats.items[idx].uuid else null
-    else
-        null;
-    snapshot.focused_pane_uuid = getCurrentFocusedUuid(self);
+    snapshot.active_float_uuid = if (self.activeFloatingIndex()) |idx| self.floats.items[idx].uuid else null;
+    snapshot.focused_pane_uuid = self.focusedPaneUuid() orelse getCurrentFocusedUuid(self);
 
     for (self.tabs.items, 0..) |*tab, tab_idx| {
         const tab_uuid = self.tabUuid(tab_idx) orelse continue;
@@ -232,7 +229,10 @@ pub fn syncActiveTabLayout(self: anytype) void {
 }
 
 pub fn getCurrentFocusedUuid(self: anytype) ?[32]u8 {
-    if (self.active_floating) |idx| {
+    if (self.focusedPaneUuid()) |uuid| {
+        if (self.findPaneByUuid(uuid) != null) return uuid;
+    }
+    if (self.activeFloatingIndex()) |idx| {
         if (idx < self.floats.items.len) {
             return self.floats.items[idx].uuid;
         }
@@ -356,15 +356,18 @@ pub fn unfocusAllPanes(self: anytype) void {
 }
 
 pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
-    if (!self.ses_client.isConnected()) return;
-    if (pane.uuid[0] == 0) return;
-
     setLayoutFocusedSplitId(self, pane);
     if (pane.floating) {
         rememberFloatingFocus(self, pane);
+        self.setActiveFloatingUuid(pane.uuid);
     } else {
         rememberSplitFocus(self, pane);
+        self.setActiveFloatingIndex(null);
     }
+    self.setFocusedPaneUuid(pane.uuid);
+
+    if (!self.ses_client.isConnected()) return;
+    if (pane.uuid[0] == 0) return;
 
     self.unfocusAllPanes();
 
@@ -418,6 +421,19 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
 }
 
 pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
+    if (self.focusedPaneUuid()) |uuid| {
+        if (std.mem.eql(u8, &uuid, &pane.uuid)) {
+            self.setFocusedPaneUuid(null);
+        }
+    }
+    if (pane.floating) {
+        if (self.activeFloatingIndex()) |idx| {
+            if (idx < self.floats.items.len and self.floats.items[idx] == pane) {
+                self.setActiveFloatingIndex(null);
+            }
+        }
+    }
+
     if (!self.ses_client.isConnected()) return;
     if (pane.uuid[0] == 0) return;
 

@@ -58,11 +58,11 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
             pane.deinit();
             state.allocator.destroy(pane);
             // Fix active_floating index.
-            if (state.active_floating) |afi| {
+            if (state.activeFloatingIndex()) |afi| {
                 if (afi == i) {
-                    state.active_floating = null;
+                    state.setActiveFloatingIndex(null);
                 } else if (afi > i) {
-                    state.active_floating = afi - 1;
+                    state.setActiveFloatingIndex(afi - 1);
                 }
             }
             // Ensure proper re-render with cursor restoration.
@@ -419,10 +419,10 @@ pub fn performClose(state: *State) void {
         state.allocator.destroy(pane);
         // Focus another float or fall back to tiled pane.
         if (state.floats.items.len > 0) {
-            state.active_floating = 0;
+            state.setActiveFloatingIndex(0);
             state.syncPaneFocus(state.floats.items[0], old_uuid);
         } else {
-            state.active_floating = null;
+            state.setActiveFloatingIndex(null);
             if (state.currentLayout().getFocusedPane()) |tiled| {
                 state.syncPaneFocus(tiled, old_uuid);
             }
@@ -604,16 +604,16 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 stale.deinit();
                 state.allocator.destroy(stale);
 
-                if (state.active_floating) |af| {
+                if (state.activeFloatingIndex()) |af| {
                     if (af == existing_idx) {
-                        state.active_floating = null;
+                        state.setActiveFloatingIndex(null);
                     } else if (af > existing_idx) {
-                        state.active_floating = af - 1;
+                        state.setActiveFloatingIndex(af - 1);
                     }
                 }
 
                 if (was_active) {
-                    state.active_floating = null;
+                    state.setActiveFloatingIndex(null);
                     state.cursor_needs_restore = true;
                     if (state.currentLayout().getFocusedPane()) |tiled| {
                         state.syncPaneFocus(tiled, old_uuid);
@@ -637,14 +637,14 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             pane.toggleVisibleOnTab(state.active_tab);
             if (pane.isVisibleOnTab(state.active_tab)) {
                 // Unfocus current pane (tiled or another float).
-                if (state.active_floating) |afi| {
+                if (state.activeFloatingIndex()) |afi| {
                     if (afi < state.floats.items.len) {
                         state.syncPaneUnfocus(state.floats.items[afi]);
                     }
                 } else if (state.currentLayout().getFocusedPane()) |tiled| {
                     state.syncPaneUnfocus(tiled);
                 }
-                state.active_floating = existing_idx;
+                state.setActiveFloatingIndex(existing_idx);
                 state.syncPaneFocus(pane, old_uuid);
                 // If alone mode, hide all other floats on this tab.
                 if (float_def.attributes.exclusive) {
@@ -668,16 +668,18 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
             } else {
                 // Float was hidden. If it had focus, return focus to tiled pane.
-                if (state.active_floating == existing_idx) {
-                    state.syncPaneUnfocus(pane);
-                    state.active_floating = null;
-                    if (state.currentLayout().getFocusedPane()) |tiled| {
-                        state.syncPaneFocus(tiled, old_uuid);
+                if (state.activeFloatingIndex()) |afi| {
+                    if (afi == existing_idx) {
+                        state.syncPaneUnfocus(pane);
+                        state.setActiveFloatingIndex(null);
+                        if (state.currentLayout().getFocusedPane()) |tiled| {
+                            state.syncPaneFocus(tiled, old_uuid);
+                        }
                     }
                 }
             }
 
-            state.syncSessionFloat(pane, state.active_floating == existing_idx and pane.isVisibleOnTab(state.active_tab));
+            state.syncSessionFloat(pane, state.activeFloatingIndex() == existing_idx and pane.isVisibleOnTab(state.active_tab));
 
             state.renderer.invalidate();
             state.force_full_render = true;
@@ -689,7 +691,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
     // No existing float - create new.
     const old_uuid = state.getCurrentFocusedUuid();
-    if (state.active_floating) |afi| {
+    if (state.activeFloatingIndex()) |afi| {
         if (afi < state.floats.items.len) {
             state.syncPaneUnfocus(state.floats.items[afi]);
         }
@@ -862,7 +864,7 @@ pub fn createAdhocFloatWithSize(
     pane.configureNotificationsFromPop(&state.pop_config.pane.notification);
 
     try state.floats.append(state.allocator, pane);
-    state.active_floating = state.floats.items.len - 1;
+    state.setActiveFloatingIndex(state.floats.items.len - 1);
     state.syncPaneAux(pane, null);
     state.syncSessionFloat(pane, true);
 
@@ -1007,7 +1009,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     pane.configureNotificationsFromPop(&state.pop_config.pane.notification);
 
     try state.floats.append(state.allocator, pane);
-    state.active_floating = state.floats.items.len - 1;
+    state.setActiveFloatingIndex(state.floats.items.len - 1);
     state.syncPaneAux(pane, parent_uuid);
     state.syncSessionFloat(pane, true);
 }

@@ -129,10 +129,10 @@ fn forwardMouseToPane(pane: *Pane, ev: MouseEvent) void {
 fn focusTarget(state: *State, target: FocusTarget) void {
     const old_uuid = state.getCurrentFocusedUuid();
     if (target.kind == .float) {
-        state.active_floating = target.float_index;
+        state.setActiveFloatingIndex(target.float_index);
         state.syncPaneFocus(target.pane, old_uuid);
     } else {
-        state.active_floating = null;
+        state.setActiveFloatingIndex(null);
         state.syncPaneFocus(target.pane, old_uuid);
     }
     state.renderer.invalidate();

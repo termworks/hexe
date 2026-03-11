@@ -15,7 +15,7 @@ const actions = @import("loop_actions.zig");
 pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
     // Floats have dedicated toggle keys — directional navigation skips them.
     // Left/right switches tabs, up/down ignored.
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         if (idx < state.floats.items.len) {
             state.cursor_needs_restore = true;
             switch (dir) {
@@ -39,7 +39,7 @@ pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
     };
 
     if (focus_nav.focusDirectionAny(state, dir, cursor)) |target| {
-        state.active_floating = null;
+        state.setActiveFloatingIndex(null);
         state.syncPaneFocus(target.pane, old_uuid);
         state.renderer.invalidate();
         state.force_full_render = true;

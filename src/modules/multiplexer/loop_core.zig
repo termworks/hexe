@@ -410,7 +410,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
         }
 
         if (was_active) {
-            state.active_floating = null;
+            state.setActiveFloatingIndex(null);
             state.cursor_needs_restore = true;
             if (state.currentLayout().getFocusedPane()) |tiled| {
                 state.syncPaneFocus(tiled, pane.uuid);
@@ -450,7 +450,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     state.syncSessionFloatRemoved(pane.uuid);
 
     if (was_active) {
-        state.active_floating = null;
+        state.setActiveFloatingIndex(null);
         state.cursor_needs_restore = true;
         if (state.currentLayout().getFocusedPane()) |tiled| {
             state.syncPaneFocus(tiled, null);
@@ -587,12 +587,12 @@ pub fn runMainLoop(state: *State) !void {
                 }
             }
             // Ensure active_floating is valid.
-            if (state.active_floating) |af| {
+            if (state.activeFloatingIndex()) |af| {
                 if (af >= state.floats.items.len) {
-                    state.active_floating = if (state.floats.items.len > 0)
+                    state.setActiveFloatingIndex(if (state.floats.items.len > 0)
                         state.floats.items.len - 1
                     else
-                        null;
+                        null);
                 }
             }
         }
@@ -669,9 +669,9 @@ pub fn runMainLoop(state: *State) !void {
             }
         }
         // Ensure active_floating is still valid.
-        if (state.active_floating) |af| {
+        if (state.activeFloatingIndex()) |af| {
             if (af >= state.floats.items.len) {
-                state.active_floating = null;
+                state.setActiveFloatingIndex(null);
             }
         }
 
