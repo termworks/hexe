@@ -16,6 +16,7 @@ const Layout = layout_mod.Layout;
 
 const Renderer = @import("render_core.zig").Renderer;
 
+const FrontendRuntime = core.FrontendRuntime;
 const FrontendAttachState = core.FrontendAttachState;
 const FrontendSessionCache = core.FrontendSessionCache;
 const PaneShellInfo = core.FrontendPaneShellInfo;
@@ -98,7 +99,8 @@ pub const State = struct {
     config: core.Config,
     pop_config: pop.PopConfig,
     ses_config: core.SesConfig,
-    session_cache: FrontendSessionCache,
+    runtime: *FrontendRuntime,
+    session_cache: *FrontendSessionCache,
     active_layout_floats: []const core.LayoutFloatDef,
     view: TerminalViewState,
     running: bool,
@@ -114,7 +116,7 @@ pub const State = struct {
     layout_width: u16,
     layout_height: u16,
     renderer: Renderer,
-    frontend_client: FrontendClient,
+    frontend_client: *FrontendClient,
     notifications: NotificationManager,
     overlays: OverlayManager,
     popups: pop.PopupManager,
@@ -125,7 +127,7 @@ pub const State = struct {
     exit_intent_deadline_ms: i64,
     /// If true, respawn the focused pane after handling input
     needs_respawn: bool,
-    attach_state: FrontendAttachState,
+    attach_state: *FrontendAttachState,
     skip_dead_check: bool,
     pending_pop_response: bool,
     pending_pop_scope: pop.Scope,
@@ -251,13 +253,16 @@ pub const State = struct {
 
         const uuid = core.ipc.generateUuid();
         const session_name = core.ipc.generateSessionName();
+        const runtime = try FrontendRuntime.createTerminal(allocator, uuid, session_name, debug, log_file, transport);
+        errdefer runtime.destroy();
 
         return .{
             .allocator = allocator,
             .config = cfg,
             .pop_config = pop_cfg,
             .ses_config = ses_cfg,
-            .session_cache = try FrontendSessionCache.init(allocator, uuid, session_name),
+            .runtime = runtime,
+            .session_cache = &runtime.session_cache,
             .active_layout_floats = layout_floats,
             .view = TerminalViewState.init(),
             .running = true,
@@ -271,7 +276,7 @@ pub const State = struct {
             .layout_width = width,
             .layout_height = layout_h,
             .renderer = try Renderer.init(allocator, width, height),
-            .frontend_client = FrontendClient.initWithTransport(allocator, uuid, session_name, true, debug, log_file, .terminal, transport),
+            .frontend_client = &runtime.client,
             .notifications = NotificationManager.initWithConfig(allocator, pop_cfg.carrier.notification),
             .overlays = OverlayManager.initWithConfig(allocator, pop_cfg.widgets.keycast),
             .popups = pop.PopupManager.init(allocator),
@@ -280,7 +285,7 @@ pub const State = struct {
             .pending_exit_intent = false,
             .exit_intent_deadline_ms = 0,
             .needs_respawn = false,
-            .attach_state = .{},
+            .attach_state = &runtime.attach_state,
             .skip_dead_check = false,
             .pending_pop_response = false,
             .pending_pop_scope = .mux,
@@ -404,7 +409,6 @@ pub const State = struct {
         self.key_timers.deinit(self.allocator);
 
         self.view.deinit(self.allocator);
-        self.session_cache.deinit();
         self.config.deinit();
         var ses_cfg = self.ses_config;
         ses_cfg.deinit(self.allocator);
@@ -417,7 +421,6 @@ pub const State = struct {
         self.mux_vt_write_queue.deinit(self.allocator);
         self.bracketed_paste_buf.deinit(self.allocator);
         self.renderer.deinit();
-        self.frontend_client.deinit();
         self.notifications.deinit();
         self.overlays.deinit();
         self.popups.deinit();
@@ -430,6 +433,7 @@ pub const State = struct {
         self.pending_float_requests.deinit();
 
         self.float_rename_buf.deinit(self.allocator);
+        self.runtime.destroy();
     }
 
     pub fn enqueueOscReplyTarget(self: *State, uuid: [32]u8) void {

@@ -242,7 +242,7 @@ pub fn run(mux_args: MuxArgs) !void {
     debugLog("ses connected (started={})", .{state.frontend_client.just_started_daemon});
 
     // If server resolved to a different name (collision avoidance), update state.
-    if (FrontendAttach.reconcileResolvedName(allocator, &state.frontend_client, &state.session_cache) catch null) |change| {
+    if (state.runtime.reconcileResolvedName() catch null) |change| {
         var owned_change = change;
         defer owned_change.deinit(allocator);
         debugLog("session name resolved from '{s}' to '{s}'", .{ owned_change.previous_name, owned_change.resolved_name });
@@ -303,7 +303,7 @@ pub fn run(mux_args: MuxArgs) !void {
         // Prefer layout-config name when provided.
         if (config.name) |loaded_name| {
             if (state.setSessionName(loaded_name)) {
-                if (FrontendAttach.syncSessionIdentity(allocator, &state.frontend_client, &state.session_cache) catch null) |change| {
+                if (state.runtime.syncSessionIdentity() catch null) |change| {
                     var owned_change = change;
                     defer owned_change.deinit(allocator);
                 }

@@ -87,7 +87,7 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
 fn handleSessionStolen(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
     skipPayload(fd, payload_len, buffer);
 
-    core.FrontendAttach.markSessionStolen(&state.attach_state);
+    state.runtime.markSessionStolen();
     state.notifications.showFor("Session attached elsewhere; this client is closing", 3500);
     state.running = false;
     state.needs_render = true;

@@ -842,7 +842,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
         if (self.frontend_client.isConnected()) {
-            tab.layout.setFrontendClient(&self.frontend_client);
+            tab.layout.setFrontendClient(self.frontend_client);
         }
         tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
@@ -1038,7 +1038,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     // This releases the attach session lock and stabilizes client identity first.
     const session_uuid = self.sessionUuid();
     mux.debugLog("reattachSession: finalizing attach uuid={s} name={s}", .{ session_uuid[0..8], self.sessionName() });
-    if (core.FrontendAttach.completeReattach(self.allocator, &self.frontend_client, &self.session_cache)) |change_opt| {
+    if (self.runtime.completeReattach()) |change_opt| {
         if (change_opt) |change| {
             var owned_change = change;
             defer owned_change.deinit(self.allocator);
@@ -1106,7 +1106,7 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
         var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
         if (self.frontend_client.isConnected()) {
-            tab.layout.setFrontendClient(&self.frontend_client);
+            tab.layout.setFrontendClient(self.frontend_client);
         }
         tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
@@ -1231,7 +1231,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             defer if (tab_needs_cleanup) tab.deinit();
 
             if (self.frontend_client.isConnected()) {
-                tab.layout.setFrontendClient(&self.frontend_client);
+                tab.layout.setFrontendClient(self.frontend_client);
             }
             tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 

@@ -1,1019 +1,523 @@
-# UI / SES Separation Plan
+# Full UI / SES Separation Plan
 
-This plan resets the architecture around one hard rule:
+This replaces the previous plan.
+
+The previous work moved canonical session authority into SES, but it did not
+finish the decoupling. The terminal frontend still owns a local attached-session
+view/controller layer. This document starts from the code as it exists now and
+defines the remaining work required to make the terminal frontend only a UI.
+
+Completion must not be claimed until the exit criteria at the end of this file
+are true.
+
+## Current Truth
+
+Right now the architecture is:
 
 ```text
-MUX is a frontend.
-SES is the session authority.
-PODS are the execution/runtime endpoints.
+terminal frontend
+  = UI
+  + local attached-session cache
+  + local attached-session controller
+  + local materialized tab/float/layout objects
+
+SES
+  = canonical session authority
+  + pod owner
+  + VT router
 ```
 
-The terminal mux stops being the owner of session truth. It becomes one UI
-client among others. Later frontends such as a Web UI or desktop app should be
-able to talk to SES through the same session protocol, locally or remotely.
+That is better than the old mux-owned model, but it is not full separation.
 
-This is a breaking rewrite plan. Backward compatibility is not a goal.
+### Concrete blockers in the current tree
 
-## End Goal
+- `src/frontends/terminal/state.zig`
+  - still owns `session_cache`, `attach_state`, `frontend_client`, and the live
+    terminal view graph.
+- `src/frontends/terminal/state_types.zig`
+  - `TerminalViewState` still owns `tabs` and `floats`.
+  - `Tab` still owns `Layout`.
+- `src/frontends/terminal/state_sync.zig`
+  - still builds canonical `SessionSnapshot` by walking terminal `Layout` and
+    float objects.
+- `src/frontends/terminal/state_reattach.zig`
+  - still parses SES session state and reconstructs terminal session objects.
+- `src/core/frontend_session_cache.zig`
+  - still owns active tab, active float, focused pane, tab metadata, pane
+    metadata, and the attached snapshot mirror.
+- `src/core/frontend_attach_state.zig`
+  - still owns attach/detach/reattach bookkeeping.
+- `src/core/frontend_attach.zig`
+  - still owns shared attach flow logic.
+- `src/core/frontend_client.zig`
+  - transport is abstracted, but only `local_ipc` exists today.
+- `src/core/wire.zig`
+  - still contains frontend-to-SES state sync and layout-tree sync messages.
+- `src/modules/session/server.zig`
+  - SES is authoritative, but it still accepts frontend-authored state blobs.
+
+## Target Architecture
 
 The target architecture is:
 
 ```text
-             local transport                      remote transport
-        (unix socket / local IPC)                  (liblink stream)
-
- terminal UI  -----\
- web UI gateway ----+--> frontend client protocol --> SES --> PODS
- desktop UI  ------/                                  |
-                                                     backlog
-                                                     metadata
-                                                     session graph
+                 +---------------------------+
+                 |         FRONTEND          |
+                 | terminal / web / desktop  |
+                 |---------------------------|
+                 | rendering                 |
+                 | input mapping             |
+                 | viewport geometry         |
+                 | selection / popups        |
+                 | local widget state        |
+                 +-------------+-------------+
+                               |
+                               v
+                 +---------------------------+
+                 |   SHARED FRONTEND RUNTIME |
+                 |---------------------------|
+                 | attach lifecycle          |
+                 | transport client          |
+                 | session projection        |
+                 | pane stream/backlog cache |
+                 | command API               |
+                 +-------------+-------------+
+                               |
+                  local IPC or | or liblink
+                               v
+                 +---------------------------+
+                 |            SES            |
+                 |---------------------------|
+                 | canonical session graph   |
+                 | focus / tabs / floats     |
+                 | pane + pod lifecycle      |
+                 | PTY size authority        |
+                 | backlog retention         |
+                 | metadata authority        |
+                 +-------------+-------------+
+                               |
+                               v
+                 +---------------------------+
+                 |           PODS            |
+                 | PTY + shell + processes   |
+                 +---------------------------+
 ```
 
-More explicitly:
+The important rule is:
 
 ```text
-frontend:
-  - rendering
-  - keybindings
-  - mouse
-  - local VT cache
-  - local ephemeral view state
-
-SES:
-  - session graph
-  - tab/focus/float/session truth
-  - pane lifecycle
-  - pod creation/destruction
-  - backlog retention + replay
-  - attach/detach
-  - metadata routing
-  - local or remote transport endpoint
-
-POD:
-  - PTY
-  - shell/process
-  - raw VT byte source/sink
+frontends do not own session truth
+frontends do not describe session truth back to SES
+frontends only render and send commands
+SES is the only authority
 ```
 
-## Why This Rewrite Exists
+## What "Full Separation" Actually Means
 
-The current code is not frontend-neutral.
+Full separation does not mean SES becomes a renderer.
 
-Today, the terminal mux still owns the attached session model and SES mostly
-stores a mux snapshot:
-
-- `src/frontends/terminal/state.zig`
-  - owns `tabs`, `active_tab`, `floats`, `active_floating`, renderer state,
-    overlays, popups, mouse state, timers, selection state, etc.
-- `src/frontends/terminal/state_serialize.zig`
-  - serializes the mux's full attached state to JSON, including terminal-view
-    geometry such as pane `x/y/width/height`.
-- `src/frontends/terminal/state_sync.zig`
-  - pushes that serialized mux state into SES with `syncStateToSes()`.
-- `src/modules/session/state.zig`
-  - stores that JSON as `Client.last_mux_state`.
-  - stores detached sessions as `DetachedMuxState { mux_state_json, pane_uuids }`.
-- `src/modules/session/server.zig`
-  - detach/reattach returns mux JSON back to the frontend.
-  - VT routing is already centralized in SES (`routePodToMux`, `routeMuxToPod`).
-- `src/frontends/terminal/state_reattach.zig`
-  - rebuilds the live UI by parsing mux JSON and adopting panes one by one.
-- `src/frontends/terminal/layout.zig`
-  - can still create panes locally or through SES.
-- `src/frontends/terminal/pane.zig`
-  - still supports both local PTY panes and SES/pod-backed panes.
-
-That split is why adding another UI is awkward. The terminal frontend is not
-just a renderer; it is also the attached-session controller.
-
-## Core Architectural Decision
-
-We are not moving "everything" into SES.
-
-We are moving session authority into SES.
-We are keeping frontend-local rendering state in the frontend.
-
-That distinction matters.
-
-### SES must own
+SES must own:
 
 - session identity
-- session name
 - tab list and tab order
-- split tree structure
-- float list and float ownership
-- active tab
+- split tree
+- float list and float visibility
 - focused pane
-- visible/hidden float state
-- pane membership in tabs/floats
+- active tab
+- active float
+- pane membership
+- pane metadata
 - pane lifecycle
 - pod lifecycle
-- pane metadata
-- backlog retention and replay
-- attach/detach/reattach
-- resize authority for the real PTY
+- attach/detach
+- backlog retention
+- PTY size truth
 
-### Frontends must own
+Frontends must own only:
 
-- renderer caches
-- terminal emulator instances
-- viewport geometry in local screen coordinates
+- renderer objects
+- VT parser/render caches
+- screen-coordinate layout math
 - selection state
-- mouse drag state
-- hover state
-- inline rename buffers
-- popups/overlays/tooltips
-- theme
-- local notification presentation
-- scroll position if it is purely view-local
+- hover / drag / popup state
+- theme / statusbar widgets
+- local notifications
+- transient input buffers
 
-### Important nuance: SES does not need to own VT rendering
+Shared frontend runtime may own:
 
-SES should manage VT bytes and backlog, but not become a renderer.
+- transport connection state
+- current SES session projection
+- pane stream caches
+- attach lifecycle state
+- command helpers
 
-Reason:
+The shared frontend runtime is not the authority. It is a client-side mirror.
 
-- terminal rendering is frontend-specific
-- web rendering is frontend-specific
-- desktop rendering is frontend-specific
-- renderer caches and selection state are inherently local
+## Non-Goals
 
-So the clean model is:
+- Backward compatibility is not a goal.
+- Multi-view collaborative control is not part of this rewrite.
+- SES should not become a terminal renderer.
+- Remote is not a separate architecture. It is the same frontend runtime over a
+  different transport.
+- Incremental diff events are not required for correctness. Full SES snapshots
+  are acceptable if SES is the only author of them.
 
-```text
-SES owns:
-  pod size
-  raw VT stream
-  backlog
-  session graph
+## Architecture Rules
 
-frontend owns:
-  VT parser instance
-  render cache
-  viewport math
-```
+These rules are mandatory for the rewrite.
 
-A frontend attaches, receives the session snapshot, then reconstructs each pane
-from backlog replay plus live VT frames.
+### Rule 1: the terminal frontend must stop building `SessionSnapshot`
 
-## Simplifying Assumption For V1
+`src/frontends/terminal/state_sync.zig` must stop walking terminal `Layout`,
+tabs, and floats to build canonical session state.
 
-One session has one controlling attached frontend at a time.
+If the terminal frontend still constructs `SessionSnapshot`, then the terminal
+frontend still owns session semantics.
 
-That matches the current behavior closely enough and avoids inventing multi-view
-focus semantics during the rewrite.
+### Rule 2: the terminal frontend must stop parsing session JSON directly
 
-So in V1:
+`src/frontends/terminal/state_reattach.zig` must stop being the place where SES
+session state is parsed and turned into canonical attached-session objects.
 
-- `active_tab` is session-global
-- `focused_pane` is session-global
-- float visibility is session-global
-- the controlling frontend sets PTY size
+That work belongs in a shared frontend runtime layer.
 
-Later, if we want true multi-view:
+### Rule 3: SES must stop accepting frontend-authored whole-session truth
 
-- session-global state stays in SES
-- per-view state gets introduced explicitly as `ViewState`
-- observers become separate attachment modes
+`sync_state` and terminal-authored layout/tree sync are the wrong model for the
+end state.
 
-But that is not the first target.
+The frontend may send commands like:
 
-## Target Model
+- focus pane
+- switch tab
+- split pane
+- close pane
+- close tab
+- create float
+- move float
+- resize float
+- hide/show float
+- rename tab
+- set sticky
 
-The target data model is:
+SES applies those mutations, then publishes the new authoritative state.
 
-```text
-Session
-  id
-  name
-  active_tab_id
-  focused_pane_uuid
-  active_float_uuid?
-  tabs[]
-  panes{}
-  floats[]
-  attached_frontend?
+### Rule 4: session structure must move out of terminal `TerminalViewState`
 
-Tab
-  id
-  name
-  root_layout_node_id
-  ordered children via split tree
+`TerminalViewState` may keep visual widget state, but it must not be the owner
+of:
 
-LayoutNode
-  pane(uuid)
-  split(dir, ratio, first_node_id, second_node_id)
+- tab identity
+- tab order
+- split tree truth
+- float identity
+- float visibility truth
+- active tab truth
+- active float truth
+- focused pane truth
 
-PaneRecord
-  uuid
-  pane_id
-  kind(split|float)
-  parent_tab_id?
-  sticky metadata
-  cwd
-  fg_process
-  fg_pid
-  title
-  exit status
-  cols
-  rows
-  dead/alive
+Those belong in SES and the shared frontend runtime mirror.
 
-FloatRecord
-  pane_uuid
-  scope(global|tab)
-  owner_tab_id?
-  visible
-  float_key
-  width_pct
-  height_pct
-  pos_x_pct
-  pos_y_pct
-  pad_x
-  pad_y
-  border/style metadata
-```
+### Rule 5: remote must reuse the exact same frontend runtime
 
-What is intentionally not in the canonical session model:
+There must not be a second remote-specific frontend architecture.
 
-- pane `x`
-- pane `y`
-- border draw coordinates
-- local popup state
-- local mouse selection state
-- local render objects
-
-Those are frontend concerns.
-
-## Ownership Matrix
-
-```text
-+--------------------------------------+-------------------+----------------------+
-| Concern                              | SES               | Frontend             |
-+--------------------------------------+-------------------+----------------------+
-| Session id/name                      | authoritative     | cached               |
-| Tab list/order                       | authoritative     | cached               |
-| Split tree ratios                    | authoritative     | cached               |
-| Float definitions/visibility         | authoritative     | cached               |
-| Focused pane / active tab            | authoritative     | cached               |
-| Pane creation/destruction            | authoritative     | command only         |
-| Pod runtime                          | authoritative     | no ownership         |
-| VT byte stream / backlog             | authoritative     | consumes             |
-| PTY cols/rows                        | authoritative     | requests changes     |
-| Renderer cache                       | none              | authoritative        |
-| Pixel/cell placement in viewport     | none              | authoritative        |
-| Mouse drag / selection / overlays    | none              | authoritative        |
-| Notifications as events              | emits             | renders              |
-| Attach/detach state                  | authoritative     | reflected            |
-+--------------------------------------+-------------------+----------------------+
-```
-
-## Local And Remote Must Use The Same Model
-
-Remote is not a second session architecture.
-
-Remote must be the same attachment model over a different transport.
-
-Correct model:
-
-```text
-local terminal frontend
-  -> frontend protocol over unix socket
-  -> local SES
-  -> local pods
-```
-
-```text
-local terminal frontend
-  -> frontend protocol over liblink
-  -> remote SES
-  -> remote pods
-```
-
-That means:
-
-- no remote-specific session model
-- no remote-specific "layout export/import" architecture as the main path
-- no direct frontend-to-pod remote bypass
-- remote access is still SES-authoritative
-
-If we need a helper on the remote side, it should only bridge transport:
-
-```text
-frontend <-> liblink <-> remote SES bridge <-> remote SES internals
-```
-
-But the session protocol itself must stay the same.
-
-## Frontend Protocol
-
-The current binary wire protocol is too mux-specific in the wrong places:
-
-- `.sync_state` pushes frontend-owned JSON to SES
-- `.detach` stores mux JSON
-- `.reattach` returns mux JSON
-
-That needs to be inverted.
-
-### New protocol shape
-
-Keep the idea of:
-
-- one control channel
-- one VT/event stream channel
-
-But change the meaning.
-
-#### Frontend -> SES commands
-
-- `frontend_register`
-- `attach_session`
-- `create_session`
-- `detach_session`
-- `close_session`
-- `create_split`
-- `create_tab`
-- `close_pane`
-- `close_tab`
-- `focus_pane`
-- `focus_direction`
-- `set_active_tab`
-- `toggle_float`
-- `move_float`
-- `resize_float`
-- `send_input`
-- `resize_pane`
-- `set_pane_name`
-- `set_sticky`
-- `request_snapshot`
-- `request_backlog`
-
-#### SES -> frontend events
-
-- `session_snapshot`
-- `session_patch`
-- `pane_created`
-- `pane_closed`
-- `pane_meta_changed`
-- `focus_changed`
-- `active_tab_changed`
-- `float_visibility_changed`
-- `vt_frame`
-- `backlog_begin`
-- `backlog_end`
-- `pane_exited`
-- `session_stolen`
-- `notify`
-- `error`
-
-### Snapshot + patch model
-
-Attach should work like this:
-
-```text
-frontend                     SES
-   |                          |
-   | attach_session --------> |
-   |                          |
-   | <----- session_snapshot  |
-   | <----- backlog_begin     |
-   | <----- vt_frame...       |
-   | <----- backlog_end       |
-   | <----- live events...    |
-```
-
-The frontend never sends "here is my whole layout JSON".
-SES sends the canonical session snapshot instead.
-
-## Terminal Frontend Runtime Model
-
-The terminal frontend should become:
-
-```text
-terminal UI
-  - input bindings
-  - renderer
-  - local VT instances
-  - local cache of SES snapshot
-  - command dispatch to SES
-```
-
-In practice that means:
-
-- `src/frontends/terminal/state.zig` gets split
-- session-authoritative fields leave the frontend
-- frontend-local fields stay
-
-### Session data to remove from frontend ownership
-
-- `tabs`
-- `active_tab`
-- `floats`
-- `active_floating`
-- focus truth
-- pane existence truth
-- attach/detach truth
-- session layout truth
-
-### Frontend data to keep
-
-- renderer
-- notifications/popups
-- overlays
-- mouse selection
-- timers
-- bracketed paste handling
-- VT write queue if it remains an output/input scheduling concern
-- local pane VT objects
-
-## Hard Cuts We Should Make
-
-Because backward compatibility is not required, the rewrite should delete the
-old architecture aggressively instead of carrying both paths.
-
-### Remove
-
-- `Client.last_mux_state` as the source of truth
-- detached session storage as raw mux JSON
-- frontend-owned `syncStateToSes()` model
-- current JSON `state_serialize.zig` detach/reattach path
-- local PTY fallback in frontend pane creation
-- `Pane.backend.local`
-
-### Replace with
-
-- canonical SES `Session` model
-- SES snapshot + patch protocol
-- SES-owned attach/detach state
-- pod-backed panes only
-- frontend-local VT/view reconstruction from SES replay
-
-## File-Level Rewrite Plan
-
-### SES side
-
-#### `src/modules/session/state.zig`
-
-Rewrite from:
-
-- `Client`
-- `DetachedMuxState`
-- pane maps + detached session JSON
-
-Into:
-
-- `Session`
-- `TabRecord`
-- `LayoutNodeRecord`
-- `PaneRecord`
-- `FloatRecord`
-- `FrontendAttachment`
-- detached session storage as canonical session snapshot, not mux JSON
-
-Keep:
-
-- pane lifecycle
-- pod ownership
-- orphan/sticky logic if still desired
-
-#### `src/modules/session/server.zig`
-
-Rewrite responsibilities to:
-
-- accept frontend commands
-- mutate SES session model
-- emit session snapshot and patch events
-- continue VT routing
-- serve attach/detach directly from canonical model
-
-Delete or replace:
-
-- old `.sync_state`
-- old `.detach` payload semantics
-- old `.reattach` payload semantics
-- old `get_session_state` mux JSON export path as the primary architecture
-
-#### `src/core/wire.zig`
-
-This file needs a protocol reset.
-
-Likely keep:
-
-- handshake structure
-- frame size limits
-- VT frame container idea
-
-Replace:
-
-- mux-specific control messages with frontend/session messages
-
-### Frontend side
-
-#### `src/frontends/terminal/ses_client.zig`
-
-Turn this into a generic frontend session client.
-
-It should:
-
-- connect to SES
-- register frontend kind
-- send session commands
-- receive snapshot/patch events
-- receive VT frames
-
-It should not:
-
-- pretend the frontend owns canonical session layout
-
-#### `src/frontends/terminal/layout.zig`
-
-This should stop being a session creator.
-
-New role:
-
-- frontend-local layout materialization from SES snapshot
-- viewport geometry calculation
-- render traversal helpers
-
-Delete:
-
-- local PTY spawn path
-- SES pane creation fallback logic as a hidden implementation detail
-
-#### `src/frontends/terminal/pane.zig`
-
-This should become a view object for a session pane.
-
-Keep:
-
-- VT instance
-- render helpers
-- local ephemeral flags
-
-Remove:
-
-- local backend
-- PTY spawning
-- local respawn semantics
-
-Panes become:
-
-```text
-PaneView
-  uuid
-  local VT
-  geometry in current viewport
-  float visual state
-  local UI-only state
-```
-
-#### `src/frontends/terminal/state_serialize.zig`
-
-Delete or reduce drastically.
-
-The frontend should no longer serialize the canonical session model to SES.
-
-#### `src/frontends/terminal/state_sync.zig`
-
-Rewrite entirely.
-
-Instead of "sync whole mux state to SES", it becomes:
-
-- command dispatch
-- local cache update from SES events
-- maybe optimistic UI if desired later
-
-#### `src/frontends/terminal/state_reattach.zig`
-
-Rewrite entirely.
-
-Reattach becomes:
-
-- request `session_snapshot`
-- build local view objects
-- request/consume backlog replay
-- enter live event loop
-
-No mux JSON parsing.
-
-### Naming cleanup
-
-After the separation lands, `multiplexer` is a misleading name.
-
-Longer term:
-
-```text
-src/frontends/terminal -> src/frontends/terminal
-```
-
-Do not block the rewrite on this rename. The architectural separation matters
-more than the directory name.
-
-## Rewrite Phases
-
-The rewrite is now split into two bounded phases:
-
-- Phase 1: establish SES authority and a shared frontend protocol/client
-- Phase 2: finish the terminal frontend cut until mux is UI-only
-
-Phase 1 is already mostly done in the current branch history.
-Phase 2 is still required for full separation.
-
-### Phase 1: Foundational Cut
-
-This was the first bounded rewrite pass. It established:
-
-- canonical SES session snapshots
-- SES-owned tab/float/layout/focus mutations
-- SES-only pane/pod ownership
-- terminal restore from SES snapshots
-- shared frontend client in `src/core/frontend_client.zig`
-
-That was necessary, but it is not the end state.
-
-### Phase 2: Full Frontend Separation
-
-This is the remaining work required to make the terminal mux a frontend only.
-
-Important:
-
-- `src/frontends/terminal/state.zig` still owns `tabs`, `active_tab`,
-  `floats`, and `active_floating`
-- the terminal frontend still rebuilds and materializes session structure in
-  `state_reattach.zig`
-- the frontend still mixes session cache, viewport/layout materialization, and
-  UI state inside one `State`
-
-So the current state is:
-
-```text
-SES = canonical session authority
-terminal mux = frontend + local session cache/view-model
-```
-
-The target state is:
-
-```text
-SES = session authority
-frontend session client/cache = transport + snapshot/event cache
-terminal mux = UI only
-```
-
-The implementation should continue in multiple large slices, but it now needs a
-second bounded phase rather than pretending the work already fits inside the
-original five-commit sketch.
-
-### Commit 1: Introduce canonical SES session model
-
-Goal:
-
-- SES becomes able to represent a full session without mux JSON.
-
-Work:
-
-- add canonical session structs in `session/state.zig`
-- move tab/split/float/focus ownership into SES
-- change detach storage from raw mux JSON to canonical session snapshot
-- keep old frontend compiling temporarily only if needed to bridge the next cut
-
-Success criteria:
-
-- SES can create, store, mutate, and detach a session without `last_mux_state`
-
-### Commit 2: Replace sync/detach/reattach with snapshot+command protocol
-
-Goal:
-
-- frontend stops sending the whole session state up
-
-Work:
-
-- reset `wire.zig` control messages
-- rewrite `ses_client.zig` around attach/snapshot/command/event flow
-- rewrite `session/server.zig` handlers
-- remove `.sync_state` as canonical behavior
-
-Success criteria:
-
-- frontend attaches and receives a canonical session snapshot from SES
-- session mutations happen through commands, not JSON uploads
-
-### Commit 3: Remove local PTY ownership from frontend
-
-Goal:
-
-- SES owns all panes and all pods
-
-Work:
-
-- delete `Pane.backend.local`
-- delete local spawn/fallback from `layout.zig` and `pane.zig`
-- make pane creation/destruction SES-only
-- simplify frontend pane model to VT/view only
-
-Success criteria:
-
-- no frontend code spawns PTYs
-- all running panes are SES/pod-backed
-
-### Commit 4: Split terminal frontend state into session cache vs UI-only state
-
-Goal:
-
-- terminal mux becomes a real frontend
-
-Work:
-
-- shrink `multiplexer/state.zig`
-- move session truth out of frontend ownership
-- keep local renderer/input/view state only
-- rebuild layout/float rendering from SES snapshots and events
-- rewrite reattach path around snapshot + backlog replay
-
-Success criteria:
-
-- terminal frontend can die and reattach without being the source of session truth
-- there is a clear boundary between session cache and UI-only state
-
-This is not sufficient for the final goal by itself.
-
-After this point, the terminal frontend may still hold a local session
-cache/view-model. Full conversion requires moving even that layer out of the
-terminal-specific runtime.
-
-### Commit 5: Transport abstraction and remote liblink attach
-
-Goal:
-
-- the same frontend can attach locally or remotely
-
-Work:
-
-- define transport abstraction under the frontend client
-- implement local IPC transport
-- implement liblink transport
-- attach to remote SES using the same session protocol
-- if necessary, add a minimal remote SES bridge helper, but keep the session
-  protocol identical
-
-Success criteria:
-
-- terminal frontend can attach to local SES
-- terminal frontend can attach to remote SES over liblink
-- remote does not require a separate session model
-
-## Remaining Work For Full Separation
-
-The following phase is now explicit and should be completed in up to 10 more
-commits.
-
-### Phase 2 Commit 1: Extract frontend session cache from terminal state
-
-Goal:
-
-- stop storing session cache directly inside terminal `State`
-
-Work:
-
-- introduce a dedicated frontend session cache module under `src/core/`
-- move tab/float/focus/session snapshot data there
-- make terminal `State` reference that cache instead of owning it structurally
-
-Success criteria:
-
-- terminal `State` no longer defines the canonical attached session cache shape
-
-### Phase 2 Commit 2: Split UI layout objects from session layout objects
-
-Goal:
-
-- stop treating terminal layout objects as the same thing as attached session state
-
-Work:
-
-- define a frontend-neutral attached layout cache
-- keep terminal `Layout` as a render/input object only
-- map session cache nodes to terminal layout objects during presentation
-
-Success criteria:
-
-- terminal `Layout` is no longer the attached session model
-
-### Phase 2 Commit 3: Move tab/focus/float navigation onto cache APIs
-
-Goal:
-
-- remove direct terminal ownership of current tab/float/focus semantics
-
-Work:
-
-- replace direct `tabs.items[...]`, `active_tab`, and `active_floating`
-  authority flows with frontend cache queries/commands
-- make terminal navigation consume cache state and send commands, not define truth
-
-Success criteria:
-
-- tab/focus/float behavior is driven by cache + SES, not terminal `State` fields
-
-### Phase 2 Commit 4: Make snapshot apply incremental
-
-Goal:
-
-- stop rebuilding large parts of the terminal session presentation on every
-  structural update
-
-Work:
-
-- add frontend snapshot delta / patch application
-- keep stable pane view reuse, but apply mutations through cache updates first
-- limit terminal rebuilds to presentation materialization
-
-Success criteria:
-
-- the frontend consumes snapshot/patch updates without treating itself as the
-  structural owner
-
-### Phase 2 Commit 5: Move pane/session metadata caches out of terminal state
-
-Goal:
-
-- remove non-UI metadata ownership from the terminal runtime
-
-Work:
-
-- move pane names, cwd/process snapshots, session identity mirrors, and similar
-  attached-session caches into the shared frontend cache/client layer
-
-Success criteria:
-
-- terminal `State` only keeps data that is needed for rendering or interaction
-
-### Phase 2 Commit 6: Reduce terminal state to UI concerns only
-
-Goal:
-
-- make the terminal state object visibly frontend-only
-
-Work:
-
-- keep renderer, VT instances, overlays, notifications, mouse/input state,
-  selection state, popups, timers, and keybinding runtime
-- remove session-graph ownership fields from terminal `State`
-
-Success criteria:
-
-- `src/frontends/terminal/state.zig` reads like a UI runtime, not a session model
-
-### Phase 2 Commit 7: Formalize frontend attach lifecycle
-
-Goal:
-
-- make attach/detach/reattach belong to the shared frontend layer, not to the
-  terminal-specific runtime
-
-Work:
-
-- move attach session flow, backlog replay coordination, and stolen-session
-  handling into the shared frontend client/cache layer
-
-Success criteria:
-
-- another frontend could reuse attach logic without depending on terminal code
-
-### Phase 2 Commit 8: Add remote transport to shared frontend client
-
-Goal:
-
-- make local and remote attach use the same frontend layer
-
-Work:
-
-- add `liblink` transport under `src/core/frontend_client.zig`
-- keep session protocol identical
-- do not reintroduce remote-specific session modeling
-
-Success criteria:
-
-- the same frontend client can attach over local IPC or liblink
-
-### Phase 2 Commit 9: Make terminal frontend transport-agnostic
-
-Goal:
-
-- remove local-only assumptions from terminal startup/attach code
-
-Work:
-
-- make terminal frontend choose a frontend-client transport instead of assuming
-  local SES
-- keep terminal runtime unaware of local-vs-remote session semantics
-
-Success criteria:
-
-- terminal UI can target either local or remote SES without architectural forks
-
-### Phase 2 Commit 10: Final cleanup and naming cut
-
-Goal:
-
-- finish the separation visibly and remove transitional language
-
-Work:
-
-- delete remaining mux-specific protocol naming where inappropriate
-- remove leftover transition shims/aliases
-- if the tree is stable enough, rename `src/frontends/terminal` to
-  `src/frontends/terminal`
-
-Success criteria:
-
-- the terminal frontend is obviously one frontend among several possible clients
-- there is no ambiguity about SES vs frontend ownership
-
-## What To Defer Until After The Separation
-
-These should not block the rewrite:
-
-- full Web UI
-- desktop app
-- true multi-view collaborative attachments
-- observer mode
-- remote registry UX
-- remote project/layout sync
-- HTTP API design
-
-First make the core model right.
-
-## Web UI / Desktop UI Implication
-
-Once the rewrite is done, new frontends should look like this:
+The target is:
 
 ```text
 terminal frontend
-  -> frontend client
-  -> local ipc or liblink
-  -> SES
-
-desktop frontend
-  -> frontend client
-  -> local ipc or liblink
-  -> SES
-
-web UI
-  -> websocket/http bridge
-  -> frontend client or protocol adapter
-  -> local ipc or liblink
+  -> shared frontend runtime
+  -> local IPC transport
   -> SES
 ```
 
-Important:
-
-- SES should not become an HTTP app just to support a browser
-- browser-specific transport should be a thin adapter over the session protocol
-
-## Rules During The Rewrite
-
-These rules should be enforced while refactoring:
-
-1. No frontend module may become the canonical owner of tabs/floats/focus again.
-2. No frontend module may spawn a PTY directly.
-3. SES must never depend on terminal-screen coordinates as canonical truth.
-4. Remote support must reuse the same session protocol as local support.
-5. New feature work on the old mux JSON sync path should stop.
-6. The rewrite must be delivered in multiple slices, not one huge dump.
-7. Phase 1 stays as delivered; the remaining full separation is allowed one
-   additional bounded phase of up to 10 more commits.
-8. Each slice must be committed before starting the next slice.
-9. Each commit message must be one line, title only.
-
-## Acceptance Criteria
-
-We are done when all of this is true:
-
-- terminal mux can only act as a frontend
-- terminal mux does not own attached session cache structure
-- SES owns session structure and lifecycle
-- SES owns all pane/pod creation
-- attach uses SES snapshot + replay, not mux JSON restore
-- local and remote attach use the same session protocol
-- adding a second frontend does not require inventing a second session model
-
-## Immediate Next Step
-
-Do not start with Web UI or remote UX.
-
-Start with the local architecture cut:
+and:
 
 ```text
-SES canonical session model
-  ->
-frontend snapshot/command protocol
-  ->
-frontend no longer spawns PTYs
-  ->
-remote transport
+terminal/web/desktop frontend
+  -> shared frontend runtime
+  -> liblink transport
+  -> SES
 ```
 
-That ordering gives us one solid core instead of repeating the old mux-centric
-design over more transports.
+Same protocol. Same projection model. Same attach lifecycle.
+
+## Required New Core Pieces
+
+These are the missing shared layers.
+
+### 1. `FrontendRuntime`
+
+New shared core type, likely in `src/core/frontend_runtime.zig`.
+
+Responsibilities:
+
+- own the transport client
+- own attach lifecycle
+- own the frontend-side session projection
+- own pane stream/backlog state
+- expose semantic commands to the frontend
+- receive SES snapshots/events
+- update the projection
+
+The terminal frontend should depend on this runtime instead of directly owning
+session cache and attach state.
+
+### 2. `SessionProjection`
+
+New shared core type, likely in `src/core/session_projection.zig`.
+
+Responsibilities:
+
+- frontend-neutral mirror of SES session state
+- tabs, floats, panes, focus, active tab, active float
+- no screen coordinates
+- no terminal renderer objects
+- no popup state
+
+This becomes the frontend-visible session model.
+
+### 3. `PaneStreamState`
+
+New shared core type, likely in `src/core/pane_stream_state.zig`.
+
+Responsibilities:
+
+- backlog buffer or replay state
+- live VT byte stream state
+- pane-level metadata mirrored from SES
+- frontend-neutral mapping by pane UUID
+
+Terminal-specific VT parser/render objects may wrap this, but should not be the
+canonical attached-session model anymore.
+
+### 4. Terminal-only view state
+
+Terminal-specific state should remain under `src/frontends/terminal/`.
+
+It should contain:
+
+- widget layout caches
+- computed pane rectangles
+- z-order for rendering
+- selection
+- popups
+- drag state
+- notification display
+
+It should not define session truth.
+
+## Protocol Reset
+
+The wire protocol should be reshaped around this rule:
+
+```text
+frontends send commands
+SES sends authoritative state
+```
+
+### Keep
+
+- register / registered
+- reattach / session_reattached
+- session_state
+- pane_exited
+- notify
+- VT frames
+- pane metadata updates from SES/pods
+
+### Remove or deprecate
+
+- `sync_state`
+- frontend-authored whole-session JSON sync
+- frontend-authored layout-tree replacement as a normal UI mutation path
+
+### Replace with semantic session commands
+
+At minimum:
+
+- `set_active_tab`
+- `focus_pane`
+- `split_pane`
+- `close_pane`
+- `close_tab`
+- `create_tab`
+- `rename_tab`
+- `create_float`
+- `close_float`
+- `show_float`
+- `hide_float`
+- `move_float`
+- `resize_float`
+- `set_active_float`
+- `set_sticky`
+- `report_viewport_sizes`
+
+Important note:
+
+`report_viewport_sizes` is not a session-ownership leak. The frontend computes
+screen-space rectangles; SES still decides and applies PTY size authority.
+
+### Snapshot vs event model
+
+For this rewrite, full SES-authored snapshots are acceptable.
+
+Incremental events can be added later, but they are not required to complete
+the separation. The critical thing is that SES is the only author of session
+truth, and the frontend runtime is the only place that applies that truth
+client-side.
+
+## Execution Plan
+
+This is the actual remaining rewrite, in order.
+
+### Phase 1: build the shared runtime and move session parsing there
+
+1. Introduce `FrontendRuntime` and `SessionProjection`.
+2. Move `frontend_session_cache.zig` functionality into the runtime/projection.
+3. Move `frontend_attach_state.zig` and `frontend_attach.zig` into the runtime.
+4. Move session JSON parsing and snapshot application out of
+   `src/frontends/terminal/state_reattach.zig`.
+5. Make the terminal frontend consume projection state from the runtime.
+
+Done when:
+
+- terminal no longer owns `session_cache`
+- terminal no longer owns `attach_state`
+- terminal no longer parses `SessionSnapshot` JSON
+
+### Phase 2: stop frontend-authored state sync
+
+1. Delete `buildSessionSnapshot()` from the terminal frontend.
+2. Remove `syncStateToSes()` as a source of truth.
+3. Remove terminal-authored normal-path layout/tree sync.
+4. Add missing semantic commands for every session mutation the terminal UI can
+   trigger.
+5. Make SES mutate its session graph from those commands only.
+6. After each accepted mutation, SES publishes the new authoritative state.
+
+Done when:
+
+- terminal does not construct `SessionSnapshot`
+- SES does not accept terminal-authored whole-session state
+- session mutations are command-based
+
+### Phase 3: move session graph ownership out of terminal view structs
+
+1. Remove session identity and session structure ownership from
+   `TerminalViewState`.
+2. Replace `Tab.layout` as session truth with terminal view objects derived from
+   `SessionProjection`.
+3. Keep only terminal-specific widget/layout caches in terminal state.
+4. Make terminal view reconciliation derive from projection state instead of
+   being the owner of tabs/floats/layout truth.
+
+Done when:
+
+- `TerminalViewState` is visual-only
+- terminal `Tab` is a view/widget, not a session owner
+- split tree truth lives only in SES + shared projection
+
+### Phase 4: split terminal `Pane` into view vs session/runtime pieces
+
+1. Audit `src/frontends/terminal/pane.zig`.
+2. Move session-shaped fields out of terminal pane objects into shared runtime
+   records.
+3. Keep terminal pane widgets responsible only for VT/render/input behavior.
+4. Make pane metadata and lifecycle queries go through the runtime/projection.
+
+Done when:
+
+- terminal pane objects are render/input widgets
+- session metadata lives in SES/runtime projection
+
+### Phase 5: make attach/detach/reattach fully runtime-driven
+
+1. Terminal startup should just create the runtime and attach.
+2. Reattach should rebuild the projection in shared core, not in terminal code.
+3. Backlog replay coordination should live in the runtime.
+4. Session stolen / reconnect / detach flows should live in the runtime.
+
+Done when:
+
+- terminal main loop does not implement attach semantics itself
+- shared runtime owns the attach lifecycle
+
+### Phase 6: make transport truly frontend-neutral
+
+1. Extend `FrontendClient.Transport` beyond `local_ipc`.
+2. Add `liblink` transport.
+3. Make transport selection a runtime concern, not a terminal concern.
+4. Reuse the exact same attach/session/VT path for remote frontends.
+
+Done when:
+
+- local and remote frontend attachment share the same runtime path
+- no terminal-specific remote architecture exists
+
+### Phase 7: delete the leftover coupling
+
+1. Delete dead snapshot sync code.
+2. Delete dead layout-tree sync code used by normal UI mutations.
+3. Delete no-longer-needed terminal-side session caches.
+4. Rename leftovers so the code reads honestly.
+5. Update docs after the code is actually finished.
+
+Done when:
+
+- the old coupling paths are removed, not just unused
+
+## Test Plan
+
+This rewrite needs tests at the boundary that actually matters now.
+
+### SES tests
+
+- command mutates canonical session graph correctly
+- attach/reattach returns correct authoritative state
+- pane/pod lifecycle updates session state correctly
+- viewport-size reports update PTY sizes correctly
+
+### Shared frontend runtime tests
+
+- snapshot application builds the correct `SessionProjection`
+- command helpers send the right wire messages
+- attach/detach/session-stolen flows update runtime state correctly
+- backlog replay populates pane stream state correctly
+
+### Terminal frontend tests or smoke checks
+
+- startup attach
+- open/close tabs
+- split/resize/close panes
+- show/hide/move/resize floats
+- detach/reattach
+- statusbar and focus behavior
+
+### Transport tests
+
+- same runtime behavior over `local_ipc`
+- same runtime behavior over `liblink`
+
+## Exit Criteria
+
+The rewrite is done only when all of the following are true:
+
+1. The terminal frontend does not build `SessionSnapshot`.
+2. The terminal frontend does not parse SES session JSON directly.
+3. The terminal frontend does not send whole-session or whole-layout truth to
+   SES as the normal UI mutation path.
+4. SES is the only author of session structure.
+5. A shared frontend runtime owns attach lifecycle and session projection.
+6. Terminal state contains only terminal-specific view/render/input state.
+7. Local and remote frontends use the same runtime and protocol shape.
+8. `PLAN.md` can be removed or marked complete without hand-waving.
+
+Until then, the honest description is:
+
+```text
+SES is canonical authority,
+but the terminal frontend still contains a local attached-session layer.
+```

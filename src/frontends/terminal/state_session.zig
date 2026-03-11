@@ -99,7 +99,7 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
     if (self.frontend_client.isConnected()) {
-        tab.layout.setFrontendClient(&self.frontend_client);
+        tab.layout.setFrontendClient(self.frontend_client);
     }
     tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
