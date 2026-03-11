@@ -2,7 +2,7 @@ const std = @import("std");
 const argonaut = @import("argonaut");
 const core = @import("core");
 const ipc = core.ipc;
-const mux = @import("mux");
+const terminal = @import("terminal");
 const ses = @import("ses");
 const pod = @import("pod");
 const shp = @import("shp");
@@ -61,13 +61,13 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     // Create main parser
-    const parser = try argonaut.newParser(allocator, "hexe", "Hexe terminal multiplexer");
+    const parser = try argonaut.newParser(allocator, "hexe", "Hexe terminal frontend");
     defer parser.deinit();
 
     // Top-level subcommands only
     const ses_cmd = try parser.newCommand("ses", "Session daemon management");
     const pod_cmd = try parser.newCommand("pod", "Per-pane PTY daemon");
-    const mux_cmd = try parser.newCommand("mux", "Terminal multiplexer");
+    const mux_cmd = try parser.newCommand("mux", "Terminal frontend");
     const shp_cmd = try parser.newCommand("shp", "Shell prompt renderer");
     const pop_cmd = try parser.newCommand("pop", "Popup overlays");
     const config_cmd = try parser.newCommand("config", "Configuration management");
@@ -442,7 +442,7 @@ pub fn main() !void {
         } else if (found_pod) {
             print("Usage: hexe pod <command>\n\nPer-pane PTY daemon\n\nCommands:\n  daemon  Start a per-pane pod daemon\n  new     Create a standalone pod\n  list    List discoverable pods\n  send    Send input to a pod\n  attach  Attach to a pod\n  record  Attach and record asciicast\n  kill    Kill a pod\n  gc      Clean stale pod metadata\n", .{});
         } else if (found_mux) {
-            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new      Create new multiplexer session\n  attach   Attach to existing session\n  float    Spawn a transient float pane\n  notify   Send notification\n  send     Send keystrokes to pane\n  info     Show pane info\n  layout   Save and restore layouts\n", .{});
+            print("Usage: hexe mux <command>\n\nTerminal frontend\n\nCommands:\n  new      Create new multiplexer session\n  attach   Attach to existing session\n  float    Spawn a transient float pane\n  notify   Send notification\n  send     Send keystrokes to pane\n  info     Show pane info\n  layout   Save and restore layouts\n", .{});
         } else if (found_shp) {
             print("Usage: hexe shp <command>\n\nShell prompt renderer\n\nCommands:\n  prompt       Render shell prompt\n  init         Print shell initialization script\n  exit-intent  Ask mux permission before shell exits\n  shell-event  Send shell metadata to mux\n  spinner      Render/animate a spinner\n", .{});
         } else if (found_config and found_validate) {
@@ -450,7 +450,7 @@ pub fn main() !void {
         } else if (found_config) {
             print("Usage: hexe config <command>\n\nConfiguration management\n\nCommands:\n  validate  Validate configuration file syntax and structure\n", .{});
         } else {
-            print("Usage: hexe <command>\n\nHexe terminal multiplexer\n\nCommands:\n  ses      Session daemon management\n  pod      Per-pane PTY daemon (internal)\n  mux      Terminal multiplexer\n  shp      Shell prompt renderer\n  pop      Popup overlays\n  config   Configuration management\n", .{});
+            print("Usage: hexe <command>\n\nHexe terminal frontend\n\nCommands:\n  ses      Session daemon management\n  pod      Per-pane PTY daemon (internal)\n  mux      Terminal frontend\n  shp      Shell prompt renderer\n  pop      Popup overlays\n  config   Configuration management\n", .{});
         }
         return;
     }
@@ -851,7 +851,7 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: [
     }
 
     // Call mux run() directly
-    try mux.run(.{
+    try terminal.run(.{
         .name = if (name.len > 0) name else null,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
@@ -862,7 +862,7 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: [
 fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (name.len > 0) {
         // Call mux run() directly with attach option
-        try mux.run(.{
+        try terminal.run(.{
             .attach = name,
             .debug = debug,
             .log_file = if (log_file.len > 0) log_file else null,

@@ -73,21 +73,21 @@ pub fn build(b: *std.Build) void {
     });
     pop_module.addImport("core", core_module);
 
-    // Create multiplexer module for unified CLI
-    const mux_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/multiplexer/main.zig"),
+    // Create terminal frontend module for unified CLI
+    const terminal_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    mux_module.addImport("core", core_module);
-    mux_module.addImport("xev", xev_mod);
-    mux_module.addImport("shp", shp_module);
-    mux_module.addImport("pop", pop_module);
+    terminal_module.addImport("core", core_module);
+    terminal_module.addImport("xev", xev_mod);
+    terminal_module.addImport("shp", shp_module);
+    terminal_module.addImport("pop", pop_module);
     if (ghostty_vt_mod) |vt| {
-        mux_module.addImport("ghostty-vt", vt);
+        terminal_module.addImport("ghostty-vt", vt);
     }
-    mux_module.addImport("vaxis", vaxis_mod);
+    terminal_module.addImport("vaxis", vaxis_mod);
 
     // Create session module for unified CLI
     const ses_module = b.createModule(.{
@@ -123,7 +123,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     cli_root.addImport("core", core_module);
-    cli_root.addImport("mux", mux_module);
+    cli_root.addImport("terminal", terminal_module);
     cli_root.addImport("ses", ses_module);
     cli_root.addImport("pod", pod_module);
     cli_root.addImport("shp", shp_module);

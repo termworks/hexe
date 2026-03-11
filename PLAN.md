@@ -63,13 +63,13 @@ The current code is not frontend-neutral.
 Today, the terminal mux still owns the attached session model and SES mostly
 stores a mux snapshot:
 
-- `src/modules/multiplexer/state.zig`
+- `src/frontends/terminal/state.zig`
   - owns `tabs`, `active_tab`, `floats`, `active_floating`, renderer state,
     overlays, popups, mouse state, timers, selection state, etc.
-- `src/modules/multiplexer/state_serialize.zig`
+- `src/frontends/terminal/state_serialize.zig`
   - serializes the mux's full attached state to JSON, including terminal-view
     geometry such as pane `x/y/width/height`.
-- `src/modules/multiplexer/state_sync.zig`
+- `src/frontends/terminal/state_sync.zig`
   - pushes that serialized mux state into SES with `syncStateToSes()`.
 - `src/modules/session/state.zig`
   - stores that JSON as `Client.last_mux_state`.
@@ -77,11 +77,11 @@ stores a mux snapshot:
 - `src/modules/session/server.zig`
   - detach/reattach returns mux JSON back to the frontend.
   - VT routing is already centralized in SES (`routePodToMux`, `routeMuxToPod`).
-- `src/modules/multiplexer/state_reattach.zig`
+- `src/frontends/terminal/state_reattach.zig`
   - rebuilds the live UI by parsing mux JSON and adopting panes one by one.
-- `src/modules/multiplexer/layout.zig`
+- `src/frontends/terminal/layout.zig`
   - can still create panes locally or through SES.
-- `src/modules/multiplexer/pane.zig`
+- `src/frontends/terminal/pane.zig`
   - still supports both local PTY panes and SES/pod-backed panes.
 
 That split is why adding another UI is awkward. The terminal frontend is not
@@ -401,7 +401,7 @@ terminal UI
 
 In practice that means:
 
-- `src/modules/multiplexer/state.zig` gets split
+- `src/frontends/terminal/state.zig` gets split
 - session-authoritative fields leave the frontend
 - frontend-local fields stay
 
@@ -510,7 +510,7 @@ Replace:
 
 ### Frontend side
 
-#### `src/modules/multiplexer/ses_client.zig`
+#### `src/frontends/terminal/ses_client.zig`
 
 Turn this into a generic frontend session client.
 
@@ -526,7 +526,7 @@ It should not:
 
 - pretend the frontend owns canonical session layout
 
-#### `src/modules/multiplexer/layout.zig`
+#### `src/frontends/terminal/layout.zig`
 
 This should stop being a session creator.
 
@@ -541,7 +541,7 @@ Delete:
 - local PTY spawn path
 - SES pane creation fallback logic as a hidden implementation detail
 
-#### `src/modules/multiplexer/pane.zig`
+#### `src/frontends/terminal/pane.zig`
 
 This should become a view object for a session pane.
 
@@ -568,13 +568,13 @@ PaneView
   local UI-only state
 ```
 
-#### `src/modules/multiplexer/state_serialize.zig`
+#### `src/frontends/terminal/state_serialize.zig`
 
 Delete or reduce drastically.
 
 The frontend should no longer serialize the canonical session model to SES.
 
-#### `src/modules/multiplexer/state_sync.zig`
+#### `src/frontends/terminal/state_sync.zig`
 
 Rewrite entirely.
 
@@ -584,7 +584,7 @@ Instead of "sync whole mux state to SES", it becomes:
 - local cache update from SES events
 - maybe optimistic UI if desired later
 
-#### `src/modules/multiplexer/state_reattach.zig`
+#### `src/frontends/terminal/state_reattach.zig`
 
 Rewrite entirely.
 
@@ -604,7 +604,7 @@ After the separation lands, `multiplexer` is a misleading name.
 Longer term:
 
 ```text
-src/modules/multiplexer -> src/frontends/terminal
+src/frontends/terminal -> src/frontends/terminal
 ```
 
 Do not block the rewrite on this rename. The architectural separation matters
@@ -638,7 +638,7 @@ This is the remaining work required to make the terminal mux a frontend only.
 
 Important:
 
-- `src/modules/multiplexer/state.zig` still owns `tabs`, `active_tab`,
+- `src/frontends/terminal/state.zig` still owns `tabs`, `active_tab`,
   `floats`, and `active_floating`
 - the terminal frontend still rebuilds and materializes session structure in
   `state_reattach.zig`
@@ -863,7 +863,7 @@ Work:
 
 Success criteria:
 
-- `src/modules/multiplexer/state.zig` reads like a UI runtime, not a session model
+- `src/frontends/terminal/state.zig` reads like a UI runtime, not a session model
 
 ### Phase 2 Commit 7: Formalize frontend attach lifecycle
 
@@ -923,7 +923,7 @@ Work:
 
 - delete remaining mux-specific protocol naming where inappropriate
 - remove leftover transition shims/aliases
-- if the tree is stable enough, rename `src/modules/multiplexer` to
+- if the tree is stable enough, rename `src/frontends/terminal` to
   `src/frontends/terminal`
 
 Success criteria:

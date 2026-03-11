@@ -77,8 +77,8 @@ pub fn runSesOpen(
     const session_name: ?[]const u8 = config.name;
 
     // Launch mux with the session config
-    const mux = @import("mux");
-    try mux.run(.{
+    const terminal = @import("terminal");
+    try terminal.run(.{
         .name = session_name,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,

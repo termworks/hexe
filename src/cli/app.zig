@@ -2,7 +2,7 @@ const std = @import("std");
 const yazap = @import("yazap");
 const core = @import("core");
 const ipc = core.ipc;
-const mux = @import("mux");
+const terminal = @import("terminal");
 const ses = @import("ses");
 const pod = @import("pod");
 const shp = @import("shp");
@@ -101,12 +101,12 @@ fn firstCommandToken(args: []const [:0]u8) ?[]const u8 {
 
 fn printHelpRoot() void {
     print("{s}{s}Hexe CLI{s}\n", .{ help_ansi.BOLD, help_ansi.TITLE, help_ansi.RESET });
-    print("{s}A terminal multiplexer where UI is disposable.{s}\n\n", .{ help_ansi.DIM, help_ansi.RESET });
+    print("{s}A terminal frontend where UI is disposable.{s}\n\n", .{ help_ansi.DIM, help_ansi.RESET });
     print("{s}Usage{s}: hexe <command> [subcommand] [options]\n\n", .{ help_ansi.SECTION, help_ansi.RESET });
     print("{s}Commands{s}:\n", .{ help_ansi.SECTION, help_ansi.RESET });
     print("  {s}session{s}      {s}(alias: ses){s}  Session daemon management\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}layout{s}       {s}(alias: lay){s}  Saved session layouts (.lua)\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-    print("  {s}multiplexer{s}  {s}(alias: mux){s}  Terminal multiplexer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("  {s}multiplexer{s}  {s}(alias: mux){s}  Terminal frontend\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}pod{s}          {s}(alias: pod){s}  Per-pane PTY daemon\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}shell{s}        {s}(alias: shp){s}  Shell prompt renderer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}popup{s}        {s}(alias: pop){s}  Popup overlays\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
@@ -164,7 +164,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var app = App.init(allocator, "hexe", "Hexe terminal multiplexer");
+    var app = App.init(allocator, "hexe", "Hexe terminal frontend");
     defer app.deinit();
 
     var root = app.rootCommand();
@@ -178,7 +178,7 @@ pub fn main() !void {
     var pod_cmd = app.createCommand("pod", "Per-pane PTY daemon");
     pod_cmd.setProperty(.help_on_empty_args);
 
-    var mux_cmd = app.createCommand("multiplexer", "Terminal multiplexer");
+    var mux_cmd = app.createCommand("multiplexer", "Terminal frontend");
     mux_cmd.setProperty(.help_on_empty_args);
 
     var shp_cmd = app.createCommand("shell", "Shell prompt renderer");
@@ -1073,7 +1073,7 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: [
         }
     }
 
-    try mux.run(.{
+    try terminal.run(.{
         .name = if (name.len > 0) name else null,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
@@ -1083,7 +1083,7 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: [
 
 fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (name.len > 0) {
-        try mux.run(.{
+        try terminal.run(.{
             .attach = name,
             .debug = debug,
             .log_file = if (log_file.len > 0) log_file else null,

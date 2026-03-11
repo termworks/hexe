@@ -6,19 +6,19 @@ const std = @import("std");
 /// Timing-related constants (all values in milliseconds)
 pub const Timing = struct {
     /// Status bar update interval for non-animated content
-    /// Used in: src/modules/multiplexer/loop_core.zig
+    /// Used in: src/frontends/terminal/loop_core.zig
     pub const status_update_interval_base: i64 = 250;
 
     /// Status bar update interval when animations are active
-    /// Used in: src/modules/multiplexer/loop_core.zig
+    /// Used in: src/frontends/terminal/loop_core.zig
     pub const status_update_interval_anim: i64 = 75;
 
     /// Interval for syncing pane info (CWD, foreground process)
-    /// Used in: src/modules/multiplexer/loop_core.zig
+    /// Used in: src/frontends/terminal/loop_core.zig
     pub const pane_sync_interval: i64 = 1000;
 
     /// Heartbeat interval for keeping SES connection alive
-    /// Used in: src/modules/multiplexer/loop_core.zig
+    /// Used in: src/frontends/terminal/loop_core.zig
     pub const heartbeat_interval: i64 = 30000;
 
     /// Timeout for spawning new pod processes
@@ -30,15 +30,15 @@ pub const Timing = struct {
     pub const ses_spawn_timeout: i64 = 2000;
 
     /// Key repeat event tracking timeout
-    /// Used in: src/modules/multiplexer/keybinds.zig
+    /// Used in: src/frontends/terminal/keybinds.zig
     pub const key_repeat_timeout: i64 = 100;
 
     /// Mouse acceleration timeout for rapid movements
-    /// Used in: src/modules/multiplexer/loop_input.zig
+    /// Used in: src/frontends/terminal/loop_input.zig
     pub const mouse_acceleration_timeout: i64 = 500;
 
     /// Internal poll interval for key timer checks
-    /// Used in: src/modules/multiplexer/loop_core.zig
+    /// Used in: src/frontends/terminal/loop_core.zig
     pub const key_timer_interval: i64 = 30;
 };
 
@@ -64,18 +64,18 @@ pub const Sizes = struct {
     pub const max_frame_len: usize = max_payload_len;
 
     /// Maximum clipboard data size (128KB)
-    /// Used in: src/modules/multiplexer/clipboard.zig
+    /// Used in: src/frontends/terminal/clipboard.zig
     pub const max_clipboard_bytes: usize = 128 * 1024;
 
     /// Maximum captured output for pane capture (1MB)
-    /// Used in: src/modules/multiplexer/pane_capture.zig
+    /// Used in: src/frontends/terminal/pane_capture.zig
     pub const max_captured_output: usize = 1024 * 1024;
 
     /// Maximum reasonable terminal rows (sanity check)
-    /// Used in: src/core/vt.zig, src/modules/multiplexer/render_state_blit.zig
+    /// Used in: src/core/vt.zig, src/frontends/terminal/render_state_blit.zig
     pub const max_reasonable_rows: usize = 10000;
 
     /// Maximum reasonable terminal columns (sanity check)
-    /// Used in: src/core/vt.zig, src/modules/multiplexer/render_state_blit.zig
+    /// Used in: src/core/vt.zig, src/frontends/terminal/render_state_blit.zig
     pub const max_reasonable_cols: usize = 1000;
 };
