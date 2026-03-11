@@ -8,6 +8,7 @@ const c = @cImport({
 });
 
 const SesClient = core.FrontendClient;
+const FrontendAttach = core.FrontendAttach;
 const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
 const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
@@ -52,6 +53,18 @@ pub fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) v
     const secs = @divTrunc(ms, 1000);
     const frac = @mod(ms, 1000);
     std.debug.print("{d}.{d:0>3} [mux][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
+}
+
+fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameChange) void {
+    const msg = std.fmt.allocPrint(
+        state.allocator,
+        "Session name changed: '{s}' -> '{s}' (collision)",
+        .{ change.previous_name, change.resolved_name },
+    ) catch null;
+    if (msg) |owned| {
+        state.notifications.showFor(owned, 4000);
+        state.allocator.free(owned);
+    }
 }
 
 /// Arguments for mux commands.
@@ -227,22 +240,11 @@ pub fn run(mux_args: MuxArgs) !void {
     debugLog("ses connected (started={})", .{state.ses_client.just_started_daemon});
 
     // If server resolved to a different name (collision avoidance), update state.
-    if (state.ses_client.resolved_name) |resolved| {
-        if (!std.mem.eql(u8, resolved, state.sessionName())) {
-            debugLog("session name resolved from '{s}' to '{s}'", .{ state.sessionName(), resolved });
-
-            // Notify user about name collision
-            const msg = std.fmt.allocPrint(
-                allocator,
-                "Session name changed: '{s}' -> '{s}' (collision)",
-                .{ state.sessionName(), resolved },
-            ) catch null;
-            if (msg) |m| {
-                state.notifications.showFor(m, 4000);
-                allocator.free(m);
-            }
-            _ = state.setSessionName(resolved);
-        }
+    if (FrontendAttach.reconcileResolvedName(allocator, &state.ses_client, &state.session_cache) catch null) |change| {
+        var owned_change = change;
+        defer owned_change.deinit(allocator);
+        debugLog("session name resolved from '{s}' to '{s}'", .{ owned_change.previous_name, owned_change.resolved_name });
+        notifySessionNameChange(&state, &owned_change);
     }
 
     // Show notification if we just started the daemon.
@@ -299,11 +301,9 @@ pub fn run(mux_args: MuxArgs) !void {
         // Prefer layout-config name when provided.
         if (config.name) |loaded_name| {
             if (state.setSessionName(loaded_name)) {
-                state.ses_client.updateSession(state.sessionUuid(), state.sessionName()) catch {};
-                if (state.ses_client.resolved_name) |resolved| {
-                    if (!std.mem.eql(u8, resolved, state.sessionName())) {
-                        _ = state.setSessionName(resolved);
-                    }
+                if (FrontendAttach.syncSessionIdentity(allocator, &state.ses_client, &state.session_cache) catch null) |change| {
+                    var owned_change = change;
+                    defer owned_change.deinit(allocator);
                 }
             }
         }

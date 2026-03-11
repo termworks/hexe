@@ -334,11 +334,9 @@ fn replaceFromLocalLayout(state: *State) void {
 
     if (cfg.name) |desired_name| {
         if (state.setSessionName(desired_name)) {
-            state.ses_client.updateSession(state.sessionUuid(), state.sessionName()) catch {};
-            if (state.ses_client.resolved_name) |resolved| {
-                if (!std.mem.eql(u8, resolved, state.sessionName())) {
-                    _ = state.setSessionName(resolved);
-                }
+            if (core.FrontendAttach.syncSessionIdentity(state.allocator, &state.ses_client, &state.session_cache) catch null) |change| {
+                var owned_change = change;
+                defer owned_change.deinit(state.allocator);
             }
         }
     }

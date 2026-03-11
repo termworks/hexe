@@ -716,8 +716,8 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     mux.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
 
     // Set flag to prevent SIGHUP from interrupting reattach
-    self.attach_state.reattach_in_progress.store(true, .release);
-    defer self.attach_state.reattach_in_progress.store(false, .release);
+    self.attach_state.beginReattach();
+    defer self.attach_state.endReattach();
 
     // Track reattach start time for timeout detection
     const reattach_start = std.time.milliTimestamp();
@@ -1037,19 +1037,18 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     // Re-register with restored UUID/name before requesting backlog replay.
     // This releases the attach session lock and stabilizes client identity first.
     const session_uuid = self.sessionUuid();
-    mux.debugLog("reattachSession: calling updateSession uuid={s} name={s}", .{ session_uuid[0..8], self.sessionName() });
-    self.ses_client.updateSession(session_uuid, self.sessionName()) catch |e| {
-        core.logging.logError("mux", "updateSession failed in restoreLayout", e);
-        mux.debugLog("reattachSession: updateSession FAILED: {s}", .{@errorName(e)});
-    };
-
-    // Signal SES that we're ready for backlog replay.
-    // This triggers deferred VT reconnection to PODs, which replays their buffers.
-    mux.debugLog("reattachSession: calling requestBacklogReplay", .{});
-    self.ses_client.requestBacklogReplay() catch |e| {
-        mux.debugLog("reattachSession: requestBacklogReplay FAILED: {s}", .{@errorName(e)});
-    };
-    mux.debugLog("reattachSession: requestBacklogReplay done", .{});
+    mux.debugLog("reattachSession: finalizing attach uuid={s} name={s}", .{ session_uuid[0..8], self.sessionName() });
+    if (core.FrontendAttach.completeReattach(self.allocator, &self.ses_client, &self.session_cache)) |change_opt| {
+        if (change_opt) |change| {
+            var owned_change = change;
+            defer owned_change.deinit(self.allocator);
+            mux.debugLog("reattachSession: resolved session name from '{s}' to '{s}'", .{ owned_change.previous_name, owned_change.resolved_name });
+        }
+        mux.debugLog("reattachSession: requestBacklogReplay done", .{});
+    } else |e| {
+        core.logging.logError("mux", "completeReattach failed in restoreLayout", e);
+        mux.debugLog("reattachSession: completeReattach FAILED: {s}", .{@errorName(e)});
+    }
 
     // Sync-phase reads can consume async pane_exited messages before the IPC
     // loop starts. Apply those exits now so dead panes/floats are not kept

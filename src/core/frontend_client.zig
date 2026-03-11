@@ -148,6 +148,12 @@ pub const SesClient = struct {
         return pending;
     }
 
+    pub fn takeResolvedNameOwned(self: *SesClient) ?[]u8 {
+        const resolved = self.resolved_name orelse return null;
+        self.resolved_name = null;
+        return resolved;
+    }
+
     /// Connect to the ses daemon, starting it if necessary.
     /// Opens CTL channel, registers, then opens VT channel.
     pub fn connect(self: *SesClient) !void {

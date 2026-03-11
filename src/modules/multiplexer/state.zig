@@ -596,7 +596,7 @@ pub const State = struct {
     }
 
     pub fn setDetachMode(self: *State, enabled: bool) void {
-        self.attach_state.detach_mode = enabled;
+        self.attach_state.setDetachMode(enabled);
     }
 
     pub fn nextStateVersion(self: *State) u32 {
