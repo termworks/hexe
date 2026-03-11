@@ -26,35 +26,18 @@ pub const PendingAction = enum {
 /// A tab contains a layout with splits.
 pub const Tab = struct {
     layout: Layout,
-    name: []const u8,
-    name_owned: ?[]u8 = null,
-    uuid: [32]u8,
     notifications: NotificationManager,
     popups: pop.PopupManager,
-    allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, width: u16, height: u16, name: []const u8, notif_cfg: pop.NotificationStyle) Tab {
+    pub fn init(allocator: std.mem.Allocator, width: u16, height: u16, notif_cfg: pop.NotificationStyle) Tab {
         return .{
             .layout = Layout.init(allocator, width, height),
-            .name = name,
-            .name_owned = null,
-            .uuid = core.ipc.generateUuid(),
             .notifications = NotificationManager.initWithConfig(allocator, notif_cfg),
             .popups = pop.PopupManager.init(allocator),
-            .allocator = allocator,
         };
     }
 
-    pub fn initOwned(allocator: std.mem.Allocator, width: u16, height: u16, name_owned: []u8, notif_cfg: pop.NotificationStyle) Tab {
-        var tab = Tab.init(allocator, width, height, name_owned, notif_cfg);
-        tab.name_owned = name_owned;
-        return tab;
-    }
-
     pub fn deinit(self: *Tab) void {
-        if (self.name_owned) |n| {
-            self.allocator.free(n);
-        }
         self.layout.deinit();
         self.notifications.deinit();
         self.popups.deinit();

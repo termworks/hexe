@@ -63,9 +63,10 @@ pub fn buildSessionSnapshot(self: anytype) !core.session_model.SessionSnapshot {
     snapshot.focused_pane_uuid = getCurrentFocusedUuid(self);
 
     for (self.tabs.items, 0..) |*tab, tab_idx| {
+        const tab_uuid = self.tabUuid(tab_idx) orelse continue;
         var session_tab = core.session_model.SessionTab{
-            .uuid = tab.uuid,
-            .name = try self.allocator.dupe(u8, tab.name),
+            .uuid = tab_uuid,
+            .name = try self.allocator.dupe(u8, self.tabName(tab_idx)),
             .root = if (tab.layout.root) |root| try buildSessionLayoutNode(self.allocator, &tab.layout, root) else null,
             .focused_pane_uuid = if (tab.layout.getFocusedPane()) |pane| pane.uuid else null,
             .allocator = self.allocator,
@@ -207,6 +208,7 @@ pub fn syncActiveTabLayout(self: anytype) void {
     if (self.tabs.items.len == 0 or self.active_tab >= self.tabs.items.len) return;
 
     const tab = &self.tabs.items[self.active_tab];
+    const tab_uuid = self.tabUuid(self.active_tab) orelse return;
     const session_root = if (tab.layout.root) |root|
         buildSessionLayoutNode(self.allocator, &tab.layout, root) catch return
     else
@@ -220,7 +222,7 @@ pub fn syncActiveTabLayout(self: anytype) void {
     defer self.allocator.free(root_json);
 
     self.ses_client.sessionSyncTabLayout(
-        tab.uuid,
+        tab_uuid,
         self.active_tab,
         if (tab.layout.getFocusedPane()) |pane| pane.uuid else null,
         root_json,

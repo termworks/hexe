@@ -6,12 +6,22 @@ pub const TabFocusKind = enum {
     float,
 };
 
+pub const TabMeta = struct {
+    uuid: [32]u8,
+    name_owned: []u8,
+
+    pub fn deinit(self: *TabMeta, allocator: std.mem.Allocator) void {
+        allocator.free(self.name_owned);
+    }
+};
+
 pub const FrontendSessionCache = struct {
     allocator: std.mem.Allocator,
     session_uuid: [32]u8,
     session_name_owned: []u8,
     tab_counter: usize = 0,
     attached_snapshot: ?session_model.SessionSnapshot = null,
+    tabs: std.ArrayList(TabMeta),
     tab_last_floating_uuid: std.ArrayList(?[32]u8),
     tab_last_focus_kind: std.ArrayList(TabFocusKind),
 
@@ -24,6 +34,7 @@ pub const FrontendSessionCache = struct {
             .allocator = allocator,
             .session_uuid = session_uuid,
             .session_name_owned = try allocator.dupe(u8, session_name),
+            .tabs = .empty,
             .tab_last_floating_uuid = .empty,
             .tab_last_focus_kind = .empty,
         };
@@ -31,6 +42,8 @@ pub const FrontendSessionCache = struct {
 
     pub fn deinit(self: *FrontendSessionCache) void {
         if (self.attached_snapshot) |*snapshot| snapshot.deinit();
+        for (self.tabs.items) |*tab| tab.deinit(self.allocator);
+        self.tabs.deinit(self.allocator);
         self.tab_last_floating_uuid.deinit(self.allocator);
         self.tab_last_focus_kind.deinit(self.allocator);
         self.allocator.free(self.session_name_owned);
@@ -86,12 +99,55 @@ pub const FrontendSessionCache = struct {
         self.attached_snapshot = snapshot;
         try self.setSessionIdentity(snapshot.uuid, snapshot.session_name);
         self.setTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
+        try self.replaceTabMetaFromSnapshot(snapshot.tabs.items);
         try self.resetTabFocusMemory(snapshot.tabs.items.len);
     }
 
     pub fn clearAttachedSnapshot(self: *FrontendSessionCache) void {
         if (self.attached_snapshot) |*snapshot| snapshot.deinit();
         self.attached_snapshot = null;
+    }
+
+    pub fn clearTabMeta(self: *FrontendSessionCache) void {
+        for (self.tabs.items) |*tab| tab.deinit(self.allocator);
+        self.tabs.clearRetainingCapacity();
+    }
+
+    pub fn replaceTabMetaFromSnapshot(
+        self: *FrontendSessionCache,
+        tabs: []const session_model.SessionTab,
+    ) !void {
+        self.clearTabMeta();
+        for (tabs) |tab| {
+            try self.appendTab(tab.uuid, tab.name);
+        }
+    }
+
+    pub fn appendTab(
+        self: *FrontendSessionCache,
+        uuid: [32]u8,
+        name: []const u8,
+    ) !void {
+        try self.tabs.append(self.allocator, .{
+            .uuid = uuid,
+            .name_owned = try self.allocator.dupe(u8, name),
+        });
+    }
+
+    pub fn removeTab(self: *FrontendSessionCache, index: usize) void {
+        if (index >= self.tabs.items.len) return;
+        var removed = self.tabs.orderedRemove(index);
+        removed.deinit(self.allocator);
+    }
+
+    pub fn tabUuid(self: *const FrontendSessionCache, index: usize) ?[32]u8 {
+        if (index >= self.tabs.items.len) return null;
+        return self.tabs.items[index].uuid;
+    }
+
+    pub fn tabName(self: *const FrontendSessionCache, index: usize) ?[]const u8 {
+        if (index >= self.tabs.items.len) return null;
+        return self.tabs.items[index].name_owned;
     }
 
     pub fn resetTabFocusMemory(self: *FrontendSessionCache, tab_count: usize) !void {

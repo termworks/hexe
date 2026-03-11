@@ -88,9 +88,8 @@ pub fn createTab(self: anytype) !void {
         mux.debugLog("VALIDATION: tab_counter reached limit, wrapping to 0", .{});
     }
     const name_owned = try core.ipc.generateTabName(self.allocator, self.sessionName(), tab_counter);
-    var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
-    const tab_uuid = tab.uuid;
-    const tab_name = tab.name;
+    const tab_uuid = core.ipc.generateUuid();
+    var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
     // Set ses client if connected (for new tabs after startup).
     if (self.ses_client.isConnected()) {
         tab.layout.setSesClient(&self.ses_client);
@@ -99,10 +98,18 @@ pub fn createTab(self: anytype) !void {
     tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
     const first_pane = try tab.layout.createFirstPane(cwd);
     try self.tabs.append(self.allocator, tab);
+    errdefer {
+        var failed_tab = self.tabs.pop().?;
+        failed_tab.deinit();
+    }
+    if (!self.appendTabMeta(tab_uuid, name_owned)) return error.OutOfMemory;
+    errdefer self.removeTabMeta(self.tabs.items.len - 1);
+    self.allocator.free(name_owned);
     if (!self.appendTabFocusMemory()) return error.OutOfMemory;
+    errdefer self.removeTabFocusMemory(self.tabs.items.len - 1);
     self.active_tab = self.tabs.items.len - 1;
     self.syncPaneAux(first_pane, parent_uuid);
-    self.syncSessionTabAdded(tab_uuid, tab_name, first_pane.uuid);
+    self.syncSessionTabAdded(tab_uuid, self.tabName(self.active_tab), first_pane.uuid);
     self.renderer.invalidate();
     self.force_full_render = true;
 }
@@ -111,7 +118,7 @@ pub fn createTab(self: anytype) !void {
 pub fn closeCurrentTab(self: anytype) bool {
     if (self.tabs.items.len <= 1) return false;
     const closing_tab = self.active_tab;
-    const closing_uuid = self.tabs.items[closing_tab].uuid;
+    const closing_uuid = self.tabUuid(closing_tab) orelse return false;
 
     // Handle tab-bound floats belonging to this tab.
     var i: usize = 0;
@@ -147,6 +154,7 @@ pub fn closeCurrentTab(self: anytype) bool {
 
     var tab = self.tabs.orderedRemove(self.active_tab);
     tab.deinit();
+    self.removeTabMeta(self.active_tab);
     self.removeTabFocusMemory(self.active_tab);
     if (self.active_tab >= self.tabs.items.len) {
         self.active_tab = self.tabs.items.len - 1;

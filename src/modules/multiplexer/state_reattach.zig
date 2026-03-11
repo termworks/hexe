@@ -173,9 +173,6 @@ fn clearStateForRestore(self: anytype) void {
 }
 
 fn deinitTabPreservingPanes(tab: *Tab) void {
-    if (tab.name_owned) |n| {
-        tab.allocator.free(n);
-    }
     tab.layout.splits.deinit();
     if (tab.layout.root) |root| {
         tab.layout.freeNode(root);
@@ -626,6 +623,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     clearStateForRestore(self);
+    self.clearTabMeta();
     const restored_name = normalizeRestoredSessionName(snapshot.session_name);
     if (!self.setSessionIdentity(snapshot.uuid, restored_name)) return false;
     self.setSessionTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
@@ -693,9 +691,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     for (snapshot.tabs.items) |snapshot_tab| {
-        const name_owned = self.allocator.dupe(u8, snapshot_tab.name) catch continue;
-        var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
-        tab.uuid = snapshot_tab.uuid;
+        var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
         if (self.ses_client.isConnected()) {
             tab.layout.setSesClient(&self.ses_client);
@@ -740,6 +736,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             tab.deinit();
             continue;
         };
+        if (!self.appendTabMeta(snapshot_tab.uuid, snapshot_tab.name)) return false;
     }
 
     if (!self.resetTabFocusMemory()) return false;
@@ -768,10 +765,10 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             if (self.tabs.items[i].layout.splits.count() == 0) {
                 // Don't remove the LAST tab - keep at least one tab always.
                 if (self.tabs.items.len > 1) {
-                    const tab_name = self.tabs.items[i].name;
-                    mux.debugLog("reattachSession: removing empty tab: {s}", .{tab_name});
+                    mux.debugLog("reattachSession: removing empty tab at index {d}", .{i});
                     var dead_tab = self.tabs.orderedRemove(i);
                     dead_tab.deinit();
+                    self.removeTabMeta(i);
                     removed_tabs += 1;
                     // Don't increment i, next tab shifted into this position
                 } else {
@@ -940,6 +937,7 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
     }
     captureExistingPaneViews(self, &existing_views);
     clearStatePreservingPanes(self);
+    self.clearTabMeta();
 
     if (!self.setSessionIdentity(snapshot.uuid, snapshot.session_name)) return false;
     self.setSessionTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
@@ -953,9 +951,7 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
     defer used_uuids.deinit();
 
     for (snapshot.tabs.items) |snapshot_tab| {
-        const tab_name = self.allocator.dupe(u8, snapshot_tab.name) catch continue;
-        var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, tab_name, self.pop_config.carrier.notification);
-        tab.uuid = snapshot_tab.uuid;
+        var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
         if (self.ses_client.isConnected()) {
             tab.layout.setSesClient(&self.ses_client);
@@ -1000,6 +996,7 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
             tab.deinit();
             continue;
         };
+        if (!self.appendTabMeta(snapshot_tab.uuid, snapshot_tab.name)) return false;
     }
 
     if (!self.resetTabFocusMemory()) return false;
@@ -1076,7 +1073,8 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             const result = self.ses_client.adoptPane(p.uuid) catch return false;
 
             // Create a new tab with this pane.
-            var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, "attached", self.pop_config.carrier.notification);
+            const tab_uuid = core.ipc.generateUuid();
+            var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
             var tab_needs_cleanup = true;
             defer if (tab_needs_cleanup) tab.deinit();
 
@@ -1127,7 +1125,19 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             self.tabs.append(self.allocator, tab) catch return false;
             // Tab is now owned by tabs array, no longer needs cleanup
             tab_needs_cleanup = false;
+            if (!self.appendTabMeta(tab_uuid, "attached")) {
+                var failed_tab = self.tabs.pop().?;
+                failed_tab.deinit();
+                return false;
+            }
+            if (!self.appendTabFocusMemory()) {
+                self.removeTabMeta(self.tabs.items.len - 1);
+                var failed_tab = self.tabs.pop().?;
+                failed_tab.deinit();
+                return false;
+            }
             self.active_tab = self.tabs.items.len - 1;
+            self.syncSessionTabAdded(tab_uuid, self.tabName(self.active_tab), pane.uuid);
             self.renderer.invalidate();
             self.force_full_render = true;
             return true;

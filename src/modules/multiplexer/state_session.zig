@@ -79,6 +79,7 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
         tab.deinit();
     }
     self.tabs.clearRetainingCapacity();
+    self.clearTabMeta();
     self.clearTabFocusMemory();
     self.active_tab = 0;
 
@@ -92,7 +93,8 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
         break :blk try core.ipc.generateTabName(self.allocator, self.sessionName(), tab_counter);
     };
 
-    var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
+    const tab_uuid = core.ipc.generateUuid();
+    var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
     if (self.ses_client.isConnected()) {
         tab.layout.setSesClient(&self.ses_client);
@@ -110,12 +112,20 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     }
 
     try self.tabs.append(self.allocator, tab);
+    errdefer {
+        var failed_tab = self.tabs.pop().?;
+        failed_tab.deinit();
+    }
+    if (!self.appendTabMeta(tab_uuid, name_owned)) return error.OutOfMemory;
+    errdefer self.removeTabMeta(self.tabs.items.len - 1);
+    self.allocator.free(name_owned);
     if (!self.appendTabFocusMemory()) return error.OutOfMemory;
+    errdefer self.removeTabFocusMemory(self.tabs.items.len - 1);
 
     self.active_tab = self.tabs.items.len - 1;
     const created_tab = &self.tabs.items[self.active_tab];
     const focused = created_tab.layout.getFocusedPane() orelse return error.InvalidLayout;
-    self.syncSessionTabAdded(created_tab.uuid, created_tab.name, focused.uuid);
+    self.syncSessionTabAdded(tab_uuid, self.tabName(self.active_tab), focused.uuid);
     self.syncActiveTabLayout();
 }
 

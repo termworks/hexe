@@ -705,6 +705,27 @@ pub const State = struct {
         self.session_cache.clearTabFocusMemory();
     }
 
+    pub fn clearTabMeta(self: *State) void {
+        self.session_cache.clearTabMeta();
+    }
+
+    pub fn appendTabMeta(self: *State, uuid: [32]u8, name: []const u8) bool {
+        self.session_cache.appendTab(uuid, name) catch return false;
+        return true;
+    }
+
+    pub fn removeTabMeta(self: *State, idx: usize) void {
+        self.session_cache.removeTab(idx);
+    }
+
+    pub fn tabUuid(self: *const State, idx: usize) ?[32]u8 {
+        return self.session_cache.tabUuid(idx);
+    }
+
+    pub fn tabName(self: *const State, idx: usize) []const u8 {
+        return self.session_cache.tabName(idx) orelse "tab";
+    }
+
     pub fn appendTabFocusMemory(self: *State) bool {
         self.session_cache.appendTabFocusMemory() catch return false;
         return true;

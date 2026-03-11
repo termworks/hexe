@@ -109,6 +109,18 @@ threadlocal var eval_cache_ctx_ptr: usize = 0;
 threadlocal var eval_cache_frame_ms: u64 = 0;
 threadlocal var eval_cache_ready: bool = false;
 
+fn tabTitleForDisplay(state: *State, tab_idx: usize, tab: anytype, use_basename: bool) []const u8 {
+    if (use_basename) {
+        if (tab.layout.getFocusedPane()) |pane| {
+            if (pane.getRealCwd()) |p| {
+                const base = std.fs.path.basename(p);
+                return if (base.len == 0) "/" else base;
+            }
+        }
+    }
+    return state.tabName(tab_idx);
+}
+
 pub fn beginExternalCallbackEval(state: *State, lua_rt: ?*LuaRuntime) void {
     callback_state = state;
     callback_lua_rt = lua_rt;
@@ -1543,16 +1555,7 @@ pub fn draw(
     var tab_count: usize = 0;
     var active_display_tab: ?usize = null;
     for (tabs.items, 0..) |*tab, ti| {
-        const tab_name = if (use_basename)
-            if (tab.layout.getFocusedPane()) |pane|
-                if (pane.getRealCwd()) |p| blk: {
-                    const base = std.fs.path.basename(p);
-                    break :blk if (base.len == 0) "/" else base;
-                } else tab.name
-            else
-                tab.name
-        else
-            tab.name;
+        const tab_name = tabTitleForDisplay(state, ti, tab, use_basename);
 
         if (tab_count < tab_names.len) {
             tab_names[tab_count] = tab_name;
@@ -1730,6 +1733,7 @@ pub fn draw(
 /// If the mouse click at (x,y) hits a tab in the center tabs widget,
 /// return the tab index.
 pub fn hitTestTab(
+    state: *State,
     allocator: std.mem.Allocator,
     config: *const core.Config,
     term_width: u16,
@@ -1769,16 +1773,7 @@ pub fn hitTestTab(
     var tab_count: usize = 0;
     var active_display_tab: ?usize = null;
     for (tabs.items, 0..) |*tab, ti| {
-        const tab_name = if (use_basename)
-            if (tab.layout.getFocusedPane()) |pane|
-                if (pane.getRealCwd()) |p| blk: {
-                    const base = std.fs.path.basename(p);
-                    break :blk if (base.len == 0) "/" else base;
-                } else tab.name
-            else
-                tab.name
-        else
-            tab.name;
+        const tab_name = tabTitleForDisplay(state, ti, tab, use_basename);
 
         if (tab_count < tab_names.len) {
             tab_names[tab_count] = tab_name;
@@ -1986,16 +1981,7 @@ pub fn hitTestAction(
     var tab_count: usize = 0;
     var active_display_tab: ?usize = null;
     for (tabs.items, 0..) |*tab, ti| {
-        const tab_name = if (use_basename)
-            if (tab.layout.getFocusedPane()) |pane|
-                if (pane.getRealCwd()) |p| blk: {
-                    const base = std.fs.path.basename(p);
-                    break :blk if (base.len == 0) "/" else base;
-                } else tab.name
-            else
-                tab.name
-        else
-            tab.name;
+        const tab_name = tabTitleForDisplay(state, ti, tab, use_basename);
 
         if (tab_count < tab_names.len) {
             tab_names[tab_count] = tab_name;

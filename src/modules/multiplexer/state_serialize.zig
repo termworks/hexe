@@ -41,12 +41,13 @@ pub fn serializeState(self: anytype) ![]const u8 {
     // Tabs.
     try writer.writeAll("\"tabs\":[");
     for (self.tabs.items, 0..) |*tab, ti| {
+        const tab_uuid = self.tabUuid(ti) orelse continue;
         if (ti > 0) try writer.writeAll(",");
         try writer.writeAll("{");
         try writer.writeAll("\"uuid\":");
-        try writeJsonString(writer, tab.uuid[0..]);
+        try writeJsonString(writer, tab_uuid[0..]);
         try writer.writeAll(",\"name\":");
-        try writeJsonString(writer, tab.name);
+        try writeJsonString(writer, self.tabName(ti));
         try writer.writeAll(",");
         try writer.print("\"focused_split_id\":{d},", .{tab.layout.focused_split_id});
         try writer.print("\"next_split_id\":{d},", .{tab.layout.next_split_id});

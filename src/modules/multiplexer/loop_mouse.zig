@@ -671,7 +671,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
 
     // Status bar tab switching (only on press).
     if (!ev.is_release and state.config.tabs.status.enabled and ev.y == state.term_height - 1) {
-        if (statusbar.hitTestTab(state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.active_tab, state.sessionName(), ev.x, ev.y)) |ti| {
+        if (statusbar.hitTestTab(state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.active_tab, state.sessionName(), ev.x, ev.y)) |ti| {
             if (ti != state.active_tab) {
                 @import("tab_switch.zig").switchToTab(state, ti);
             }
