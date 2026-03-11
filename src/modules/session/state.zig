@@ -867,6 +867,104 @@ pub const SesState = struct {
         }
     }
 
+    fn collectLayoutPaneUuids(
+        allocator: std.mem.Allocator,
+        node: ?*const session_model.SessionLayoutNode,
+        out: *std.ArrayList([32]u8),
+    ) !void {
+        const root = node orelse return;
+        switch (root.*) {
+            .pane => |uuid| try out.append(allocator, uuid),
+            .split => |split| {
+                try collectLayoutPaneUuids(allocator, split.first, out);
+                try collectLayoutPaneUuids(allocator, split.second, out);
+            },
+        }
+    }
+
+    pub fn updateClientSessionTabLayout(
+        self: *SesState,
+        client_id: usize,
+        tab_uuid: [32]u8,
+        active_tab: u16,
+        focused_pane_uuid: ?[32]u8,
+        root_json: []const u8,
+    ) !void {
+        const client = self.getClient(client_id) orelse return;
+        const snapshot = try self.ensureClientSessionSnapshot(client);
+
+        var tab_index: ?usize = null;
+        for (snapshot.tabs.items, 0..) |tab, idx| {
+            if (std.mem.eql(u8, &tab.uuid, &tab_uuid)) {
+                tab_index = idx;
+                break;
+            }
+        }
+        const idx = tab_index orelse return;
+
+        const new_root = try session_model.layoutNodeFromJson(snapshot.allocator, root_json);
+        errdefer if (new_root) |root| {
+            root.deinit(snapshot.allocator);
+            snapshot.allocator.destroy(root);
+        };
+
+        var live_panes: std.ArrayList([32]u8) = .empty;
+        defer live_panes.deinit(self.allocator);
+        try collectLayoutPaneUuids(self.allocator, new_root, &live_panes);
+
+        if (snapshot.tabs.items[idx].root) |old_root| {
+            old_root.deinit(snapshot.allocator);
+            snapshot.allocator.destroy(old_root);
+        }
+        snapshot.tabs.items[idx].root = new_root;
+        snapshot.tabs.items[idx].focused_pane_uuid = focused_pane_uuid;
+        if (snapshot.tabs.items.len > 0) {
+            snapshot.active_tab = @min(@as(usize, @intCast(active_tab)), snapshot.tabs.items.len - 1);
+        } else {
+            snapshot.active_tab = 0;
+        }
+
+        var to_remove: std.ArrayList([32]u8) = .empty;
+        defer to_remove.deinit(self.allocator);
+
+        var pane_iter = snapshot.panes.iterator();
+        while (pane_iter.next()) |entry| {
+            if (entry.value_ptr.kind != .split) continue;
+            if (entry.value_ptr.parent_tab != idx) continue;
+
+            var keep = false;
+            for (live_panes.items) |live_uuid| {
+                if (std.mem.eql(u8, entry.key_ptr, &live_uuid)) {
+                    keep = true;
+                    break;
+                }
+            }
+            if (!keep) {
+                try to_remove.append(self.allocator, entry.key_ptr.*);
+            }
+        }
+        for (to_remove.items) |pane_uuid| {
+            _ = snapshot.panes.remove(pane_uuid);
+        }
+
+        for (live_panes.items) |pane_uuid| {
+            if (snapshot.panes.getPtr(pane_uuid)) |pane| {
+                pane.kind = .split;
+                pane.parent_tab = idx;
+            } else {
+                try snapshot.panes.put(pane_uuid, .{
+                    .uuid = pane_uuid,
+                    .kind = .split,
+                    .parent_tab = idx,
+                });
+            }
+        }
+
+        if (snapshot.active_float_uuid == null) {
+            snapshot.focused_pane_uuid = focused_pane_uuid;
+        }
+    }
+
     /// Check if a session name is already in use by a detached session or connected client.
     /// Optionally excludes one client id (used during re-register).
     fn isSessionNameInUse(self: *SesState, name: []const u8, exclude_client_id: ?usize) bool {

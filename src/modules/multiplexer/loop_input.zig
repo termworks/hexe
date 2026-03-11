@@ -449,7 +449,7 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                                         if (layout.getFocusedPane()) |new_pane| {
                                             state.syncPaneFocus(new_pane, null);
                                         }
-                                        state.syncStateToSes();
+                                        state.syncActiveTabLayout();
                                     }
                                 },
                                 else => {},

@@ -356,6 +356,24 @@ pub const SesClient = struct {
         try wire.writeControl(fd, .session_remove_float, std.mem.asBytes(&msg));
     }
 
+    pub fn sessionSyncTabLayout(
+        self: *SesClient,
+        tab_uuid: [32]u8,
+        active_tab: usize,
+        focused_pane_uuid: ?[32]u8,
+        root_json: []const u8,
+    ) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionSyncTabLayout = .{
+            .tab_uuid = tab_uuid,
+            .focused_pane_uuid = if (focused_pane_uuid) |uuid| uuid else .{0} ** 32,
+            .active_tab = @intCast(active_tab),
+            .root_len = @intCast(root_json.len),
+            .has_focused_pane = if (focused_pane_uuid != null) 1 else 0,
+        };
+        try wire.writeControlWithTrail(fd, .session_sync_tab_layout, std.mem.asBytes(&msg), root_json);
+    }
+
     /// Create a new pane via ses.
     /// Returns the pane UUID, pane_id (for VT routing), and pod PID.
     /// If inherit_env_parent_uuid is set, SES will read environment from that pane's process

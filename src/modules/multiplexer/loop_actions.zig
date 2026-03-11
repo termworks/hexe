@@ -528,7 +528,11 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
 
         // Sync the new pane info.
         state.syncPaneAux(pane, null);
-        state.syncStateToSes();
+        if (pane.floating) {
+            state.syncSessionFloat(pane, state.active_floating != null);
+        } else {
+            state.syncActiveTabLayout();
+        }
 
         if (destroy_current) {
             state.notifications.show("Adopted pane (old destroyed)");

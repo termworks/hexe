@@ -562,6 +562,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             if (is_wheel) return true;
             if (ev.is_release) {
                 state.mouse_drag = .none;
+                state.syncActiveTabLayout();
                 return true;
             }
             if (!is_motion) return true;

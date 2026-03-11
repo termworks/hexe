@@ -119,6 +119,7 @@ pub const MsgType = enum(u16) {
     session_remove_tab = 0x0139,
     session_sync_float = 0x013A,
     session_remove_float = 0x013B,
+    session_sync_tab_layout = 0x013C,
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -272,6 +273,16 @@ pub const SessionSyncFloat = extern struct {
 /// SessionRemoveFloat: remove a float record from the canonical snapshot.
 pub const SessionRemoveFloat = extern struct {
     pane_uuid: [32]u8 align(1),
+};
+
+/// SessionSyncTabLayout: replace one tab's canonical split tree.
+/// Followed by: canonical layout JSON bytes (root_len).
+pub const SessionSyncTabLayout = extern struct {
+    tab_uuid: [32]u8 align(1),
+    focused_pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    root_len: u32 align(1),
+    has_focused_pane: u8 align(1),
 };
 
 /// Notify: message for the owning MUX.

@@ -444,7 +444,7 @@ pub const State = struct {
         self.clearFloatRename();
         self.renderer.invalidate();
         self.force_full_render = true;
-        self.syncStateToSes();
+        self.syncSessionFloat(pane, self.active_floating != null);
     }
 
     pub fn deinit(self: *State) void {
@@ -770,6 +770,10 @@ pub const State = struct {
         return state_sync.syncSessionFloatRemoved(self, pane_uuid);
     }
 
+    pub fn syncActiveTabLayout(self: *State) void {
+        return state_sync.syncActiveTabLayout(self);
+    }
+
     pub fn getCurrentFocusedUuid(self: *State) ?[32]u8 {
         return state_sync.getCurrentFocusedUuid(self);
     }
@@ -1039,7 +1043,7 @@ pub const State = struct {
 
         // Recalculate and sync.
         tab.layout.recalculateLayout();
-        self.syncStateToSes();
+        self.syncActiveTabLayout();
         self.needs_render = true;
     }
 

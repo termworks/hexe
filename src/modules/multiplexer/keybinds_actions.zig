@@ -193,7 +193,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 state.syncPaneAux(new_pane, parent_uuid);
             }
             state.needs_render = true;
-            state.syncStateToSes();
+            state.syncActiveTabLayout();
             return true;
         },
         .split_v => {
@@ -215,7 +215,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 state.syncPaneAux(new_pane, parent_uuid);
             }
             state.needs_render = true;
-            state.syncStateToSes();
+            state.syncActiveTabLayout();
             return true;
         },
         .split_resize => |dir_kind| {
@@ -233,6 +233,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 state.needs_render = true;
                 state.renderer.invalidate();
                 state.force_full_render = true;
+                state.syncActiveTabLayout();
             }
             return true;
         },
@@ -280,7 +281,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                         if (layout.getFocusedPane()) |new_pane| {
                             state.syncPaneFocus(new_pane, null);
                         }
-                        state.syncStateToSes();
+                        state.syncActiveTabLayout();
                         state.needs_render = true;
                     }
                 }

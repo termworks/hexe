@@ -993,6 +993,9 @@ pub const Server = struct {
             .session_remove_float => {
                 self.handleBinarySessionRemoveFloat(fd, hdr.payload_len, &buf);
             },
+            .session_sync_tab_layout => {
+                self.handleBinarySessionSyncTabLayout(fd, hdr.payload_len, &buf);
+            },
             // POD control channel messages
             .cwd_changed => {
                 self.handleBinaryCwdChanged(fd, hdr.payload_len, &buf);
@@ -1258,6 +1261,35 @@ pub const Server = struct {
         const msg = wire.readStruct(wire.SessionRemoveFloat, fd) catch return;
         const client_id = self.findClientForCtlFd(fd) orelse return;
         self.ses_state.removeClientSessionFloat(client_id, msg.pane_uuid);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionSyncTabLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionSyncTabLayout)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionSyncTabLayout, fd) catch return;
+        if (msg.root_len > wire.MAX_PAYLOAD_LEN or msg.root_len > buf.len) {
+            self.skipBinaryPayload(fd, msg.root_len, buf);
+            self.sendBinaryError(fd, "session_sync_tab_layout: root too large");
+            return;
+        }
+        if (msg.root_len > 0) {
+            wire.readExact(fd, buf[0..msg.root_len]) catch return;
+        }
+
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.updateClientSessionTabLayout(
+            client_id,
+            msg.tab_uuid,
+            msg.active_tab,
+            if (msg.has_focused_pane != 0) msg.focused_pane_uuid else null,
+            buf[0..msg.root_len],
+        ) catch {
+            self.sendBinaryError(fd, "session_sync_tab_layout_failed");
+            return;
+        };
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
 

@@ -65,6 +65,28 @@ pub const SessionLayoutNode = union(enum) {
     }
 };
 
+pub fn layoutNodeToJson(allocator: std.mem.Allocator, node: ?*const SessionLayoutNode) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    var writer = buf.writer(allocator);
+    if (node) |root| {
+        try serializeLayoutNode(writer, root);
+    } else {
+        try writer.writeAll("null");
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
+pub fn layoutNodeFromJson(allocator: std.mem.Allocator, json: []const u8) !?*SessionLayoutNode {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    return switch (parsed.value) {
+        .null => null,
+        else => try parseCanonicalLayoutNode(allocator, parsed.value),
+    };
+}
+
 pub const SessionTab = struct {
     uuid: [32]u8,
     name: []u8,

@@ -841,7 +841,7 @@ pub fn runMainLoop(state: *State) !void {
                     if (state.currentLayout().getFocusedPane()) |new_pane| {
                         state.syncPaneFocus(new_pane, null);
                     }
-                    state.syncStateToSes();
+                    state.syncActiveTabLayout();
                     state.needs_render = true;
                 } else if (state.tabs.items.len > 1) {
                     _ = state.closeCurrentTab();

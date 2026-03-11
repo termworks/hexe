@@ -878,6 +878,42 @@ test "syncClientSessionFloat: upserts visibility and active float state" {
     try testing.expect(client.session_snapshot.?.panes.get([_]u8{'f'} ** 32) == null);
 }
 
+test "updateClientSessionTabLayout: replaces tab root and removes stale split panes" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const client = ses_state.getClient(client_id).?;
+
+    const old_root = try testing.allocator.create(core.session_model.SessionLayoutNode);
+    old_root.* = .{ .pane = [_]u8{'1'} ** 32 };
+
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha");
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-1"),
+        .root = old_root,
+        .focused_pane_uuid = [_]u8{'1'} ** 32,
+        .allocator = testing.allocator,
+    });
+    snapshot.active_tab = 0;
+    snapshot.focused_pane_uuid = [_]u8{'1'} ** 32;
+    try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 0 });
+    try snapshot.panes.put([_]u8{'2'} ** 32, .{ .uuid = [_]u8{'2'} ** 32, .kind = .split, .parent_tab = 0 });
+    client.updateSessionSnapshot(snapshot);
+
+    const root_json =
+        \\{"type":"split","dir":"horizontal","ratio":0.5,"first":{"type":"pane","uuid":"11111111111111111111111111111111"},"second":{"type":"pane","uuid":"33333333333333333333333333333333"}}
+    ;
+    try ses_state.updateClientSessionTabLayout(client_id, [_]u8{'t'} ** 32, 0, [_]u8{'3'} ** 32, root_json);
+
+    try testing.expect(client.session_snapshot.?.tabs.items[0].root != null);
+    try testing.expectEqual([_]u8{'3'} ** 32, client.session_snapshot.?.tabs.items[0].focused_pane_uuid.?);
+    try testing.expectEqual([_]u8{'3'} ** 32, client.session_snapshot.?.focused_pane_uuid.?);
+    try testing.expect(client.session_snapshot.?.panes.get([_]u8{'2'} ** 32) == null);
+    try testing.expectEqual(@as(usize, 0), client.session_snapshot.?.panes.get([_]u8{'3'} ** 32).?.parent_tab.?);
+}
+
 // ============================================================================
 // Session Affinity Tests
 // ============================================================================
