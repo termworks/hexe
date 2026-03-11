@@ -31,8 +31,8 @@ pub fn serializeState(self: anytype) ![]const u8 {
     try writer.print("\"tab_counter\":{d},", .{self.sessionTabCounter()});
 
     // Active tab/float.
-    try writer.print("\"active_tab\":{d},", .{self.active_tab});
-    if (self.active_floating) |af| {
+    try writer.print("\"active_tab\":{d},", .{self.activeTabIndex()});
+    if (self.activeFloatingIndex()) |af| {
         try writer.print("\"active_floating\":{d},", .{af});
     } else {
         try writer.writeAll("\"active_floating\":null,");

@@ -154,14 +154,14 @@ pub fn syncStateToSes(self: anytype) void {
 
 pub fn syncSessionTabAdded(self: anytype, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
     if (!self.frontend_client.isConnected()) return;
-    self.frontend_client.sessionAddTab(tab_uuid, pane_uuid, self.active_tab, name) catch |err| {
+    self.frontend_client.sessionAddTab(tab_uuid, pane_uuid, self.activeTabIndex(), name) catch |err| {
         core.logging.logError("mux", "failed sessionAddTab IPC", err);
     };
 }
 
 pub fn syncSessionTabRemoved(self: anytype, tab_uuid: [32]u8) void {
     if (!self.frontend_client.isConnected()) return;
-    const active_tab: ?usize = if (self.tabs.items.len > 0) self.active_tab else null;
+    const active_tab: ?usize = if (self.tabs.items.len > 0) self.activeTabIndex() else null;
     self.frontend_client.sessionRemoveTab(tab_uuid, active_tab) catch |err| {
         core.logging.logError("mux", "failed sessionRemoveTab IPC", err);
     };
@@ -173,7 +173,7 @@ pub fn syncSessionFloat(self: anytype, pane: *Pane, active: bool) void {
 
     self.frontend_client.sessionSyncFloat(
         pane.uuid,
-        self.active_tab,
+        self.activeTabIndex(),
         pane.parent_tab,
         pane.visible,
         pane.tab_visible,
@@ -202,10 +202,10 @@ pub fn syncSessionFloatRemoved(self: anytype, pane_uuid: [32]u8) void {
 
 pub fn syncActiveTabLayout(self: anytype) void {
     if (!self.frontend_client.isConnected()) return;
-    if (self.tabs.items.len == 0 or self.active_tab >= self.tabs.items.len) return;
+    if (self.tabs.items.len == 0 or self.activeTabIndex() >= self.tabs.items.len) return;
 
-    const tab = &self.tabs.items[self.active_tab];
-    const tab_uuid = self.tabUuid(self.active_tab) orelse return;
+    const tab = &self.tabs.items[self.activeTabIndex()];
+    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
     const session_root = if (tab.layout.root) |root|
         buildSessionLayoutNode(self.allocator, &tab.layout, root) catch return
     else
@@ -220,7 +220,7 @@ pub fn syncActiveTabLayout(self: anytype) void {
 
     self.frontend_client.sessionSyncTabLayout(
         tab_uuid,
-        self.active_tab,
+        self.activeTabIndex(),
         if (tab.layout.getFocusedPane()) |pane| pane.uuid else null,
         root_json,
     ) catch |err| {
@@ -263,7 +263,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
     const focused_from = if (pane.focused) created_from else null;
     self.frontend_client.updatePaneAux(
         pane.uuid,
-        self.active_tab,
+        self.activeTabIndex(),
         pane.floating,
         pane.focused,
         pane_type,
@@ -300,7 +300,7 @@ pub fn unfocusAllPanes(self: anytype) void {
                 defer if (layout_path) |path| self.allocator.free(path);
                 self.frontend_client.updatePaneAux(
                     p.*.uuid,
-                    self.active_tab,
+                    self.activeTabIndex(),
                     p.*.floating,
                     false,
                     pane_type,
@@ -333,7 +333,7 @@ pub fn unfocusAllPanes(self: anytype) void {
             defer if (layout_path) |path| self.allocator.free(path);
             self.frontend_client.updatePaneAux(
                 fp.uuid,
-                self.active_tab,
+                self.activeTabIndex(),
                 fp.floating,
                 false,
                 .float,
@@ -381,7 +381,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
     defer if (layout_path) |path| self.allocator.free(path);
     self.frontend_client.updatePaneAux(
         pane.uuid,
-        self.active_tab,
+        self.activeTabIndex(),
         pane.floating,
         true,
         pane_type,
@@ -412,7 +412,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
         }
         _ = rt.lua.pushString(if (pane.floating) "float" else "split");
         rt.lua.setField(-2, "pane_type");
-        rt.lua.pushInteger(@intCast(self.active_tab + 1));
+        rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
         rt.lua.setField(-2, "active_tab");
         rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
         rt.lua.setField(-2, "now_ms");
@@ -446,7 +446,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
     defer if (layout_path) |path| self.allocator.free(path);
     self.frontend_client.updatePaneAux(
         pane.uuid,
-        self.active_tab,
+        self.activeTabIndex(),
         pane.floating,
         false,
         pane_type,
@@ -505,7 +505,7 @@ pub fn getReliableCwd(self: anytype, pane: *Pane) ?[]const u8 {
 pub fn syncFocusedPaneInfo(self: anytype) void {
     if (!self.frontend_client.isConnected()) return;
 
-    const pane = if (self.active_floating) |idx| blk: {
+    const pane = if (self.activeFloatingIndex()) |idx| blk: {
         if (idx < self.floats.items.len) break :blk self.floats.items[idx];
         break :blk @as(?*Pane, null);
     } else self.currentLayout().getFocusedPane();
@@ -545,7 +545,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     defer if (layout_path) |path| self.allocator.free(path);
     self.frontend_client.updatePaneAux(
         p.uuid,
-        self.active_tab,
+        self.activeTabIndex(),
         p.floating,
         true,
         pane_type,

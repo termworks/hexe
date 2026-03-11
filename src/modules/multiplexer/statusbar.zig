@@ -684,7 +684,7 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
                 std.mem.eql(u8, &pane.uuid, &fu)
             else
                 false;
-            const tab_idx = pane.parent_tab orelse state.active_tab;
+            const tab_idx = pane.parent_tab orelse state.activeTabIndex();
             appendPaneApiEntry(rt, state, pane, is_focused, tab_idx, pane_index, null);
             pane_index += 1;
         }
@@ -1478,7 +1478,7 @@ pub fn draw(
     // Also ensure we have a stable `shell_started_at_ms` while a float is focused,
     // so spinner modules can animate even without shell hooks.
     if (state.getCurrentFocusedUuid()) |uuid| {
-        if (state.active_floating != null) {
+        if (state.activeFloatingIndex() != null) {
             const info_opt = state.getPaneShell(uuid);
             const needs_start = if (info_opt) |info| info.started_at_ms == null else true;
             if (needs_start) {
@@ -1511,11 +1511,11 @@ pub fn draw(
 
     // Mux focus state.
     ctx.tab_count = @intCast(@min(tabs.items.len, @as(usize, std.math.maxInt(u16))));
-    ctx.focus_is_float = state.active_floating != null;
-    ctx.focus_is_split = state.active_floating == null;
+    ctx.focus_is_float = state.activeFloatingIndex() != null;
+    ctx.focus_is_split = state.activeFloatingIndex() == null;
 
     // Provide pane state for animation policy + float attributes.
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         if (idx < state.floats.items.len) {
             ctx.alt_screen = state.floats.items[idx].vt.inAltScreen();
 
@@ -1945,10 +1945,10 @@ pub fn hitTestAction(
     }
 
     ctx.tab_count = @intCast(@min(tabs.items.len, @as(usize, std.math.maxInt(u16))));
-    ctx.focus_is_float = state.active_floating != null;
-    ctx.focus_is_split = state.active_floating == null;
+    ctx.focus_is_float = state.activeFloatingIndex() != null;
+    ctx.focus_is_split = state.activeFloatingIndex() == null;
 
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         if (idx < state.floats.items.len) {
             ctx.alt_screen = state.floats.items[idx].vt.inAltScreen();
             const fp = state.floats.items[idx];

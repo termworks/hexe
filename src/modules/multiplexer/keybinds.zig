@@ -52,10 +52,10 @@ fn handleBlockedPopup(popups: anytype, parsed_event: ?vaxis.Event) bool {
 }
 
 pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, parsed_event: ?vaxis.Event) void {
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         const fpane = state.floats.items[idx];
-        const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
-        if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
+        const can_interact = if (fpane.parent_tab) |parent| parent == state.activeTabIndex() else true;
+        if (fpane.isVisibleOnTab(state.activeTabIndex()) and can_interact) {
             if (fpane.popups.isBlocked()) {
                 if (handleBlockedPopup(&fpane.popups, parsed_event)) {
                     loop_ipc.sendPopResponse(state);
@@ -128,10 +128,10 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
     }
 
     const target_pane = blk: {
-        if (state.active_floating) |idx| {
+        if (state.activeFloatingIndex()) |idx| {
             const fpane = state.floats.items[idx];
-            const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
-            if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
+            const can_interact = if (fpane.parent_tab) |parent| parent == state.activeTabIndex() else true;
+            if (fpane.isVisibleOnTab(state.activeTabIndex()) and can_interact) {
                 break :blk fpane;
             }
         }
@@ -154,13 +154,13 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
 
 /// Focus context used for key timer bookkeeping.
 fn currentFocusContext(state: *State) FocusContext {
-    return if (state.active_floating != null) .float else .split;
+    return if (state.activeFloatingIndex() != null) .float else .split;
 }
 
 /// Build a PaneQuery from the current mux state for condition evaluation.
 fn buildPaneQuery(state: *State) PaneQuery {
-    const is_float = state.active_floating != null;
-    const pane: ?*Pane = if (state.active_floating) |idx| blk: {
+    const is_float = state.activeFloatingIndex() != null;
+    const pane: ?*Pane = if (state.activeFloatingIndex()) |idx| blk: {
         if (idx < state.floats.items.len) break :blk state.floats.items[idx];
         break :blk @as(?*Pane, null);
     } else state.currentLayout().getFocusedPane();
@@ -215,7 +215,7 @@ fn buildPaneQuery(state: *State) PaneQuery {
         .float_isolated = float_isolated,
         .float_destroyable = float_destroyable,
         .tab_count = @intCast(state.tabs.items.len),
-        .active_tab = @intCast(state.active_tab),
+        .active_tab = @intCast(state.activeTabIndex()),
         .fg_process = fg_proc,
         .now_ms = @intCast(std.time.milliTimestamp()),
     };
@@ -446,7 +446,7 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
             std.mem.eql(u8, &pane.uuid, &fu)
         else
             false;
-        const tab_idx = pane.parent_tab orelse state.active_tab;
+        const tab_idx = pane.parent_tab orelse state.activeTabIndex();
         appendPaneApiEntry(rt, state, pane, is_focused, tab_idx, pane_index, null);
         pane_index += 1;
     }

@@ -703,7 +703,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     if (cwd_slice.len > 0) {
         spawn_cwd = cwd_slice;
     } else {
-        const focused_pane = if (state.active_floating) |idx| blk: {
+        const focused_pane = if (state.activeFloatingIndex()) |idx| blk: {
             if (idx < state.floats.items.len) break :blk state.floats.items[idx];
             break :blk @as(?*Pane, null);
         } else state.currentLayout().getFocusedPane();
@@ -720,7 +720,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     // restore even when float process exits without cleaning cursor state.
     var cursor_snapshot: ?CursorSnapshot = null;
     if (wait_for_exit) {
-        const source_pane = if (state.active_floating) |idx| blk: {
+        const source_pane = if (state.activeFloatingIndex()) |idx| blk: {
             if (idx < state.floats.items.len) break :blk state.floats.items[idx];
             break :blk @as(?*Pane, null);
         } else state.currentLayout().getFocusedPane();
@@ -739,7 +739,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     // Unfocus current pane.
     const old_uuid = state.getCurrentFocusedUuid();
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         if (idx < state.floats.items.len) state.syncPaneUnfocus(state.floats.items[idx]);
     } else if (state.currentLayout().getFocusedPane()) |tiled| {
         state.syncPaneUnfocus(tiled);

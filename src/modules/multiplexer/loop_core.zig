@@ -386,7 +386,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     if (index >= state.floats.items.len) return;
 
     const pane = state.floats.items[index];
-    const was_active = if (state.active_floating) |af| af == index else false;
+    const was_active = if (state.activeFloatingIndex()) |af| af == index else false;
     const exit_code = pane.getExitCode();
 
     if (pane.float_key != 0 and !pane.capture_output) {
@@ -602,14 +602,14 @@ pub fn runMainLoop(state: *State) !void {
             const uuid = state.getCurrentFocusedUuid() orelse break :blk false;
 
             // If a float is focused, allow fast refresh (spinners in statusbar).
-            if (state.active_floating != null) break :blk true;
+            if (state.activeFloatingIndex() != null) break :blk true;
 
             // suppress while alt-screen is active (for split-focused panes)
             const alt = if (state.currentLayout().getFocusedPane()) |pane| pane.vt.inAltScreen() else false;
             if (alt) break :blk false;
 
             // Prefer direct fg_process; fallback to cached process name.
-            const fg = if (state.active_floating) |idx| blk3: {
+            const fg = if (state.activeFloatingIndex()) |idx| blk3: {
                 if (idx < state.floats.items.len) {
                     if (state.floats.items[idx].getFgProcess()) |p| break :blk3 p;
                 }
@@ -771,7 +771,7 @@ pub fn runMainLoop(state: *State) !void {
                         defer if (layout_path) |path| state.allocator.free(path);
                         state.frontend_client.updatePaneAux(
                             pane.uuid,
-                            state.active_tab,
+                            state.activeTabIndex(),
                             pane.floating,
                             pane.focused,
                             pane_type,
@@ -819,15 +819,15 @@ pub fn runMainLoop(state: *State) !void {
         }
 
         // Update TAB realm notifications (current tab only).
-        if (state.tabs.items[state.active_tab].notifications.update()) {
+        if (state.tabs.items[state.activeTabIndex()].notifications.update()) {
             state.needs_render = true;
         }
 
         // Update TAB realm popups (check for timeout).
-        if (state.tabs.items[state.active_tab].popups.update()) {
+        if (state.tabs.items[state.activeTabIndex()].popups.update()) {
             state.needs_render = true;
             // Check if a popup timed out and we need to send response.
-            if (state.pending_pop_response and state.pending_pop_scope == .tab and !state.tabs.items[state.active_tab].popups.isBlocked()) {
+            if (state.pending_pop_response and state.pending_pop_scope == .tab and !state.tabs.items[state.activeTabIndex()].popups.isBlocked()) {
                 loop_ipc.sendPopResponse(state);
             }
         }

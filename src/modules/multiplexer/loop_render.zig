@@ -153,7 +153,7 @@ fn populateFloatTitleContext(state: *State, pane: *Pane, ctx: *shp.Context, now_
     ctx.home = std.posix.getenv("HOME");
     ctx.now_ms = now_ms;
     ctx.tab_count = @intCast(@min(state.tabs.items.len, @as(usize, std.math.maxInt(u16))));
-    ctx.active_tab = @intCast(state.active_tab);
+    ctx.active_tab = @intCast(state.activeTabIndex());
     ctx.session_name = state.sessionName();
     ctx.focus_is_float = true;
     ctx.focus_is_split = false;
@@ -196,7 +196,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         const render_state = pane.*.getRenderState() catch continue;
         drawPaneRenderState(renderer, pane.*, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, stdout);
 
-        if (state.mouse_selection.rangeForPane(state.active_tab, pane.*)) |range| {
+        if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane.*)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, range, state.config.selection_color);
         }
 
@@ -233,11 +233,11 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Draw visible floats (on top of splits).
     // Draw inactive floats first, then active one last so it's on top.
     for (state.floats.items, 0..) |pane, i| {
-        if (!pane.isVisibleOnTab(state.active_tab)) continue;
-        if (state.active_floating == i) continue; // Skip active, draw it last.
+        if (!pane.isVisibleOnTab(state.activeTabIndex())) continue;
+        if (state.activeFloatingIndex() == i) continue; // Skip active, draw it last.
         // Skip tab-bound floats on wrong tab.
         if (pane.parent_tab) |parent| {
-            if (parent != state.active_tab) continue;
+            if (parent != state.activeTabIndex()) continue;
         }
 
         var float_label_compose: [256]u8 = undefined;
@@ -258,7 +258,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         const render_state = pane.getRenderState() catch continue;
         drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout);
 
-        if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
+        if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
         }
 
@@ -280,14 +280,14 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     }
 
     // Draw active float last so it's on top.
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         const pane = state.floats.items[idx];
         // Check tab ownership for tab-bound floats.
         const can_render = if (pane.parent_tab) |parent|
-            parent == state.active_tab
+            parent == state.activeTabIndex()
         else
             true;
-        if (pane.isVisibleOnTab(state.active_tab) and can_render) {
+        if (pane.isVisibleOnTab(state.activeTabIndex()) and can_render) {
             var active_float_label_compose: [256]u8 = undefined;
             const active_float_label_raw = composeFloatBorderLabel(state, pane, &active_float_label_compose);
             var active_float_label_buf: [128]u8 = undefined;
@@ -306,7 +306,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (pane.getRenderState()) |render_state| {
                 drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout);
 
-                if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
+                if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane)) |range| {
                     mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
                 }
             } else |_| {}
@@ -331,11 +331,11 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // Draw status bar if enabled.
     if (state.config.tabs.status.enabled) {
-        statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.active_tab, state.sessionName());
+        statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.activeTabIndex(), state.sessionName());
     }
 
     // Check if active float has dim_background set (focus mode)
-    const float_dim = if (state.active_floating) |idx| blk: {
+    const float_dim = if (state.activeFloatingIndex()) |idx| blk: {
         if (idx < state.floats.items.len) break :blk state.floats.items[idx].dim_background;
         break :blk false;
     } else false;
@@ -345,7 +345,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         // Get focused pane bounds to exclude from dimming
         // For floats: use border dimensions + shadow (1 cell right/bottom) if shadow enabled
         const focused_bounds: ?overlay_render.Bounds = blk: {
-            if (state.active_floating) |idx| {
+            if (state.activeFloatingIndex()) |idx| {
                 if (idx < state.floats.items.len) {
                     const fp = state.floats.items[idx];
                     const has_shadow = if (fp.float_style) |s| s.shadow_color != null else false;
@@ -373,7 +373,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     }
 
     // Draw TAB realm notifications (center of screen, below MUX).
-    const current_tab = &state.tabs.items[state.active_tab];
+    const current_tab = &state.tabs.items[state.activeTabIndex()];
 
     // Draw PANE-level blocking popups (for ALL panes with active popups).
     // Check all splits in current tab.
@@ -410,7 +410,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Gather cursor info.
     var cursor = CursorInfo{};
 
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         const pane = state.floats.items[idx];
         const pos = pane.getCursorPos();
         cursor.x = pos.x;

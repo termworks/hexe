@@ -26,7 +26,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .pane_disown => {
-            const current_pane: ?*Pane = if (state.active_floating) |idx|
+            const current_pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
                 state.floats.items[idx]
             else
                 state.currentLayout().getFocusedPane();
@@ -57,7 +57,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .clipboard_copy => {
-            const pane: ?*Pane = if (state.active_floating) |idx|
+            const pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
                 state.floats.items[idx]
             else
                 state.currentLayout().getFocusedPane();
@@ -68,7 +68,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 return true;
             };
 
-            const range = state.mouse_selection.bufRangeForPane(state.active_tab, p) orelse {
+            const range = state.mouse_selection.bufRangeForPane(state.activeTabIndex(), p) orelse {
                 state.notifications.showFor("No text selected", 1200);
                 state.needs_render = true;
                 return true;
@@ -118,8 +118,8 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             var io_buf: [512]u8 = undefined;
             var writer = stdout.writer(&io_buf);
 
-            const body = if (state.tabs.items.len > 0 and state.active_tab < state.tabs.items.len)
-                state.tabName(state.active_tab)
+            const body = if (state.tabs.items.len > 0 and state.activeTabIndex() < state.tabs.items.len)
+                state.tabName(state.activeTabIndex())
             else
                 "hexe";
 
@@ -139,7 +139,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .sprite_toggle => {
             // Toggle sprite on the focused pane - use the pane's actual Pokemon name!
-            if (state.active_floating) |idx| {
+            if (state.activeFloatingIndex()) |idx| {
                 if (idx < state.floats.items.len) {
                     const pane = state.floats.items[idx];
                     if (pane.pokemon_initialized) {
@@ -220,7 +220,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .split_resize => |dir_kind| {
             // Only applies to split panes (floats should ignore).
-            if (state.active_floating != null) return true;
+            if (state.activeFloatingIndex() != null) return true;
             const dir: ?layout_mod.Layout.Direction = switch (dir_kind) {
                 .up => .up,
                 .down => .down,
@@ -259,7 +259,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .pane_close => {
             // Close float or split pane, but never the tab.
-            if (state.active_floating != null) {
+            if (state.activeFloatingIndex() != null) {
                 // Close the focused float.
                 if (cfg.confirm_on_close) {
                     state.pending_action = .close;
@@ -292,7 +292,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         .tab_close => {
             if (cfg.confirm_on_close) {
                 state.pending_action = .close;
-                const msg = if (state.active_floating != null) "Close float?" else "Close tab?";
+                const msg = if (state.activeFloatingIndex() != null) "Close float?" else "Close tab?";
                 state.popups.showConfirm(msg, .{}) catch {};
                 state.needs_render = true;
             } else {
@@ -327,11 +327,11 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 else => null,
             };
             if (dir == null) return false;
-            const fi = state.active_floating orelse return false;
+            const fi = state.activeFloatingIndex() orelse return false;
             if (fi >= state.floats.items.len) return false;
             const pane = state.floats.items[fi];
             if (pane.parent_tab) |parent| {
-                if (parent != state.active_tab) return false;
+                if (parent != state.activeTabIndex()) return false;
             }
 
             nudgeFloat(state, pane, dir.?, 1);

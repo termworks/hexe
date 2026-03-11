@@ -144,10 +144,10 @@ const isFloatRenderableOnTab = float_util.isFloatRenderableOnTab;
 
 fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
     // Floats are topmost - check active first, then others in reverse.
-    if (state.active_floating) |afi| {
+    if (state.activeFloatingIndex()) |afi| {
         if (afi < state.floats.items.len) {
             const fp = state.floats.items[afi];
-            if (isFloatRenderableOnTab(fp, state.active_tab)) {
+            if (isFloatRenderableOnTab(fp, state.activeTabIndex())) {
                 if (x >= fp.border_x and x < fp.border_x + fp.border_w and y >= fp.border_y and y < fp.border_y + fp.border_h) {
                     return .{ .kind = .float, .pane = fp, .float_index = afi };
                 }
@@ -159,7 +159,7 @@ fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
     while (fi > 0) {
         fi -= 1;
         const fp = state.floats.items[fi];
-        if (!isFloatRenderableOnTab(fp, state.active_tab)) continue;
+        if (!isFloatRenderableOnTab(fp, state.activeTabIndex())) continue;
         if (x >= fp.border_x and x < fp.border_x + fp.border_w and y >= fp.border_y and y < fp.border_y + fp.border_h) {
             return .{ .kind = .float, .pane = fp, .float_index = fi };
         }
@@ -412,7 +412,7 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
 }
 
 fn copySelectionRange(state: *State, pane: *Pane, range: anytype) bool {
-    state.mouse_selection.setRange(state.active_tab, pane.uuid, pane, range);
+    state.mouse_selection.setRange(state.activeTabIndex(), pane.uuid, pane, range);
     const bytes = mouse_selection.extractText(state.allocator, pane, range) catch {
         state.notifications.showFor("Copy failed", 1200);
         state.needs_render = true;
@@ -435,7 +435,7 @@ fn copySelectionRange(state: *State, pane: *Pane, range: anytype) bool {
 }
 
 fn forwardToFocusedAltPane(state: *State, ev: MouseEvent) bool {
-    if (state.active_floating) |afi| {
+    if (state.activeFloatingIndex()) |afi| {
         if (afi < state.floats.items.len and state.floats.items[afi].vt.inAltScreen()) {
             forwardMouseToPane(state.floats.items[afi], ev);
             return true;
@@ -591,7 +591,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             if (ev.is_release) {
                 state.mouse_drag = .none;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
-                    state.syncSessionFloat(pane, state.active_floating != null and state.floats.items[state.active_floating.?] == pane);
+                    state.syncSessionFloat(pane, state.activeFloatingIndex() != null and state.floats.items[state.activeFloatingIndex().?] == pane);
                 }
                 return true;
             }
@@ -608,7 +608,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.overlays.hideResizeInfo();
                 state.needs_render = true;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
-                    state.syncSessionFloat(pane, state.active_floating != null and state.floats.items[state.active_floating.?] == pane);
+                    state.syncSessionFloat(pane, state.activeFloatingIndex() != null and state.floats.items[state.activeFloatingIndex().?] == pane);
                 }
                 return true;
             }
@@ -625,7 +625,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
     if (state.mouse_selection.active) {
         if (state.mouse_selection.pane_uuid) |uuid| {
             if (state.mouse_selection.tab) |tab_idx| {
-                if (tab_idx == state.active_tab) {
+                if (tab_idx == state.activeTabIndex()) {
                     if (state.findPaneByUuid(uuid)) |sel_pane| {
                         const local = toLocalClamped(sel_pane, ev.x, ev.y);
 
@@ -638,7 +638,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                         if (ev.is_release) {
                             state.mouse_selection.update(sel_pane, local.x, local.y);
                             state.mouse_selection.finish();
-                            if (state.mouse_selection.bufRangeForPane(state.active_tab, sel_pane)) |range| {
+                            if (state.mouse_selection.bufRangeForPane(state.activeTabIndex(), sel_pane)) |range| {
                                 const bytes = mouse_selection.extractText(state.allocator, sel_pane, range) catch {
                                     state.notifications.showFor("Copy failed", 1200);
                                     state.needs_render = true;
@@ -671,8 +671,8 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
 
     // Status bar tab switching (only on press).
     if (!ev.is_release and state.config.tabs.status.enabled and ev.y == state.term_height - 1) {
-        if (statusbar.hitTestTab(state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.active_tab, state.sessionName(), ev.x, ev.y)) |ti| {
-            if (ti != state.active_tab) {
+        if (statusbar.hitTestTab(state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.activeTabIndex(), state.sessionName(), ev.x, ev.y)) |ti| {
+            if (ti != state.activeTabIndex()) {
                 @import("tab_switch.zig").switchToTab(state, ti);
             }
             return true;
@@ -685,7 +685,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             state.term_width,
             state.term_height,
             state.tabs,
-            state.active_tab,
+            state.activeTabIndex(),
             state.sessionName(),
             ev.x,
             ev.y,
@@ -720,7 +720,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.needs_render = true;
             }
         } else {
-            if (state.active_floating) |afi| {
+            if (state.activeFloatingIndex()) |afi| {
                 if (afi < state.floats.items.len) {
                     forwardMouseToPane(state.floats.items[afi], ev);
                 }
@@ -834,7 +834,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                     }
                 }
 
-                state.mouse_selection.begin(state.active_tab, t.pane.uuid, t.pane, local.x, local.y);
+                state.mouse_selection.begin(state.activeTabIndex(), t.pane.uuid, t.pane, local.x, local.y);
                 state.needs_render = true;
             } else if (forward_to_app) {
                 forwardMouseToPane(t.pane, ev);

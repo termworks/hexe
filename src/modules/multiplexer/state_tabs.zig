@@ -17,7 +17,7 @@ const lua_events = @import("lua_events.zig");
 
 /// Get the current tab's layout.
 pub fn currentLayout(self: anytype) *Layout {
-    return &self.tabs.items[self.active_tab].layout;
+    return &self.tabs.items[self.activeTabIndex()].layout;
 }
 
 pub fn findPaneByUuid(self: anytype, uuid: [32]u8) ?*Pane {
@@ -64,7 +64,7 @@ pub fn createTab(self: anytype) !void {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (self.tabs.items.len > 0) {
         // Check active float first, then split pane
-        const focused_pane: ?*Pane = if (self.active_floating) |idx| blk: {
+        const focused_pane: ?*Pane = if (self.activeFloatingIndex()) |idx| blk: {
             if (idx < self.floats.items.len) break :blk self.floats.items[idx];
             break :blk null;
         } else self.currentLayout().getFocusedPane();
@@ -117,7 +117,7 @@ pub fn createTab(self: anytype) !void {
 /// Close the current tab.
 pub fn closeCurrentTab(self: anytype) bool {
     if (self.tabs.items.len <= 1) return false;
-    const closing_tab = self.active_tab;
+    const closing_tab = self.activeTabIndex();
     const closing_uuid = self.tabUuid(closing_tab) orelse return false;
 
     // Handle tab-bound floats belonging to this tab.
@@ -152,10 +152,10 @@ pub fn closeCurrentTab(self: anytype) bool {
         i += 1;
     }
 
-    var tab = self.tabs.orderedRemove(self.active_tab);
+    var tab = self.tabs.orderedRemove(self.activeTabIndex());
     tab.deinit();
-    self.removeTabMeta(self.active_tab);
-    self.removeTabFocusMemory(self.active_tab);
+    self.removeTabMeta(self.activeTabIndex());
+    self.removeTabFocusMemory(self.activeTabIndex());
     if (self.activeTabIndex() >= self.tabs.items.len) {
         self.setActiveTabIndex(self.tabs.items.len - 1);
     } else {
@@ -261,7 +261,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
 
     // For global floats (special or pwd), set per-tab visibility.
     if (float_def.attributes.global or float_def.attributes.per_cwd) {
-        pane.setVisibleOnTab(self.active_tab, true);
+        pane.setVisibleOnTab(self.activeTabIndex(), true);
     } else {
         pane.visible = true;
     }
@@ -288,7 +288,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
 
     // For tab-bound floats, set parent tab.
     if (!float_def.attributes.global and !float_def.attributes.per_cwd) {
-        pane.parent_tab = self.active_tab;
+        pane.parent_tab = self.activeTabIndex();
     }
 
     // Store style reference.
@@ -363,7 +363,7 @@ pub fn adoptOrphanedPane(self: anytype) bool {
     const vt_fd = self.frontend_client.getVtFd() orelse return false;
 
     // Get the current focused pane and replace it.
-    if (self.active_floating) |idx| {
+    if (self.activeFloatingIndex()) |idx| {
         const old_pane = self.floats.items[idx];
         old_pane.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch return false;
     } else if (self.currentLayout().getFocusedPane()) |pane| {

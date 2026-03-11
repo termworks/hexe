@@ -287,7 +287,7 @@ fn isValidEnvKey(key: []const u8) bool {
 }
 
 fn getCurrentFocusedPane(state: *State) ?*Pane {
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         if (idx < state.floats.items.len) return state.floats.items[idx];
     }
     return state.currentLayout().getFocusedPane();
@@ -325,7 +325,7 @@ pub fn performDetach(state: *State) void {
 
 /// Perform the actual disown action - orphan pane in ses and spawn new shell in same place.
 pub fn performDisown(state: *State) void {
-    const pane: ?*Pane = if (state.active_floating) |idx|
+    const pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
         state.floats.items[idx]
     else
         state.currentLayout().getFocusedPane();
@@ -370,7 +370,7 @@ pub fn performDisown(state: *State) void {
             defer if (layout_path) |path| state.allocator.free(path);
             state.frontend_client.updatePaneAux(
                 p.uuid,
-                state.active_tab,
+                state.activeTabIndex(),
                 p.floating,
                 p.focused,
                 pane_type,
@@ -397,7 +397,7 @@ pub fn performDisown(state: *State) void {
 
 /// Perform the actual close action - close current float or tab.
 pub fn performClose(state: *State) void {
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         const old_uuid = state.getCurrentFocusedUuid();
         const pane = state.floats.orderedRemove(idx);
         mux.debugLogUuid(&pane.uuid, "performClose: float pane_id={?d} vt_fd={?d}", .{
@@ -494,7 +494,7 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
     };
 
     // Get the current focused pane.
-    const current_pane: ?*Pane = if (state.active_floating) |idx|
+    const current_pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
         state.floats.items[idx]
     else
         state.currentLayout().getFocusedPane();
@@ -522,7 +522,7 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
         // Sync the new pane info.
         state.syncPaneAux(pane, null);
         if (pane.floating) {
-            state.syncSessionFloat(pane, state.active_floating != null);
+            state.syncSessionFloat(pane, state.activeFloatingIndex() != null);
         } else {
             state.syncActiveTabLayout();
         }
@@ -567,7 +567,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             // per_cwd/global floats are shared across tabs.
             if (!float_def.attributes.per_cwd and !float_def.attributes.global) {
                 if (pane.parent_tab) |parent| {
-                    if (parent != state.active_tab) {
+                    if (parent != state.activeTabIndex()) {
                         existing_idx += 1;
                         continue;
                     }
@@ -592,8 +592,8 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
             const missing_in_ses = !paneExistsInSes(state, pane.uuid);
             if (!pane.isAlive() or missing_in_ses) {
-                const was_visible_on_tab = pane.isVisibleOnTab(state.active_tab);
-                const was_active = if (state.active_floating) |af| af == existing_idx else false;
+                const was_visible_on_tab = pane.isVisibleOnTab(state.activeTabIndex());
+                const was_active = if (state.activeFloatingIndex()) |af| af == existing_idx else false;
                 const old_uuid = state.getCurrentFocusedUuid();
                 if (was_active) {
                     state.syncPaneUnfocus(pane);
@@ -634,8 +634,8 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
             // Toggle visibility (per-tab for global/per_cwd floats).
             const old_uuid = state.getCurrentFocusedUuid();
-            pane.toggleVisibleOnTab(state.active_tab);
-            if (pane.isVisibleOnTab(state.active_tab)) {
+            pane.toggleVisibleOnTab(state.activeTabIndex());
+            if (pane.isVisibleOnTab(state.activeTabIndex())) {
                 // Unfocus current pane (tiled or another float).
                 if (state.activeFloatingIndex()) |afi| {
                     if (afi < state.floats.items.len) {
@@ -660,7 +660,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                     for (to_hide.items) |target_uuid| {
                         for (state.floats.items) |candidate| {
                             if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
-                                hideOrDestroyFloat(state, candidate, state.active_tab);
+                                hideOrDestroyFloat(state, candidate, state.activeTabIndex());
                                 break;
                             }
                         }
@@ -679,7 +679,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
             }
 
-            state.syncSessionFloat(pane, state.activeFloatingIndex() == existing_idx and pane.isVisibleOnTab(state.active_tab));
+            state.syncSessionFloat(pane, state.activeFloatingIndex() == existing_idx and pane.isVisibleOnTab(state.activeTabIndex()));
 
             state.renderer.invalidate();
             state.force_full_render = true;
@@ -719,7 +719,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
         for (to_hide.items) |target_uuid| {
             for (state.floats.items) |candidate| {
                 if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
-                    hideOrDestroyFloat(state, candidate, state.active_tab);
+                    hideOrDestroyFloat(state, candidate, state.activeTabIndex());
                     break;
                 }
             }
@@ -740,7 +740,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
         for (to_hide.items) |target_uuid| {
             for (state.floats.items) |candidate| {
                 if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
-                    hideOrDestroyFloat(state, candidate, state.active_tab);
+                    hideOrDestroyFloat(state, candidate, state.activeTabIndex());
                     break;
                 }
             }
@@ -850,7 +850,7 @@ pub fn createAdhocFloatWithSize(
     pane.float_pad_x = @intCast(pad_x_cfg);
     pane.float_pad_y = @intCast(pad_y_cfg);
 
-    pane.parent_tab = state.active_tab;
+    pane.parent_tab = state.activeTabIndex();
     pane.sticky = false;
     pane.dim_background = size.dim_background;
     if (size.exit_key) |ek| {
@@ -963,7 +963,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     // For global floats (special or pwd), set per-tab visibility.
     // For tab-bound floats, use simple visible field.
     if (float_def.attributes.global or float_def.attributes.per_cwd) {
-        pane.setVisibleOnTab(state.active_tab, true);
+        pane.setVisibleOnTab(state.activeTabIndex(), true);
     } else {
         pane.visible = true;
     }
@@ -991,7 +991,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
 
     // For tab-bound floats, set parent tab.
     if (!float_def.attributes.global and !float_def.attributes.per_cwd) {
-        pane.parent_tab = state.active_tab;
+        pane.parent_tab = state.activeTabIndex();
     }
 
     // For sticky floats, set sticky.

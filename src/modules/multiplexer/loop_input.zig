@@ -132,7 +132,7 @@ fn stashFromIndex(state: *State, inp: []const u8, start: usize) []const u8 {
 }
 
 fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
-    const pane: ?*Pane = if (state.active_floating) |idx|
+    const pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
         state.floats.items[idx]
     else
         state.currentLayout().getFocusedPane();
@@ -265,13 +265,13 @@ fn freeParsedEventPayload(state: *State, parsed_event: ?vaxis.Event) void {
 }
 
 fn resolveFocusedPaneForInput(state: *State) ?*Pane {
-    if (state.active_floating) |idx| {
+    if (state.activeFloatingIndex()) |idx| {
         const fpane = state.floats.items[idx];
         const can_interact = if (fpane.parent_tab) |parent|
-            parent == state.active_tab
+            parent == state.activeTabIndex()
         else
             true;
-        if (fpane.isVisibleOnTab(state.active_tab) and can_interact) return fpane;
+        if (fpane.isVisibleOnTab(state.activeTabIndex()) and can_interact) return fpane;
     }
     return state.currentLayout().getFocusedPane();
 }
@@ -463,7 +463,7 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
 }
 
 fn handleTabLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
-    const current_tab = &state.tabs.items[state.active_tab];
+    const current_tab = &state.tabs.items[state.activeTabIndex()];
     if (!current_tab.popups.isBlocked()) return false;
     defer freeParsedEventPayload(state, parsed_event);
 
@@ -1191,11 +1191,11 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
     var i: usize = 0;
     while (i < inp.len) {
         if (!state.csi_reply_in_progress and state.csi_reply_targets.items.len == 0) {
-            if (state.active_floating) |idx| {
+            if (state.activeFloatingIndex()) |idx| {
                 if (idx < state.floats.items.len) {
                     const fp = state.floats.items[idx];
-                    const can_interact = if (fp.parent_tab) |parent| parent == state.active_tab else true;
-                    if (fp.isVisibleOnTab(state.active_tab) and can_interact) {
+                    const can_interact = if (fp.parent_tab) |parent| parent == state.activeTabIndex() else true;
+                    if (fp.isVisibleOnTab(state.activeTabIndex()) and can_interact) {
                         const n = parseLikelyTerminalCsiReplyLen(inp, i);
                         if (n > 0) {
                             fp.write(inp[i .. i + n]) catch {};
