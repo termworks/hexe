@@ -224,7 +224,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Set custom session name if provided.
     if (terminal_args.name) |custom_name| {
-        _ = state.setSessionName(custom_name);
+        _ = state.runtime.setSessionName(custom_name);
     }
 
     // Keep the legacy env var for shell integrations.
@@ -253,7 +253,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
     // Export session ID so child panes can identify their parent terminal session.
     // Must happen BEFORE createTab/reattach which fork pane shells.
     var session_id_z: [33]u8 = undefined;
-    const session_uuid = state.sessionUuid();
+    const session_uuid = state.runtime.sessionUuid();
     @memcpy(session_id_z[0..32], &session_uuid);
     session_id_z[32] = 0;
     _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
@@ -265,7 +265,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
             debugLog("attach: reattachSession succeeded", .{});
             state.notifications.show("Session reattached");
             // Reattach may change state.uuid — update env for subsequent panes.
-            const reattached_uuid = state.sessionUuid();
+            const reattached_uuid = state.runtime.sessionUuid();
             @memcpy(session_id_z[0..32], &reattached_uuid);
             _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
         } else if (state.attachOrphanedPane(uuid_prefix)) {
@@ -298,7 +298,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
         // Prefer layout-config name when provided.
         if (config.name) |loaded_name| {
-            if (state.setSessionName(loaded_name)) {
+            if (state.runtime.setSessionName(loaded_name)) {
                 if (state.runtime.syncSessionIdentity() catch null) |change| {
                     var owned_change = change;
                     defer owned_change.deinit(allocator);

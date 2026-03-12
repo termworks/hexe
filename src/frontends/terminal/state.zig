@@ -569,18 +569,6 @@ pub const State = struct {
         return state_tabs.currentLayout(self);
     }
 
-    pub fn sessionUuid(self: *const State) [32]u8 {
-        return self.runtime.projection.sessionUuid();
-    }
-
-    pub fn sessionName(self: *const State) []const u8 {
-        return self.runtime.projection.sessionName();
-    }
-
-    pub fn sessionTabCounter(self: *const State) usize {
-        return self.runtime.projection.tab_counter;
-    }
-
     pub fn isDetachMode(self: *const State) bool {
         return self.runtime.isDetachMode();
     }
@@ -600,24 +588,6 @@ pub const State = struct {
     pub fn setActiveTabIndex(self: *State, idx: usize) void {
         const clamped = if (self.view.tabs.items.len == 0) 0 else @min(idx, self.view.tabs.items.len - 1);
         self.runtime.projection.setActiveTab(clamped);
-    }
-
-    pub fn focusedPaneUuid(self: *const State) ?[32]u8 {
-        return self.runtime.projection.focusedPaneUuid();
-    }
-
-    pub fn setFocusedPaneUuid(self: *State, uuid: ?[32]u8) void {
-        self.runtime.projection.setFocusedPaneUuid(uuid);
-    }
-
-    pub fn setSessionIdentity(self: *State, uuid: [32]u8, session_name: []const u8) bool {
-        self.runtime.projection.setSessionIdentity(uuid, session_name) catch return false;
-        self.runtime.syncClientSessionIdentity();
-        return true;
-    }
-
-    pub fn setSessionName(self: *State, session_name: []const u8) bool {
-        return self.setSessionIdentity(self.sessionUuid(), session_name);
     }
 
     pub fn activeFloatingIndex(self: *State) ?usize {
@@ -881,7 +851,7 @@ pub const State = struct {
     }
 
     pub fn paneIsFocused(self: *const State, pane: *const Pane) bool {
-        if (self.focusedPaneUuid()) |uuid| {
+        if (self.runtime.focusedPaneUuid()) |uuid| {
             return std.mem.eql(u8, &uuid, &pane.uuid);
         }
         return pane.focused;

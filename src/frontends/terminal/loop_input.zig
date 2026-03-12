@@ -331,7 +331,7 @@ fn replaceFromLocalLayout(state: *State) void {
     defer cfg.deinit(state.allocator);
 
     if (cfg.name) |desired_name| {
-        if (state.setSessionName(desired_name)) {
+        if (state.runtime.setSessionName(desired_name)) {
             if (state.runtime.syncSessionIdentity() catch null) |change| {
                 var owned_change = change;
                 defer owned_change.deinit(state.allocator);

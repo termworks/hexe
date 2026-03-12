@@ -145,6 +145,32 @@ pub const FrontendRuntime = struct {
         try self.client.connect();
     }
 
+    pub fn sessionUuid(self: *const FrontendRuntime) [32]u8 {
+        return self.projection.sessionUuid();
+    }
+
+    pub fn sessionName(self: *const FrontendRuntime) []const u8 {
+        return self.projection.sessionName();
+    }
+
+    pub fn setSessionIdentity(self: *FrontendRuntime, uuid: [32]u8, session_name: []const u8) bool {
+        self.projection.setSessionIdentity(uuid, session_name) catch return false;
+        self.syncClientSessionIdentity();
+        return true;
+    }
+
+    pub fn setSessionName(self: *FrontendRuntime, session_name: []const u8) bool {
+        return self.setSessionIdentity(self.sessionUuid(), session_name);
+    }
+
+    pub fn focusedPaneUuid(self: *const FrontendRuntime) ?[32]u8 {
+        return self.projection.focusedPaneUuid();
+    }
+
+    pub fn setFocusedPaneUuid(self: *FrontendRuntime, uuid: ?[32]u8) void {
+        self.projection.setFocusedPaneUuid(uuid);
+    }
+
     pub fn attachFrontend(self: *FrontendRuntime) !StartupAttachResult {
         try self.connect();
         return .{

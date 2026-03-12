@@ -79,7 +79,7 @@ fn clearStateForRestore(self: anytype) void {
 
     self.setActiveTabIndex(0);
     self.setActiveFloatingIndex(null);
-    self.setFocusedPaneUuid(null);
+    self.runtime.setFocusedPaneUuid(null);
     self.runtime.clearTabFocusMemory();
 }
 
@@ -117,7 +117,7 @@ fn clearStatePreservingPanes(self: anytype) void {
     self.view.floats.clearRetainingCapacity();
     self.setActiveTabIndex(0);
     self.setActiveFloatingIndex(null);
-    self.setFocusedPaneUuid(null);
+    self.runtime.setFocusedPaneUuid(null);
     self.runtime.clearTabFocusMemory();
 }
 
@@ -553,7 +553,7 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
         self.setActiveTabIndex(0);
     }
     self.setActiveFloatingUuid(snapshot.active_float_uuid);
-    self.setFocusedPaneUuid(snapshot.focused_pane_uuid);
+    self.runtime.setFocusedPaneUuid(snapshot.focused_pane_uuid);
 
     if (self.activeFloatingIndex()) |idx| {
         self.rememberFloatingFocus(self.view.floats.items[idx]);
@@ -830,7 +830,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.rememberFloatingFocus(self.view.floats.items[idx]);
     }
 
-    if (!self.setSessionIdentity(snapshot.uuid, restored_name)) return false;
+    if (!self.runtime.setSessionIdentity(snapshot.uuid, restored_name)) return false;
 
     self.renderer.invalidate();
     self.force_full_render = true;
@@ -863,8 +863,8 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Re-register with restored UUID/name before requesting backlog replay.
     // This releases the attach session lock and stabilizes client identity first.
-    const session_uuid = self.sessionUuid();
-    terminal_main.debugLog("reattachSession: finalizing attach uuid={s} name={s}", .{ session_uuid[0..8], self.sessionName() });
+    const session_uuid = self.runtime.sessionUuid();
+    terminal_main.debugLog("reattachSession: finalizing attach uuid={s} name={s}", .{ session_uuid[0..8], self.runtime.sessionName() });
     if (self.runtime.completeReattach()) |change_opt| {
         if (change_opt) |change| {
             var owned_change = change;

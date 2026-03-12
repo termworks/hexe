@@ -468,7 +468,7 @@ Done when:
 
 1. Done: Delete dead snapshot sync code.
 2. Done: Delete dead layout-tree sync code used by normal UI mutations.
-3. Delete no-longer-needed terminal-side session caches.
+3. Done: Delete no-longer-needed terminal-side session caches.
 4. Done: Rename leftovers so the code reads honestly.
 5. Update docs after the code is actually finished.
 

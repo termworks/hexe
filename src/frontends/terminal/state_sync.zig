@@ -162,7 +162,7 @@ pub fn syncSessionSplitRatio(
 }
 
 pub fn getCurrentFocusedUuid(self: anytype) ?[32]u8 {
-    if (self.focusedPaneUuid()) |uuid| {
+    if (self.runtime.focusedPaneUuid()) |uuid| {
         if (self.findPaneByUuid(uuid) != null) return uuid;
     }
     if (self.activeFloatingIndex()) |idx| {
@@ -190,7 +190,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
             rememberSplitFocus(self, pane);
             self.setActiveFloatingIndex(null);
         }
-        self.setFocusedPaneUuid(pane.uuid);
+        self.runtime.setFocusedPaneUuid(pane.uuid);
         self.unfocusAllPanes();
         pane.focused = true;
     }
@@ -306,7 +306,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
         rememberSplitFocus(self, pane);
         self.setActiveFloatingIndex(null);
     }
-    self.setFocusedPaneUuid(pane.uuid);
+    self.runtime.setFocusedPaneUuid(pane.uuid);
 
     if (!self.runtime.isConnected()) return;
     if (pane.uuid[0] == 0) return;
@@ -363,9 +363,9 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
 }
 
 pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
-    if (self.focusedPaneUuid()) |uuid| {
+    if (self.runtime.focusedPaneUuid()) |uuid| {
         if (std.mem.eql(u8, &uuid, &pane.uuid)) {
-            self.setFocusedPaneUuid(null);
+            self.runtime.setFocusedPaneUuid(null);
         }
     }
     if (self.paneIsFloating(pane)) {

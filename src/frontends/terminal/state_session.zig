@@ -74,7 +74,7 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
     }
     self.view.floats.clearRetainingCapacity();
     self.setActiveFloatingIndex(null);
-    self.setFocusedPaneUuid(null);
+    self.runtime.setFocusedPaneUuid(null);
 
     // Remove all tabs.
     for (self.view.tabs.items) |*tab| {
@@ -84,7 +84,7 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
     self.runtime.clearTabMeta();
     self.runtime.clearTabFocusMemory();
     self.setActiveTabIndex(0);
-    self.setFocusedPaneUuid(null);
+    self.runtime.setFocusedPaneUuid(null);
 
     try applySessionConfig(self, config, tab_filter);
 }
@@ -93,7 +93,7 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     // Generate tab name
     const name_owned = self.allocator.dupe(u8, tab_config.name) catch blk: {
         const tab_counter = self.runtime.takeNextTabCounter();
-        break :blk try core.ipc.generateTabName(self.allocator, self.sessionName(), tab_counter);
+        break :blk try core.ipc.generateTabName(self.allocator, self.runtime.sessionName(), tab_counter);
     };
 
     const tab_uuid = core.ipc.generateUuid();

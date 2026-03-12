@@ -296,7 +296,7 @@ fn getCurrentFocusedPane(state: *State) ?*Pane {
 
 /// Perform the actual detach action.
 pub fn performDetach(state: *State) void {
-    const session_uuid = state.sessionUuid();
+    const session_uuid = state.runtime.sessionUuid();
     state.runtime.detachCurrentSession() catch {
         std.debug.print("\nDetach failed - panes orphaned\n", .{});
         state.running = false;

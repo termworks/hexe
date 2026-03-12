@@ -87,7 +87,7 @@ pub fn createTab(self: anytype) !void {
     if (tab_counter == 999) {
         terminal_main.debugLog("VALIDATION: tab_counter reached limit, wrapping to 0", .{});
     }
-    const name_owned = try core.ipc.generateTabName(self.allocator, self.sessionName(), tab_counter);
+    const name_owned = try core.ipc.generateTabName(self.allocator, self.runtime.sessionName(), tab_counter);
     const tab_uuid = core.ipc.generateUuid();
     var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
     // Set ses client if connected (for new tabs after startup).
