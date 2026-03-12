@@ -616,6 +616,22 @@ pub const SesClient = struct {
                     }
                     continue;
                 }
+                if (mt == .session_state) {
+                    if (h.payload_len > 0) {
+                        const json = self.allocator.alloc(u8, h.payload_len) catch {
+                            self.skipPayload(fd, h.payload_len);
+                            continue;
+                        };
+                        errdefer self.allocator.free(json);
+                        wire.readExact(fd, json) catch {
+                            self.allocator.free(json);
+                            continue;
+                        };
+                        self.queuePendingSessionState(json);
+                        self.allocator.free(json);
+                    }
+                    continue;
+                }
                 break :blk h;
             }
         };
@@ -761,18 +777,7 @@ pub const SesClient = struct {
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch return null;
 
-        // Read response, skipping fire-and-forget acks (but NOT .pane_info).
-        const hdr = blk: {
-            while (true) {
-                const h = wire.readControlHeader(fd) catch return null;
-                const mt: wire.MsgType = @enumFromInt(h.msg_type);
-                if (mt == .ok or mt == .get_pane_cwd) {
-                    self.skipPayload(fd, h.payload_len);
-                    continue;
-                }
-                break :blk h;
-            }
-        };
+        const hdr = self.readPaneInfoResponse(fd) catch return null;
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type != .pane_info or hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
             self.skipPayload(fd, hdr.payload_len);

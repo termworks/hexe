@@ -1136,6 +1136,7 @@ pub const Server = struct {
             self.sendBinaryError(fd, "session_add_tab_failed");
             return;
         };
+        self.pushClientSessionSnapshot(client_id);
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
 
@@ -1151,6 +1152,7 @@ pub const Server = struct {
             msg.tab_uuid,
             if (msg.has_active_tab != 0) msg.active_tab else null,
         );
+        self.pushClientSessionSnapshot(client_id);
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
 
@@ -1182,6 +1184,7 @@ pub const Server = struct {
             self.sendBinaryError(fd, "session_sync_float_failed");
             return;
         };
+        self.pushClientSessionSnapshot(client_id);
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
 
@@ -1193,6 +1196,7 @@ pub const Server = struct {
         const msg = wire.readStruct(wire.SessionRemoveFloat, fd) catch return;
         const client_id = self.findClientForCtlFd(fd) orelse return;
         self.ses_state.removeClientSessionFloat(client_id, msg.pane_uuid);
+        self.pushClientSessionSnapshot(client_id);
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
 
@@ -1222,6 +1226,7 @@ pub const Server = struct {
             self.sendBinaryError(fd, "session_sync_tab_layout_failed");
             return;
         };
+        self.pushClientSessionSnapshot(client_id);
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
 

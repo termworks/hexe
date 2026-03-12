@@ -395,10 +395,11 @@ Done when:
 1. Done: Delete `buildSessionSnapshot()` from the terminal frontend.
 2. Done: Remove `syncStateToSes()` as a source of truth.
 3. Remove terminal-authored normal-path layout/tree sync.
-4. Add missing semantic commands for every session mutation the terminal UI can
-   trigger.
-5. Make SES mutate its session graph from those commands only.
-6. After each accepted mutation, SES publishes the new authoritative state.
+4. Done: Add semantic commands for normal tab/float/layout/focus mutations the
+   terminal UI can trigger.
+5. Done: Make SES mutate its session graph from those commands instead of
+   frontend-authored whole-session state.
+6. Done: After each accepted mutation, SES publishes the new authoritative state.
 
 Done when:
 
