@@ -27,7 +27,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .pane_disown => {
             const current_pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
-                state.view.floats.items[idx]
+                state.view.float_views.items[idx]
             else
                 state.currentLayout().getFocusedPane();
 
@@ -58,7 +58,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .clipboard_copy => {
             const pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
-                state.view.floats.items[idx]
+                state.view.float_views.items[idx]
             else
                 state.currentLayout().getFocusedPane();
 
@@ -118,7 +118,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             var io_buf: [512]u8 = undefined;
             var writer = stdout.writer(&io_buf);
 
-            const body = if (state.view.tabs.items.len > 0 and state.activeTabIndex() < state.view.tabs.items.len)
+            const body = if (state.view.tab_views.items.len > 0 and state.activeTabIndex() < state.view.tab_views.items.len)
                 (state.runtime.tabName(state.activeTabIndex()) orelse "tab")
             else
                 "hexe";
@@ -140,8 +140,8 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         .sprite_toggle => {
             // Toggle sprite on the focused pane - use the pane's actual Pokemon name!
             if (state.activeFloatingIndex()) |idx| {
-                if (idx < state.view.floats.items.len) {
-                    const pane = state.view.floats.items[idx];
+                if (idx < state.view.float_views.items.len) {
+                    const pane = state.view.float_views.items[idx];
                     if (pane.pokemon_initialized) {
                         if (pane.pokemon_state.show_sprite) {
                             pane.pokemon_state.hide();
@@ -332,8 +332,8 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             };
             if (dir == null) return false;
             const fi = state.activeFloatingIndex() orelse return false;
-            if (fi >= state.view.floats.items.len) return false;
-            const pane = state.view.floats.items[fi];
+            if (fi >= state.view.float_views.items.len) return false;
+            const pane = state.view.float_views.items[fi];
             if (state.paneParentTab(pane)) |parent| {
                 if (parent != state.activeTabIndex()) return false;
             }

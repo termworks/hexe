@@ -6,7 +6,7 @@ const pop = @import("pop");
 
 const state_types = @import("state_types.zig");
 pub const PendingAction = state_types.PendingAction;
-pub const Tab = state_types.Tab;
+pub const TabView = state_types.TabView;
 pub const TerminalViewState = state_types.TerminalViewState;
 pub const PendingFloatRequest = state_types.PendingFloatRequest;
 pub const CursorSnapshot = state_types.CursorSnapshot;
@@ -582,17 +582,17 @@ pub const State = struct {
     }
 
     pub fn activeTabIndex(self: *const State) usize {
-        return self.runtime.projection.activeTab(self.view.tabs.items.len);
+        return self.runtime.projection.activeTab(self.view.tab_views.items.len);
     }
 
     pub fn setActiveTabIndex(self: *State, idx: usize) void {
-        const clamped = if (self.view.tabs.items.len == 0) 0 else @min(idx, self.view.tabs.items.len - 1);
+        const clamped = if (self.view.tab_views.items.len == 0) 0 else @min(idx, self.view.tab_views.items.len - 1);
         self.runtime.projection.setActiveTab(clamped);
     }
 
     pub fn activeFloatingIndex(self: *State) ?usize {
         const uuid = self.runtime.projection.activeFloatUuid() orelse return null;
-        for (self.view.floats.items, 0..) |pane, idx| {
+        for (self.view.float_views.items, 0..) |pane, idx| {
             if (std.mem.eql(u8, &pane.uuid, &uuid)) return idx;
         }
         self.runtime.projection.setActiveFloatUuid(null);
@@ -601,8 +601,8 @@ pub const State = struct {
 
     pub fn setActiveFloatingIndex(self: *State, idx: ?usize) void {
         if (idx) |value| {
-            if (value < self.view.floats.items.len) {
-                self.runtime.projection.setActiveFloatUuid(self.view.floats.items[value].uuid);
+            if (value < self.view.float_views.items.len) {
+                self.runtime.projection.setActiveFloatUuid(self.view.float_views.items[value].uuid);
                 return;
             }
         }
@@ -780,7 +780,7 @@ pub const State = struct {
         self.layout_width = cols;
         self.layout_height = rows - status_h;
 
-        for (self.view.tabs.items) |*tab| {
+        for (self.view.tab_views.items) |*tab| {
             tab.layout.resize(self.layout_width, self.layout_height);
         }
 

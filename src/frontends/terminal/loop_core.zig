@@ -374,9 +374,9 @@ fn stdinCallback(
 }
 
 fn cleanupDeadFloat(state: *State, index: usize) void {
-    if (index >= state.view.floats.items.len) return;
+    if (index >= state.view.float_views.items.len) return;
 
-    const pane = state.view.floats.items[index];
+    const pane = state.view.float_views.items[index];
     const was_active = if (state.activeFloatingIndex()) |af| af == index else false;
     const exit_code = state.paneExitCode(pane.uuid);
 
@@ -414,7 +414,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
         return;
     }
 
-    _ = state.view.floats.orderedRemove(index);
+    _ = state.view.float_views.orderedRemove(index);
 
     terminal_main.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
 
@@ -495,7 +495,7 @@ pub fn runMainLoop(state: *State) !void {
             while (split_it.next()) |pane| {
                 pane.*.vt.freeCachedKittyImages(&state.renderer.vx, &tty_restore.interface);
             }
-            for (state.view.floats.items) |pane| {
+            for (state.view.float_views.items) |pane| {
                 pane.vt.freeCachedKittyImages(&state.renderer.vx, &tty_restore.interface);
             }
         }
@@ -570,11 +570,11 @@ pub fn runMainLoop(state: *State) !void {
         // Proactively check for dead floats before polling.
         // Iterate in reverse to avoid O(n²) behavior from orderedRemove shifts.
         {
-            if (state.view.floats.items.len > 0) {
-                var fi: usize = state.view.floats.items.len;
+            if (state.view.float_views.items.len > 0) {
+                var fi: usize = state.view.float_views.items.len;
                 while (fi > 0) {
                     fi -= 1;
-                    if (!state.view.floats.items[fi].isAlive()) {
+                    if (!state.view.float_views.items[fi].isAlive()) {
                         cleanupDeadFloat(state, fi);
                         // When iterating in reverse, removals don't affect unprocessed indices.
                     }
@@ -582,9 +582,9 @@ pub fn runMainLoop(state: *State) !void {
             }
             // Ensure active_floating is valid.
             if (state.activeFloatingIndex()) |af| {
-                if (af >= state.view.floats.items.len) {
-                    state.setActiveFloatingIndex(if (state.view.floats.items.len > 0)
-                        state.view.floats.items.len - 1
+                if (af >= state.view.float_views.items.len) {
+                    state.setActiveFloatingIndex(if (state.view.float_views.items.len > 0)
+                        state.view.float_views.items.len - 1
                     else
                         null);
                 }
@@ -604,8 +604,8 @@ pub fn runMainLoop(state: *State) !void {
 
             // Prefer direct fg_process; fallback to cached process name.
             const fg = if (state.activeFloatingIndex()) |idx| blk3: {
-                if (idx < state.view.floats.items.len) {
-                    if (state.view.floats.items[idx].getFgProcess()) |p| break :blk3 p;
+                if (idx < state.view.float_views.items.len) {
+                    if (state.view.float_views.items[idx].getFgProcess()) |p| break :blk3 p;
                 }
                 break :blk3 @as(?[]const u8, null);
             } else if (state.currentLayout().getFocusedPane()) |pane| pane.getFgProcess() else null;
@@ -664,7 +664,7 @@ pub fn runMainLoop(state: *State) !void {
         }
         // Ensure active_floating is still valid.
         if (state.activeFloatingIndex()) |af| {
-            if (af >= state.view.floats.items.len) {
+            if (af >= state.view.float_views.items.len) {
                 state.setActiveFloatingIndex(null);
             }
         }
@@ -709,7 +709,7 @@ pub fn runMainLoop(state: *State) !void {
                         state.syncPaneFocus(new_pane, null);
                     }
                     state.needs_render = true;
-                } else if (state.view.tabs.items.len > 1) {
+                } else if (state.view.tab_views.items.len > 1) {
                     _ = state.closeCurrentTab();
                     state.needs_render = true;
                     // Active tab changed; remaining dead UUIDs were collected from
@@ -814,15 +814,15 @@ pub fn runMainLoop(state: *State) !void {
         }
 
         // Update TAB realm notifications (current tab only).
-        if (state.view.tabs.items[state.activeTabIndex()].notifications.update()) {
+        if (state.view.tab_views.items[state.activeTabIndex()].notifications.update()) {
             state.needs_render = true;
         }
 
         // Update TAB realm popups (check for timeout).
-        if (state.view.tabs.items[state.activeTabIndex()].popups.update()) {
+        if (state.view.tab_views.items[state.activeTabIndex()].popups.update()) {
             state.needs_render = true;
             // Check if a popup timed out and we need to send response.
-            if (state.pending_pop_response and state.pending_pop_scope == .tab and !state.view.tabs.items[state.activeTabIndex()].popups.isBlocked()) {
+            if (state.pending_pop_response and state.pending_pop_scope == .tab and !state.view.tab_views.items[state.activeTabIndex()].popups.isBlocked()) {
                 loop_ipc.sendPopResponse(state);
             }
         }
@@ -848,7 +848,7 @@ pub fn runMainLoop(state: *State) !void {
         }
 
         // Update PANE realm notifications (floats).
-        for (state.view.floats.items) |pane| {
+        for (state.view.float_views.items) |pane| {
             if (pane.updateNotifications()) {
                 state.needs_render = true;
             }

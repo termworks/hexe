@@ -9,7 +9,7 @@ pub fn getLayoutPath(state: anytype, pane: *Pane) !?[]const u8 {
         return try std.fmt.allocPrint(state.allocator, "float:{d}", .{pane.id});
     }
 
-    for (state.view.tabs.items, 0..) |*tab, ti| {
+    for (state.view.tab_views.items, 0..) |*tab, ti| {
         var pane_it = tab.layout.splitIterator();
         while (pane_it.next()) |p| {
             if (p.* == pane) {

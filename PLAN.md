@@ -404,7 +404,7 @@ Done when:
 
 ### Phase 3: move session graph ownership out of terminal view structs
 
-1. Remove session identity and session structure ownership from
+1. Done: Remove session identity and session structure ownership from
    `TerminalViewState`.
 2. Done: Replace `Tab.layout` as session truth with terminal view objects derived from
    `SessionProjection`.

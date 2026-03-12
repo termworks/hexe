@@ -4,7 +4,7 @@ const terminal_main = @import("main.zig");
 const session_model = core.session_model;
 
 const state_types = @import("state_types.zig");
-const Tab = state_types.Tab;
+const TabView = state_types.TabView;
 
 const layout_mod = @import("layout.zig");
 const LayoutNode = layout_mod.LayoutNode;
@@ -26,7 +26,7 @@ fn applyDeferredPaneExits(self: anytype) void {
     for (pending.items) |uuid| {
         var marked = false;
 
-        for (self.view.tabs.items) |*tab| {
+        for (self.view.tab_views.items) |*tab| {
             var it = tab.layout.splits.valueIterator();
             while (it.next()) |pane_ptr| {
                 if (std.mem.eql(u8, &pane_ptr.*.uuid, &uuid)) {
@@ -36,7 +36,7 @@ fn applyDeferredPaneExits(self: anytype) void {
             }
         }
 
-        for (self.view.floats.items) |pane| {
+        for (self.view.float_views.items) |pane| {
             if (std.mem.eql(u8, &pane.uuid, &uuid)) {
                 pane.backend.pod.dead = true;
                 marked = true;
@@ -60,16 +60,16 @@ fn normalizeRestoredSessionName(name: []const u8) []const u8 {
 }
 
 fn clearStateForRestore(self: anytype) void {
-    while (self.view.tabs.items.len > 0) {
-        const tab_opt = self.view.tabs.pop();
+    while (self.view.tab_views.items.len > 0) {
+        const tab_opt = self.view.tab_views.pop();
         if (tab_opt) |tab_const| {
             var tab = tab_const;
             tab.deinit();
         }
     }
 
-    while (self.view.floats.items.len > 0) {
-        const p_opt = self.view.floats.pop();
+    while (self.view.float_views.items.len > 0) {
+        const p_opt = self.view.float_views.pop();
         if (p_opt) |p| {
             self.clearFloatUi(p.uuid);
             p.deinit();
@@ -83,7 +83,7 @@ fn clearStateForRestore(self: anytype) void {
     self.runtime.clearTabFocusMemory();
 }
 
-fn deinitTabPreservingPanes(tab: *Tab) void {
+fn deinitTabPreservingPanes(tab: *TabView) void {
     tab.layout.splits.deinit();
     if (tab.layout.root) |root| {
         tab.layout.freeNode(root);
@@ -94,27 +94,27 @@ fn deinitTabPreservingPanes(tab: *Tab) void {
 }
 
 fn captureExistingPaneViews(self: anytype, out: *ExistingPaneViews) void {
-    for (self.view.tabs.items) |*tab| {
+    for (self.view.tab_views.items) |*tab| {
         var it = tab.layout.splits.valueIterator();
         while (it.next()) |pane_ptr| {
             out.put(pane_ptr.*.uuid, pane_ptr.*) catch {};
         }
     }
-    for (self.view.floats.items) |pane| {
+    for (self.view.float_views.items) |pane| {
         out.put(pane.uuid, pane) catch {};
     }
 }
 
 fn clearStatePreservingPanes(self: anytype) void {
-    while (self.view.tabs.items.len > 0) {
-        const tab_opt = self.view.tabs.pop();
+    while (self.view.tab_views.items.len > 0) {
+        const tab_opt = self.view.tab_views.pop();
         if (tab_opt) |tab_const| {
             var tab = tab_const;
             deinitTabPreservingPanes(&tab);
         }
     }
 
-    self.view.floats.clearRetainingCapacity();
+    self.view.float_views.clearRetainingCapacity();
     self.setActiveTabIndex(0);
     self.setActiveFloatingIndex(null);
     self.runtime.setFocusedPaneUuid(null);
@@ -142,7 +142,7 @@ fn destroyUnusedPaneViews(self: anytype, existing_views: *ExistingPaneViews) voi
     }
 }
 
-fn recyclePaneForSplit(self: anytype, tab: *Tab, pane: *Pane, pane_id: u16, pane_uuid: [32]u8, actual_focus_uuid: ?[32]u8) void {
+fn recyclePaneForSplit(self: anytype, tab: *TabView, pane: *Pane, pane_id: u16, pane_uuid: [32]u8, actual_focus_uuid: ?[32]u8) void {
     self.clearFloatUi(pane.uuid);
     pane.id = pane_id;
     pane.uuid = pane_uuid;
@@ -221,7 +221,7 @@ fn ensureAdoptInfo(
 
 fn ensureSplitPaneView(
     self: anytype,
-    tab: *Tab,
+    tab: *TabView,
     pane_uuid: [32]u8,
     uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
     existing_views: ?*ExistingPaneViews,
@@ -295,7 +295,7 @@ fn freeRestoredLayoutNode(allocator: std.mem.Allocator, node: *LayoutNode) void 
 
 fn restoreLayoutNode(
     self: anytype,
-    tab: *Tab,
+    tab: *TabView,
     node: *const SessionLayoutNode,
     uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
     existing_views: ?*ExistingPaneViews,
@@ -383,12 +383,12 @@ fn restoreFloatPane(
         const pane = self.allocator.create(Pane) catch return null;
         errdefer self.allocator.destroy(pane);
 
-        const local_id: u16 = @intCast(100 + self.view.floats.items.len);
+        const local_id: u16 = @intCast(100 + self.view.float_views.items.len);
         pane.initWithPod(self.allocator, local_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, float_state.pane_uuid) catch return null;
         pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
         break :blk pane;
     };
-    pane.id = @intCast(100 + self.view.floats.items.len);
+    pane.id = @intCast(100 + self.view.float_views.items.len);
     pane.uuid = float_state.pane_uuid;
     recyclePaneForFloat(self, pane, float_state, actual_focus_uuid);
     hydratePaneMetadata(self, pane, float_state.pane_uuid);
@@ -443,26 +443,26 @@ fn layoutMatchesSnapshot(layout: *const layout_mod.Layout, node: ?*const LayoutN
 }
 
 fn canApplySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) bool {
-    if (self.view.tabs.items.len != snapshot.tabs.items.len) return false;
-    if (self.view.floats.items.len != snapshot.floats.items.len) return false;
+    if (self.view.tab_views.items.len != snapshot.tabs.items.len) return false;
+    if (self.view.float_views.items.len != snapshot.floats.items.len) return false;
 
     for (snapshot.tabs.items, 0..) |snapshot_tab, idx| {
         if (!std.mem.eql(u8, &snapshot_tab.uuid, &(self.runtime.tabUuid(idx) orelse return false))) return false;
         if (!std.mem.eql(u8, snapshot_tab.name, self.runtime.tabName(idx) orelse "tab")) return false;
 
-        const live_tab = &self.view.tabs.items[idx];
+        const live_tab = &self.view.tab_views.items[idx];
         if (live_tab.layout.splits.count() != countSessionLayoutPanes(snapshot_tab.root)) return false;
         if (!layoutMatchesSnapshot(&live_tab.layout, live_tab.layout.root, snapshot_tab.root)) return false;
     }
 
     for (snapshot.floats.items, 0..) |float_state, idx| {
-        if (!std.mem.eql(u8, &self.view.floats.items[idx].uuid, &float_state.pane_uuid)) return false;
+        if (!std.mem.eql(u8, &self.view.float_views.items[idx].uuid, &float_state.pane_uuid)) return false;
     }
 
     return true;
 }
 
-fn applyTabSnapshotFocus(tab: *Tab, remembered_focus_uuid: ?[32]u8, actual_focus_uuid: ?[32]u8) void {
+fn applyTabSnapshotFocus(tab: *TabView, remembered_focus_uuid: ?[32]u8, actual_focus_uuid: ?[32]u8) void {
     const target_focus_uuid = remembered_focus_uuid orelse actual_focus_uuid;
 
     var found_focus = false;
@@ -538,17 +538,17 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
     if (!canApplySnapshotIncrementally(self, snapshot)) return false;
 
     for (snapshot.tabs.items, 0..) |snapshot_tab, idx| {
-        applyTabSnapshotFocus(&self.view.tabs.items[idx], snapshot_tab.focused_pane_uuid, snapshot.focused_pane_uuid);
+        applyTabSnapshotFocus(&self.view.tab_views.items[idx], snapshot_tab.focused_pane_uuid, snapshot.focused_pane_uuid);
     }
 
     for (snapshot.floats.items, 0..) |float_state, idx| {
-        updateFloatPresentation(self, self.view.floats.items[idx], float_state, snapshot.focused_pane_uuid);
+        updateFloatPresentation(self, self.view.float_views.items[idx], float_state, snapshot.focused_pane_uuid);
     }
 
     self.resizeFloatingPanes();
 
-    if (self.view.tabs.items.len > 0) {
-        self.setActiveTabIndex(@min(snapshot.active_tab, self.view.tabs.items.len - 1));
+    if (self.view.tab_views.items.len > 0) {
+        self.setActiveTabIndex(@min(snapshot.active_tab, self.view.tab_views.items.len - 1));
     } else {
         self.setActiveTabIndex(0);
     }
@@ -556,8 +556,8 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
     self.runtime.setFocusedPaneUuid(snapshot.focused_pane_uuid);
 
     if (self.activeFloatingIndex()) |idx| {
-        self.rememberFloatingFocus(self.view.floats.items[idx]);
-    } else if (self.view.tabs.items.len > 0) {
+        self.rememberFloatingFocus(self.view.float_views.items[idx]);
+    } else if (self.view.tab_views.items.len > 0) {
         self.rememberSplitFocus();
     }
 
@@ -684,7 +684,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     for (snapshot.tabs.items) |snapshot_tab| {
-        var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+        var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
         if (self.runtime.isConnected()) {
             tab.layout.setFrontendRuntime(self.runtime);
@@ -721,7 +721,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             tab.layout.root = node;
         }
 
-        self.view.tabs.append(self.allocator, tab) catch {
+        self.view.tab_views.append(self.allocator, tab) catch {
             tab.deinit();
             continue;
         };
@@ -729,7 +729,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     for (snapshot.floats.items) |float_state| {
         const pane = restoreFloatPane(self, float_state, &uuid_pane_map, null, false, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
-        self.view.floats.append(self.allocator, pane) catch {
+        self.view.float_views.append(self.allocator, pane) catch {
             pane.deinit();
             self.allocator.destroy(pane);
             continue;
@@ -739,7 +739,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     // Prune dead pane nodes from layout trees. Pods that died during detach
     // (e.g., from SIGPIPE) leave orphan nodes in the tree that would corrupt
     // the layout by allocating space for non-existent panes.
-    for (self.view.tabs.items) |*tab| {
+    for (self.view.tab_views.items) |*tab| {
         tab.layout.pruneDeadNodes();
     }
 
@@ -747,12 +747,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     {
         var i: usize = 0;
         var removed_tabs: usize = 0;
-        while (i < self.view.tabs.items.len) {
-            if (self.view.tabs.items[i].layout.splits.count() == 0) {
+        while (i < self.view.tab_views.items.len) {
+            if (self.view.tab_views.items[i].layout.splits.count() == 0) {
                 // Don't remove the LAST tab - keep at least one tab always.
-                if (self.view.tabs.items.len > 1) {
+                if (self.view.tab_views.items.len > 1) {
                     terminal_main.debugLog("reattachSession: removing empty tab at index {d}", .{i});
-                    var dead_tab = self.view.tabs.orderedRemove(i);
+                    var dead_tab = self.view.tab_views.orderedRemove(i);
                     dead_tab.deinit();
                     removed_tabs += 1;
                     // Don't increment i, next tab shifted into this position
@@ -780,7 +780,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Safety check: ensure we have at least one tab.
     // If all tabs were empty and removed, create a new one.
-    if (self.view.tabs.items.len == 0) {
+    if (self.view.tab_views.items.len == 0) {
         terminal_main.debugLog("reattachSession: CRITICAL - all tabs removed, creating new tab", .{});
         self.createTab() catch {
             terminal_main.debugLog("reattachSession: FAILED to create recovery tab", .{});
@@ -790,12 +790,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     // Recalculate all layouts for current terminal size.
-    for (self.view.tabs.items) |*tab| {
+    for (self.view.tab_views.items) |*tab| {
         tab.layout.resize(self.layout_width, self.layout_height);
     }
 
     // Validate and fix parent_tab indices for floating panes
-    const invalid_parent_tabs = self.normalizeFloatParentTabs(self.view.tabs.items.len);
+    const invalid_parent_tabs = self.normalizeFloatParentTabs(self.view.tab_views.items.len);
     // Notify user if any parent_tab links were broken
     if (invalid_parent_tabs > 0) {
         const msg = std.fmt.allocPrint(
@@ -812,14 +812,14 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     self.resizeFloatingPanes();
 
     // Apply restored active indices now that all state is present.
-    if (self.view.tabs.items.len > 0) {
-        self.setActiveTabIndex(@min(wanted_active_tab, self.view.tabs.items.len - 1));
+    if (self.view.tab_views.items.len > 0) {
+        self.setActiveTabIndex(@min(wanted_active_tab, self.view.tab_views.items.len - 1));
     } else {
         self.setActiveTabIndex(0);
     }
     self.setActiveFloatingIndex(null);
     if (snapshot.active_float_uuid) |active_float_uuid| {
-        for (self.view.floats.items, 0..) |pane, idx| {
+        for (self.view.float_views.items, 0..) |pane, idx| {
             if (std.mem.eql(u8, &pane.uuid, &active_float_uuid)) {
                 self.setActiveFloatingIndex(idx);
                 break;
@@ -827,7 +827,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
     if (self.activeFloatingIndex()) |idx| {
-        self.rememberFloatingFocus(self.view.floats.items[idx]);
+        self.rememberFloatingFocus(self.view.float_views.items[idx]);
     }
 
     if (!self.runtime.setSessionIdentity(snapshot.uuid, restored_name)) return false;
@@ -835,7 +835,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     self.renderer.invalidate();
     self.force_full_render = true;
 
-    terminal_main.debugLog("reattachSession: tabs restored={d}, floats restored={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
+    terminal_main.debugLog("reattachSession: tabs restored={d}, floats restored={d}", .{ self.view.tab_views.items.len, self.view.float_views.items.len });
 
     // Check timeout after layout restoration
     {
@@ -848,7 +848,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             const msg = std.fmt.allocPrint(
                 self.allocator,
                 "Warning: reattach slow ({d}s total, {d} tabs restored)",
-                .{ @divTrunc(elapsed, 1000), self.view.tabs.items.len },
+                .{ @divTrunc(elapsed, 1000), self.view.tab_views.items.len },
             ) catch "Warning: reattach taking longer than expected";
             defer if (!std.mem.eql(u8, msg, "Warning: reattach taking longer than expected")) self.allocator.free(msg);
             self.notifications.showFor(msg, 3000);
@@ -856,7 +856,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
 
-    if (self.view.tabs.items.len == 0) {
+    if (self.view.tab_views.items.len == 0) {
         terminal_main.debugLog("reattachSession: no tabs restored, returning false", .{});
         return false;
     }
@@ -893,7 +893,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
 
-    terminal_main.debugLog("reattachSession: returning true, tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
+    terminal_main.debugLog("reattachSession: returning true, tabs={d} floats={d}", .{ self.view.tab_views.items.len, self.view.float_views.items.len });
     return true;
 }
 
@@ -901,7 +901,7 @@ pub fn applySessionSnapshot(self: anytype) bool {
     const snapshot = self.runtime.attachedSnapshot() orelse return false;
 
     if (applySnapshotIncrementally(self, snapshot)) {
-        terminal_main.debugLog("applySessionSnapshot: incrementally applied tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
+        terminal_main.debugLog("applySessionSnapshot: incrementally applied tabs={d} floats={d}", .{ self.view.tab_views.items.len, self.view.float_views.items.len });
         return true;
     }
 
@@ -922,7 +922,7 @@ pub fn applySessionSnapshot(self: anytype) bool {
     defer used_uuids.deinit();
 
     for (snapshot.tabs.items) |snapshot_tab| {
-        var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+        var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
         if (self.runtime.isConnected()) {
             tab.layout.setFrontendRuntime(self.runtime);
@@ -959,7 +959,7 @@ pub fn applySessionSnapshot(self: anytype) bool {
             tab.layout.root = node;
         }
 
-        self.view.tabs.append(self.allocator, tab) catch {
+        self.view.tab_views.append(self.allocator, tab) catch {
             tab.deinit();
             continue;
         };
@@ -967,29 +967,29 @@ pub fn applySessionSnapshot(self: anytype) bool {
 
     for (snapshot.floats.items) |float_state| {
         const pane = restoreFloatPane(self, float_state, &uuid_pane_map, &existing_views, true, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
-        self.view.floats.append(self.allocator, pane) catch {
+        self.view.float_views.append(self.allocator, pane) catch {
             pane.deinit();
             self.allocator.destroy(pane);
             continue;
         };
     }
 
-    for (self.view.tabs.items) |*tab| {
+    for (self.view.tab_views.items) |*tab| {
         tab.layout.pruneDeadNodes();
         tab.layout.resize(self.layout_width, self.layout_height);
     }
 
-    _ = self.normalizeFloatParentTabs(self.view.tabs.items.len);
+    _ = self.normalizeFloatParentTabs(self.view.tab_views.items.len);
     self.resizeFloatingPanes();
 
-    if (self.view.tabs.items.len > 0) {
-        self.setActiveTabIndex(@min(wanted_active_tab, self.view.tabs.items.len - 1));
+    if (self.view.tab_views.items.len > 0) {
+        self.setActiveTabIndex(@min(wanted_active_tab, self.view.tab_views.items.len - 1));
     } else {
         self.setActiveTabIndex(0);
     }
     self.setActiveFloatingIndex(null);
     if (snapshot.active_float_uuid) |active_float_uuid| {
-        for (self.view.floats.items, 0..) |pane, idx| {
+        for (self.view.float_views.items, 0..) |pane, idx| {
             if (std.mem.eql(u8, &pane.uuid, &active_float_uuid)) {
                 self.setActiveFloatingIndex(idx);
                 break;
@@ -997,13 +997,13 @@ pub fn applySessionSnapshot(self: anytype) bool {
         }
     }
     if (self.activeFloatingIndex()) |idx| {
-        self.rememberFloatingFocus(self.view.floats.items[idx]);
+        self.rememberFloatingFocus(self.view.float_views.items[idx]);
     }
 
     self.renderer.invalidate();
     self.force_full_render = true;
     self.needs_render = true;
-    terminal_main.debugLog("applySessionSnapshot: tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
+    terminal_main.debugLog("applySessionSnapshot: tabs={d} floats={d}", .{ self.view.tab_views.items.len, self.view.float_views.items.len });
     return true;
 }
 
@@ -1029,7 +1029,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
 
             // Create a new tab with this pane.
             const tab_uuid = core.ipc.generateUuid();
-            var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+            var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
             var tab_needs_cleanup = true;
             defer if (tab_needs_cleanup) tab.deinit();
 
@@ -1080,21 +1080,21 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             tab.layout.focused_pane_uuid = pane.uuid;
             tab.layout.next_pane_view_id = 1;
 
-            self.view.tabs.append(self.allocator, tab) catch return false;
+            self.view.tab_views.append(self.allocator, tab) catch return false;
             // Tab is now owned by tabs array, no longer needs cleanup
             tab_needs_cleanup = false;
             if (!self.runtime.appendTabMeta(tab_uuid, "attached")) {
-                var failed_tab = self.view.tabs.pop().?;
+                var failed_tab = self.view.tab_views.pop().?;
                 failed_tab.deinit();
                 return false;
             }
             if (!self.runtime.appendTabFocusMemory()) {
-                self.runtime.removeTabMeta(self.view.tabs.items.len - 1);
-                var failed_tab = self.view.tabs.pop().?;
+                self.runtime.removeTabMeta(self.view.tab_views.items.len - 1);
+                var failed_tab = self.view.tab_views.pop().?;
                 failed_tab.deinit();
                 return false;
             }
-            self.setActiveTabIndex(self.view.tabs.items.len - 1);
+            self.setActiveTabIndex(self.view.tab_views.items.len - 1);
             self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", pane.uuid);
             self.renderer.invalidate();
             self.force_full_render = true;

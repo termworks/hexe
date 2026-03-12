@@ -109,8 +109,8 @@ pub fn checkExitKeyEvent(state: *State, mods: u8, key: core.Config.BindKey, when
     if (!matched) return false;
 
     if (state.activeFloatingIndex()) |idx| {
-        if (idx < state.view.floats.items.len) {
-            state.setPaneClosedByExitKey(state.view.floats.items[idx].uuid, true);
+        if (idx < state.view.float_views.items.len) {
+            state.setPaneClosedByExitKey(state.view.float_views.items[idx].uuid, true);
         }
     }
     actions.performClose(state);
@@ -120,7 +120,7 @@ pub fn checkExitKeyEvent(state: *State, mods: u8, key: core.Config.BindKey, when
 
 fn isFocusedPaneInPasswordMode(state: *State) bool {
     const pane = if (state.activeFloatingIndex()) |idx|
-        if (idx < state.view.floats.items.len) state.view.floats.items[idx] else return false
+        if (idx < state.view.float_views.items.len) state.view.float_views.items[idx] else return false
     else
         state.currentLayout().getFocusedPane() orelse return false;
 
@@ -129,8 +129,8 @@ fn isFocusedPaneInPasswordMode(state: *State) bool {
 
 fn getFocusedFloatExitKey(state: *State) ?[]const u8 {
     const idx = state.activeFloatingIndex() orelse return null;
-    if (idx >= state.view.floats.items.len) return null;
-    const pane = state.view.floats.items[idx];
+    if (idx >= state.view.float_views.items.len) return null;
+    const pane = state.view.float_views.items[idx];
     return state.paneExitKey(pane);
 }
 

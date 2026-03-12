@@ -13,7 +13,7 @@ fn setLayoutFocusedPaneUuid(self: anytype, pane: *Pane) void {
 
     // Find which tab/layout owns this pane pointer and set its focused pane UUID
     // to match. This keeps per-tab focus stable when switching tabs.
-    for (self.view.tabs.items) |*tab| {
+    for (self.view.tab_views.items) |*tab| {
         var it = tab.layout.splits.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.* == pane) {
@@ -43,7 +43,7 @@ pub fn syncSessionTabAdded(self: anytype, tab_uuid: [32]u8, name: []const u8, pa
 
 pub fn syncSessionTabRemoved(self: anytype, tab_uuid: [32]u8) void {
     if (!self.runtime.isConnected()) return;
-    const active_tab: ?usize = if (self.view.tabs.items.len > 0) self.activeTabIndex() else null;
+    const active_tab: ?usize = if (self.view.tab_views.items.len > 0) self.activeTabIndex() else null;
     self.runtime.sessionRemoveTab(tab_uuid, active_tab) catch |err| {
         core.logging.logError("terminal", "failed sessionRemoveTab IPC", err);
     };
@@ -166,11 +166,11 @@ pub fn getCurrentFocusedUuid(self: anytype) ?[32]u8 {
         if (self.findPaneByUuid(uuid) != null) return uuid;
     }
     if (self.activeFloatingIndex()) |idx| {
-        if (idx < self.view.floats.items.len) {
-            return self.view.floats.items[idx].uuid;
+        if (idx < self.view.float_views.items.len) {
+            return self.view.float_views.items[idx].uuid;
         }
     }
-    if (self.view.tabs.items.len == 0) return null;
+    if (self.view.tab_views.items.len == 0) return null;
     if (self.currentLayout().getFocusedPane()) |pane| {
         return pane.uuid;
     }
@@ -228,7 +228,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
 pub fn unfocusAllPanes(self: anytype) void {
     if (!self.runtime.isConnected()) return;
 
-    for (self.view.tabs.items) |*tab| {
+    for (self.view.tab_views.items) |*tab| {
         var pane_it = tab.layout.splitIterator();
         while (pane_it.next()) |p| {
             if (p.*.uuid[0] != 0) {
@@ -264,7 +264,7 @@ pub fn unfocusAllPanes(self: anytype) void {
         }
     }
 
-    for (self.view.floats.items) |fp| {
+    for (self.view.float_views.items) |fp| {
         if (fp.uuid[0] != 0) {
             fp.focused = false;
             const cursor = fp.getCursorPos();
@@ -370,7 +370,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
     }
     if (self.paneIsFloating(pane)) {
         if (self.activeFloatingIndex()) |idx| {
-            if (idx < self.view.floats.items.len and self.view.floats.items[idx] == pane) {
+            if (idx < self.view.float_views.items.len and self.view.float_views.items[idx] == pane) {
                 self.setActiveFloatingIndex(null);
             }
         }
@@ -448,7 +448,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     if (!self.runtime.isConnected()) return;
 
     const pane = if (self.activeFloatingIndex()) |idx| blk: {
-        if (idx < self.view.floats.items.len) break :blk self.view.floats.items[idx];
+        if (idx < self.view.float_views.items.len) break :blk self.view.float_views.items[idx];
         break :blk @as(?*Pane, null);
     } else self.currentLayout().getFocusedPane();
 
@@ -510,7 +510,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
 pub fn resizeFloatingPanes(self: anytype) void {
     const avail_h = self.term_height - self.status_height;
 
-    for (self.view.floats.items) |pane| {
+    for (self.view.float_views.items) |pane| {
         const shadow_enabled = self.paneFloatHasShadow(pane);
         const usable_w: u16 = if (shadow_enabled) (self.term_width -| 1) else self.term_width;
         const usable_h: u16 = if (shadow_enabled and self.status_height == 0) (avail_h -| 1) else avail_h;

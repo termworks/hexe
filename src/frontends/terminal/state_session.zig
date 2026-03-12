@@ -3,7 +3,7 @@ const core = @import("core");
 const terminal_main = @import("main.zig");
 
 const state_types = @import("state_types.zig");
-const Tab = state_types.Tab;
+const TabView = state_types.TabView;
 
 const layout_mod = @import("layout.zig");
 const Layout = layout_mod.Layout;
@@ -55,8 +55,8 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
     }
 
     self.setActiveTabIndex(0);
-    if (self.view.tabs.items.len > 0) {
-        if (self.view.tabs.items[0].layout.getFocusedPane()) |pane| {
+    if (self.view.tab_views.items.len > 0) {
+        if (self.view.tab_views.items[0].layout.getFocusedPane()) |pane| {
             self.syncPaneFocus(pane, null);
         }
     }
@@ -67,20 +67,20 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
 /// Replace current runtime tabs/floats with a session config.
 pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]const u8) !void {
     // Remove floating panes.
-    for (self.view.floats.items) |pane| {
+    for (self.view.float_views.items) |pane| {
         self.clearFloatUi(pane.uuid);
         pane.deinit();
         self.allocator.destroy(pane);
     }
-    self.view.floats.clearRetainingCapacity();
+    self.view.float_views.clearRetainingCapacity();
     self.setActiveFloatingIndex(null);
     self.runtime.setFocusedPaneUuid(null);
 
     // Remove all tabs.
-    for (self.view.tabs.items) |*tab| {
+    for (self.view.tab_views.items) |*tab| {
         tab.deinit();
     }
-    self.view.tabs.clearRetainingCapacity();
+    self.view.tab_views.clearRetainingCapacity();
     self.runtime.clearTabMeta();
     self.runtime.clearTabFocusMemory();
     self.setActiveTabIndex(0);
@@ -97,7 +97,7 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     };
 
     const tab_uuid = core.ipc.generateUuid();
-    var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+    var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
     if (self.runtime.isConnected()) {
         tab.layout.setFrontendRuntime(self.runtime);
@@ -114,19 +114,19 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
         _ = try tab.layout.createFirstPane(cwd);
     }
 
-    try self.view.tabs.append(self.allocator, tab);
+    try self.view.tab_views.append(self.allocator, tab);
     errdefer {
-        var failed_tab = self.view.tabs.pop().?;
+        var failed_tab = self.view.tab_views.pop().?;
         failed_tab.deinit();
     }
     if (!self.runtime.appendTabMeta(tab_uuid, name_owned)) return error.OutOfMemory;
-    errdefer self.runtime.removeTabMeta(self.view.tabs.items.len - 1);
+    errdefer self.runtime.removeTabMeta(self.view.tab_views.items.len - 1);
     self.allocator.free(name_owned);
     if (!self.runtime.appendTabFocusMemory()) return error.OutOfMemory;
-    errdefer self.runtime.removeTabFocusMemory(self.view.tabs.items.len - 1);
+    errdefer self.runtime.removeTabFocusMemory(self.view.tab_views.items.len - 1);
 
-    self.setActiveTabIndex(self.view.tabs.items.len - 1);
-    const created_tab = &self.view.tabs.items[self.activeTabIndex()];
+    self.setActiveTabIndex(self.view.tab_views.items.len - 1);
+    const created_tab = &self.view.tab_views.items[self.activeTabIndex()];
     const focused = created_tab.layout.getFocusedPane() orelse return error.InvalidLayout;
     self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", focused.uuid);
     if (created_tab.layout.root) |root| {

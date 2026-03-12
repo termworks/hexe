@@ -663,7 +663,7 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
         }
         var pane_index: usize = 1;
 
-        for (state.view.tabs.items, 0..) |*tab, tab_idx| {
+        for (state.view.tab_views.items, 0..) |*tab, tab_idx| {
             const tab_focused_uuid = if (tab.layout.getFocusedPane()) |fp| fp.uuid else null;
             var pane_it = tab.layout.splitIterator();
             while (pane_it.next()) |pane| {
@@ -680,7 +680,7 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
             }
         }
 
-        for (state.view.floats.items) |pane| {
+        for (state.view.float_views.items) |pane| {
             const is_focused = if (focused_uuid) |fu|
                 std.mem.eql(u8, &pane.uuid, &fu)
             else
@@ -1517,10 +1517,10 @@ pub fn draw(
 
     // Provide pane state for animation policy + float attributes.
     if (state.activeFloatingIndex()) |idx| {
-        if (idx < state.view.floats.items.len) {
-            ctx.alt_screen = state.view.floats.items[idx].vt.inAltScreen();
+        if (idx < state.view.float_views.items.len) {
+            ctx.alt_screen = state.view.float_views.items[idx].vt.inAltScreen();
 
-            const fp = state.view.floats.items[idx];
+            const fp = state.view.float_views.items[idx];
             ctx.float_key = state.paneFloatKey(fp);
             ctx.float_sticky = state.paneSticky(fp);
             ctx.float_global = state.paneParentTab(fp) == null;
@@ -1950,9 +1950,9 @@ pub fn hitTestAction(
     ctx.focus_is_split = state.activeFloatingIndex() == null;
 
     if (state.activeFloatingIndex()) |idx| {
-        if (idx < state.view.floats.items.len) {
-            ctx.alt_screen = state.view.floats.items[idx].vt.inAltScreen();
-            const fp = state.view.floats.items[idx];
+        if (idx < state.view.float_views.items.len) {
+            ctx.alt_screen = state.view.float_views.items[idx].vt.inAltScreen();
+            const fp = state.view.float_views.items[idx];
             ctx.float_key = state.paneFloatKey(fp);
             ctx.float_sticky = state.paneSticky(fp);
             ctx.float_global = state.paneParentTab(fp) == null;

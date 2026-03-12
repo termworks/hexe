@@ -23,8 +23,8 @@ pub fn focusDirectionAny(state: *State, dir: layout_mod.Layout.Direction, cursor
     // and alignment. No type priority: floats and splits compete equally.
 
     const current: *Pane = if (state.activeFloatingIndex()) |idx| blk: {
-        if (idx < state.view.floats.items.len) {
-            const fp = state.view.floats.items[idx];
+        if (idx < state.view.float_views.items.len) {
+            const fp = state.view.float_views.items[idx];
             if (isFloatRenderableOnTab(state, fp, state.activeTabIndex())) break :blk fp;
         }
         break :blk state.currentLayout().getFocusedPane() orelse return null;

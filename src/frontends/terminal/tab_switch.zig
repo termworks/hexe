@@ -11,7 +11,7 @@ fn restoreTabFocus(state: *State, old_uuid: ?[32]u8) void {
     const active_tab = state.activeTabIndex();
     if (state.runtime.lastFocusKind(active_tab) == .float) {
         if (state.runtime.lastFloatingUuid(active_tab)) |uuid| {
-            for (state.view.floats.items, 0..) |pane, fi| {
+            for (state.view.float_views.items, 0..) |pane, fi| {
                 if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
                 if (!isFloatRenderableOnTab(state, pane, active_tab)) continue;
                 state.setActiveFloatingIndex(fi);
@@ -28,7 +28,7 @@ fn restoreTabFocus(state: *State, old_uuid: ?[32]u8) void {
 }
 
 pub fn switchToTab(state: *State, new_tab: usize) void {
-    if (new_tab >= state.view.tabs.items.len) return;
+    if (new_tab >= state.view.tab_views.items.len) return;
     const old_uuid = state.getCurrentFocusedUuid();
 
     // Clear any pending/active selection on tab change.
@@ -37,8 +37,8 @@ pub fn switchToTab(state: *State, new_tab: usize) void {
     state.mouse_drag = .none;
 
     if (state.activeFloatingIndex()) |idx| {
-        if (idx < state.view.floats.items.len) {
-            state.syncPaneUnfocus(state.view.floats.items[idx]);
+        if (idx < state.view.float_views.items.len) {
+            state.syncPaneUnfocus(state.view.float_views.items[idx]);
         }
         state.setActiveFloatingIndex(null);
     } else if (state.currentLayout().getFocusedPane()) |old_pane| {

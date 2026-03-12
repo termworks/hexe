@@ -153,7 +153,7 @@ fn populateFloatTitleContext(state: *State, pane: *Pane, ctx: *shp.Context, now_
     ctx.terminal_width = state.term_width;
     ctx.home = std.posix.getenv("HOME");
     ctx.now_ms = now_ms;
-    ctx.tab_count = @intCast(@min(state.view.tabs.items.len, @as(usize, std.math.maxInt(u16))));
+    ctx.tab_count = @intCast(@min(state.view.tab_views.items.len, @as(usize, std.math.maxInt(u16))));
     ctx.active_tab = @intCast(state.activeTabIndex());
     ctx.session_name = state.runtime.sessionName();
     ctx.focus_is_float = true;
@@ -234,7 +234,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // Draw visible floats (on top of splits).
     // Draw inactive floats first, then active one last so it's on top.
-    for (state.view.floats.items, 0..) |pane, i| {
+    for (state.view.float_views.items, 0..) |pane, i| {
         if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
         if (state.activeFloatingIndex() == i) continue; // Skip active, draw it last.
         // Skip tab-bound floats on wrong tab.
@@ -283,7 +283,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // Draw active float last so it's on top.
     if (state.activeFloatingIndex()) |idx| {
-        const pane = state.view.floats.items[idx];
+        const pane = state.view.float_views.items[idx];
         // Check tab ownership for tab-bound floats.
         const can_render = if (state.paneParentTab(pane)) |parent|
             parent == state.activeTabIndex()
@@ -333,12 +333,12 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // Draw status bar if enabled.
     if (state.config.tabs.status.enabled) {
-        statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.view.tabs, state.activeTabIndex(), state.runtime.sessionName());
+        statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.view.tab_views, state.activeTabIndex(), state.runtime.sessionName());
     }
 
     // Check if active float has dim_background set (focus mode)
     const float_dim = if (state.activeFloatingIndex()) |idx| blk: {
-        if (idx < state.view.floats.items.len) break :blk state.paneDimBackground(state.view.floats.items[idx]);
+        if (idx < state.view.float_views.items.len) break :blk state.paneDimBackground(state.view.float_views.items[idx]);
         break :blk false;
     } else false;
 
@@ -348,8 +348,8 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         // For floats: use border dimensions + shadow (1 cell right/bottom) if shadow enabled
         const focused_bounds: ?overlay_render.Bounds = blk: {
             if (state.activeFloatingIndex()) |idx| {
-                if (idx < state.view.floats.items.len) {
-                    const fp = state.view.floats.items[idx];
+                if (idx < state.view.float_views.items.len) {
+                    const fp = state.view.float_views.items[idx];
                     const has_shadow = state.paneFloatHasShadow(fp);
                     const shadow_offset: u16 = if (has_shadow) 1 else 0;
                     break :blk .{
@@ -375,7 +375,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     }
 
     // Draw TAB realm notifications (center of screen, below MUX).
-    const current_tab = &state.view.tabs.items[state.activeTabIndex()];
+    const current_tab = &state.view.tab_views.items[state.activeTabIndex()];
 
     // Draw PANE-level blocking popups (for ALL panes with active popups).
     // Check all splits in current tab.
@@ -386,7 +386,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
     }
     // Check all floats.
-    for (state.view.floats.items) |fpane| {
+    for (state.view.float_views.items) |fpane| {
         if (fpane.popups.getActivePopup()) |popup| {
             popup_render.drawInBounds(renderer, popup, &state.pop_config.pane, fpane.x, fpane.y, fpane.width, fpane.height);
         }
@@ -413,7 +413,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     var cursor = CursorInfo{};
 
     if (state.activeFloatingIndex()) |idx| {
-        const pane = state.view.floats.items[idx];
+        const pane = state.view.float_views.items[idx];
         const pos = pane.getCursorPos();
         cursor.x = pos.x;
         cursor.y = pos.y;

@@ -53,7 +53,7 @@ fn handleBlockedPopup(popups: anytype, parsed_event: ?vaxis.Event) bool {
 
 pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, parsed_event: ?vaxis.Event) void {
     if (state.activeFloatingIndex()) |idx| {
-        const fpane = state.view.floats.items[idx];
+        const fpane = state.view.float_views.items[idx];
         const can_interact = if (state.paneParentTab(fpane)) |parent| parent == state.activeTabIndex() else true;
         if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) {
             if (fpane.popups.isBlocked()) {
@@ -129,7 +129,7 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
 
     const target_pane = blk: {
         if (state.activeFloatingIndex()) |idx| {
-            const fpane = state.view.floats.items[idx];
+            const fpane = state.view.float_views.items[idx];
             const can_interact = if (state.paneParentTab(fpane)) |parent| parent == state.activeTabIndex() else true;
             if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) {
                 break :blk fpane;
@@ -161,7 +161,7 @@ fn currentFocusContext(state: *State) FocusContext {
 fn buildPaneQuery(state: *State) PaneQuery {
     const is_float = state.activeFloatingIndex() != null;
     const pane: ?*Pane = if (state.activeFloatingIndex()) |idx| blk: {
-        if (idx < state.view.floats.items.len) break :blk state.view.floats.items[idx];
+        if (idx < state.view.float_views.items.len) break :blk state.view.float_views.items[idx];
         break :blk @as(?*Pane, null);
     } else state.currentLayout().getFocusedPane();
 
@@ -214,7 +214,7 @@ fn buildPaneQuery(state: *State) PaneQuery {
         .float_global = float_global,
         .float_isolated = float_isolated,
         .float_destroyable = float_destroyable,
-        .tab_count = @intCast(state.view.tabs.items.len),
+        .tab_count = @intCast(state.view.tab_views.items.len),
         .active_tab = @intCast(state.activeTabIndex()),
         .fg_process = fg_proc,
         .now_ms = @intCast(std.time.milliTimestamp()),
@@ -425,7 +425,7 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
     }
     var pane_index: usize = 1;
 
-    for (state.view.tabs.items, 0..) |*tab, tab_idx| {
+    for (state.view.tab_views.items, 0..) |*tab, tab_idx| {
         const tab_focused_uuid = if (tab.layout.getFocusedPane()) |fp| fp.uuid else null;
         var pane_it = tab.layout.splitIterator();
         while (pane_it.next()) |pane| {
@@ -442,7 +442,7 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
         }
     }
 
-    for (state.view.floats.items) |pane| {
+    for (state.view.float_views.items) |pane| {
         const is_focused = if (focused_uuid) |fu|
             std.mem.eql(u8, &pane.uuid, &fu)
         else

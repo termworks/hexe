@@ -16,7 +16,7 @@ pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
     // Floats have dedicated toggle keys — directional navigation skips them.
     // Left/right switches tabs, up/down ignored.
     if (state.activeFloatingIndex()) |idx| {
-        if (idx < state.view.floats.items.len) {
+        if (idx < state.view.float_views.items.len) {
             state.cursor_needs_restore = true;
             switch (dir) {
                 .left => actions.switchToPrevTab(state),

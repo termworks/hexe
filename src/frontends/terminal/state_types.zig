@@ -24,13 +24,13 @@ pub const PendingAction = enum {
     layout_load_choose, // Choosing detach/replace for local layout load
 };
 
-/// A tab contains a layout with splits.
-pub const Tab = struct {
+/// A terminal tab view contains only terminal widgets for one projected tab.
+pub const TabView = struct {
     layout: Layout,
     notifications: NotificationManager,
     popups: pop.PopupManager,
 
-    pub fn init(allocator: std.mem.Allocator, width: u16, height: u16, notif_cfg: pop.NotificationStyle) Tab {
+    pub fn init(allocator: std.mem.Allocator, width: u16, height: u16, notif_cfg: pop.NotificationStyle) TabView {
         return .{
             .layout = Layout.init(allocator, width, height),
             .notifications = NotificationManager.initWithConfig(allocator, notif_cfg),
@@ -38,7 +38,7 @@ pub const Tab = struct {
         };
     }
 
-    pub fn deinit(self: *Tab) void {
+    pub fn deinit(self: *TabView) void {
         self.layout.deinit();
         self.notifications.deinit();
         self.popups.deinit();
@@ -46,27 +46,29 @@ pub const Tab = struct {
 };
 
 pub const TerminalViewState = struct {
-    tabs: std.ArrayList(Tab),
-    floats: std.ArrayList(*Pane),
+    /// Visual tab widgets derived from the shared projection.
+    tab_views: std.ArrayList(TabView),
+    /// Visual float widgets derived from the shared projection.
+    float_views: std.ArrayList(*Pane),
 
     pub fn init() TerminalViewState {
         return .{
-            .tabs = .empty,
-            .floats = .empty,
+            .tab_views = .empty,
+            .float_views = .empty,
         };
     }
 
     pub fn deinit(self: *TerminalViewState, allocator: std.mem.Allocator) void {
-        for (self.floats.items) |pane| {
+        for (self.float_views.items) |pane| {
             pane.deinit();
             allocator.destroy(pane);
         }
-        self.floats.deinit(allocator);
+        self.float_views.deinit(allocator);
 
-        for (self.tabs.items) |*tab| {
+        for (self.tab_views.items) |*tab| {
             tab.deinit();
         }
-        self.tabs.deinit(allocator);
+        self.tab_views.deinit(allocator);
     }
 };
 

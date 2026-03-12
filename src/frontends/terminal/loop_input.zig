@@ -133,7 +133,7 @@ fn stashFromIndex(state: *State, inp: []const u8, start: usize) []const u8 {
 
 fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
     const pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
-        state.view.floats.items[idx]
+        state.view.float_views.items[idx]
     else
         state.currentLayout().getFocusedPane();
     if (pane == null) return false;
@@ -266,7 +266,7 @@ fn freeParsedEventPayload(state: *State, parsed_event: ?vaxis.Event) void {
 
 fn resolveFocusedPaneForInput(state: *State) ?*Pane {
     if (state.activeFloatingIndex()) |idx| {
-        const fpane = state.view.floats.items[idx];
+        const fpane = state.view.float_views.items[idx];
         const can_interact = if (state.paneParentTab(fpane)) |parent|
             parent == state.activeTabIndex()
         else
@@ -465,7 +465,7 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
 }
 
 fn handleTabLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
-    const current_tab = &state.view.tabs.items[state.activeTabIndex()];
+    const current_tab = &state.view.tab_views.items[state.activeTabIndex()];
     if (!current_tab.popups.isBlocked()) return false;
     defer freeParsedEventPayload(state, parsed_event);
 
@@ -858,7 +858,7 @@ fn queuePaneOscExpected(state: *State, pane: *Pane) bool {
 
 fn harvestPendingCsiReplies(state: *State) void {
     // Drain pending CSI reply expectations from all panes.
-    for (state.view.tabs.items) |*tab| {
+    for (state.view.tab_views.items) |*tab| {
         var pane_it = tab.layout.splitIterator();
         while (pane_it.next()) |p| {
             const n = p.*.takeCsiExpectedResponses();
@@ -870,7 +870,7 @@ fn harvestPendingCsiReplies(state: *State) void {
             }
         }
     }
-    for (state.view.floats.items) |fp| {
+    for (state.view.float_views.items) |fp| {
         const n = fp.takeCsiExpectedResponses();
         if (n > 0) {
             var j: u16 = 0;
@@ -883,7 +883,7 @@ fn harvestPendingCsiReplies(state: *State) void {
 
 fn harvestPendingOscReplies(state: *State) void {
     // Drain pending OSC reply expectations from all panes.
-    for (state.view.tabs.items) |*tab| {
+    for (state.view.tab_views.items) |*tab| {
         var pane_it = tab.layout.splitIterator();
         while (pane_it.next()) |p| {
             const n = p.*.takeOscExpectedResponses();
@@ -895,7 +895,7 @@ fn harvestPendingOscReplies(state: *State) void {
             }
         }
     }
-    for (state.view.floats.items) |fp| {
+    for (state.view.float_views.items) |fp| {
         const n = fp.takeOscExpectedResponses();
         if (n > 0) {
             var j: u16 = 0;
@@ -1194,8 +1194,8 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
     while (i < inp.len) {
         if (!state.csi_reply_in_progress and state.csi_reply_targets.items.len == 0) {
             if (state.activeFloatingIndex()) |idx| {
-                if (idx < state.view.floats.items.len) {
-                    const fp = state.view.floats.items[idx];
+                if (idx < state.view.float_views.items.len) {
+                    const fp = state.view.float_views.items[idx];
                     const can_interact = if (state.paneParentTab(fp)) |parent| parent == state.activeTabIndex() else true;
                     if (state.paneVisibleOnTab(fp, state.activeTabIndex()) and can_interact) {
                         const n = parseLikelyTerminalCsiReplyLen(inp, i);
