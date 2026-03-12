@@ -126,11 +126,13 @@ pub fn closeCurrentTab(self: anytype) bool {
         const fp = self.view.float_views.items[i];
         if (self.paneParentTab(fp)) |parent| {
             if (parent == closing_tab) {
+                const fp_uuid = fp.uuid;
                 // Kill this tab-bound float.
-                self.runtime.killPane(fp.uuid) catch |e| {
+                self.runtime.killPane(fp_uuid) catch |e| {
                     core.logging.logError("terminal", "killPane failed in closeTab", e);
                 };
-                self.clearFloatUi(fp.uuid);
+                self.clearTransientPaneState(fp);
+                self.clearFloatUi(fp_uuid);
                 fp.deinit();
                 self.allocator.destroy(fp);
                 _ = self.view.float_views.orderedRemove(i);
@@ -142,7 +144,7 @@ pub fn closeCurrentTab(self: anytype) bool {
                         self.setActiveFloatingIndex(afi - 1);
                     }
                 }
-                self.syncSessionFloatRemoved(fp.uuid);
+                self.syncSessionFloatRemoved(fp_uuid);
                 continue;
             }
         }
@@ -150,10 +152,16 @@ pub fn closeCurrentTab(self: anytype) bool {
     }
     self.reindexFloatParentTabsAfterRemovedTab(closing_tab);
 
-    var tab = self.view.tab_views.orderedRemove(self.activeTabIndex());
+    var tab = self.view.tab_views.orderedRemove(closing_tab);
+    {
+        var split_it = tab.layout.splits.valueIterator();
+        while (split_it.next()) |pane_ptr| {
+            self.clearTransientPaneState(pane_ptr.*);
+        }
+    }
     tab.deinit();
-    self.runtime.removeTabMeta(self.activeTabIndex());
-    self.runtime.removeTabFocusMemory(self.activeTabIndex());
+    self.runtime.removeTabMeta(closing_tab);
+    self.runtime.removeTabFocusMemory(closing_tab);
     if (self.activeTabIndex() >= self.view.tab_views.items.len) {
         self.setActiveTabIndex(self.view.tab_views.items.len - 1);
     } else {

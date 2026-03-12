@@ -427,7 +427,9 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                                     // Close split pane only (not tab).
                                     const layout = state.currentLayout();
                                     if (layout.splitCount() > 1) {
-                                        const closing_uuid = layout.getFocusedPane().?.uuid;
+                                        const closing_pane = layout.getFocusedPane().?;
+                                        const closing_uuid = closing_pane.uuid;
+                                        state.clearTransientPaneState(closing_pane);
                                         _ = layout.closePane(closing_uuid);
                                         const next_focus_uuid = if (layout.getFocusedPane()) |pane| pane.uuid else null;
                                         state.syncSessionCloseSplitPane(closing_uuid, next_focus_uuid);

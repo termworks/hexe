@@ -55,6 +55,7 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
                 state.runtime.killPane(pane.uuid) catch {};
             }
             state.syncSessionFloatRemoved(pane.uuid);
+            state.clearTransientPaneState(pane);
             state.clearFloatUi(pane.uuid);
             pane.deinit();
             state.allocator.destroy(pane);
@@ -399,6 +400,7 @@ pub fn performClose(state: *State) void {
             terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
         }
         state.syncSessionFloatRemoved(pane.uuid);
+        state.clearTransientPaneState(pane);
         state.clearFloatUi(pane.uuid);
         pane.deinit();
         state.allocator.destroy(pane);
@@ -570,7 +572,8 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             // For per_cwd floats, also check directory match.
             if (float_def.attributes.per_cwd and state.paneIsPwd(pane)) {
                 // Both dirs must exist and match, or both be null.
-                const dirs_match = if (state.panePwdDir(pane)) |pane_dir| blk: {
+                const pane_dir_opt = state.panePwdDir(pane) orelse state.paneRealCwd(pane);
+                const dirs_match = if (pane_dir_opt) |pane_dir| blk: {
                     if (current_dir) |curr| {
                         break :blk std.mem.eql(u8, pane_dir, curr);
                     }
@@ -594,6 +597,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
                 const stale = state.view.float_views.orderedRemove(existing_idx);
                 state.syncSessionFloatRemoved(stale.uuid);
+                state.clearTransientPaneState(stale);
                 state.clearFloatUi(stale.uuid);
                 stale.deinit();
                 state.allocator.destroy(stale);

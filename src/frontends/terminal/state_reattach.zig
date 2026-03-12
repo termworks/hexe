@@ -64,6 +64,10 @@ fn clearStateForRestore(self: anytype) void {
         const tab_opt = self.view.tab_views.pop();
         if (tab_opt) |tab_const| {
             var tab = tab_const;
+            var split_it = tab.layout.splits.valueIterator();
+            while (split_it.next()) |pane_ptr| {
+                self.clearTransientPaneState(pane_ptr.*);
+            }
             tab.deinit();
         }
     }
@@ -71,6 +75,7 @@ fn clearStateForRestore(self: anytype) void {
     while (self.view.float_views.items.len > 0) {
         const p_opt = self.view.float_views.pop();
         if (p_opt) |p| {
+            self.clearTransientPaneState(p);
             self.clearFloatUi(p.uuid);
             p.deinit();
             self.allocator.destroy(p);
@@ -115,10 +120,10 @@ fn clearStatePreservingPanes(self: anytype) void {
     }
 
     self.view.float_views.clearRetainingCapacity();
-    self.setActiveTabIndex(0);
-    self.setActiveFloatingIndex(null);
-    self.runtime.setFocusedPaneUuid(null);
-    self.runtime.clearTabFocusMemory();
+    // Keep runtime projection state intact while rebuilding from the current
+    // authoritative snapshot. applySessionSnapshot() reads that snapshot after
+    // this call, so clearing active/focus fields here corrupts the data we are
+    // in the middle of restoring.
 }
 
 fn clearPaneAuxCaches(self: anytype, uuid: [32]u8) void {
@@ -136,6 +141,7 @@ fn clearPaneAuxCaches(self: anytype, uuid: [32]u8) void {
 fn destroyUnusedPaneViews(self: anytype, existing_views: *ExistingPaneViews) void {
     var it = existing_views.iterator();
     while (it.next()) |entry| {
+        self.clearTransientPaneState(entry.value_ptr.*);
         clearPaneAuxCaches(self, entry.key_ptr.*);
         entry.value_ptr.*.deinit();
         self.allocator.destroy(entry.value_ptr.*);
@@ -364,6 +370,17 @@ fn restoreFloatPane(
     if (used_uuids.contains(float_state.pane_uuid)) return null;
     const info = ensureAdoptInfo(self, float_state.pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return null;
     const vt_fd = self.runtime.getVtFd() orelse return null;
+    const preserved_title = blk: {
+        if (existing_views) |views| {
+            if (views.get(float_state.pane_uuid)) |existing_pane| {
+                if (self.paneFloatTitle(existing_pane)) |title| {
+                    break :blk self.allocator.dupe(u8, title) catch null;
+                }
+            }
+        }
+        break :blk null;
+    };
+    defer if (preserved_title) |title| self.allocator.free(title);
 
     const pane = blk: {
         if (existing_views) |views| {
@@ -403,12 +420,16 @@ fn restoreFloatPane(
         }
     }
 
-    if (self.runtime.isConnected()) {
-        if (self.runtime.getPaneName(float_state.pane_uuid)) |name| {
-            _ = self.setPaneFloatTitle(pane.uuid, name);
-            self.allocator.free(name);
+    const restored_title = blk: {
+        if (float_state.float_key != 0) {
+            if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
+                if (float_def.title) |title| break :blk title;
+            }
         }
-    }
+        if (preserved_title) |title| break :blk title;
+        break :blk null;
+    };
+    _ = self.setPaneFloatTitle(pane.uuid, restored_title);
 
     used_uuids.put(float_state.pane_uuid, {}) catch {};
     return pane;
@@ -445,6 +466,21 @@ fn layoutMatchesSnapshot(layout: *const layout_mod.Layout, node: ?*const LayoutN
 fn canApplySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) bool {
     if (self.view.tab_views.items.len != snapshot.tabs.items.len) return false;
     if (self.view.float_views.items.len != snapshot.floats.items.len) return false;
+
+    // The incremental path is safe only when float visibility/focus stays in a
+    // simple "one active visible float" shape. Hidden/background/per-tab floats
+    // have been the crashy case during toggle-hide, so force the conservative
+    // rebuild path there.
+    if (snapshot.floats.items.len > 0) {
+        if (snapshot.active_float_uuid == null) return false;
+        for (snapshot.floats.items) |float_state| {
+            if (float_state.parent_tab != null) {
+                if (!float_state.visible) return false;
+            } else {
+                if (float_state.tab_visible != std.math.maxInt(u64)) return false;
+            }
+        }
+    }
 
     for (snapshot.tabs.items, 0..) |snapshot_tab, idx| {
         if (!std.mem.eql(u8, &snapshot_tab.uuid, &(self.runtime.tabUuid(idx) orelse return false))) return false;
@@ -903,6 +939,13 @@ pub fn applySessionSnapshot(self: anytype) bool {
     if (applySnapshotIncrementally(self, snapshot)) {
         terminal_main.debugLog("applySessionSnapshot: incrementally applied tabs={d} floats={d}", .{ self.view.tab_views.items.len, self.view.float_views.items.len });
         return true;
+    }
+    if (snapshot.floats.items.len > 0) {
+        terminal_main.debugLog("applySessionSnapshot: falling back to full rebuild tabs={d} floats={d} active_float={}", .{
+            snapshot.tabs.items.len,
+            snapshot.floats.items.len,
+            snapshot.active_float_uuid != null,
+        });
     }
 
     var existing_views = ExistingPaneViews.init(self.allocator);

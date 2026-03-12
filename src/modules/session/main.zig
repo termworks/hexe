@@ -63,8 +63,10 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
 
     debugLog("txlog: checking {d} entries for incomplete transactions", .{entries.items.len});
 
-    // Find incomplete transactions (start without commit)
-    var incomplete = try txlog.findIncompleteTransactions(entries.items);
+    // Find incomplete transactions (start without commit) and keep the
+    // operation type so recovery can roll back detaches without destroying a
+    // still-valid detached session after a failed reattach.
+    var incomplete = try txlog.findIncompleteOperations(entries.items);
     defer incomplete.deinit(allocator);
 
     if (incomplete.items.len == 0) {
@@ -76,23 +78,34 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
 
     // Handle incomplete transactions: remove detached sessions
     debugLog("txlog: found {d} incomplete transactions, rolling back", .{incomplete.items.len});
-    for (incomplete.items) |session_id| {
-        const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
-        debugLog("txlog: removing incomplete session {s}", .{hex_id[0..8]});
+    for (incomplete.items) |entry| {
+        const hex_id: [32]u8 = std.fmt.bytesToHex(&entry.session_id, .lower);
+        switch (entry.tx_type) {
+            .detach_start => {
+                debugLog("txlog: removing incomplete detached session {s}", .{hex_id[0..8]});
 
-        // Remove from detached sessions (best-effort cleanup)
-        ses_state.removeDetachedSession(session_id);
+                // Remove from detached sessions (best-effort cleanup)
+                ses_state.removeDetachedSession(entry.session_id);
 
-        // Mark all panes with this session_id as orphaned
-        var pane_iter = ses_state.panes.valueIterator();
-        while (pane_iter.next()) |pane| {
-            if (pane.session_id) |sid| {
-                if (std.mem.eql(u8, &sid, &session_id)) {
-                    _ = pane.transitionState(.orphaned, "txlog recovery (incomplete transaction)");
-                    pane.session_id = null;
-                    debugLog("txlog: marked pane {s} as orphaned", .{pane.uuid[0..8]});
+                // Mark all panes with this session_id as orphaned
+                var pane_iter = ses_state.panes.valueIterator();
+                while (pane_iter.next()) |pane| {
+                    if (pane.session_id) |sid| {
+                        if (std.mem.eql(u8, &sid, &entry.session_id)) {
+                            _ = pane.transitionState(.orphaned, "txlog recovery (incomplete detach)");
+                            pane.session_id = null;
+                            debugLog("txlog: marked pane {s} as orphaned", .{pane.uuid[0..8]});
+                        }
+                    }
                 }
-            }
+            },
+            .reattach_start => {
+                // Reattach start does not mutate detached session storage.
+                // If SES dies before the client re-registers with the restored
+                // session ID, the safe rollback is to keep the detached session.
+                debugLog("txlog: preserving detached session after incomplete reattach {s}", .{hex_id[0..8]});
+            },
+            else => {},
         }
     }
 

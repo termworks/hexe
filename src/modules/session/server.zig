@@ -1086,7 +1086,7 @@ pub const Server = struct {
 
         // Resolve session name to ensure uniqueness (avoid collisions with detached sessions)
         const resolved_name: ?[]u8 = if (name_slice.len > 0)
-            self.ses_state.resolveSessionName(name_slice, client_id)
+            self.ses_state.resolveSessionName(name_slice, client_id, session_id)
         else
             null;
         defer if (resolved_name) |rn| self.allocator.free(rn);
@@ -1324,7 +1324,7 @@ pub const Server = struct {
             wire.readExact(fd, buf[0..trail_len]) catch return;
         }
 
-        ses.debugLog("create_pane: shell_len={d} cwd_len={d} sticky_key={d} isolation_profile_len={d}", .{ cp.shell_len, cp.cwd_len, cp.sticky_key, cp.isolation_profile_len });
+        ses.debugLog("create_pane: shell_len={d} cwd_len={d} sticky_key={d} isolation_profile_len={d} env_count={d}", .{ cp.shell_len, cp.cwd_len, cp.sticky_key, cp.isolation_profile_len, cp.env_count });
 
         var offset: usize = 0;
         const shell = if (cp.shell_len > 0 and offset + cp.shell_len <= trail_len) blk: {
@@ -1357,6 +1357,17 @@ pub const Server = struct {
         } else null;
         const sticky_key: ?u8 = if (cp.sticky_key != 0) cp.sticky_key else null;
 
+        var env_list: std.ArrayList([]const u8) = .empty;
+        defer env_list.deinit(self.allocator);
+        for (0..cp.env_count) |_| {
+            if (offset + 2 > trail_len) break;
+            const entry_len = std.mem.readInt(u16, buf[offset..][0..2], .little);
+            offset += 2;
+            if (offset + entry_len > trail_len) break;
+            env_list.append(self.allocator, buf[offset .. offset + entry_len]) catch break;
+            offset += entry_len;
+        }
+
         // Resolve parent environment if inherit_env was requested.
         var parent_env: ?[]const []const u8 = null;
         defer if (parent_env) |env_entries| {
@@ -1368,6 +1379,24 @@ pub const Server = struct {
                 parent_env = parent_pane.getProcEnviron(self.allocator);
             }
         }
+
+        var merged_env_storage: ?[]const []const u8 = null;
+        defer if (merged_env_storage) |slice| self.allocator.free(slice);
+        const spawn_env: ?[]const []const u8 = blk: {
+            if (parent_env) |base| {
+                if (env_list.items.len == 0) break :blk base;
+                const merged = self.allocator.alloc([]const u8, base.len + env_list.items.len) catch {
+                    self.sendBinaryError(fd, "create_pane: env merge alloc failed");
+                    return;
+                };
+                @memcpy(merged[0..base.len], base);
+                @memcpy(merged[base.len..], env_list.items);
+                merged_env_storage = merged;
+                break :blk merged;
+            }
+            if (env_list.items.len > 0) break :blk env_list.items;
+            break :blk null;
+        };
 
         const client_id = self.findClientForCtlFd(fd) orelse blk: {
             const cid = self.ses_state.addClient(fd) catch {
@@ -1420,7 +1449,7 @@ pub const Server = struct {
             }
         }
 
-        const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, parent_env, isolation_profile) catch {
+        const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, spawn_env, isolation_profile) catch {
             self.sendBinaryError(fd, "create_failed");
             return;
         };
@@ -1930,6 +1959,9 @@ pub const Server = struct {
 
     /// Helper to complete reattach after session_id is resolved.
     fn completeReattach(self: *Server, fd: posix.fd_t, session_id: [16]u8, client_id: usize) void {
+        const hex_id_dbg: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+        ses.debugLog("completeReattach: begin session={s} client_id={d} fd={d}", .{ hex_id_dbg[0..8], client_id, fd });
+
         // Transaction log: reattach start
         const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
         self.ses_state.txlog.write(.reattach_start, session_id, &hex_id) catch {};
@@ -1942,22 +1974,45 @@ pub const Server = struct {
         // Note: Lock will be released in handleBinaryRegister after successful registration
 
         const result = self.ses_state.reattachSession(session_id, client_id) catch {
+            ses.debugLog("completeReattach: ses_state.reattachSession threw", .{});
             self.ses_state.releaseSessionLock(session_id);
             self.sendBinaryError(fd, "reattach_failed");
             return;
         };
         if (result == null) {
+            ses.debugLog("completeReattach: session not found after lock", .{});
             self.ses_state.releaseSessionLock(session_id);
             self.sendBinaryError(fd, "session_not_found");
             return;
         }
         const reattach_result = result.?;
+        ses.debugLog("completeReattach: borrowed snapshot panes={d}", .{reattach_result.pane_uuids.len});
+        const snapshot = reattach_result.session_snapshot;
+        ses.debugLog(
+            "completeReattach: snapshot name={s} uuid={s} tabs={d} panes={d} floats={d} active_tab={d}",
+            .{
+                snapshot.session_name,
+                snapshot.uuid[0..8],
+                snapshot.tabs.items.len,
+                snapshot.panes.count(),
+                snapshot.floats.items.len,
+                snapshot.active_tab,
+            },
+        );
+        for (snapshot.tabs.items, 0..) |tab, idx| {
+            ses.debugLog(
+                "completeReattach: tab[{d}] name={s} root={} focused={}",
+                .{ idx, tab.name, tab.root != null, tab.focused_pane_uuid != null },
+            );
+        }
         const session_json = reattach_result.session_snapshot.toJson(self.allocator) catch {
+            ses.debugLog("completeReattach: snapshot toJson failed", .{});
             self.ses_state.releaseSessionLock(session_id);
             self.sendBinaryError(fd, "reattach_snapshot_failed");
             return;
         };
         defer self.allocator.free(session_json);
+        ses.debugLog("completeReattach: session_json_len={d}", .{session_json.len});
 
         // Send SessionReattached: header + mux_state bytes + pane_count * 32 UUID bytes.
         var resp = wire.SessionReattached{
@@ -1971,12 +2026,14 @@ pub const Server = struct {
             .msg_type = @intFromEnum(wire.MsgType.session_reattached),
             .payload_len = @intCast(total_payload),
         };
+        ses.debugLog("completeReattach: writing response payload={d}", .{total_payload});
         wire.writeAll(fd, std.mem.asBytes(&ctrl_hdr)) catch return;
         wire.writeAll(fd, std.mem.asBytes(&resp)) catch return;
         wire.writeAll(fd, session_json) catch return;
         for (reattach_result.pane_uuids) |uuid| {
             wire.writeAll(fd, &uuid) catch return;
         }
+        ses.debugLog("completeReattach: response sent", .{});
     }
 
     fn handleBinaryDisconnect(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {

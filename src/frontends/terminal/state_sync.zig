@@ -447,13 +447,16 @@ pub fn getReliableCwd(self: anytype, pane: *Pane) ?[]const u8 {
 pub fn syncFocusedPaneInfo(self: anytype) void {
     if (!self.runtime.isConnected()) return;
 
-    const pane = if (self.activeFloatingIndex()) |idx| blk: {
-        if (idx < self.view.float_views.items.len) break :blk self.view.float_views.items[idx];
-        break :blk @as(?*Pane, null);
-    } else self.currentLayout().getFocusedPane();
+    const pane = if (getCurrentFocusedUuid(self)) |uuid|
+        self.findPaneByUuid(uuid)
+    else
+        null;
 
     if (pane == null) return;
     const p = pane.?;
+    if (self.paneIsFloating(p)) {
+        self.setActiveFloatingUuid(p.uuid);
+    }
     if (p.uuid[0] == 0) return;
 
     // Ensure pane metadata eventually converges even if an async response was

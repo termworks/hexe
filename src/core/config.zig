@@ -504,17 +504,16 @@ pub const SesConfig = struct {
 
         runtime.loadConfig(config_path) catch return config;
 
-        // Use ConfigBuilder API approach
-        if (runtime.getBuilder()) |builder| {
-            if (builder.ses) |ses_builder| {
-                config = ses_builder.build() catch config;
+        if (!shouldLoadLocalConfig()) {
+            if (runtime.getBuilder()) |builder| {
+                if (builder.ses) |ses_builder| {
+                    config = ses_builder.build() catch config;
+                }
             }
+            // Pop global config return value (if any) from stack
+            runtime.pop();
+            return config;
         }
-
-        // Pop config return value (if any) from stack
-        runtime.pop();
-
-        if (!shouldLoadLocalConfig()) return config;
 
         // Try to load local .hexe.lua from current directory
         const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
@@ -523,16 +522,32 @@ pub const SesConfig = struct {
         // Check if local config exists
         std.fs.cwd().access(local_path, .{}) catch {
             // No local config, use global only
+            if (runtime.getBuilder()) |builder| {
+                if (builder.ses) |ses_builder| {
+                    config = ses_builder.build() catch config;
+                }
+            }
+            // Pop global config return value (if any) from stack
+            runtime.pop();
             return config;
         };
 
         // Local config exists, load it and merge/overwrite
         runtime.loadConfig(local_path) catch {
             // Failed to load local config, but global is already loaded
+            if (runtime.getBuilder()) |builder| {
+                if (builder.ses) |ses_builder| {
+                    config = ses_builder.build() catch config;
+                }
+            }
+            // Pop global config return value (if any) from stack
+            runtime.pop();
             return config;
         };
 
-        // Use ConfigBuilder API approach for local config (merge/overwrite)
+        // Build once after both global and local config have run. Building the
+        // SES builder eagerly consumes layout definitions, so a second build
+        // after loading local config would otherwise wipe the global layouts.
         if (runtime.getBuilder()) |builder| {
             if (builder.ses) |ses_builder| {
                 config = ses_builder.build() catch config;

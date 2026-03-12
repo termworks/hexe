@@ -217,6 +217,174 @@ test "SessionLock: timeout releases stale locks" {
     ses_state.releaseSessionLock(session_id);
 }
 
+test "reattachSession: returns snapshot borrowed from detached session map" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const session_id = [_]u8{4} ** 16;
+    const session_hex: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+    const pane_uuid = [_]u8{'a'} ** 32;
+    const live_pid: std.posix.pid_t = @intCast(std.c.getpid());
+
+    var snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, session_hex, "borrowed");
+    errdefer snapshot.deinit();
+    try snapshot.panes.put(pane_uuid, .{
+        .uuid = pane_uuid,
+        .kind = .split,
+        .parent_tab = null,
+    });
+
+    const pane_uuids = try testing.allocator.alloc([32]u8, 1);
+    errdefer testing.allocator.free(pane_uuids);
+    pane_uuids[0] = pane_uuid;
+
+    try ses_state.panes.put(pane_uuid, .{
+        .uuid = pane_uuid,
+        .name = null,
+        .pod_pid = live_pid,
+        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/test-pane-a.sock"),
+        .child_pid = live_pid,
+        .state = .detached,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = null,
+        .session_id = session_id,
+        .created_at = std.time.timestamp(),
+        .orphaned_at = null,
+        .allocator = testing.allocator,
+    });
+
+    try ses_state.detached_sessions.put(session_id, .{
+        .session_id = session_id,
+        .session_snapshot = snapshot,
+        .pane_uuids = pane_uuids,
+        .detached_at = std.time.timestamp(),
+        .allocator = testing.allocator,
+    });
+
+    const result = (try ses_state.reattachSession(session_id, 1)) orelse return error.TestUnexpectedResult;
+    const stored = ses_state.detached_sessions.getPtr(session_id) orelse return error.TestUnexpectedResult;
+
+    try testing.expect(result.session_snapshot == &stored.session_snapshot);
+    try testing.expectEqualStrings("borrowed", result.session_snapshot.session_name);
+    try testing.expectEqualSlices(u8, &pane_uuids[0], &result.pane_uuids[0]);
+}
+
+test "reattachSession: seeds live client snapshot from detached state" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const session_id = [_]u8{6} ** 16;
+    const session_hex: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+    const pane_uuid = [_]u8{'p'} ** 32;
+    const live_pid: std.posix.pid_t = @intCast(std.c.getpid());
+
+    var snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, session_hex, "seeded");
+    errdefer snapshot.deinit();
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "seeded-1"),
+        .focused_pane_uuid = pane_uuid,
+        .allocator = testing.allocator,
+    });
+    try snapshot.panes.put(pane_uuid, .{
+        .uuid = pane_uuid,
+        .kind = .split,
+        .parent_tab = 0,
+    });
+    snapshot.focused_pane_uuid = pane_uuid;
+
+    const pane_uuids = try testing.allocator.alloc([32]u8, 1);
+    errdefer testing.allocator.free(pane_uuids);
+    pane_uuids[0] = pane_uuid;
+
+    try ses_state.panes.put(pane_uuid, .{
+        .uuid = pane_uuid,
+        .name = null,
+        .pod_pid = live_pid,
+        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/test-pane-p.sock"),
+        .child_pid = live_pid,
+        .state = .detached,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = null,
+        .session_id = session_id,
+        .created_at = std.time.timestamp(),
+        .orphaned_at = null,
+        .allocator = testing.allocator,
+    });
+
+    try ses_state.detached_sessions.put(session_id, .{
+        .session_id = session_id,
+        .session_snapshot = snapshot,
+        .pane_uuids = pane_uuids,
+        .detached_at = std.time.timestamp(),
+        .allocator = testing.allocator,
+    });
+
+    const result = (try ses_state.reattachSession(session_id, client_id)) orelse return error.TestUnexpectedResult;
+    const client = ses_state.getClient(client_id) orelse return error.TestUnexpectedResult;
+
+    try testing.expect(client.session_snapshot != null);
+    try testing.expect(&client.session_snapshot.? != result.session_snapshot);
+    try testing.expectEqualStrings("seeded", client.session_snapshot.?.session_name);
+    try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.tabs.items.len);
+    try testing.expectEqual(pane_uuid, client.session_snapshot.?.focused_pane_uuid.?);
+}
+
+test "reattachSession: prunes stale detached pane uuids before returning" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const session_id = [_]u8{7} ** 16;
+    const session_hex: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+    const stale_uuid = [_]u8{'f'} ** 32;
+
+    var snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, session_hex, "stale");
+    errdefer snapshot.deinit();
+    try snapshot.panes.put(stale_uuid, .{
+        .uuid = stale_uuid,
+        .kind = .float,
+        .parent_tab = null,
+        .sticky = true,
+        .is_pwd = true,
+        .float_key = '1',
+    });
+    try snapshot.floats.append(testing.allocator, .{
+        .pane_uuid = stale_uuid,
+        .visible = true,
+        .sticky = true,
+        .is_pwd = true,
+        .float_key = '1',
+    });
+    snapshot.active_float_uuid = stale_uuid;
+    snapshot.focused_pane_uuid = stale_uuid;
+
+    const pane_uuids = try testing.allocator.alloc([32]u8, 1);
+    errdefer testing.allocator.free(pane_uuids);
+    pane_uuids[0] = stale_uuid;
+
+    try ses_state.detached_sessions.put(session_id, .{
+        .session_id = session_id,
+        .session_snapshot = snapshot,
+        .pane_uuids = pane_uuids,
+        .detached_at = std.time.timestamp(),
+        .allocator = testing.allocator,
+    });
+
+    const result = (try ses_state.reattachSession(session_id, client_id)) orelse return error.TestUnexpectedResult;
+    const stored = ses_state.detached_sessions.getPtr(session_id) orelse return error.TestUnexpectedResult;
+
+    try testing.expectEqual(@as(usize, 0), result.pane_uuids.len);
+    try testing.expectEqual(@as(usize, 0), stored.pane_uuids.len);
+    try testing.expect(stored.session_snapshot.panes.get(stale_uuid) == null);
+    try testing.expectEqual(@as(usize, 0), stored.session_snapshot.floats.items.len);
+    try testing.expect(stored.session_snapshot.active_float_uuid == null);
+    try testing.expect(stored.session_snapshot.focused_pane_uuid == null);
+}
+
 // ============================================================================
 // Session Name Resolution Tests
 // ============================================================================
@@ -226,7 +394,7 @@ test "resolveSessionName: unique name returned as-is" {
     defer ses_state.deinit();
 
     const name = "alpha";
-    const resolved = ses_state.resolveSessionName(name, null) orelse return error.AllocationFailed;
+    const resolved = ses_state.resolveSessionName(name, null, null) orelse return error.AllocationFailed;
     // Note: resolved is allocated with page_allocator (SesState.allocator), not testing.allocator
     defer ses_state.allocator.free(resolved);
 
@@ -245,7 +413,7 @@ test "resolveSessionName: conflicting name gets suffix" {
     }
 
     // Try to resolve "alpha" - should get "alpha-2"
-    const resolved = ses_state.resolveSessionName("alpha", null) orelse return error.AllocationFailed;
+    const resolved = ses_state.resolveSessionName("alpha", null, null) orelse return error.AllocationFailed;
     defer ses_state.allocator.free(resolved);
 
     try testing.expectEqualStrings("alpha-2", resolved);
@@ -261,7 +429,34 @@ test "resolveSessionName: ignores current client on re-register" {
         client.session_name = try ses_state.allocator.dupe(u8, "alpha");
     }
 
-    const resolved = ses_state.resolveSessionName("alpha", client_id) orelse return error.AllocationFailed;
+    const resolved = ses_state.resolveSessionName("alpha", client_id, null) orelse return error.AllocationFailed;
+    defer ses_state.allocator.free(resolved);
+
+    try testing.expectEqualStrings("alpha", resolved);
+}
+
+test "resolveSessionName: ignores matching detached session on reattach" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const session_id = [_]u8{5} ** 16;
+    const session_hex: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+
+    var snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, session_hex, "alpha");
+    errdefer snapshot.deinit();
+
+    const pane_uuids = try testing.allocator.alloc([32]u8, 0);
+    errdefer testing.allocator.free(pane_uuids);
+
+    try ses_state.detached_sessions.put(session_id, .{
+        .session_id = session_id,
+        .session_snapshot = snapshot,
+        .pane_uuids = pane_uuids,
+        .detached_at = std.time.timestamp(),
+        .allocator = testing.allocator,
+    });
+
+    const resolved = ses_state.resolveSessionName("alpha", null, session_id) orelse return error.AllocationFailed;
     defer ses_state.allocator.free(resolved);
 
     try testing.expectEqualStrings("alpha", resolved);
@@ -339,6 +534,28 @@ test "TxLog: findIncompleteTransactions detects incomplete detach" {
 
     try testing.expectEqual(@as(usize, 1), incomplete.items.len);
     try testing.expectEqualSlices(u8, &session_id_2, &incomplete.items[0]);
+}
+
+test "TxLog: findIncompleteOperations preserves reattach type" {
+    const page_alloc = std.heap.page_allocator;
+    var entries: std.ArrayList(txlog.TxLogEntry) = .empty;
+    defer entries.deinit(page_alloc);
+
+    const session_id = [_]u8{3} ** 16;
+
+    try entries.append(page_alloc, .{
+        .tx_type = .reattach_start,
+        .timestamp = 300,
+        .session_id = session_id,
+        .payload = "",
+    });
+
+    var incomplete = try txlog.findIncompleteOperations(entries.items);
+    defer incomplete.deinit(page_alloc);
+
+    try testing.expectEqual(@as(usize, 1), incomplete.items.len);
+    try testing.expectEqual(txlog.TxType.reattach_start, incomplete.items[0].tx_type);
+    try testing.expectEqualSlices(u8, &session_id, &incomplete.items[0].session_id);
 }
 
 test "TxLog: truncate clears log" {

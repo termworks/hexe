@@ -12,6 +12,7 @@ const transport_helpers = @import("frontend_transport_helpers.zig");
 const session_model = @import("session_model.zig");
 const TabFocusKind = @import("session_projection.zig").TabFocusKind;
 const SessionProjection = @import("session_projection.zig").SessionProjection;
+const logging = @import("logging.zig");
 const wire = @import("wire.zig");
 
 pub const FrontendRuntime = struct {
@@ -640,9 +641,28 @@ pub const FrontendRuntime = struct {
     }
 
     pub fn applySessionStateJson(self: *FrontendRuntime, session_state_json: []const u8) bool {
-        var snapshot = self.parseSessionSnapshotJson(session_state_json) catch return false;
+        logging.debug("frontend-runtime", "applySessionStateJson: begin len={d}", .{session_state_json.len});
+        var snapshot = self.parseSessionSnapshotJson(session_state_json) catch |err| {
+            logging.debug("frontend-runtime", "applySessionStateJson: parse failed: {s}", .{@errorName(err)});
+            return false;
+        };
         defer snapshot.deinit();
-        self.replaceProjectionFromSnapshot(&snapshot, snapshot.tabs.items.len) catch return false;
+        logging.debug(
+            "frontend-runtime",
+            "applySessionStateJson: parsed tabs={d} floats={d} active_tab={d} active_float={} focused={}",
+            .{
+                snapshot.tabs.items.len,
+                snapshot.floats.items.len,
+                snapshot.active_tab,
+                snapshot.active_float_uuid != null,
+                snapshot.focused_pane_uuid != null,
+            },
+        );
+        self.replaceProjectionFromSnapshot(&snapshot, snapshot.tabs.items.len) catch |err| {
+            logging.debug("frontend-runtime", "applySessionStateJson: replaceProjectionFromSnapshot failed: {s}", .{@errorName(err)});
+            return false;
+        };
+        logging.debug("frontend-runtime", "applySessionStateJson: projection replaced", .{});
         return true;
     }
 
@@ -682,10 +702,23 @@ pub const FrontendRuntime = struct {
         snapshot: *const session_model.SessionSnapshot,
         live_tab_count: usize,
     ) !void {
+        logging.debug(
+            "frontend-runtime",
+            "replaceProjectionFromSnapshot: tabs={d} floats={d} active_tab={d} active_float={} focused={}",
+            .{
+                snapshot.tabs.items.len,
+                snapshot.floats.items.len,
+                snapshot.active_tab,
+                snapshot.active_float_uuid != null,
+                snapshot.focused_pane_uuid != null,
+            },
+        );
         try self.projection.replaceAttachedSnapshotOwned(try snapshot.clone(self.allocator));
+        logging.debug("frontend-runtime", "replaceProjectionFromSnapshot: attached snapshot replaced", .{});
         self.client.session_id = self.projection.sessionUuid();
         self.client.session_name = self.projection.sessionName();
         self.projection.setActiveTab(self.projection.activeTab(live_tab_count));
+        logging.debug("frontend-runtime", "replaceProjectionFromSnapshot: active tab normalized", .{});
     }
 
     pub fn clearTabMeta(self: *FrontendRuntime) void {

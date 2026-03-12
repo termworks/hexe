@@ -313,8 +313,22 @@ pub fn run(terminal_args: TerminalArgs) !void {
             try state.createTab();
         };
     } else {
-        // Create first tab with one pane (will use ses if connected).
-        try state.createTab();
+        // Apply the enabled SES layout on normal startup when present.
+        var applied_layout = false;
+        for (state.ses_config.layouts) |*layout| {
+            if (!layout.enabled) continue;
+            state.applyLayoutDef(layout) catch |err| {
+                debugLog("applyLayoutDef failed: {s}", .{@errorName(err)});
+                std.debug.print("Error applying configured layout '{s}': {s}\n", .{ layout.name, @errorName(err) });
+            };
+            applied_layout = true;
+            break;
+        }
+
+        if (!applied_layout) {
+            // No configured layout; create a single default tab.
+            try state.createTab();
+        }
     }
 
     // Auto-adopt sticky panes from ses for this directory.

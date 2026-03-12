@@ -379,13 +379,14 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     const pane = state.view.float_views.items[index];
     const was_active = if (state.activeFloatingIndex()) |af| af == index else false;
     const exit_code = state.paneExitCode(pane.uuid);
+    const pane_uuid = pane.uuid;
 
     if (state.paneFloatKey(pane) != 0 and !state.paneCaptureOutput(pane)) {
         if (state.paneRetainedAfterExit(pane)) return;
-        state.setPaneRetainedAfterExit(pane.uuid, true);
+        state.setPaneRetainedAfterExit(pane_uuid, true);
 
         terminal_main.debugLog("float pane retained after exit: uuid={s} exit_code={d} focused={}", .{
-            pane.uuid[0..8],
+            pane_uuid[0..8],
             exit_code,
             was_active,
         });
@@ -404,7 +405,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
             state.setActiveFloatingIndex(null);
             state.cursor_needs_restore = true;
             if (state.currentLayout().getFocusedPane()) |tiled| {
-                state.syncPaneFocus(tiled, pane.uuid);
+                state.syncPaneFocus(tiled, pane_uuid);
             }
         }
 
@@ -416,7 +417,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
 
     _ = state.view.float_views.orderedRemove(index);
 
-    terminal_main.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
+    terminal_main.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane_uuid[0..8], exit_code, was_active });
 
     if (!was_active and exit_code != 0) {
         const msg = std.fmt.allocPrint(
@@ -433,13 +434,14 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     // Float is already dead (detected via isAlive/pane_exited), so avoid
     // sending another synchronous kill request on the shared control channel.
 
-    state.clearFloatUi(pane.uuid);
+    state.clearTransientPaneState(pane);
+    state.clearFloatUi(pane_uuid);
     pane.deinit();
     state.allocator.destroy(pane);
     state.needs_render = true;
     state.force_full_render = true;
     state.renderer.invalidate();
-    state.syncSessionFloatRemoved(pane.uuid);
+    state.syncSessionFloatRemoved(pane_uuid);
 
     if (was_active) {
         state.setActiveFloatingIndex(null);
@@ -686,11 +688,13 @@ pub fn runMainLoop(state: *State) !void {
                 const exit_code = if (dead_pane) |p| state.paneExitCode(p.uuid) else 0;
 
                 if (state.currentLayout().splitCount() > 1) {
+                    const dead_view_id = dead_pane.?.id;
+                    state.clearTransientPaneState(dead_pane.?);
                     // Multiple splits in tab - close the specific dead pane.
                     _ = state.currentLayout().closePane(dead_uuid);
 
                     // Log pane death
-                    terminal_main.debugLog("pane died: view_id={d} exit_code={d} focused={}", .{ dead_pane.?.id, exit_code, was_focused });
+                    terminal_main.debugLog("pane died: view_id={d} exit_code={d} focused={}", .{ dead_view_id, exit_code, was_focused });
 
                     // Show notification if pane died with non-zero exit or was unfocused (unexpected)
                     if (!was_focused and exit_code != 0) {

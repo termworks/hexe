@@ -333,6 +333,22 @@ pub fn drawFloatingBorder(
     ctx: ?*shp.Context,
     query: ?*const core.PaneQuery,
 ) void {
+    const drawDefaultTitle = struct {
+        fn go(renderer_in: *Renderer, x_in: u16, y_in: u16, w_in: u16, h_in: u16, border_palette: u8, name_in: []const u8) void {
+            if (name_in.len == 0) return;
+            const inner_w = floatTitleInnerWidth(w_in);
+            if (inner_w == 0) return;
+
+            const clipped_name = text_width.clipTextToWidth(name_in, inner_w);
+            const title_len = @min(inner_w, statusbar.measureText(clipped_name));
+            if (title_len == 0) return;
+
+            const place = floatTitlePlacement(x_in, y_in, w_in, h_in, .topcenter, title_len);
+            const title_style = applyFloatTitleStyleDefaults(.{}, border_palette);
+            _ = statusbar.drawStyledText(renderer_in, place.x, place.y, clipped_name, title_style);
+        }
+    }.go;
+
     // Optional shadow (draw first so border overlays it)
     if (style) |s| {
         if (s.shadow_color) |sc| {
@@ -461,7 +477,10 @@ pub fn drawFloatingBorder(
                     const seg_style = applyFloatTitleStyleDefaults(toShpStyle(seg), color);
                     cur_x = statusbar.drawStyledText(renderer, cur_x, place.y, clipped, seg_style);
                 }
+                return;
             }
         }
     }
+
+    drawDefaultTitle(renderer, x, y, w, h, color, name);
 }

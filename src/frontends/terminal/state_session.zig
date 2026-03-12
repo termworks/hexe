@@ -16,6 +16,9 @@ const SessionConfig = core.session_config.SessionConfig;
 const SplitConfig = core.session_config.SplitConfig;
 const TabConfig = core.session_config.TabConfig;
 const SplitChild = core.session_config.SplitChild;
+const LayoutDef = core.LayoutDef;
+const LayoutTabDef = core.LayoutTabDef;
+const LayoutSplitDef = core.LayoutSplitDef;
 
 /// Apply a session config to the terminal frontend state.
 /// Creates tabs with the specified split trees, panes with commands/cwds.
@@ -64,10 +67,42 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
     self.force_full_render = true;
 }
 
+/// Apply an enabled SES layout definition to a new session startup.
+pub fn applyLayoutDef(self: anytype, layout: *const LayoutDef) !void {
+    terminal_main.debugLog("applyLayoutDef: '{s}' tabs={d} floats={d}", .{ layout.name, layout.tabs.len, layout.floats.len });
+
+    if (layout.tabs.len == 0) {
+        try self.createTab();
+        return;
+    }
+
+    var created_any = false;
+    for (layout.tabs) |tab_config| {
+        if (!tab_config.enabled) continue;
+        try createTabFromLayoutDef(self, tab_config);
+        created_any = true;
+    }
+
+    if (!created_any) {
+        try self.createTab();
+        return;
+    }
+
+    self.setActiveTabIndex(0);
+    if (self.view.tab_views.items.len > 0) {
+        if (self.view.tab_views.items[0].layout.getFocusedPane()) |pane| {
+            self.syncPaneFocus(pane, null);
+        }
+    }
+    self.renderer.invalidate();
+    self.force_full_render = true;
+}
+
 /// Replace current runtime tabs/floats with a session config.
 pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]const u8) !void {
     // Remove floating panes.
     for (self.view.float_views.items) |pane| {
+        self.clearTransientPaneState(pane);
         self.clearFloatUi(pane.uuid);
         pane.deinit();
         self.allocator.destroy(pane);
@@ -78,6 +113,10 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
 
     // Remove all tabs.
     for (self.view.tab_views.items) |*tab| {
+        var split_it = tab.layout.splits.valueIterator();
+        while (split_it.next()) |pane_ptr| {
+            self.clearTransientPaneState(pane_ptr.*);
+        }
         tab.deinit();
     }
     self.view.tab_views.clearRetainingCapacity();
@@ -134,6 +173,53 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     }
 }
 
+fn createTabFromLayoutDef(self: anytype, tab_config: LayoutTabDef) !void {
+    const name_owned = try self.allocator.dupe(u8, tab_config.name);
+
+    const tab_uuid = core.ipc.generateUuid();
+    var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+
+    if (self.runtime.isConnected()) {
+        tab.layout.setFrontendRuntime(self.runtime);
+    }
+    tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
+
+    if (tab_config.root) |root_def| {
+        const root = try buildLayoutTree(self, &tab.layout, root_def);
+        tab.layout.root = root;
+        tab.layout.focused_pane_uuid = leftmostPaneUuid(&tab.layout, root);
+        if (tab.layout.focused_pane_uuid) |focused_uuid| {
+            if (tab.layout.splits.getPtr(focused_uuid)) |pane| {
+                pane.*.focused = true;
+            }
+        }
+        tab.layout.recalculateLayout();
+    } else {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = std.posix.getcwd(&cwd_buf) catch null;
+        _ = try tab.layout.createFirstPane(cwd);
+    }
+
+    try self.view.tab_views.append(self.allocator, tab);
+    errdefer {
+        var failed_tab = self.view.tab_views.pop().?;
+        failed_tab.deinit();
+    }
+    if (!self.runtime.appendTabMeta(tab_uuid, name_owned)) return error.OutOfMemory;
+    errdefer self.runtime.removeTabMeta(self.view.tab_views.items.len - 1);
+    self.allocator.free(name_owned);
+    if (!self.runtime.appendTabFocusMemory()) return error.OutOfMemory;
+    errdefer self.runtime.removeTabFocusMemory(self.view.tab_views.items.len - 1);
+
+    self.setActiveTabIndex(self.view.tab_views.items.len - 1);
+    const created_tab = &self.view.tab_views.items[self.activeTabIndex()];
+    const focused = created_tab.layout.getFocusedPane() orelse return error.InvalidLayout;
+    self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", focused.uuid);
+    if (created_tab.layout.root) |root| {
+        syncConfigSplitTree(self, &created_tab.layout, root, focused.uuid);
+    }
+}
+
 fn leftmostPaneUuid(layout: *Layout, node: *const LayoutNode) ?[32]u8 {
     return switch (node.*) {
         .pane => |id| if (layout.splits.get(id)) |pane| pane.uuid else null,
@@ -161,7 +247,8 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
         .pane => |pane_config| {
             // Single pane
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const cwd = resolvePaneCwd(pane_config.cwd) orelse (std.posix.getcwd(&cwd_buf) catch null);
+            var resolved_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = resolvePaneCwd(pane_config.cwd, &resolved_cwd_buf) orelse (std.posix.getcwd(&cwd_buf) catch null);
             const first_pane = try layout.createFirstPane(cwd);
 
             // If cmd is set, type it into the shell
@@ -216,12 +303,74 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
     }
 }
 
+fn buildLayoutTree(self: anytype, layout: *Layout, split_def: LayoutSplitDef) !*LayoutNode {
+    const node = try self.allocator.create(LayoutNode);
+    errdefer self.allocator.destroy(node);
+
+    switch (split_def) {
+        .pane => |pane_config| {
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            var resolved_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = resolvePaneCwd(pane_config.cwd, &resolved_cwd_buf) orelse (std.posix.getcwd(&cwd_buf) catch null);
+            const view_id = layout.next_pane_view_id;
+            layout.next_pane_view_id +%= 1;
+
+            const pane = try self.allocator.create(Pane);
+            errdefer self.allocator.destroy(pane);
+
+            const runtime = layout.runtime orelse return error.SesUnavailable;
+            if (!runtime.isConnected()) return error.SesUnavailable;
+            const result = try runtime.createPane(null, cwd, null, null, null, null, null);
+            const vt_fd = runtime.getVtFd() orelse return error.SesUnavailable;
+            try pane.initWithPod(self.allocator, view_id, 0, 0, layout.width, layout.height, result.pane_id, vt_fd, result.uuid);
+
+            layout.configurePaneNotifications(pane);
+            try layout.splits.put(pane.uuid, pane);
+            if (pane_config.command) |cmd| {
+                writePaneCommand(self, pane, cmd);
+            }
+            node.* = .{ .pane = pane.uuid };
+        },
+        .split => |split| {
+            const dir: SplitDir = if (std.mem.eql(u8, split.dir, "h")) .horizontal else .vertical;
+            const first = try buildLayoutTree(self, layout, split.first.*);
+            errdefer {
+                destroyLayoutTreeNodes(self.allocator, first);
+            }
+            const second = try buildLayoutTree(self, layout, split.second.*);
+            errdefer {
+                destroyLayoutTreeNodes(self.allocator, second);
+            }
+            node.* = .{ .split = .{
+                .dir = dir,
+                .ratio = split.ratio,
+                .first = first,
+                .second = second,
+            } };
+        },
+    }
+
+    return node;
+}
+
+fn destroyLayoutTreeNodes(allocator: std.mem.Allocator, node: *LayoutNode) void {
+    switch (node.*) {
+        .pane => {},
+        .split => |split| {
+            destroyLayoutTreeNodes(allocator, split.first);
+            destroyLayoutTreeNodes(allocator, split.second);
+        },
+    }
+    allocator.destroy(node);
+}
+
 /// Recursively collect all leaf panes, creating them via SES.
 fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: *std.ArrayList(*Pane), cmds: *std.ArrayList(?[]const u8)) !void {
     switch (config) {
         .pane => |pane_config| {
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const cwd = resolvePaneCwd(pane_config.cwd) orelse (std.posix.getcwd(&cwd_buf) catch null);
+            var resolved_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = resolvePaneCwd(pane_config.cwd, &resolved_cwd_buf) orelse (std.posix.getcwd(&cwd_buf) catch null);
             const view_id = layout.next_pane_view_id;
             layout.next_pane_view_id +%= 1;
 
@@ -356,11 +505,13 @@ fn computeTotalSize(children: []const SplitChild) u16 {
     return total;
 }
 
-fn resolvePaneCwd(cwd: ?[]const u8) ?[]const u8 {
+fn resolvePaneCwd(cwd: ?[]const u8, out_buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
     if (cwd) |c| {
         if (std.fs.path.isAbsolute(c)) return c;
-        // For relative paths, they're relative to the root (which we already chdir'd to)
-        return c;
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const base = std.posix.getcwd(&cwd_buf) catch return null;
+        var fba = std.heap.FixedBufferAllocator.init(out_buf);
+        return std.fs.path.resolve(fba.allocator(), &.{ base, c }) catch null;
     }
     return null;
 }

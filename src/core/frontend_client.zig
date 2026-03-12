@@ -592,7 +592,7 @@ pub const SesClient = struct {
         cwd: ?[]const u8,
         sticky_pwd: ?[]const u8,
         sticky_key: ?u8,
-        _: ?[]const []const u8, // env (unused in binary protocol — pod inherits)
+        env: ?[]const []const u8,
         isolation_profile: ?[]const u8,
         inherit_env_parent_uuid: ?[32]u8,
     ) !struct { uuid: [32]u8, pane_id: u16, pid: posix.pid_t } {
@@ -603,6 +603,21 @@ pub const SesClient = struct {
         const sticky_pwd_bytes = sticky_pwd orelse "";
         const isolation_profile_bytes = isolation_profile orelse "";
         const parent_uuid_bytes: []const u8 = if (inherit_env_parent_uuid) |*u| u[0..] else "";
+        const env_items = env orelse &.{};
+
+        var trail: std.ArrayList(u8) = .empty;
+        defer trail.deinit(self.allocator);
+        var tw = trail.writer(self.allocator);
+        try tw.writeAll(shell_bytes);
+        try tw.writeAll(cwd_bytes);
+        try tw.writeAll(sticky_pwd_bytes);
+        try tw.writeAll(isolation_profile_bytes);
+        try tw.writeAll(parent_uuid_bytes);
+        for (env_items) |entry| {
+            const entry_len: u16 = @intCast(entry.len);
+            try tw.writeAll(std.mem.asBytes(&entry_len));
+            try tw.writeAll(entry);
+        }
 
         var msg: wire.CreatePane = .{
             .shell_len = @intCast(shell_bytes.len),
@@ -611,10 +626,10 @@ pub const SesClient = struct {
             .sticky_pwd_len = @intCast(sticky_pwd_bytes.len),
             .isolation_profile_len = @intCast(isolation_profile_bytes.len),
             .inherit_env_parent_uuid_len = @intCast(parent_uuid_bytes.len),
+            .env_count = @intCast(env_items.len),
         };
-        const trails: []const []const u8 = &.{ shell_bytes, cwd_bytes, sticky_pwd_bytes, isolation_profile_bytes, parent_uuid_bytes };
         self.debugLog("createPane: shell={s} cwd={s} isolation={s}", .{ shell_bytes, cwd_bytes, isolation_profile_bytes });
-        try wire.writeControlMsg(fd, .create_pane, std.mem.asBytes(&msg), trails);
+        try wire.writeControlWithTrail(fd, .create_pane, std.mem.asBytes(&msg), trail.items);
 
         // Read response.
         const hdr = try self.readSyncResponse(fd);

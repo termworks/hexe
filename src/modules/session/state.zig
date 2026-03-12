@@ -557,6 +557,231 @@ pub const SesState = struct {
         return &client.session_snapshot.?;
     }
 
+    fn firstLayoutPaneUuid(node: ?*const session_model.SessionLayoutNode) ?[32]u8 {
+        const root = node orelse return null;
+        return switch (root.*) {
+            .pane => |uuid| uuid,
+            .split => |split| firstLayoutPaneUuid(split.first) orelse firstLayoutPaneUuid(split.second),
+        };
+    }
+
+    fn normalizeSessionSnapshotAfterPaneRemoval(snapshot: *session_model.SessionSnapshot) void {
+        if (snapshot.tabs.items.len == 0) {
+            snapshot.active_tab = 0;
+            if (snapshot.active_float_uuid) |active_float_uuid| {
+                if (!snapshot.panes.contains(active_float_uuid)) {
+                    snapshot.active_float_uuid = null;
+                }
+            }
+            snapshot.focused_pane_uuid = snapshot.active_float_uuid;
+            return;
+        }
+
+        if (snapshot.active_tab >= snapshot.tabs.items.len) {
+            snapshot.active_tab = snapshot.tabs.items.len - 1;
+        }
+
+        if (snapshot.tabs.items[snapshot.active_tab].focused_pane_uuid == null) {
+            snapshot.tabs.items[snapshot.active_tab].focused_pane_uuid =
+                firstLayoutPaneUuid(snapshot.tabs.items[snapshot.active_tab].root);
+        }
+
+        if (snapshot.active_float_uuid) |active_float_uuid| {
+            if (!snapshot.panes.contains(active_float_uuid)) {
+                snapshot.active_float_uuid = null;
+            }
+        }
+
+        if (snapshot.active_float_uuid) |active_float_uuid| {
+            snapshot.focused_pane_uuid = active_float_uuid;
+        } else {
+            snapshot.focused_pane_uuid = snapshot.tabs.items[snapshot.active_tab].focused_pane_uuid;
+        }
+    }
+
+    fn removePaneFromSessionSnapshot(
+        allocator: std.mem.Allocator,
+        snapshot: *session_model.SessionSnapshot,
+        pane_uuid: [32]u8,
+    ) void {
+        const pane_state = snapshot.panes.get(pane_uuid) orelse {
+            var float_idx: ?usize = null;
+            for (snapshot.floats.items, 0..) |float_state, idx| {
+                if (std.mem.eql(u8, &float_state.pane_uuid, &pane_uuid)) {
+                    float_idx = idx;
+                    break;
+                }
+            }
+            if (float_idx) |idx| {
+                _ = snapshot.floats.orderedRemove(idx);
+            }
+            if (snapshot.active_float_uuid) |active_float_uuid| {
+                if (std.mem.eql(u8, &active_float_uuid, &pane_uuid)) {
+                    snapshot.active_float_uuid = null;
+                }
+            }
+            if (snapshot.focused_pane_uuid) |focused_pane_uuid| {
+                if (std.mem.eql(u8, &focused_pane_uuid, &pane_uuid)) {
+                    snapshot.focused_pane_uuid = null;
+                }
+            }
+            normalizeSessionSnapshotAfterPaneRemoval(snapshot);
+            return;
+        };
+
+        switch (pane_state.kind) {
+            .float => {
+                var float_idx: ?usize = null;
+                for (snapshot.floats.items, 0..) |float_state, idx| {
+                    if (std.mem.eql(u8, &float_state.pane_uuid, &pane_uuid)) {
+                        float_idx = idx;
+                        break;
+                    }
+                }
+                if (float_idx) |idx| {
+                    _ = snapshot.floats.orderedRemove(idx);
+                }
+                _ = snapshot.panes.remove(pane_uuid);
+            },
+            .split => {
+                var removed_tab_idx: ?usize = null;
+                if (pane_state.parent_tab) |tab_idx| {
+                    if (tab_idx < snapshot.tabs.items.len) {
+                        _ = session_model.removePaneFromLayout(snapshot.allocator, &snapshot.tabs.items[tab_idx].root, pane_uuid) catch false;
+                        if (snapshot.tabs.items[tab_idx].focused_pane_uuid) |focused_pane_uuid| {
+                            if (std.mem.eql(u8, &focused_pane_uuid, &pane_uuid)) {
+                                snapshot.tabs.items[tab_idx].focused_pane_uuid =
+                                    firstLayoutPaneUuid(snapshot.tabs.items[tab_idx].root);
+                            }
+                        }
+                        if (snapshot.tabs.items[tab_idx].root == null) {
+                            var removed_tab = snapshot.tabs.orderedRemove(tab_idx);
+                            removed_tab.deinit();
+                            removed_tab_idx = tab_idx;
+                        }
+                    }
+                }
+
+                _ = snapshot.panes.remove(pane_uuid);
+
+                if (removed_tab_idx) |tab_idx| {
+                    var remove_split_uuids: std.ArrayList([32]u8) = .empty;
+                    defer remove_split_uuids.deinit(allocator);
+
+                    var pane_iter = snapshot.panes.iterator();
+                    while (pane_iter.next()) |entry| {
+                        if (entry.value_ptr.parent_tab) |parent| {
+                            if (entry.value_ptr.kind == .split and parent == tab_idx) {
+                                remove_split_uuids.append(allocator, entry.key_ptr.*) catch {};
+                            } else if (parent > tab_idx) {
+                                entry.value_ptr.parent_tab = parent - 1;
+                            }
+                        }
+                    }
+                    for (remove_split_uuids.items) |split_uuid| {
+                        _ = snapshot.panes.remove(split_uuid);
+                    }
+
+                    for (snapshot.floats.items) |*float_state| {
+                        if (float_state.parent_tab) |parent| {
+                            if (parent == tab_idx) {
+                                float_state.parent_tab = null;
+                            } else if (parent > tab_idx) {
+                                float_state.parent_tab = parent - 1;
+                            }
+                        }
+                    }
+
+                    var remapped_iter = snapshot.panes.iterator();
+                    while (remapped_iter.next()) |entry| {
+                        if (entry.value_ptr.kind != .float) continue;
+                        if (entry.value_ptr.parent_tab) |parent| {
+                            if (parent == tab_idx) {
+                                entry.value_ptr.parent_tab = null;
+                            } else if (parent > tab_idx) {
+                                entry.value_ptr.parent_tab = parent - 1;
+                            }
+                        }
+                    }
+                }
+            },
+        }
+
+        if (snapshot.active_float_uuid) |active_float_uuid| {
+            if (std.mem.eql(u8, &active_float_uuid, &pane_uuid)) {
+                snapshot.active_float_uuid = null;
+            }
+        }
+        if (snapshot.focused_pane_uuid) |focused_pane_uuid| {
+            if (std.mem.eql(u8, &focused_pane_uuid, &pane_uuid)) {
+                snapshot.focused_pane_uuid = null;
+            }
+        }
+
+        normalizeSessionSnapshotAfterPaneRemoval(snapshot);
+    }
+
+    fn prunePaneFromClientSnapshot(self: *SesState, client_id: usize, pane_uuid: [32]u8) void {
+        const client = self.getClient(client_id) orelse return;
+        if (client.session_snapshot) |*snapshot| {
+            removePaneFromSessionSnapshot(self.allocator, snapshot, pane_uuid);
+        }
+    }
+
+    fn prunePaneFromDetachedSnapshot(self: *SesState, session_id: [16]u8, pane_uuid: [32]u8) void {
+        const detached = self.detached_sessions.getPtr(session_id) orelse return;
+
+        var found_idx: ?usize = null;
+        for (detached.pane_uuids, 0..) |existing_uuid, idx| {
+            if (std.mem.eql(u8, &existing_uuid, &pane_uuid)) {
+                found_idx = idx;
+                break;
+            }
+        }
+
+        if (found_idx) |idx| {
+            var uuids = std.ArrayList([32]u8).fromOwnedSlice(detached.pane_uuids);
+            _ = uuids.orderedRemove(idx);
+            detached.pane_uuids = uuids.toOwnedSlice(detached.allocator) catch {
+                detached.pane_uuids = uuids.items;
+                return;
+            };
+        }
+
+        removePaneFromSessionSnapshot(self.allocator, &detached.session_snapshot, pane_uuid);
+    }
+
+    fn paneProcessDead(pane: *const Pane) bool {
+        return !isPidAlive(pane.child_pid) or !isPidAlive(pane.pod_pid);
+    }
+
+    fn pruneDetachedSessionPanes(self: *SesState, session_id: [16]u8) void {
+        const detached = self.detached_sessions.getPtr(session_id) orelse return;
+
+        var stale_panes: std.ArrayList([32]u8) = .empty;
+        defer stale_panes.deinit(self.allocator);
+
+        for (detached.pane_uuids) |pane_uuid| {
+            const pane = self.panes.getPtr(pane_uuid) orelse {
+                stale_panes.append(self.allocator, pane_uuid) catch {};
+                continue;
+            };
+
+            if (paneProcessDead(pane)) {
+                stale_panes.append(self.allocator, pane_uuid) catch {};
+            }
+        }
+
+        for (stale_panes.items) |pane_uuid| {
+            ses.debugLog("pruneDetachedSessionPanes: dropping stale pane uuid={s}", .{pane_uuid[0..8]});
+            if (self.panes.contains(pane_uuid)) {
+                self.killPane(pane_uuid) catch {};
+            } else {
+                self.prunePaneFromDetachedSnapshot(session_id, pane_uuid);
+            }
+        }
+    }
+
     pub fn updateClientSessionFocus(
         self: *SesState,
         client_id: usize,
@@ -1236,18 +1461,27 @@ pub const SesState = struct {
 
     /// Check if a session name is already in use by a detached session or connected client.
     /// Optionally excludes one client id (used during re-register).
-    fn isSessionNameInUse(self: *SesState, name: []const u8, exclude_client_id: ?usize) bool {
+    fn isSessionNameInUse(
+        self: *SesState,
+        name: []const u8,
+        exclude_client_id: ?usize,
+        exclude_session_id: ?[16]u8,
+    ) bool {
         // Check detached sessions
-        var iter = self.detached_sessions.valueIterator();
-        while (iter.next()) |detached| {
+        var iter = self.detached_sessions.iterator();
+        while (iter.next()) |entry| {
+            if (exclude_session_id) |exclude| {
+                if (std.mem.eql(u8, &entry.key_ptr.*, &exclude)) continue;
+            }
+            const detached = entry.value_ptr;
             if (std.ascii.eqlIgnoreCase(detached.session_snapshot.session_name, name)) {
                 return true;
             }
         }
         // Check connected clients
-        for (self.clients.items, 0..) |*client, idx| {
+        for (self.clients.items) |*client| {
             if (exclude_client_id) |exclude| {
-                if (idx == exclude) continue;
+                if (client.id == exclude) continue;
             }
             if (client.session_name) |client_name| {
                 if (std.ascii.eqlIgnoreCase(client_name, name)) {
@@ -1261,12 +1495,17 @@ pub const SesState = struct {
     /// Resolve a session name to ensure uniqueness.
     /// If name conflicts, appends "-2", "-3", etc. until unique.
     /// Returns allocated string that caller must free.
-    pub fn resolveSessionName(self: *SesState, requested_name: []const u8, exclude_client_id: ?usize) ?[]u8 {
+    pub fn resolveSessionName(
+        self: *SesState,
+        requested_name: []const u8,
+        exclude_client_id: ?usize,
+        exclude_session_id: ?[16]u8,
+    ) ?[]u8 {
         const trimmed = std.mem.trim(u8, requested_name, " \t\r\n");
         const base_name = if (trimmed.len > 0) trimmed else "session";
 
         // If name is not in use, just return a copy
-        if (!self.isSessionNameInUse(base_name, exclude_client_id)) {
+        if (!self.isSessionNameInUse(base_name, exclude_client_id, exclude_session_id)) {
             return self.allocator.dupe(u8, base_name) catch null;
         }
 
@@ -1275,7 +1514,7 @@ pub const SesState = struct {
         var buf: [128]u8 = undefined;
         while (suffix < 100) : (suffix += 1) {
             const resolved = std.fmt.bufPrint(&buf, "{s}-{d}", .{ base_name, suffix }) catch break;
-            if (!self.isSessionNameInUse(resolved, exclude_client_id)) {
+            if (!self.isSessionNameInUse(resolved, exclude_client_id, exclude_session_id)) {
                 return self.allocator.dupe(u8, resolved) catch null;
             }
         }
@@ -1776,10 +2015,17 @@ pub const SesState = struct {
     /// The session is NOT removed from detached_sessions yet — call
     /// removeDetachedSession() after the terminal frontend confirms successful restore.
     pub fn reattachSession(self: *SesState, session_id: [16]u8, client_id: usize) !?ReattachResult {
-        _ = client_id; // Client will adopt panes individually
+        self.pruneDetachedSessionPanes(session_id);
 
         // Find the detached session (don't remove yet).
-        const detached_state = self.detached_sessions.get(session_id) orelse return null;
+        const detached_state = self.detached_sessions.getPtr(session_id) orelse return null;
+
+        // Seed the live client snapshot from detached state before frontend
+        // restore begins. Reattach can issue semantic mutations (tab add/remove,
+        // float sync, focus updates) before final register completes.
+        if (self.getClient(client_id)) |client| {
+            client.updateSessionSnapshot(try detached_state.session_snapshot.clone(self.allocator));
+        }
 
         // Return the stored state (caller borrows — session stays in map as safety net).
         return .{
@@ -2050,10 +2296,10 @@ pub const SesState = struct {
             (isolation_profile != null and isolation_profile.?.len > 0);
 
         if (env != null or needs_runtime_env) {
-            var env_map = if (env == null)
-                try std.process.getEnvMap(self.allocator)
-            else
-                std.process.EnvMap.init(self.allocator);
+            // Start from the current SES environment so spawned pods keep
+            // basic runtime variables like PATH, HOME, and XDG_RUNTIME_DIR.
+            // Ad-hoc float env is meant to overlay this, not replace it.
+            var env_map = try std.process.getEnvMap(self.allocator);
 
             if (env) |vars| {
                 for (vars) |entry| {
@@ -2268,10 +2514,19 @@ pub const SesState = struct {
     /// Process panes that need backlog replay (called from server loop).
     /// Reconnects VT channel to each marked pane, triggering POD backlog replay.
     pub fn processBacklogReplays(self: *SesState) void {
+        var stale_panes: std.ArrayList([32]u8) = .empty;
+        defer stale_panes.deinit(self.allocator);
+
         var iter = self.panes.iterator();
         while (iter.next()) |entry| {
             const pane = entry.value_ptr;
             if (pane.needs_backlog_replay) {
+                if (paneProcessDead(pane)) {
+                    ses.debugLog("processBacklogReplays: pruning dead pane uuid={s}", .{entry.key_ptr[0..8]});
+                    stale_panes.append(self.allocator, entry.key_ptr.*) catch {};
+                    continue;
+                }
+
                 // Wait until the owning mux VT channel is attached before
                 // reconnecting to POD VT. If we reconnect too early, POD will
                 // stream backlog immediately and SES may discard it because no
@@ -2297,11 +2552,21 @@ pub const SesState = struct {
                 if (self.connectPodVt(entry.key_ptr.*, pane.pod_socket_path, pane.pane_id)) {
                     pane.needs_backlog_replay = false;
                 } else {
+                    if (paneProcessDead(pane)) {
+                        ses.debugLog("processBacklogReplays: connect failed for dead pane uuid={s}", .{entry.key_ptr[0..8]});
+                        stale_panes.append(self.allocator, entry.key_ptr.*) catch {};
+                        continue;
+                    }
+
                     // Keep the flag set so periodic retries can reconnect once
                     // the pod VT endpoint is ready.
                     ses.debugLog("processBacklogReplays: deferred retry uuid={s}", .{entry.key_ptr[0..8]});
                 }
             }
+        }
+
+        for (stale_panes.items) |pane_uuid| {
+            self.killPane(pane_uuid) catch {};
         }
     }
 
@@ -2364,6 +2629,9 @@ pub const SesState = struct {
                     }
                 }
             }
+            self.prunePaneFromClientSnapshot(client_id, uuid);
+        } else if (pane.value.session_id) |session_id| {
+            self.prunePaneFromDetachedSnapshot(session_id, uuid);
         }
 
         if (pane.value.pod_vt_fd) |vt_fd| {

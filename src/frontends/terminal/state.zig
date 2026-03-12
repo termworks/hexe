@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 
 const core = @import("core");
+const wire = core.wire;
 const pop = @import("pop");
 
 const state_types = @import("state_types.zig");
@@ -375,6 +376,114 @@ pub const State = struct {
         self.needs_render = true;
     }
 
+    fn removeQueuedPaneReplyTargets(
+        uuids: *std.ArrayList([32]u8),
+        enqueued_ms: *std.ArrayList(i64),
+        pane_uuid: [32]u8,
+    ) void {
+        var i: usize = 0;
+        while (i < uuids.items.len) {
+            if (std.mem.eql(u8, &uuids.items[i], &pane_uuid)) {
+                _ = uuids.orderedRemove(i);
+                if (i < enqueued_ms.items.len) {
+                    _ = enqueued_ms.orderedRemove(i);
+                }
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    pub fn clearTransientPaneState(self: *State, pane: *const Pane) void {
+        const pane_uuid = pane.uuid;
+
+        if (self.pending_pop_pane) |pending_pane| {
+            if (@intFromPtr(pending_pane) == @intFromPtr(pane)) {
+                self.pending_pop_pane = null;
+                if (self.pending_pop_response and self.pending_pop_scope == .pane) {
+                    self.pending_pop_response = false;
+                    self.pending_pop_scope = .mux;
+                    self.pending_pop_tab = 0;
+                    if (self.runtime.getCtlFd()) |fd| {
+                        const resp = wire.PopResponse{
+                            .response_type = 0,
+                            .selected_idx = 0,
+                        };
+                        wire.writeControl(fd, .pop_response, std.mem.asBytes(&resp)) catch {};
+                    }
+                }
+            }
+        }
+
+        if (self.mouse_selection.pane_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) {
+                self.mouse_selection.clear();
+            }
+        }
+
+        if (self.bracketed_paste_target_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) {
+                self.bracketed_paste_target_uuid = null;
+                self.in_bracketed_paste = false;
+                self.bracketed_paste_buf.clearRetainingCapacity();
+            }
+        }
+
+        if (self.osc_reply_target_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) {
+                self.osc_reply_target_uuid = null;
+                self.osc_reply_in_progress = false;
+                self.osc_reply_prev_esc = false;
+                self.osc_reply_buf.clearRetainingCapacity();
+            }
+        }
+        removeQueuedPaneReplyTargets(&self.osc_reply_targets, &self.osc_reply_target_enqueued_ms, pane_uuid);
+
+        if (self.csi_reply_target_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) {
+                self.csi_reply_target_uuid = null;
+                self.csi_reply_in_progress = false;
+                self.csi_reply_buf.clearRetainingCapacity();
+            }
+        }
+        removeQueuedPaneReplyTargets(&self.csi_reply_targets, &self.csi_reply_target_enqueued_ms, pane_uuid);
+
+        switch (self.mouse_drag) {
+            .float_move => |drag| {
+                if (std.mem.eql(u8, &drag.uuid, &pane_uuid)) {
+                    self.mouse_drag = .none;
+                }
+            },
+            .float_resize => |drag| {
+                if (std.mem.eql(u8, &drag.uuid, &pane_uuid)) {
+                    self.mouse_drag = .none;
+                }
+            },
+            else => {},
+        }
+
+        if (self.float_rename_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) {
+                self.float_rename_uuid = null;
+                self.float_rename_buf.clearRetainingCapacity();
+            }
+        }
+
+        if (self.mouse_title_last_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) {
+                self.mouse_title_last_uuid = null;
+                self.mouse_title_click_count = 0;
+            }
+        }
+
+        if (self.mouse_click_last_pane_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) {
+                self.mouse_click_last_pane_uuid = null;
+                self.mouse_click_count = 0;
+            }
+        }
+    }
+
     pub fn commitFloatRename(self: *State) void {
         const uuid = self.float_rename_uuid orelse return;
         const pane = self.findPaneByUuid(uuid) orelse {
@@ -591,11 +700,24 @@ pub const State = struct {
     }
 
     pub fn activeFloatingIndex(self: *State) ?usize {
-        const uuid = self.runtime.activeFloatUuid() orelse return null;
-        for (self.view.float_views.items, 0..) |pane, idx| {
-            if (std.mem.eql(u8, &pane.uuid, &uuid)) return idx;
+        if (self.runtime.activeFloatUuid()) |uuid| {
+            for (self.view.float_views.items, 0..) |pane, idx| {
+                if (std.mem.eql(u8, &pane.uuid, &uuid)) return idx;
+            }
         }
-        self.runtime.setActiveFloatUuid(null);
+
+        if (self.runtime.focusedPaneUuid()) |focused_uuid| {
+            for (self.view.float_views.items, 0..) |pane, idx| {
+                if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
+                    self.runtime.setActiveFloatUuid(focused_uuid);
+                    return idx;
+                }
+            }
+        }
+
+        if (self.runtime.activeFloatUuid() != null) {
+            self.runtime.setActiveFloatUuid(null);
+        }
         return null;
     }
 
@@ -671,6 +793,10 @@ pub const State = struct {
 
     pub fn applySessionConfig(self: *State, config: core.SessionConfig, tab_filter: ?[]const u8) !void {
         return state_session.applySessionConfig(self, config, tab_filter);
+    }
+
+    pub fn applyLayoutDef(self: *State, layout: *const core.LayoutDef) !void {
+        return state_session.applyLayoutDef(self, layout);
     }
 
     pub fn replaceWithSessionConfig(self: *State, config: core.SessionConfig, tab_filter: ?[]const u8) !void {

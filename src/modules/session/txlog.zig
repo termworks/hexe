@@ -166,12 +166,16 @@ pub const TxLogEntry = struct {
     payload: []const u8,
 };
 
-/// Analyze transaction log entries to detect incomplete operations.
-/// Returns sessions that need rollback/recovery.
-pub fn findIncompleteTransactions(entries: []const TxLogEntry) !std.ArrayList([16]u8) {
-    var incomplete: std.ArrayList([16]u8) = .empty;
+pub const IncompleteTransaction = struct {
+    session_id: [16]u8,
+    tx_type: TxType,
+};
 
-    // Track start/commit pairs
+/// Analyze transaction log entries to detect incomplete operations and preserve
+/// the operation type for recovery handling.
+pub fn findIncompleteOperations(entries: []const TxLogEntry) !std.ArrayList(IncompleteTransaction) {
+    var incomplete: std.ArrayList(IncompleteTransaction) = .empty;
+
     const alloc = std.heap.page_allocator;
     var pending_ops = std.AutoHashMap([16]u8, TxType).init(alloc);
     defer pending_ops.deinit();
@@ -179,28 +183,38 @@ pub fn findIncompleteTransactions(entries: []const TxLogEntry) !std.ArrayList([1
     for (entries) |entry| {
         switch (entry.tx_type) {
             .detach_start, .reattach_start => {
-                // Mark session as having a pending operation
                 try pending_ops.put(entry.session_id, entry.tx_type);
             },
             .detach_commit => {
-                // Complete detach operation
                 _ = pending_ops.remove(entry.session_id);
             },
             .reattach_commit => {
-                // Complete reattach operation
                 _ = pending_ops.remove(entry.session_id);
             },
-            .pane_state_change => {
-                // These don't require explicit commit (state is already changed)
-            },
+            .pane_state_change => {},
         }
     }
 
-    // Any remaining entries are incomplete
     var it = pending_ops.iterator();
     while (it.next()) |kv| {
-        try incomplete.append(alloc, kv.key_ptr.*);
+        try incomplete.append(alloc, .{
+            .session_id = kv.key_ptr.*,
+            .tx_type = kv.value_ptr.*,
+        });
     }
 
+    return incomplete;
+}
+
+/// Analyze transaction log entries to detect incomplete operations.
+/// Returns sessions that need rollback/recovery.
+pub fn findIncompleteTransactions(entries: []const TxLogEntry) !std.ArrayList([16]u8) {
+    var incomplete_ops = try findIncompleteOperations(entries);
+    defer incomplete_ops.deinit(std.heap.page_allocator);
+
+    var incomplete: std.ArrayList([16]u8) = .empty;
+    for (incomplete_ops.items) |entry| {
+        try incomplete.append(std.heap.page_allocator, entry.session_id);
+    }
     return incomplete;
 }

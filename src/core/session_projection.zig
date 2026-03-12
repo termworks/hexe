@@ -123,13 +123,17 @@ pub const SessionProjection = struct {
         session_name: []const u8,
     ) !void {
         const name_owned = try self.allocator.dupe(u8, session_name);
+        const snapshot_name_owned: ?[]u8 = if (self.attached_snapshot != null)
+            try self.allocator.dupe(u8, session_name)
+        else
+            null;
         self.allocator.free(self.session_name_owned);
         self.session_name_owned = name_owned;
         self.session_uuid = session_uuid;
 
         if (self.attached_snapshot) |*snapshot| {
             self.allocator.free(snapshot.session_name);
-            snapshot.session_name = try self.allocator.dupe(u8, session_name);
+            snapshot.session_name = snapshot_name_owned.?;
             snapshot.uuid = session_uuid;
         }
     }
