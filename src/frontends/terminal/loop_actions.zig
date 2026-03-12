@@ -344,7 +344,7 @@ pub fn performDisown(state: *State) void {
             };
 
             // Sync inherited auxiliary info to the new pane.
-            const pane_type: FrontendRuntime.PaneType = if (p.floating) .float else .split;
+            const pane_type: FrontendRuntime.PaneType = if (state.paneIsFloating(p)) .float else .split;
             const cursor = p.getCursorPos();
             const cursor_style = p.vt.getCursorStyle();
             const cursor_visible = p.vt.isCursorVisible();
@@ -354,8 +354,8 @@ pub fn performDisown(state: *State) void {
             state.runtime.updatePaneAux(
                 p.uuid,
                 state.activeTabIndex(),
-                p.floating,
-                p.focused,
+                state.paneIsFloating(p),
+                state.paneIsFocused(p),
                 pane_type,
                 old_aux.created_from, // Inherit creator.
                 old_aux.focused_from, // Inherit last focus.
@@ -510,7 +510,7 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
 
         // Sync the new pane info.
         state.syncPaneAux(pane, null);
-        if (pane.floating) {
+        if (state.paneIsFloating(pane)) {
             state.syncSessionFloat(pane, state.activeFloatingIndex() != null);
         } else {
             state.syncActiveTabLayout();
@@ -551,11 +551,11 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
     var existing_idx: usize = 0;
     while (existing_idx < state.view.floats.items.len) {
         const pane = state.view.floats.items[existing_idx];
-        if (pane.float_key == float_def.key) {
+        if (state.paneFloatKey(pane) == float_def.key) {
             // Only tab-bound floats use parent_tab filtering.
             // per_cwd/global floats are shared across tabs.
             if (!float_def.attributes.per_cwd and !float_def.attributes.global) {
-                if (pane.parent_tab) |parent| {
+                if (state.paneParentTab(pane)) |parent| {
                     if (parent != state.activeTabIndex()) {
                         existing_idx += 1;
                         continue;
@@ -564,7 +564,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             }
 
             // For per_cwd floats, also check directory match.
-            if (float_def.attributes.per_cwd and pane.is_pwd) {
+            if (float_def.attributes.per_cwd and state.paneIsPwd(pane)) {
                 // Both dirs must exist and match, or both be null.
                 const dirs_match = if (pane.pwd_dir) |pane_dir| blk: {
                     if (current_dir) |curr| {
@@ -581,7 +581,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
             const missing_in_ses = !paneExistsInSes(state, pane.uuid);
             if (!pane.isAlive() or missing_in_ses) {
-                const was_visible_on_tab = pane.isVisibleOnTab(state.activeTabIndex());
+                const was_visible_on_tab = state.paneVisibleOnTab(pane, state.activeTabIndex());
                 const was_active = if (state.activeFloatingIndex()) |af| af == existing_idx else false;
                 const old_uuid = state.getCurrentFocusedUuid();
                 if (was_active) {
@@ -624,7 +624,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             // Toggle visibility (per-tab for global/per_cwd floats).
             const old_uuid = state.getCurrentFocusedUuid();
             pane.toggleVisibleOnTab(state.activeTabIndex());
-            if (pane.isVisibleOnTab(state.activeTabIndex())) {
+            if (state.paneVisibleOnTab(pane, state.activeTabIndex())) {
                 // Unfocus current pane (tiled or another float).
                 if (state.activeFloatingIndex()) |afi| {
                     if (afi < state.view.floats.items.len) {
@@ -641,7 +641,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                     defer to_hide.deinit(state.allocator);
 
                     for (state.view.floats.items) |other| {
-                        if (other.float_key != float_def.key) {
+                        if (state.paneFloatKey(other) != float_def.key) {
                             to_hide.append(state.allocator, other.uuid) catch {};
                         }
                     }
@@ -668,7 +668,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
             }
 
-            state.syncSessionFloat(pane, state.activeFloatingIndex() == existing_idx and pane.isVisibleOnTab(state.activeTabIndex()));
+            state.syncSessionFloat(pane, state.activeFloatingIndex() == existing_idx and state.paneVisibleOnTab(pane, state.activeTabIndex()));
 
             state.renderer.invalidate();
             state.force_full_render = true;
@@ -700,7 +700,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
         defer to_hide.deinit(state.allocator);
 
         for (state.view.floats.items) |pane| {
-            if (pane.float_key != float_def.key) {
+            if (state.paneFloatKey(pane) != float_def.key) {
                 to_hide.append(state.allocator, pane.uuid) catch {};
             }
         }
@@ -721,7 +721,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
         defer to_hide.deinit(state.allocator);
 
         for (state.view.floats.items, 0..) |pane, i| {
-            if (i != new_idx and pane.float_key == float_def.key) {
+            if (i != new_idx and state.paneFloatKey(pane) == float_def.key) {
                 to_hide.append(state.allocator, pane.uuid) catch {};
             }
         }

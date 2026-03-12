@@ -54,8 +54,8 @@ fn handleBlockedPopup(popups: anytype, parsed_event: ?vaxis.Event) bool {
 pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, parsed_event: ?vaxis.Event) void {
     if (state.activeFloatingIndex()) |idx| {
         const fpane = state.view.floats.items[idx];
-        const can_interact = if (fpane.parent_tab) |parent| parent == state.activeTabIndex() else true;
-        if (fpane.isVisibleOnTab(state.activeTabIndex()) and can_interact) {
+        const can_interact = if (state.paneParentTab(fpane)) |parent| parent == state.activeTabIndex() else true;
+        if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) {
             if (fpane.popups.isBlocked()) {
                 if (handleBlockedPopup(&fpane.popups, parsed_event)) {
                     loop_ipc.sendPopResponse(state);
@@ -130,8 +130,8 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
     const target_pane = blk: {
         if (state.activeFloatingIndex()) |idx| {
             const fpane = state.view.floats.items[idx];
-            const can_interact = if (fpane.parent_tab) |parent| parent == state.activeTabIndex() else true;
-            if (fpane.isVisibleOnTab(state.activeTabIndex()) and can_interact) {
+            const can_interact = if (state.paneParentTab(fpane)) |parent| parent == state.activeTabIndex() else true;
+            if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) {
                 break :blk fpane;
             }
         }
@@ -189,8 +189,8 @@ fn buildPaneQuery(state: *State) PaneQuery {
 
     if (pane) |p| {
         if (is_float) {
-            float_key = p.float_key;
-            float_sticky = p.sticky;
+            float_key = state.paneFloatKey(p);
+            float_sticky = state.paneSticky(p);
             // Look up float def for other attributes.
             if (float_key != 0) {
                 if (state.getLayoutFloatByKey(float_key)) |fd| {
@@ -248,29 +248,30 @@ fn pushPaneLuaTable(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: boo
 
     rt.lua.pushBoolean(is_focused);
     rt.lua.setField(-2, "focused");
-    rt.lua.pushBoolean(!pane.floating);
+    rt.lua.pushBoolean(!state.paneIsFloating(pane));
     rt.lua.setField(-2, "focus_split");
-    rt.lua.pushBoolean(pane.floating);
+    rt.lua.pushBoolean(state.paneIsFloating(pane));
     rt.lua.setField(-2, "focus_float");
-    rt.lua.pushBoolean(!pane.floating);
+    rt.lua.pushBoolean(!state.paneIsFloating(pane));
     rt.lua.setField(-2, "is_split");
-    rt.lua.pushBoolean(pane.floating);
+    rt.lua.pushBoolean(state.paneIsFloating(pane));
     rt.lua.setField(-2, "is_float");
-    rt.lua.pushBoolean(pane.floating);
+    rt.lua.pushBoolean(state.paneIsFloating(pane));
     rt.lua.setField(-2, "floating");
 
-    rt.lua.pushInteger(pane.float_key);
+    const float_key = state.paneFloatKey(pane);
+    rt.lua.pushInteger(float_key);
     rt.lua.setField(-2, "float_key");
-    rt.lua.pushBoolean(pane.sticky);
+    rt.lua.pushBoolean(state.paneSticky(pane));
     rt.lua.setField(-2, "float_sticky");
 
     var float_exclusive = false;
     var float_per_cwd = false;
-    var float_global = pane.parent_tab == null;
+    var float_global = state.paneParentTab(pane) == null;
     var float_isolated = false;
     var float_destroyable = false;
-    if (pane.float_key != 0) {
-        if (state.getLayoutFloatByKey(pane.float_key)) |fd| {
+    if (float_key != 0) {
+        if (state.getLayoutFloatByKey(float_key)) |fd| {
             float_destroyable = fd.attributes.destroy;
             float_exclusive = fd.attributes.exclusive;
             float_per_cwd = fd.attributes.per_cwd;
@@ -446,7 +447,7 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
             std.mem.eql(u8, &pane.uuid, &fu)
         else
             false;
-        const tab_idx = pane.parent_tab orelse state.activeTabIndex();
+        const tab_idx = state.paneParentTab(pane) orelse state.activeTabIndex();
         appendPaneApiEntry(rt, state, pane, is_focused, tab_idx, pane_index, null);
         pane_index += 1;
     }

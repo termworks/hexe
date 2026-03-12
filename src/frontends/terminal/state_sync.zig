@@ -47,7 +47,7 @@ fn buildSessionLayoutNode(
 }
 
 fn setLayoutFocusedSplitId(self: anytype, pane: *Pane) void {
-    if (pane.floating) return;
+    if (self.paneIsFloating(pane)) return;
 
     // Find which tab/layout owns this pane pointer and set its focused_split_id
     // to match. This keeps per-tab focus stable when switching tabs.
@@ -63,12 +63,12 @@ fn setLayoutFocusedSplitId(self: anytype, pane: *Pane) void {
 }
 
 fn rememberFloatingFocus(self: anytype, pane: *Pane) void {
-    if (!pane.floating) return;
+    if (!self.paneIsFloating(pane)) return;
     self.rememberFloatingFocus(pane);
 }
 
 fn rememberSplitFocus(self: anytype, pane: *Pane) void {
-    if (pane.floating) return;
+    if (self.paneIsFloating(pane)) return;
     self.rememberSplitFocus();
 }
 
@@ -94,18 +94,18 @@ pub fn syncSessionFloat(self: anytype, pane: *Pane, active: bool) void {
     self.runtime.sessionSyncFloat(
         pane.uuid,
         self.activeTabIndex(),
-        pane.parent_tab,
-        pane.visible,
-        pane.tab_visible,
-        pane.sticky,
-        pane.is_pwd,
-        pane.float_key,
-        pane.float_width_pct,
-        pane.float_height_pct,
-        pane.float_pos_x_pct,
-        pane.float_pos_y_pct,
-        pane.float_pad_x,
-        pane.float_pad_y,
+        self.paneParentTab(pane),
+        if (self.paneFloatState(pane)) |float_state| float_state.visible else true,
+        if (self.paneFloatState(pane)) |float_state| float_state.tab_visible else 0,
+        self.paneSticky(pane),
+        self.paneIsPwd(pane),
+        self.paneFloatKey(pane),
+        self.paneFloatWidthPct(pane),
+        self.paneFloatHeightPct(pane),
+        self.paneFloatPosXPct(pane),
+        self.paneFloatPosYPct(pane),
+        self.paneFloatPadX(pane),
+        self.paneFloatPadY(pane),
         active,
     ) catch |err| {
         core.logging.logError("mux", "failed sessionSyncFloat IPC", err);
@@ -173,7 +173,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
         pane.focused = true;
     }
 
-    const pane_type: FrontendRuntime.PaneType = if (pane.floating) .float else .split;
+    const pane_type: FrontendRuntime.PaneType = if (self.paneIsFloating(pane)) .float else .split;
     const cursor = pane.getCursorPos();
     const cursor_style = pane.vt.getCursorStyle();
     const cursor_visible = pane.vt.isCursorVisible();
@@ -184,8 +184,8 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
     self.runtime.updatePaneAux(
         pane.uuid,
         self.activeTabIndex(),
-        pane.floating,
-        pane.focused,
+        self.paneIsFloating(pane),
+        self.paneIsFocused(pane),
         pane_type,
         created_from,
         focused_from,
@@ -211,7 +211,7 @@ pub fn unfocusAllPanes(self: anytype) void {
         while (pane_it.next()) |p| {
             if (p.*.uuid[0] != 0) {
                 p.*.focused = false;
-                const pane_type: FrontendRuntime.PaneType = if (p.*.floating) .float else .split;
+                const pane_type: FrontendRuntime.PaneType = if (self.paneIsFloating(p.*)) .float else .split;
                 const cursor = p.*.getCursorPos();
                 const cursor_style = p.*.vt.getCursorStyle();
                 const cursor_visible = p.*.vt.isCursorVisible();
@@ -221,7 +221,7 @@ pub fn unfocusAllPanes(self: anytype) void {
                 self.runtime.updatePaneAux(
                     p.*.uuid,
                     self.activeTabIndex(),
-                    p.*.floating,
+                    self.paneIsFloating(p.*),
                     false,
                     pane_type,
                     null,
@@ -254,7 +254,7 @@ pub fn unfocusAllPanes(self: anytype) void {
             self.runtime.updatePaneAux(
                 fp.uuid,
                 self.activeTabIndex(),
-                fp.floating,
+                self.paneIsFloating(fp),
                 false,
                 .float,
                 null,
@@ -277,7 +277,7 @@ pub fn unfocusAllPanes(self: anytype) void {
 
 pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
     setLayoutFocusedSplitId(self, pane);
-    if (pane.floating) {
+    if (self.paneIsFloating(pane)) {
         rememberFloatingFocus(self, pane);
         self.setActiveFloatingUuid(pane.uuid);
     } else {
@@ -292,7 +292,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
     self.unfocusAllPanes();
 
     pane.focused = true;
-    const pane_type: FrontendRuntime.PaneType = if (pane.floating) .float else .split;
+    const pane_type: FrontendRuntime.PaneType = if (self.paneIsFloating(pane)) .float else .split;
     const cursor = pane.getCursorPos();
     const cursor_style = pane.vt.getCursorStyle();
     const cursor_visible = pane.vt.isCursorVisible();
@@ -302,7 +302,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
     self.runtime.updatePaneAux(
         pane.uuid,
         self.activeTabIndex(),
-        pane.floating,
+        self.paneIsFloating(pane),
         true,
         pane_type,
         null,
@@ -330,7 +330,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
             _ = rt.lua.pushString(prev[0..]);
             rt.lua.setField(-2, "previous_pane_uuid");
         }
-        _ = rt.lua.pushString(if (pane.floating) "float" else "split");
+        _ = rt.lua.pushString(if (self.paneIsFloating(pane)) "float" else "split");
         rt.lua.setField(-2, "pane_type");
         rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
         rt.lua.setField(-2, "active_tab");
@@ -346,7 +346,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
             self.setFocusedPaneUuid(null);
         }
     }
-    if (pane.floating) {
+    if (self.paneIsFloating(pane)) {
         if (self.activeFloatingIndex()) |idx| {
             if (idx < self.view.floats.items.len and self.view.floats.items[idx] == pane) {
                 self.setActiveFloatingIndex(null);
@@ -357,7 +357,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
     if (!self.runtime.isConnected()) return;
     if (pane.uuid[0] == 0) return;
 
-    const pane_type: FrontendRuntime.PaneType = if (pane.floating) .float else .split;
+    const pane_type: FrontendRuntime.PaneType = if (self.paneIsFloating(pane)) .float else .split;
     const cursor = pane.getCursorPos();
     const cursor_style = pane.vt.getCursorStyle();
     const cursor_visible = pane.vt.isCursorVisible();
@@ -367,7 +367,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
     self.runtime.updatePaneAux(
         pane.uuid,
         self.activeTabIndex(),
-        pane.floating,
+        self.paneIsFloating(pane),
         false,
         pane_type,
         null,
@@ -456,7 +456,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
         self.runtime.requestPaneProcess(p.uuid);
     }
 
-    const pane_type: FrontendRuntime.PaneType = if (p.floating) .float else .split;
+    const pane_type: FrontendRuntime.PaneType = if (self.paneIsFloating(p)) .float else .split;
     const cursor = p.getCursorPos();
     const cursor_style = p.vt.getCursorStyle();
     const cursor_visible = p.vt.isCursorVisible();
@@ -466,7 +466,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     self.runtime.updatePaneAux(
         p.uuid,
         self.activeTabIndex(),
-        p.floating,
+        self.paneIsFloating(p),
         true,
         pane_type,
         null,
@@ -493,16 +493,16 @@ pub fn resizeFloatingPanes(self: anytype) void {
         const usable_w: u16 = if (shadow_enabled) (self.term_width -| 1) else self.term_width;
         const usable_h: u16 = if (shadow_enabled and self.status_height == 0) (avail_h -| 1) else avail_h;
 
-        const outer_w: u16 = usable_w * pane.float_width_pct / 100;
-        const outer_h: u16 = usable_h * pane.float_height_pct / 100;
+        const outer_w: u16 = usable_w * self.paneFloatWidthPct(pane) / 100;
+        const outer_h: u16 = usable_h * self.paneFloatHeightPct(pane) / 100;
 
         const max_x = usable_w -| outer_w;
         const max_y = usable_h -| outer_h;
-        const outer_x: u16 = max_x * pane.float_pos_x_pct / 100;
-        const outer_y: u16 = max_y * pane.float_pos_y_pct / 100;
+        const outer_x: u16 = max_x * self.paneFloatPosXPct(pane) / 100;
+        const outer_y: u16 = max_y * self.paneFloatPosYPct(pane) / 100;
 
-        const pad_x: u16 = 1 + pane.float_pad_x;
-        const pad_y: u16 = 1 + pane.float_pad_y;
+        const pad_x: u16 = 1 + self.paneFloatPadX(pane);
+        const pad_y: u16 = 1 + self.paneFloatPadY(pane);
         const content_x = outer_x + pad_x;
         const content_y = outer_y + pad_y;
         const content_w = outer_w -| (pad_x * 2);

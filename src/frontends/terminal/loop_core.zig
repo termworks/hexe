@@ -373,7 +373,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     const was_active = if (state.activeFloatingIndex()) |af| af == index else false;
     const exit_code = state.paneExitCode(pane.uuid);
 
-    if (pane.float_key != 0 and !pane.capture_output) {
+    if (state.paneFloatKey(pane) != 0 and !pane.capture_output) {
         if (pane.retained_after_exit) return;
         pane.retained_after_exit = true;
 
@@ -746,7 +746,7 @@ pub fn runMainLoop(state: *State) !void {
                         };
                     } else replaced = false;
                     if (replaced) {
-                        const pane_type: FrontendRuntime.PaneType = if (pane.floating) .float else .split;
+                        const pane_type: FrontendRuntime.PaneType = if (state.paneIsFloating(pane)) .float else .split;
                         const cursor = pane.getCursorPos();
                         const cursor_style = pane.vt.getCursorStyle();
                         const cursor_visible = pane.vt.isCursorVisible();
@@ -756,8 +756,8 @@ pub fn runMainLoop(state: *State) !void {
                         state.runtime.updatePaneAux(
                             pane.uuid,
                             state.activeTabIndex(),
-                            pane.floating,
-                            pane.focused,
+                            state.paneIsFloating(pane),
+                            state.paneIsFocused(pane),
                             pane_type,
                             old_aux.created_from,
                             old_aux.focused_from,

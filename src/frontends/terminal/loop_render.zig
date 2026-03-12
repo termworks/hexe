@@ -121,8 +121,9 @@ fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
 fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []const u8 {
     const title = blk: {
         if (pane.float_title) |t| break :blk t;
-        if (pane.float_key != 0) {
-            if (state.getLayoutFloatByKey(pane.float_key)) |fd| {
+        const float_key = state.paneFloatKey(pane);
+        if (float_key != 0) {
+            if (state.getLayoutFloatByKey(float_key)) |fd| {
                 if (fd.title) |t| break :blk t;
             }
         }
@@ -170,11 +171,12 @@ fn populateFloatTitleContext(state: *State, pane: *Pane, ctx: *shp.Context, now_
         ctx.shell_started_at_ms = info.started_at_ms;
     }
 
-    ctx.float_key = pane.float_key;
-    ctx.float_sticky = pane.sticky;
-    ctx.float_global = pane.parent_tab == null;
-    if (pane.float_key != 0) {
-        if (state.getLayoutFloatByKey(pane.float_key)) |fd| {
+    const float_key = state.paneFloatKey(pane);
+    ctx.float_key = float_key;
+    ctx.float_sticky = state.paneSticky(pane);
+    ctx.float_global = state.paneParentTab(pane) == null;
+    if (float_key != 0) {
+        if (state.getLayoutFloatByKey(float_key)) |fd| {
             ctx.float_destroyable = fd.attributes.destroy;
             ctx.float_exclusive = fd.attributes.exclusive;
             ctx.float_per_cwd = fd.attributes.per_cwd;
@@ -233,10 +235,10 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Draw visible floats (on top of splits).
     // Draw inactive floats first, then active one last so it's on top.
     for (state.view.floats.items, 0..) |pane, i| {
-        if (!pane.isVisibleOnTab(state.activeTabIndex())) continue;
+        if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
         if (state.activeFloatingIndex() == i) continue; // Skip active, draw it last.
         // Skip tab-bound floats on wrong tab.
-        if (pane.parent_tab) |parent| {
+        if (state.paneParentTab(pane)) |parent| {
             if (parent != state.activeTabIndex()) continue;
         }
 
@@ -283,11 +285,11 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     if (state.activeFloatingIndex()) |idx| {
         const pane = state.view.floats.items[idx];
         // Check tab ownership for tab-bound floats.
-        const can_render = if (pane.parent_tab) |parent|
+        const can_render = if (state.paneParentTab(pane)) |parent|
             parent == state.activeTabIndex()
         else
             true;
-        if (pane.isVisibleOnTab(state.activeTabIndex()) and can_render) {
+        if (state.paneVisibleOnTab(pane, state.activeTabIndex()) and can_render) {
             var active_float_label_compose: [256]u8 = undefined;
             const active_float_label_raw = composeFloatBorderLabel(state, pane, &active_float_label_compose);
             var active_float_label_buf: [128]u8 = undefined;

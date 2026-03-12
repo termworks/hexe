@@ -471,29 +471,30 @@ fn pushPaneLuaTable(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: boo
 
     rt.lua.pushBoolean(is_focused);
     rt.lua.setField(-2, "focused");
-    rt.lua.pushBoolean(!pane.floating);
+    rt.lua.pushBoolean(!state.paneIsFloating(pane));
     rt.lua.setField(-2, "focus_split");
-    rt.lua.pushBoolean(pane.floating);
+    rt.lua.pushBoolean(state.paneIsFloating(pane));
     rt.lua.setField(-2, "focus_float");
-    rt.lua.pushBoolean(!pane.floating);
+    rt.lua.pushBoolean(!state.paneIsFloating(pane));
     rt.lua.setField(-2, "is_split");
-    rt.lua.pushBoolean(pane.floating);
+    rt.lua.pushBoolean(state.paneIsFloating(pane));
     rt.lua.setField(-2, "is_float");
-    rt.lua.pushBoolean(pane.floating);
+    rt.lua.pushBoolean(state.paneIsFloating(pane));
     rt.lua.setField(-2, "floating");
 
-    rt.lua.pushInteger(pane.float_key);
+    const float_key = state.paneFloatKey(pane);
+    rt.lua.pushInteger(float_key);
     rt.lua.setField(-2, "float_key");
-    rt.lua.pushBoolean(pane.sticky);
+    rt.lua.pushBoolean(state.paneSticky(pane));
     rt.lua.setField(-2, "float_sticky");
 
     var float_exclusive = false;
     var float_per_cwd = false;
-    var float_global = pane.parent_tab == null;
+    var float_global = state.paneParentTab(pane) == null;
     var float_isolated = false;
     var float_destroyable = false;
-    if (pane.float_key != 0) {
-        if (state.getLayoutFloatByKey(pane.float_key)) |fd| {
+    if (float_key != 0) {
+        if (state.getLayoutFloatByKey(float_key)) |fd| {
             float_destroyable = fd.attributes.destroy;
             float_exclusive = fd.attributes.exclusive;
             float_per_cwd = fd.attributes.per_cwd;
@@ -684,7 +685,7 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
                 std.mem.eql(u8, &pane.uuid, &fu)
             else
                 false;
-            const tab_idx = pane.parent_tab orelse state.activeTabIndex();
+            const tab_idx = state.paneParentTab(pane) orelse state.activeTabIndex();
             appendPaneApiEntry(rt, state, pane, is_focused, tab_idx, pane_index, null);
             pane_index += 1;
         }

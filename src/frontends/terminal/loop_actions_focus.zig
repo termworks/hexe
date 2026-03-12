@@ -32,8 +32,8 @@ pub fn enterPaneSelectMode(state: *State, swap: bool) void {
     }
 
     for (state.view.floats.items) |pane| {
-        if (!pane.isVisibleOnTab(state.activeTabIndex())) continue;
-        if (pane.parent_tab) |parent| {
+        if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
+        if (state.paneParentTab(pane)) |parent| {
             if (parent != state.activeTabIndex()) continue;
         }
 
@@ -57,8 +57,8 @@ pub fn enterPaneSelectMode(state: *State, swap: bool) void {
 pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
     for (state.view.floats.items, 0..) |pane, i| {
         if (std.mem.eql(u8, &pane.uuid, &uuid)) {
-            if (!pane.isVisibleOnTab(state.activeTabIndex())) continue;
-            if (pane.parent_tab) |parent| {
+            if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
+            if (state.paneParentTab(pane)) |parent| {
                 if (parent != state.activeTabIndex()) continue;
             }
 
@@ -212,8 +212,8 @@ fn getCurrentFocusedPane(state: *State) ?*Pane {
 fn swapPanePositions(state: *State, pane_a: *Pane, pane_b: *Pane) void {
     if (pane_a == pane_b) return;
 
-    const a_float = pane_a.floating;
-    const b_float = pane_b.floating;
+    const a_float = state.paneIsFloating(pane_a);
+    const b_float = state.paneIsFloating(pane_b);
 
     if (!a_float and !b_float) {
         const layout = state.currentLayout();
@@ -314,8 +314,8 @@ fn restoreFocusInTab(state: *State, old_uuid: ?[32]u8) void {
         if (state.lastFloatingUuidForTab(active_tab)) |uuid| {
             for (state.view.floats.items, 0..) |pane, fi| {
                 if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                if (!pane.isVisibleOnTab(active_tab)) continue;
-                if (pane.parent_tab) |parent| {
+                if (!state.paneVisibleOnTab(pane, active_tab)) continue;
+                if (state.paneParentTab(pane)) |parent| {
                     if (parent != active_tab) continue;
                 }
                 state.setActiveFloatingIndex(fi);

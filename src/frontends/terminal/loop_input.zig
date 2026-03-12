@@ -267,11 +267,11 @@ fn freeParsedEventPayload(state: *State, parsed_event: ?vaxis.Event) void {
 fn resolveFocusedPaneForInput(state: *State) ?*Pane {
     if (state.activeFloatingIndex()) |idx| {
         const fpane = state.view.floats.items[idx];
-        const can_interact = if (fpane.parent_tab) |parent|
+        const can_interact = if (state.paneParentTab(fpane)) |parent|
             parent == state.activeTabIndex()
         else
             true;
-        if (fpane.isVisibleOnTab(state.activeTabIndex()) and can_interact) return fpane;
+        if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) return fpane;
     }
     return state.currentLayout().getFocusedPane();
 }
@@ -1194,8 +1194,8 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
             if (state.activeFloatingIndex()) |idx| {
                 if (idx < state.view.floats.items.len) {
                     const fp = state.view.floats.items[idx];
-                    const can_interact = if (fp.parent_tab) |parent| parent == state.activeTabIndex() else true;
-                    if (fp.isVisibleOnTab(state.activeTabIndex()) and can_interact) {
+                    const can_interact = if (state.paneParentTab(fp)) |parent| parent == state.activeTabIndex() else true;
+                    if (state.paneVisibleOnTab(fp, state.activeTabIndex()) and can_interact) {
                         const n = parseLikelyTerminalCsiReplyLen(inp, i);
                         if (n > 0) {
                             fp.write(inp[i .. i + n]) catch {};

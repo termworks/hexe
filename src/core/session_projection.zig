@@ -201,6 +201,81 @@ pub const SessionProjection = struct {
         self.attached_snapshot = null;
     }
 
+    pub fn paneMeta(
+        self: *const SessionProjection,
+        uuid: [32]u8,
+    ) ?session_model.SessionPane {
+        const snapshot = self.attached_snapshot orelse return null;
+        return snapshot.panes.get(uuid);
+    }
+
+    pub fn floatState(
+        self: *const SessionProjection,
+        uuid: [32]u8,
+    ) ?session_model.SessionFloat {
+        const snapshot = self.attached_snapshot orelse return null;
+        for (snapshot.floats.items) |float_state| {
+            if (std.mem.eql(u8, &float_state.pane_uuid, &uuid)) return float_state;
+        }
+        return null;
+    }
+
+    pub fn syncFloatState(
+        self: *SessionProjection,
+        float_state: session_model.SessionFloat,
+        active: bool,
+    ) void {
+        if (self.attached_snapshot) |*snapshot| {
+            const pane_state = session_model.SessionPane{
+                .uuid = float_state.pane_uuid,
+                .kind = .float,
+                .parent_tab = float_state.parent_tab,
+                .sticky = float_state.sticky,
+                .is_pwd = float_state.is_pwd,
+                .float_key = float_state.float_key,
+            };
+            if (snapshot.panes.getPtr(float_state.pane_uuid)) |pane| {
+                pane.* = pane_state;
+            } else {
+                snapshot.panes.put(float_state.pane_uuid, pane_state) catch {};
+            }
+
+            for (snapshot.floats.items) |*existing| {
+                if (!std.mem.eql(u8, &existing.pane_uuid, &float_state.pane_uuid)) continue;
+                existing.* = float_state;
+                if (active) {
+                    snapshot.active_float_uuid = float_state.pane_uuid;
+                } else if (snapshot.active_float_uuid) |uuid| {
+                    if (std.mem.eql(u8, &uuid, &float_state.pane_uuid)) {
+                        snapshot.active_float_uuid = null;
+                    }
+                }
+                return;
+            }
+
+            snapshot.floats.append(self.allocator, float_state) catch return;
+            if (active) snapshot.active_float_uuid = float_state.pane_uuid;
+        }
+    }
+
+    pub fn removeFloatState(self: *SessionProjection, pane_uuid: [32]u8) void {
+        if (self.attached_snapshot) |*snapshot| {
+            var idx: usize = 0;
+            while (idx < snapshot.floats.items.len) : (idx += 1) {
+                if (!std.mem.eql(u8, &snapshot.floats.items[idx].pane_uuid, &pane_uuid)) continue;
+                _ = snapshot.floats.orderedRemove(idx);
+                break;
+            }
+            _ = snapshot.panes.remove(pane_uuid);
+            if (snapshot.active_float_uuid) |uuid| {
+                if (std.mem.eql(u8, &uuid, &pane_uuid)) snapshot.active_float_uuid = null;
+            }
+            if (snapshot.focused_pane_uuid) |uuid| {
+                if (std.mem.eql(u8, &uuid, &pane_uuid)) snapshot.focused_pane_uuid = null;
+            }
+        }
+    }
+
     pub fn clearTabMeta(self: *SessionProjection) void {
         for (self.tabs.items) |*tab| tab.deinit(self.allocator);
         self.tabs.clearRetainingCapacity();

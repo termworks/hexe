@@ -884,6 +884,110 @@ pub const State = struct {
         return null;
     }
 
+    pub fn paneSessionMeta(self: *const State, pane: *const Pane) core.session_model.SessionPane {
+        if (self.runtime.projection.paneMeta(pane.uuid)) |meta| return meta;
+        return .{
+            .uuid = pane.uuid,
+            .kind = if (pane.floating) .float else .split,
+            .parent_tab = pane.parent_tab,
+            .sticky = pane.sticky,
+            .is_pwd = pane.is_pwd,
+            .float_key = pane.float_key,
+        };
+    }
+
+    pub fn paneFloatState(self: *const State, pane: *const Pane) ?core.session_model.SessionFloat {
+        if (self.runtime.projection.floatState(pane.uuid)) |float_state| return float_state;
+        if (!pane.floating) return null;
+        return .{
+            .pane_uuid = pane.uuid,
+            .parent_tab = pane.parent_tab,
+            .visible = pane.visible,
+            .tab_visible = pane.tab_visible,
+            .sticky = pane.sticky,
+            .is_pwd = pane.is_pwd,
+            .float_key = pane.float_key,
+            .width_pct = pane.float_width_pct,
+            .height_pct = pane.float_height_pct,
+            .pos_x_pct = pane.float_pos_x_pct,
+            .pos_y_pct = pane.float_pos_y_pct,
+            .pad_x = pane.float_pad_x,
+            .pad_y = pane.float_pad_y,
+        };
+    }
+
+    pub fn paneIsFloating(self: *const State, pane: *const Pane) bool {
+        return self.paneSessionMeta(pane).kind == .float;
+    }
+
+    pub fn paneIsFocused(self: *const State, pane: *const Pane) bool {
+        if (self.focusedPaneUuid()) |uuid| {
+            return std.mem.eql(u8, &uuid, &pane.uuid);
+        }
+        return pane.focused;
+    }
+
+    pub fn paneParentTab(self: *const State, pane: *const Pane) ?usize {
+        if (self.paneFloatState(pane)) |float_state| return float_state.parent_tab;
+        return self.paneSessionMeta(pane).parent_tab;
+    }
+
+    pub fn paneVisibleOnTab(self: *const State, pane: *const Pane, tab: usize) bool {
+        if (self.paneFloatState(pane)) |float_state| {
+            if (float_state.parent_tab != null) {
+                return float_state.visible;
+            }
+            if (tab >= 64) return false;
+            return (float_state.tab_visible & (@as(u64, 1) << @intCast(tab))) != 0;
+        }
+        return true;
+    }
+
+    pub fn paneFloatKey(self: *const State, pane: *const Pane) u8 {
+        if (self.paneFloatState(pane)) |float_state| return float_state.float_key;
+        return self.paneSessionMeta(pane).float_key;
+    }
+
+    pub fn paneSticky(self: *const State, pane: *const Pane) bool {
+        if (self.paneFloatState(pane)) |float_state| return float_state.sticky;
+        return self.paneSessionMeta(pane).sticky;
+    }
+
+    pub fn paneIsPwd(self: *const State, pane: *const Pane) bool {
+        if (self.paneFloatState(pane)) |float_state| return float_state.is_pwd;
+        return self.paneSessionMeta(pane).is_pwd;
+    }
+
+    pub fn paneFloatWidthPct(self: *const State, pane: *const Pane) u8 {
+        if (self.paneFloatState(pane)) |float_state| return float_state.width_pct;
+        return pane.float_width_pct;
+    }
+
+    pub fn paneFloatHeightPct(self: *const State, pane: *const Pane) u8 {
+        if (self.paneFloatState(pane)) |float_state| return float_state.height_pct;
+        return pane.float_height_pct;
+    }
+
+    pub fn paneFloatPosXPct(self: *const State, pane: *const Pane) u8 {
+        if (self.paneFloatState(pane)) |float_state| return float_state.pos_x_pct;
+        return pane.float_pos_x_pct;
+    }
+
+    pub fn paneFloatPosYPct(self: *const State, pane: *const Pane) u8 {
+        if (self.paneFloatState(pane)) |float_state| return float_state.pos_y_pct;
+        return pane.float_pos_y_pct;
+    }
+
+    pub fn paneFloatPadX(self: *const State, pane: *const Pane) u8 {
+        if (self.paneFloatState(pane)) |float_state| return float_state.pad_x;
+        return pane.float_pad_x;
+    }
+
+    pub fn paneFloatPadY(self: *const State, pane: *const Pane) u8 {
+        if (self.paneFloatState(pane)) |float_state| return float_state.pad_y;
+        return pane.float_pad_y;
+    }
+
     pub fn setPaneNameOwned(self: *State, uuid: [32]u8, name_owned: []u8) void {
         self.runtime.projection.setPaneNameOwned(uuid, name_owned);
     }

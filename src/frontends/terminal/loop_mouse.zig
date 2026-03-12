@@ -147,7 +147,7 @@ fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
     if (state.activeFloatingIndex()) |afi| {
         if (afi < state.view.floats.items.len) {
             const fp = state.view.floats.items[afi];
-            if (isFloatRenderableOnTab(fp, state.activeTabIndex())) {
+            if (isFloatRenderableOnTab(state, fp, state.activeTabIndex())) {
                 if (x >= fp.border_x and x < fp.border_x + fp.border_w and y >= fp.border_y and y < fp.border_y + fp.border_h) {
                     return .{ .kind = .float, .pane = fp, .float_index = afi };
                 }
@@ -159,7 +159,7 @@ fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
     while (fi > 0) {
         fi -= 1;
         const fp = state.view.floats.items[fi];
-        if (!isFloatRenderableOnTab(fp, state.activeTabIndex())) continue;
+        if (!isFloatRenderableOnTab(state, fp, state.activeTabIndex())) continue;
         if (x >= fp.border_x and x < fp.border_x + fp.border_w and y >= fp.border_y and y < fp.border_y + fp.border_h) {
             return .{ .kind = .float, .pane = fp, .float_index = fi };
         }
@@ -301,8 +301,8 @@ fn updateFloatMove(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const St
     const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
     const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
 
-    const outer_w: u16 = usable_w * pane.float_width_pct / 100;
-    const outer_h: u16 = usable_h * pane.float_height_pct / 100;
+    const outer_w: u16 = usable_w * state.paneFloatWidthPct(pane) / 100;
+    const outer_h: u16 = usable_h * state.paneFloatHeightPct(pane) / 100;
 
     const max_x: u16 = usable_w -| outer_w;
     const max_y: u16 = usable_h -| outer_h;
@@ -365,8 +365,8 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
     const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
 
-    const min_outer_w: i32 = @intCast((@as(u16, 1) + pane.float_pad_x) * 2 + 1);
-    const min_outer_h: i32 = @intCast((@as(u16, 1) + pane.float_pad_y) * 2 + 1);
+    const min_outer_w: i32 = @intCast((@as(u16, 1) + state.paneFloatPadX(pane)) * 2 + 1);
+    const min_outer_h: i32 = @intCast((@as(u16, 1) + state.paneFloatPadY(pane)) * 2 + 1);
 
     if (w0 < min_outer_w) w0 = min_outer_w;
     if (h0 < min_outer_h) h0 = min_outer_h;

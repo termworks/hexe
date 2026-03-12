@@ -13,7 +13,7 @@ fn restoreTabFocus(state: *State, old_uuid: ?[32]u8) void {
         if (state.lastFloatingUuidForTab(active_tab)) |uuid| {
             for (state.view.floats.items, 0..) |pane, fi| {
                 if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                if (!isFloatRenderableOnTab(pane, active_tab)) continue;
+                if (!isFloatRenderableOnTab(state, pane, active_tab)) continue;
                 state.setActiveFloatingIndex(fi);
                 state.syncPaneFocus(pane, old_uuid);
                 return;

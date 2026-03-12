@@ -330,7 +330,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             const fi = state.activeFloatingIndex() orelse return false;
             if (fi >= state.view.floats.items.len) return false;
             const pane = state.view.floats.items[fi];
-            if (pane.parent_tab) |parent| {
+            if (state.paneParentTab(pane)) |parent| {
                 if (parent != state.activeTabIndex()) return false;
             }
 
@@ -432,8 +432,8 @@ fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step
     const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
     const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
 
-    const outer_w: u16 = usable_w * pane.float_width_pct / 100;
-    const outer_h: u16 = usable_h * pane.float_height_pct / 100;
+    const outer_w: u16 = usable_w * state.paneFloatWidthPct(pane) / 100;
+    const outer_h: u16 = usable_h * state.paneFloatHeightPct(pane) / 100;
 
     const max_x: u16 = usable_w -| outer_w;
     const max_y: u16 = usable_h -| outer_h;

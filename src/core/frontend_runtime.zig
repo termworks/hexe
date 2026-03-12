@@ -539,10 +539,26 @@ pub const FrontendRuntime = struct {
             pad_y,
             active,
         );
+        self.projection.syncFloatState(.{
+            .pane_uuid = pane_uuid,
+            .parent_tab = parent_tab,
+            .visible = visible,
+            .tab_visible = tab_visible,
+            .sticky = sticky,
+            .is_pwd = is_pwd,
+            .float_key = float_key,
+            .width_pct = width_pct,
+            .height_pct = height_pct,
+            .pos_x_pct = pos_x_pct,
+            .pos_y_pct = pos_y_pct,
+            .pad_x = pad_x,
+            .pad_y = pad_y,
+        }, active);
     }
 
     pub fn sessionRemoveFloat(self: *FrontendRuntime, pane_uuid: [32]u8) !void {
         try self.client.sessionRemoveFloat(pane_uuid);
+        self.projection.removeFloatState(pane_uuid);
     }
 
     pub fn sessionSyncTabLayout(
