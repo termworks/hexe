@@ -448,7 +448,8 @@ Done when:
 2. Done: Reattach should rebuild the projection in shared core, not in
    terminal code.
 3. Done: Backlog replay coordination should live in the runtime.
-4. Session stolen / reconnect / detach flows should live in the runtime.
+4. Done: Session stolen / reconnect / detach flows should live in the
+   runtime.
 
 Done when:
 

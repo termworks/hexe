@@ -97,6 +97,17 @@ fn applyDeferredSessionSnapshots(state: *State) void {
     _ = state.applySessionSnapshot(&snapshot);
 }
 
+fn applyRuntimeStopRequest(state: *State) bool {
+    const reason = state.runtime.takeStopReason() orelse return false;
+    switch (reason) {
+        .session_stolen => state.notifications.showFor("Session attached elsewhere; this client is closing", 3500),
+        .frontend_disconnect, .explicit_detach, .none => {},
+    }
+    state.running = false;
+    state.needs_render = true;
+    return true;
+}
+
 fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
     if (!state.terminal_query_in_flight) return;
 
@@ -346,19 +357,16 @@ fn stdinCallback(
 ) xev.CallbackAction {
     const slot = ctx orelse return .disarm;
     _ = result catch {
-        slot.state.setDetachMode(true);
-        slot.state.running = false;
+        slot.state.runtime.requestFrontendDisconnectStop();
         return .disarm;
     };
 
     const n = posix.read(posix.STDIN_FILENO, slot.buffer) catch {
-        slot.state.setDetachMode(true);
-        slot.state.running = false;
+        slot.state.runtime.requestFrontendDisconnectStop();
         return .disarm;
     };
     if (n == 0) {
-        slot.state.setDetachMode(true);
-        slot.state.running = false;
+        slot.state.runtime.requestFrontendDisconnectStop();
         return .disarm;
     }
 
@@ -534,6 +542,7 @@ pub fn runMainLoop(state: *State) !void {
 
     // Main loop.
     while (state.running) {
+        if (applyRuntimeStopRequest(state)) break;
         applyDeferredPaneExits(state);
         applyDeferredSessionSnapshots(state);
         state.flushPendingMuxVtWrites();
@@ -542,6 +551,7 @@ pub fn runMainLoop(state: *State) !void {
         ensureStdinWatcherArmed(state, &stdin_watcher, &stdin_buffer);
 
         try loop.run(.once);
+        if (applyRuntimeStopRequest(state)) break;
         if (!state.running) break;
 
         // Clear skip flag from previous iteration.

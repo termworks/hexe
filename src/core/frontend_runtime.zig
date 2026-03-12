@@ -12,6 +12,7 @@ const SessionProjection = @import("session_projection.zig").SessionProjection;
 const wire = @import("wire.zig");
 
 pub const FrontendRuntime = struct {
+    pub const StopReason = FrontendAttachState.StopReason;
     pub const PaneType = FrontendClient.PaneType;
     pub const PaneAuxInfo = FrontendClient.PaneAuxInfo;
     pub const PaneInfoSnapshot = FrontendClient.PaneInfoSnapshot;
@@ -394,6 +395,18 @@ pub const FrontendRuntime = struct {
 
     pub fn markSessionStolen(self: *FrontendRuntime) void {
         frontend_attach.markSessionStolen(&self.attach_state);
+    }
+
+    pub fn requestFrontendDisconnectStop(self: *FrontendRuntime) void {
+        self.attach_state.requestFrontendDisconnectStop();
+    }
+
+    pub fn requestExplicitDetachStop(self: *FrontendRuntime) void {
+        self.attach_state.requestExplicitDetachStop();
+    }
+
+    pub fn takeStopReason(self: *FrontendRuntime) ?StopReason {
+        return self.attach_state.takeStopReason();
     }
 
     pub fn isDetachMode(self: *const FrontendRuntime) bool {

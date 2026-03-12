@@ -26,8 +26,7 @@ var global_state: std.atomic.Value(?*State) = std.atomic.Value(?*State).init(nul
 /// This is called when the terminal closes unexpectedly.
 fn sighupHandler(_: c_int) callconv(.c) void {
     if (global_state.load(.acquire)) |state| {
-        state.setDetachMode(true);
-        state.running = false;
+        state.runtime.requestFrontendDisconnectStop();
     }
 }
 

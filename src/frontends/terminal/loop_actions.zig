@@ -301,9 +301,9 @@ pub fn performDetach(state: *State) void {
         state.running = false;
         return;
     };
+    state.runtime.requestExplicitDetachStop();
     // Print session_id (our UUID) so user can reattach.
     std.debug.print("\nSession detached: {s}\nReattach with: hexe mux attach {s}\n", .{ session_uuid, session_uuid[0..8] });
-    state.running = false;
 }
 
 /// Perform the actual disown action - orphan pane in ses and spawn new shell in same place.
