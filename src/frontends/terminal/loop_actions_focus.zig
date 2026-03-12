@@ -78,7 +78,7 @@ pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
         if (std.mem.eql(u8, &pane.uuid, &uuid)) {
             state.unfocusAllPanes();
             state.setActiveFloatingIndex(null);
-            layout.focused_split_id = entry.key_ptr.*;
+            layout.focused_pane_uuid = entry.key_ptr.*;
             pane.focused = true;
             state.syncPaneFocus(pane, null);
             state.needs_render = true;
@@ -217,32 +217,7 @@ fn swapPanePositions(state: *State, pane_a: *Pane, pane_b: *Pane) void {
 
     if (!a_float and !b_float) {
         const layout = state.currentLayout();
-
-        var key_a: ?u16 = null;
-        var key_b: ?u16 = null;
-        var it = layout.splits.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.* == pane_a) key_a = entry.key_ptr.*;
-            if (entry.value_ptr.* == pane_b) key_b = entry.key_ptr.*;
-        }
-        if (key_a == null or key_b == null) return;
-
-        const ptr_a = layout.splits.getPtr(key_a.?) orelse return;
-        const ptr_b = layout.splits.getPtr(key_b.?) orelse return;
-        ptr_a.* = pane_b;
-        ptr_b.* = pane_a;
-
-        const tmp_id = pane_a.id;
-        pane_a.id = pane_b.id;
-        pane_b.id = tmp_id;
-
-        if (layout.focused_split_id == key_a.?) {
-            layout.focused_split_id = key_b.?;
-        } else if (layout.focused_split_id == key_b.?) {
-            layout.focused_split_id = key_a.?;
-        }
-
-        layout.recalculateLayout();
+        if (!layout.swapPaneNodes(pane_a.uuid, pane_b.uuid)) return;
     } else if (a_float and b_float) {
         swapFloatPositions(state, pane_a, pane_b);
     } else {

@@ -8,16 +8,16 @@ const helpers = @import("helpers.zig");
 const layout_mod = @import("layout.zig");
 const lua_events = @import("lua_events.zig");
 
-fn setLayoutFocusedSplitId(self: anytype, pane: *Pane) void {
+fn setLayoutFocusedPaneUuid(self: anytype, pane: *Pane) void {
     if (self.paneIsFloating(pane)) return;
 
-    // Find which tab/layout owns this pane pointer and set its focused_split_id
+    // Find which tab/layout owns this pane pointer and set its focused pane UUID
     // to match. This keeps per-tab focus stable when switching tabs.
     for (self.view.tabs.items) |*tab| {
         var it = tab.layout.splits.iterator();
         while (it.next()) |entry| {
             if (entry.value_ptr.* == pane) {
-                tab.layout.focused_split_id = entry.key_ptr.*;
+                tab.layout.focused_pane_uuid = entry.key_ptr.*;
                 return;
             }
         }
@@ -182,7 +182,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
     if (pane.uuid[0] == 0) return;
 
     if (pane.focused) {
-        setLayoutFocusedSplitId(self, pane);
+        setLayoutFocusedPaneUuid(self, pane);
         if (self.paneIsFloating(pane)) {
             rememberFloatingFocus(self, pane);
             self.setActiveFloatingUuid(pane.uuid);
@@ -298,7 +298,7 @@ pub fn unfocusAllPanes(self: anytype) void {
 }
 
 pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
-    setLayoutFocusedSplitId(self, pane);
+    setLayoutFocusedPaneUuid(self, pane);
     if (self.paneIsFloating(pane)) {
         rememberFloatingFocus(self, pane);
         self.setActiveFloatingUuid(pane.uuid);

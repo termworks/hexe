@@ -280,7 +280,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                         state.needs_render = true;
                     } else {
                         const closing_uuid = layout.getFocusedPane().?.uuid;
-                        _ = layout.closePane(layout.focused_split_id);
+                        _ = layout.closePane(closing_uuid);
                         const next_focus_uuid = if (layout.getFocusedPane()) |pane| pane.uuid else null;
                         state.syncSessionCloseSplitPane(closing_uuid, next_focus_uuid);
                         if (layout.getFocusedPane()) |new_pane| {

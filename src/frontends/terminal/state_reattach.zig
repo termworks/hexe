@@ -223,23 +223,21 @@ fn ensureSplitPaneView(
     self: anytype,
     tab: *Tab,
     pane_uuid: [32]u8,
-    local_ids: *std.AutoHashMap([32]u8, u16),
     uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
     existing_views: ?*ExistingPaneViews,
     attached_snapshot: bool,
     used_uuids: *std.AutoHashMap([32]u8, void),
     remembered_focus_uuid: ?[32]u8,
     actual_focus_uuid: ?[32]u8,
-) ?u16 {
-    if (local_ids.get(pane_uuid)) |existing| return existing;
-    if (used_uuids.contains(pane_uuid)) return null;
+) bool {
+    if (tab.layout.splits.contains(pane_uuid)) return true;
+    if (used_uuids.contains(pane_uuid)) return false;
 
-    const info = ensureAdoptInfo(self, pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return null;
-    const vt_fd = self.runtime.getVtFd() orelse return null;
+    const info = ensureAdoptInfo(self, pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return false;
+    const vt_fd = self.runtime.getVtFd() orelse return false;
 
-    const pane_id = tab.layout.next_split_id;
-    tab.layout.next_split_id +%= 1;
-    if (tab.layout.next_split_id == 0) tab.layout.next_split_id = 1;
+    const view_id = tab.layout.next_pane_view_id;
+    tab.layout.next_pane_view_id +%= 1;
 
     const pane = blk: {
         if (existing_views) |views| {
@@ -249,40 +247,39 @@ fn ensureSplitPaneView(
                     pane.replaceWithPod(info.pane_id, vt_fd, pane_uuid) catch {
                         pane.deinit();
                         self.allocator.destroy(pane);
-                        return null;
+                        return false;
                     };
                 }
-                recyclePaneForSplit(self, tab, pane, pane_id, pane_uuid, actual_focus_uuid);
+                recyclePaneForSplit(self, tab, pane, view_id, pane_uuid, actual_focus_uuid);
                 break :blk pane;
             }
         }
 
-        const pane = self.allocator.create(Pane) catch return null;
+        const pane = self.allocator.create(Pane) catch return false;
         errdefer self.allocator.destroy(pane);
 
-        pane.initWithPod(self.allocator, pane_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, pane_uuid) catch return null;
-        recyclePaneForSplit(self, tab, pane, pane_id, pane_uuid, actual_focus_uuid);
+        pane.initWithPod(self.allocator, view_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, pane_uuid) catch return false;
+        recyclePaneForSplit(self, tab, pane, view_id, pane_uuid, actual_focus_uuid);
         pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
         break :blk pane;
     };
 
     hydratePaneMetadata(self, pane, pane_uuid);
 
-    tab.layout.splits.put(pane_id, pane) catch {
+    tab.layout.splits.put(pane_uuid, pane) catch {
         pane.deinit();
         self.allocator.destroy(pane);
-        return null;
+        return false;
     };
-    local_ids.put(pane_uuid, pane_id) catch {};
     used_uuids.put(pane_uuid, {}) catch {};
 
     if (remembered_focus_uuid) |focus_uuid| {
         if (std.mem.eql(u8, &focus_uuid, &pane_uuid)) {
-            tab.layout.focused_split_id = pane_id;
+            tab.layout.focused_pane_uuid = pane_uuid;
         }
     }
 
-    return pane_id;
+    return true;
 }
 
 fn freeRestoredLayoutNode(allocator: std.mem.Allocator, node: *LayoutNode) void {
@@ -300,7 +297,6 @@ fn restoreLayoutNode(
     self: anytype,
     tab: *Tab,
     node: *const SessionLayoutNode,
-    local_ids: *std.AutoHashMap([32]u8, u16),
     uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
     existing_views: ?*ExistingPaneViews,
     attached_snapshot: bool,
@@ -310,25 +306,25 @@ fn restoreLayoutNode(
 ) ?*LayoutNode {
     switch (node.*) {
         .pane => |pane_uuid| {
-            const pane_id = ensureSplitPaneView(
+            const ok = ensureSplitPaneView(
                 self,
                 tab,
                 pane_uuid,
-                local_ids,
                 uuid_pane_map,
                 existing_views,
                 attached_snapshot,
                 used_uuids,
                 remembered_focus_uuid,
                 actual_focus_uuid,
-            ) orelse return null;
+            );
+            if (!ok) return null;
             const restored = self.allocator.create(LayoutNode) catch return null;
-            restored.* = .{ .pane = pane_id };
+            restored.* = .{ .pane = pane_uuid };
             return restored;
         },
         .split => |split| {
-            const first = restoreLayoutNode(self, tab, split.first, local_ids, uuid_pane_map, existing_views, attached_snapshot, used_uuids, remembered_focus_uuid, actual_focus_uuid);
-            const second = restoreLayoutNode(self, tab, split.second, local_ids, uuid_pane_map, existing_views, attached_snapshot, used_uuids, remembered_focus_uuid, actual_focus_uuid);
+            const first = restoreLayoutNode(self, tab, split.first, uuid_pane_map, existing_views, attached_snapshot, used_uuids, remembered_focus_uuid, actual_focus_uuid);
+            const second = restoreLayoutNode(self, tab, split.second, uuid_pane_map, existing_views, attached_snapshot, used_uuids, remembered_focus_uuid, actual_focus_uuid);
 
             if (first == null and second == null) return null;
             if (first == null) return second;
@@ -431,11 +427,8 @@ fn layoutMatchesSnapshot(layout: *const layout_mod.Layout, node: ?*const LayoutN
     const expected = snapshot_node orelse return false;
 
     return switch (live.*) {
-        .pane => |pane_id| switch (expected.*) {
-            .pane => |pane_uuid| blk: {
-                const pane = layout.splits.get(pane_id) orelse break :blk false;
-                break :blk std.mem.eql(u8, &pane.uuid, &pane_uuid);
-            },
+        .pane => |pane_uuid| switch (expected.*) {
+            .pane => |expected_uuid| std.mem.eql(u8, &pane_uuid, &expected_uuid),
             .split => false,
         },
         .split => |split| switch (expected.*) {
@@ -484,7 +477,7 @@ fn applyTabSnapshotFocus(tab: *Tab, remembered_focus_uuid: ?[32]u8, actual_focus
 
         if (target_focus_uuid) |focused_uuid| {
             if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
-                tab.layout.focused_split_id = entry.key_ptr.*;
+                tab.layout.focused_pane_uuid = entry.key_ptr.*;
                 found_focus = true;
             }
         }
@@ -493,7 +486,7 @@ fn applyTabSnapshotFocus(tab: *Tab, remembered_focus_uuid: ?[32]u8, actual_focus
     if (!found_focus) {
         var first = tab.layout.splits.iterator();
         if (first.next()) |entry| {
-            tab.layout.focused_split_id = entry.key_ptr.*;
+            tab.layout.focused_pane_uuid = entry.key_ptr.*;
         }
     }
 }
@@ -700,15 +693,11 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
         tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
-        var local_ids = std.AutoHashMap([32]u8, u16).init(self.allocator);
-        defer local_ids.deinit();
-
         if (snapshot_tab.root) |root| {
             tab.layout.root = restoreLayoutNode(
                 self,
                 &tab,
                 root,
-                &local_ids,
                 &uuid_pane_map,
                 null,
                 false,
@@ -718,10 +707,10 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             );
         }
 
-        if (!tab.layout.splits.contains(tab.layout.focused_split_id)) {
+        if (tab.layout.focused_pane_uuid == null or !tab.layout.splits.contains(tab.layout.focused_pane_uuid.?)) {
             var split_it = tab.layout.splits.iterator();
             if (split_it.next()) |entry| {
-                tab.layout.focused_split_id = entry.key_ptr.*;
+                tab.layout.focused_pane_uuid = entry.key_ptr.*;
             }
         }
 
@@ -730,7 +719,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 tab.deinit();
                 continue;
             };
-            node.* = .{ .pane = tab.layout.focused_split_id };
+            node.* = .{ .pane = tab.layout.focused_pane_uuid.? };
             tab.layout.root = node;
         }
 
@@ -940,15 +929,11 @@ pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) boo
         }
         tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
-        var local_ids = std.AutoHashMap([32]u8, u16).init(self.allocator);
-        defer local_ids.deinit();
-
         if (snapshot_tab.root) |root| {
             tab.layout.root = restoreLayoutNode(
                 self,
                 &tab,
                 root,
-                &local_ids,
                 &uuid_pane_map,
                 &existing_views,
                 true,
@@ -958,10 +943,10 @@ pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) boo
             );
         }
 
-        if (!tab.layout.splits.contains(tab.layout.focused_split_id)) {
+        if (tab.layout.focused_pane_uuid == null or !tab.layout.splits.contains(tab.layout.focused_pane_uuid.?)) {
             var split_it = tab.layout.splits.iterator();
             if (split_it.next()) |entry| {
-                tab.layout.focused_split_id = entry.key_ptr.*;
+                tab.layout.focused_pane_uuid = entry.key_ptr.*;
             }
         }
 
@@ -970,7 +955,7 @@ pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) boo
                 tab.deinit();
                 continue;
             };
-            node.* = .{ .pane = tab.layout.focused_split_id };
+            node.* = .{ .pane = tab.layout.focused_pane_uuid.? };
             tab.layout.root = node;
         }
 
@@ -1083,7 +1068,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
 
             // Add pane to layout manually.
-            tab.layout.splits.put(0, pane) catch {
+            tab.layout.splits.put(pane.uuid, pane) catch {
                 pane.deinit();
                 return false;
             };
@@ -1091,9 +1076,10 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             pane_needs_cleanup = false;
 
             const node = self.allocator.create(LayoutNode) catch return false;
-            node.* = .{ .pane = 0 };
+            node.* = .{ .pane = pane.uuid };
             tab.layout.root = node;
-            tab.layout.next_split_id = 1;
+            tab.layout.focused_pane_uuid = pane.uuid;
+            tab.layout.next_pane_view_id = 1;
 
             self.view.tabs.append(self.allocator, tab) catch return false;
             // Tab is now owned by tabs array, no longer needs cleanup

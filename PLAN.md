@@ -406,7 +406,7 @@ Done when:
 
 1. Remove session identity and session structure ownership from
    `TerminalViewState`.
-2. Replace `Tab.layout` as session truth with terminal view objects derived from
+2. Done: Replace `Tab.layout` as session truth with terminal view objects derived from
    `SessionProjection`.
 3. Keep only terminal-specific widget/layout caches in terminal state.
 4. Make terminal view reconciliation derive from projection state instead of

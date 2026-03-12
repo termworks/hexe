@@ -194,11 +194,11 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
             }
 
             // Build binary layout tree from N-child config
-            const root = try buildBinaryTree(self.allocator, split_config, panes.items, &layout.next_split_id);
+            const root = try buildBinaryTree(self.allocator, split_config, panes.items);
             layout.root = root;
 
             // Set the first pane as focused
-            layout.focused_split_id = panes.items[0].id;
+            layout.focused_pane_uuid = panes.items[0].uuid;
             panes.items[0].focused = true;
 
             // Recalculate layout positions
@@ -222,8 +222,8 @@ fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: 
         .pane => |pane_config| {
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             const cwd = resolvePaneCwd(pane_config.cwd) orelse (std.posix.getcwd(&cwd_buf) catch null);
-            const id = layout.next_split_id;
-            layout.next_split_id += 1;
+            const view_id = layout.next_pane_view_id;
+            layout.next_pane_view_id +%= 1;
 
             const pane = try self.allocator.create(Pane);
             errdefer self.allocator.destroy(pane);
@@ -232,10 +232,10 @@ fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: 
             if (!runtime.isConnected()) return error.SesUnavailable;
             const result = try runtime.createPane(null, cwd, null, null, null, null, null);
             const vt_fd = runtime.getVtFd() orelse return error.SesUnavailable;
-            try pane.initWithPod(self.allocator, id, 0, 0, layout.width, layout.height, result.pane_id, vt_fd, result.uuid);
+            try pane.initWithPod(self.allocator, view_id, 0, 0, layout.width, layout.height, result.pane_id, vt_fd, result.uuid);
 
             layout.configurePaneNotifications(pane);
-            try layout.splits.put(id, pane);
+            try layout.splits.put(pane.uuid, pane);
             try panes.append(self.allocator, pane);
             try cmds.append(self.allocator, pane_config.cmd);
         },
@@ -249,8 +249,7 @@ fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: 
 
 /// Convert N-child SplitConfig to a binary LayoutNode tree.
 /// Pane IDs are assigned from the panes slice in traversal order.
-fn buildBinaryTree(allocator: std.mem.Allocator, config: SplitConfig, panes: []*Pane, pane_idx: *u16) !*LayoutNode {
-    _ = pane_idx;
+fn buildBinaryTree(allocator: std.mem.Allocator, config: SplitConfig, panes: []*Pane) !*LayoutNode {
     var leaf_idx: usize = 0;
     return buildBinaryTreeInner(allocator, config, panes, &leaf_idx);
 }
@@ -262,7 +261,7 @@ fn buildBinaryTreeInner(allocator: std.mem.Allocator, config: SplitConfig, panes
     switch (config) {
         .pane => {
             if (leaf_idx.* < panes.len) {
-                node.* = .{ .pane = panes[leaf_idx.*].id };
+                node.* = .{ .pane = panes[leaf_idx.*].uuid };
                 leaf_idx.* += 1;
             } else {
                 return error.InvalidNode;

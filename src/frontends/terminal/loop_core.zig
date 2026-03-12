@@ -538,7 +538,7 @@ pub fn runMainLoop(state: *State) !void {
     loop_timer.run(&loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
 
     // Reusable lists for dead pane tracking (avoid per-iteration allocations).
-    var dead_splits: std.ArrayList(u16) = .empty;
+    var dead_splits: std.ArrayList([32]u8) = .empty;
     defer dead_splits.deinit(allocator);
 
     // Main loop.
@@ -659,7 +659,7 @@ pub fn runMainLoop(state: *State) !void {
             var pane_it = state.currentLayout().splitIterator();
             while (pane_it.next()) |pane| {
                 if (!pane.*.isAlive()) {
-                    dead_splits.append(allocator, pane.*.id) catch {};
+                    dead_splits.append(allocator, pane.*.uuid) catch {};
                 }
             }
         }
@@ -674,25 +674,24 @@ pub fn runMainLoop(state: *State) !void {
         if (!state.skip_dead_check) {
             var dead_idx: usize = 0;
             while (dead_idx < dead_splits.items.len) : (dead_idx += 1) {
-                const dead_id = dead_splits.items[dead_idx];
+                const dead_uuid = dead_splits.items[dead_idx];
                 // Find the dead pane to get exit status and determine if notification is needed
-                const dead_pane = state.currentLayout().splits.get(dead_id);
-                // Dead-id snapshots can become stale after tab/layout mutations.
-                // Ignore IDs that no longer exist in the active layout.
+                const dead_pane = state.currentLayout().splits.get(dead_uuid);
+                // Dead-pane snapshots can become stale after tab/layout mutations.
+                // Ignore UUIDs that no longer exist in the active layout.
                 if (dead_pane == null) continue;
                 // Only handle panes that are actually dead.
                 if (dead_pane.?.isAlive()) continue;
 
-                const was_focused = if (state.currentLayout().getFocusedPane()) |fp| fp.id == dead_id else false;
+                const was_focused = if (state.currentLayout().getFocusedPane()) |fp| std.mem.eql(u8, &fp.uuid, &dead_uuid) else false;
                 const exit_code = if (dead_pane) |p| state.paneExitCode(p.uuid) else 0;
 
                 if (state.currentLayout().splitCount() > 1) {
                     // Multiple splits in tab - close the specific dead pane.
-                    const dead_uuid = dead_pane.?.uuid;
-                    _ = state.currentLayout().closePane(dead_id);
+                    _ = state.currentLayout().closePane(dead_uuid);
 
                     // Log pane death
-                    terminal_main.debugLog("pane died: id={d} exit_code={d} focused={}", .{ dead_id, exit_code, was_focused });
+                    terminal_main.debugLog("pane died: view_id={d} exit_code={d} focused={}", .{ dead_pane.?.id, exit_code, was_focused });
 
                     // Show notification if pane died with non-zero exit or was unfocused (unexpected)
                     if (!was_focused and exit_code != 0) {
@@ -714,7 +713,7 @@ pub fn runMainLoop(state: *State) !void {
                 } else if (state.view.tabs.items.len > 1) {
                     _ = state.closeCurrentTab();
                     state.needs_render = true;
-                    // Active tab changed; remaining dead_ids were collected from
+                    // Active tab changed; remaining dead UUIDs were collected from
                     // the old tab context and must be discarded this iteration.
                     break;
                 } else {

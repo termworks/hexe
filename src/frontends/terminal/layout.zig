@@ -22,7 +22,7 @@ pub const SplitDir = enum {
 
 /// A node in the layout tree - either a pane or a split
 pub const LayoutNode = union(enum) {
-    pane: u16, // pane id
+    pane: [32]u8, // pane uuid
     split: Split,
 
     pub const Split = struct {
@@ -37,9 +37,9 @@ pub const LayoutNode = union(enum) {
 pub const Layout = struct {
     allocator: std.mem.Allocator,
     root: ?*LayoutNode,
-    splits: std.AutoHashMap(u16, *Pane),
-    next_split_id: u16,
-    focused_split_id: u16,
+    splits: std.AutoHashMap([32]u8, *Pane),
+    next_pane_view_id: u16,
+    focused_pane_uuid: ?[32]u8,
     // Usable area (excluding status bar)
     x: u16,
     y: u16,
@@ -54,9 +54,9 @@ pub const Layout = struct {
         return .{
             .allocator = allocator,
             .root = null,
-            .splits = std.AutoHashMap(u16, *Pane).init(allocator),
-            .next_split_id = 0,
-            .focused_split_id = 0,
+            .splits = std.AutoHashMap([32]u8, *Pane).init(allocator),
+            .next_pane_view_id = 0,
+            .focused_pane_uuid = null,
             .x = 0,
             .y = 0,
             .width = width,
@@ -114,24 +114,24 @@ pub const Layout = struct {
         const runtime = self.runtime orelse return error.SesUnavailable;
         if (!runtime.isConnected()) return error.SesUnavailable;
 
-        const id = self.next_split_id;
-        self.next_split_id += 1;
+        const view_id = self.next_pane_view_id;
+        self.next_pane_view_id +%= 1;
 
         const pane = try self.allocator.create(Pane);
         errdefer self.allocator.destroy(pane);
 
         const result = try runtime.createPane(null, cwd, null, null, null, null, null);
         const vt_fd = runtime.getVtFd() orelse return error.SesUnavailable;
-        try pane.initWithPod(self.allocator, id, self.x, self.y, self.width, self.height, result.pane_id, vt_fd, result.uuid);
+        try pane.initWithPod(self.allocator, view_id, self.x, self.y, self.width, self.height, result.pane_id, vt_fd, result.uuid);
 
         pane.focused = true;
-        self.focused_split_id = id;
+        self.focused_pane_uuid = pane.uuid;
 
-        try self.splits.put(id, pane);
+        try self.splits.put(pane.uuid, pane);
         self.configurePaneNotifications(pane);
 
         const node = try self.allocator.create(LayoutNode);
-        node.* = .{ .pane = id };
+        node.* = .{ .pane = pane.uuid };
         self.root = node;
 
         return pane;
@@ -144,11 +144,11 @@ pub const Layout = struct {
         if (self.root == null) return null;
 
         const focused = self.getFocusedPane() orelse return null;
-        const old_id = focused.id;
+        const old_uuid = focused.uuid;
 
         // Create new pane
-        const new_id = self.next_split_id;
-        self.next_split_id += 1;
+        const view_id = self.next_pane_view_id;
+        self.next_pane_view_id +%= 1;
 
         const new_pane = try self.allocator.create(Pane);
         errdefer self.allocator.destroy(new_pane);
@@ -161,21 +161,21 @@ pub const Layout = struct {
 
         const result = try runtime.createPane(null, cwd, null, null, null, null, null);
         const vt_fd = runtime.getVtFd() orelse return error.SesUnavailable;
-        try new_pane.initWithPod(self.allocator, new_id, new_x, new_y, new_width, new_height, result.pane_id, vt_fd, result.uuid);
+        try new_pane.initWithPod(self.allocator, view_id, new_x, new_y, new_width, new_height, result.pane_id, vt_fd, result.uuid);
         errdefer new_pane.deinit();
 
-        try self.splits.put(new_id, new_pane);
+        try self.splits.put(new_pane.uuid, new_pane);
         self.configurePaneNotifications(new_pane);
 
         // Find and replace the node containing the focused pane
-        const node_to_split = self.findNode(self.root.?, old_id) orelse return null;
+        const node_to_split = self.findNode(self.root.?, old_uuid) orelse return null;
 
         // Create new split node
         const first_node = try self.allocator.create(LayoutNode);
-        first_node.* = .{ .pane = old_id };
+        first_node.* = .{ .pane = old_uuid };
 
         const second_node = try self.allocator.create(LayoutNode);
-        second_node.* = .{ .pane = new_id };
+        second_node.* = .{ .pane = new_pane.uuid };
 
         node_to_split.* = .{
             .split = .{
@@ -192,20 +192,20 @@ pub const Layout = struct {
         // Focus the new pane (like tmux behavior)
         focused.focused = false;
         new_pane.focused = true;
-        self.focused_split_id = new_id;
+        self.focused_pane_uuid = new_pane.uuid;
 
         return new_pane;
     }
 
-    fn findNode(self: *Layout, node: *LayoutNode, pane_id: u16) ?*LayoutNode {
+    fn findNode(self: *Layout, node: *LayoutNode, pane_uuid: [32]u8) ?*LayoutNode {
         switch (node.*) {
-            .pane => |id| {
-                if (id == pane_id) return node;
+            .pane => |uuid| {
+                if (std.mem.eql(u8, &uuid, &pane_uuid)) return node;
                 return null;
             },
             .split => |split| {
-                if (self.findNode(split.first, pane_id)) |found| return found;
-                if (self.findNode(split.second, pane_id)) |found| return found;
+                if (self.findNode(split.first, pane_uuid)) |found| return found;
+                if (self.findNode(split.second, pane_uuid)) |found| return found;
                 return null;
             },
         }
@@ -213,7 +213,7 @@ pub const Layout = struct {
 
     fn firstLeafPaneUuid(self: *Layout, node: *const LayoutNode) ?[32]u8 {
         return switch (node.*) {
-            .pane => |id| if (self.splits.get(id)) |pane| pane.uuid else null,
+            .pane => |uuid| if (self.splits.get(uuid)) |pane| pane.uuid else null,
             .split => |split| self.firstLeafPaneUuid(split.first) orelse self.firstLeafPaneUuid(split.second),
         };
     }
@@ -237,8 +237,8 @@ pub const Layout = struct {
 
     fn layoutNode(self: *Layout, node: *LayoutNode, x: u16, y: u16, w: u16, h: u16) void {
         switch (node.*) {
-            .pane => |id| {
-                if (self.splits.get(id)) |pane| {
+            .pane => |uuid| {
+                if (self.splits.get(uuid)) |pane| {
                     pane.resize(x, y, w, h) catch {};
                 }
             },
@@ -278,14 +278,16 @@ pub const Layout = struct {
                 self.allocator.destroy(root);
             }
         }
-        // Ensure focused_split_id points to a live pane
-        if (!self.splits.contains(self.focused_split_id)) {
+        // Ensure focused_pane_uuid points to a live pane
+        if (self.focused_pane_uuid == null or !self.splits.contains(self.focused_pane_uuid.?)) {
             var it = self.splits.keyIterator();
-            if (it.next()) |first_id| {
-                self.focused_split_id = first_id.*;
-                if (self.splits.get(first_id.*)) |pane| {
+            if (it.next()) |first_uuid| {
+                self.focused_pane_uuid = first_uuid.*;
+                if (self.splits.get(first_uuid.*)) |pane| {
                     pane.focused = true;
                 }
+            } else {
+                self.focused_pane_uuid = null;
             }
         }
     }
@@ -297,8 +299,8 @@ pub const Layout = struct {
 
     fn pruneNode(self: *Layout, node: *LayoutNode) PruneResult {
         switch (node.*) {
-            .pane => |id| {
-                if (self.splits.contains(id)) {
+            .pane => |uuid| {
+                if (self.splits.contains(uuid)) {
                     return .{ .dead = false, .replacement = null };
                 } else {
                     return .{ .dead = true, .replacement = null };
@@ -354,7 +356,8 @@ pub const Layout = struct {
 
     /// Get focused pane
     pub fn getFocusedPane(self: *Layout) ?*Pane {
-        return self.splits.get(self.focused_split_id);
+        const focused_uuid = self.focused_pane_uuid orelse return null;
+        return self.splits.get(focused_uuid);
     }
 
     /// Focus next pane
@@ -365,21 +368,26 @@ pub const Layout = struct {
             current.focused = false;
         }
 
-        // Get all pane IDs and find next
-        var ids: std.ArrayList(u16) = .empty;
-        defer ids.deinit(self.allocator);
+        var panes: std.ArrayList(*Pane) = .empty;
+        defer panes.deinit(self.allocator);
 
-        var it = self.splits.keyIterator();
-        while (it.next()) |id| {
-            ids.append(self.allocator, id.*) catch continue;
+        var it = self.splits.valueIterator();
+        while (it.next()) |pane_ptr| {
+            panes.append(self.allocator, pane_ptr.*) catch continue;
         }
 
-        std.mem.sort(u16, ids.items, {}, std.sort.asc(u16));
+        const Ctx = struct {
+            fn lessThan(_: void, a: *Pane, b: *Pane) bool {
+                return a.id < b.id;
+            }
+        };
+        std.mem.sort(*Pane, panes.items, {}, Ctx.lessThan);
 
-        for (ids.items, 0..) |id, i| {
-            if (id == self.focused_split_id) {
-                const next_idx = (i + 1) % ids.items.len;
-                self.focused_split_id = ids.items[next_idx];
+        const focused_uuid = self.focused_pane_uuid orelse return;
+        for (panes.items, 0..) |pane, i| {
+            if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
+                const next_idx = (i + 1) % panes.items.len;
+                self.focused_pane_uuid = panes.items[next_idx].uuid;
                 break;
             }
         }
@@ -397,20 +405,26 @@ pub const Layout = struct {
             current.focused = false;
         }
 
-        var ids: std.ArrayList(u16) = .empty;
-        defer ids.deinit(self.allocator);
+        var panes: std.ArrayList(*Pane) = .empty;
+        defer panes.deinit(self.allocator);
 
-        var it = self.splits.keyIterator();
-        while (it.next()) |id| {
-            ids.append(self.allocator, id.*) catch continue;
+        var it = self.splits.valueIterator();
+        while (it.next()) |pane_ptr| {
+            panes.append(self.allocator, pane_ptr.*) catch continue;
         }
 
-        std.mem.sort(u16, ids.items, {}, std.sort.asc(u16));
+        const Ctx = struct {
+            fn lessThan(_: void, a: *Pane, b: *Pane) bool {
+                return a.id < b.id;
+            }
+        };
+        std.mem.sort(*Pane, panes.items, {}, Ctx.lessThan);
 
-        for (ids.items, 0..) |id, i| {
-            if (id == self.focused_split_id) {
-                const prev_idx = if (i == 0) ids.items.len - 1 else i - 1;
-                self.focused_split_id = ids.items[prev_idx];
+        const focused_uuid = self.focused_pane_uuid orelse return;
+        for (panes.items, 0..) |pane, i| {
+            if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
+                const prev_idx = if (i == 0) panes.items.len - 1 else i - 1;
+                self.focused_pane_uuid = panes.items[prev_idx].uuid;
                 break;
             }
         }
@@ -430,15 +444,15 @@ pub const Layout = struct {
         const cur_cx = if (cursor_pos) |pos| pos.x else current.x + current.width / 2;
         const cur_cy = if (cursor_pos) |pos| pos.y else current.y + current.height / 2;
 
-        var best_id: ?u16 = null;
+        var best_uuid: ?[32]u8 = null;
         var best_dist: i32 = std.math.maxInt(i32);
 
         var it = self.splits.iterator();
         while (it.next()) |entry| {
-            const id = entry.key_ptr.*;
             const pane = entry.value_ptr.*;
-
-            if (id == self.focused_split_id) continue;
+            if (self.focused_pane_uuid) |focused_uuid| {
+                if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) continue;
+            }
 
             const pane_cx = pane.x + pane.width / 2;
             const pane_cy = pane.y + pane.height / 2;
@@ -475,13 +489,13 @@ pub const Layout = struct {
 
             if (dist < best_dist) {
                 best_dist = dist;
-                best_id = id;
+                best_uuid = pane.uuid;
             }
         }
 
-        if (best_id) |new_id| {
+        if (best_uuid) |new_uuid| {
             current.focused = false;
-            self.focused_split_id = new_id;
+            self.focused_pane_uuid = new_uuid;
             if (self.getFocusedPane()) |new_focus| {
                 new_focus.focused = true;
             }
@@ -496,7 +510,7 @@ pub const Layout = struct {
         if (self.root == null) return null;
         if (self.splits.count() <= 1) return null;
 
-        const focused_id = self.focused_split_id;
+        const focused_uuid = self.focused_pane_uuid orelse return null;
         const root = self.root.?;
 
         const Helper = struct {
@@ -510,13 +524,13 @@ pub const Layout = struct {
                 target: ?Target,
             };
 
-            fn rec(node: *LayoutNode, pane_id: u16, want: Direction) RecResult {
+            fn rec(node: *LayoutNode, pane_uuid: [32]u8, want: Direction) RecResult {
                 return switch (node.*) {
-                    .pane => |id| .{ .found = id == pane_id, .target = null },
+                    .pane => |uuid| .{ .found = std.mem.eql(u8, &uuid, &pane_uuid), .target = null },
                     .split => |*sp| blk: {
-                        const left_res: RecResult = rec(sp.first, pane_id, want);
+                        const left_res: RecResult = rec(sp.first, pane_uuid, want);
                         const right_res: RecResult = if (!left_res.found)
-                            rec(sp.second, pane_id, want)
+                            rec(sp.second, pane_uuid, want)
                         else
                             .{ .found = false, .target = null };
 
@@ -548,7 +562,7 @@ pub const Layout = struct {
             }
         };
 
-        const res = Helper.rec(root, focused_id, dir);
+        const res = Helper.rec(root, focused_uuid, dir);
         if (res.target == null) return null;
 
         const t = res.target.?;
@@ -574,13 +588,13 @@ pub const Layout = struct {
     pub fn closeFocused(self: *Layout) bool {
         if (self.splits.count() <= 1) return false;
 
-        const id_to_close = self.focused_split_id;
+        const uuid_to_close = self.focused_pane_uuid orelse return false;
 
         // Focus next before removing
         self.focusNext();
 
         // Remove pane
-        if (self.splits.fetchRemove(id_to_close)) |kv| {
+        if (self.splits.fetchRemove(uuid_to_close)) |kv| {
             // Tell ses to kill only if the pane is still alive.
             // Dead panes already reported by SES should be removed locally
             // without another synchronous kill request.
@@ -595,7 +609,7 @@ pub const Layout = struct {
 
         // Remove from layout tree and restructure
         if (self.root) |root| {
-            self.removeFromTree(root, null, id_to_close);
+            self.removeFromTree(root, null, uuid_to_close);
         }
 
         self.recalculateLayout();
@@ -605,16 +619,18 @@ pub const Layout = struct {
     /// Close a specific pane by ID.
     ///
     /// This is used when the event loop detects a specific pane has died.
-    pub fn closePane(self: *Layout, id_to_close: u16) bool {
+    pub fn closePane(self: *Layout, uuid_to_close: [32]u8) bool {
         if (self.splits.count() <= 1) return false;
-        if (!self.splits.contains(id_to_close)) return false;
+        if (!self.splits.contains(uuid_to_close)) return false;
 
         // If we're closing the focused pane, move focus first.
-        if (id_to_close == self.focused_split_id) {
-            self.focusNext();
+        if (self.focused_pane_uuid) |focused_uuid| {
+            if (std.mem.eql(u8, &uuid_to_close, &focused_uuid)) {
+                self.focusNext();
+            }
         }
 
-        if (self.splits.fetchRemove(id_to_close)) |kv| {
+        if (self.splits.fetchRemove(uuid_to_close)) |kv| {
             if (self.runtime) |runtime| {
                 if (kv.value.isAlive()) {
                     runtime.killPane(kv.value.uuid) catch {};
@@ -625,24 +641,37 @@ pub const Layout = struct {
         }
 
         if (self.root) |root| {
-            self.removeFromTree(root, null, id_to_close);
+            self.removeFromTree(root, null, uuid_to_close);
         }
         self.recalculateLayout();
         return true;
     }
 
-    fn removeFromTree(self: *Layout, node: *LayoutNode, parent: ?*LayoutNode, pane_id: u16) void {
+    pub fn swapPaneNodes(self: *Layout, pane_a_uuid: [32]u8, pane_b_uuid: [32]u8) bool {
+        if (std.mem.eql(u8, &pane_a_uuid, &pane_b_uuid)) return false;
+        const root = self.root orelse return false;
+
+        const node_a = self.findNode(root, pane_a_uuid) orelse return false;
+        const node_b = self.findNode(root, pane_b_uuid) orelse return false;
+
+        node_a.* = .{ .pane = pane_b_uuid };
+        node_b.* = .{ .pane = pane_a_uuid };
+        self.recalculateLayout();
+        return true;
+    }
+
+    fn removeFromTree(self: *Layout, node: *LayoutNode, parent: ?*LayoutNode, pane_uuid: [32]u8) void {
         switch (node.*) {
-            .pane => |id| {
-                if (id == pane_id and parent != null) {
+            .pane => |uuid| {
+                if (std.mem.eql(u8, &uuid, &pane_uuid) and parent != null) {
                     // This is handled by the parent split case
                 }
             },
             .split => |split| {
                 // Check if either child is the pane to remove
                 switch (split.first.*) {
-                    .pane => |id| {
-                        if (id == pane_id) {
+                    .pane => |uuid| {
+                        if (std.mem.eql(u8, &uuid, &pane_uuid)) {
                             // Replace this split with second child
                             const second = split.second.*;
                             self.allocator.destroy(split.first);
@@ -654,8 +683,8 @@ pub const Layout = struct {
                     else => {},
                 }
                 switch (split.second.*) {
-                    .pane => |id| {
-                        if (id == pane_id) {
+                    .pane => |uuid| {
+                        if (std.mem.eql(u8, &uuid, &pane_uuid)) {
                             // Replace this split with first child
                             const first = split.first.*;
                             self.allocator.destroy(split.first);
@@ -667,14 +696,14 @@ pub const Layout = struct {
                     else => {},
                 }
                 // Recurse
-                self.removeFromTree(split.first, node, pane_id);
-                self.removeFromTree(split.second, node, pane_id);
+                self.removeFromTree(split.first, node, pane_uuid);
+                self.removeFromTree(split.second, node, pane_uuid);
             },
         }
     }
 
     /// Get iterator over all panes
-    pub fn splitIterator(self: *Layout) std.AutoHashMap(u16, *Pane).ValueIterator {
+    pub fn splitIterator(self: *Layout) std.AutoHashMap([32]u8, *Pane).ValueIterator {
         return self.splits.valueIterator();
     }
 
@@ -685,22 +714,27 @@ pub const Layout = struct {
 
     /// Get index of focused pane in iteration order
     pub fn getFocusedIndex(self: *Layout) usize {
-        var ids: [16]u16 = undefined;
+        var panes: [16]*Pane = undefined;
         var count: usize = 0;
 
-        var it = self.splits.keyIterator();
-        while (it.next()) |id| {
+        var it = self.splits.valueIterator();
+        while (it.next()) |pane| {
             if (count < 16) {
-                ids[count] = id.*;
+                panes[count] = pane.*;
                 count += 1;
             }
         }
 
-        // Sort to get consistent order
-        std.mem.sort(u16, ids[0..count], {}, std.sort.asc(u16));
+        const Ctx = struct {
+            fn lessThan(_: void, a: *Pane, b: *Pane) bool {
+                return a.id < b.id;
+            }
+        };
+        std.mem.sort(*Pane, panes[0..count], {}, Ctx.lessThan);
 
-        for (ids[0..count], 0..) |id, i| {
-            if (id == self.focused_split_id) return i;
+        const focused_uuid = self.focused_pane_uuid orelse return 0;
+        for (panes[0..count], 0..) |pane, i| {
+            if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) return i;
         }
 
         return 0;

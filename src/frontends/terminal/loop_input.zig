@@ -428,7 +428,7 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                                     const layout = state.currentLayout();
                                     if (layout.splitCount() > 1) {
                                         const closing_uuid = layout.getFocusedPane().?.uuid;
-                                        _ = layout.closePane(layout.focused_split_id);
+                                        _ = layout.closePane(closing_uuid);
                                         const next_focus_uuid = if (layout.getFocusedPane()) |pane| pane.uuid else null;
                                         state.syncSessionCloseSplitPane(closing_uuid, next_focus_uuid);
                                         if (layout.getFocusedPane()) |new_pane| {
