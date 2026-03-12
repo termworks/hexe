@@ -8,6 +8,12 @@ const FrontendRuntime = core.FrontendRuntime;
 /// Cursor position for directional navigation
 pub const CursorPos = struct { x: u16, y: u16 };
 
+pub const SplitRatioSync = struct {
+    first_anchor_uuid: [32]u8,
+    second_anchor_uuid: [32]u8,
+    ratio: f32,
+};
+
 /// Direction of a split
 pub const SplitDir = enum {
     horizontal, // side by side (left | right)
@@ -203,6 +209,23 @@ pub const Layout = struct {
                 return null;
             },
         }
+    }
+
+    fn firstLeafPaneUuid(self: *Layout, node: *const LayoutNode) ?[32]u8 {
+        return switch (node.*) {
+            .pane => |id| if (self.splits.get(id)) |pane| pane.uuid else null,
+            .split => |split| self.firstLeafPaneUuid(split.first) orelse self.firstLeafPaneUuid(split.second),
+        };
+    }
+
+    pub fn splitRatioSyncForSplit(self: *Layout, split: *const LayoutNode.Split) ?SplitRatioSync {
+        const first_anchor_uuid = self.firstLeafPaneUuid(split.first) orelse return null;
+        const second_anchor_uuid = self.firstLeafPaneUuid(split.second) orelse return null;
+        return .{
+            .first_anchor_uuid = first_anchor_uuid,
+            .second_anchor_uuid = second_anchor_uuid,
+            .ratio = split.ratio,
+        };
     }
 
     /// Recalculate all pane positions based on layout tree
@@ -467,11 +490,11 @@ pub const Layout = struct {
 
     pub const Direction = enum { up, down, left, right };
 
-    pub fn resizeFocused(self: *Layout, dir: Direction, step_cells: u16) bool {
+    pub fn resizeFocused(self: *Layout, dir: Direction, step_cells: u16) ?SplitRatioSync {
         // Adjust the nearest split divider that borders the focused pane in the
         // requested direction (i3/tmux-style resize).
-        if (self.root == null) return false;
-        if (self.splits.count() <= 1) return false;
+        if (self.root == null) return null;
+        if (self.splits.count() <= 1) return null;
 
         const focused_id = self.focused_split_id;
         const root = self.root.?;
@@ -526,14 +549,14 @@ pub const Layout = struct {
         };
 
         const res = Helper.rec(root, focused_id, dir);
-        if (res.target == null) return false;
+        if (res.target == null) return null;
 
         const t = res.target.?;
         const axis: u16 = switch (dir) {
             .left, .right => self.width,
             .up, .down => self.height,
         };
-        if (axis == 0) return false;
+        if (axis == 0) return null;
         const delta: f32 = @as(f32, @floatFromInt(step_cells)) / @as(f32, @floatFromInt(axis));
 
         var r = t.split.ratio;
@@ -544,7 +567,7 @@ pub const Layout = struct {
         if (r > 0.9) r = 0.9;
         t.split.ratio = r;
         self.recalculateLayout();
-        return true;
+        return self.splitRatioSyncForSplit(t.split);
     }
 
     /// Close the focused pane

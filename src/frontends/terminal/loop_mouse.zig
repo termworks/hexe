@@ -236,7 +236,7 @@ fn hitTestDivider(layout: *layout_mod.Layout, x: u16, y: u16) ?DividerHit {
     if (layout.root == null) return null;
 
     const Rec = struct {
-        fn rec(node: *layout_mod.LayoutNode, rx: u16, ry: u16, rw: u16, rh: u16, mx: u16, my: u16) ?DividerHit {
+        fn rec(layout_ptr: *layout_mod.Layout, node: *layout_mod.LayoutNode, rx: u16, ry: u16, rw: u16, rh: u16, mx: u16, my: u16) ?DividerHit {
             return switch (node.*) {
                 .pane => null,
                 .split => |*sp| blk: {
@@ -245,14 +245,24 @@ fn hitTestDivider(layout: *layout_mod.Layout, x: u16, y: u16) ?DividerHit {
                             const first_w: u16 = @as(u16, @intFromFloat(@as(f32, @floatFromInt(rw)) * sp.ratio)) -| 1;
                             const div_x = rx + first_w;
                             if (mx == div_x and my >= ry and my < ry + rh) {
-                                break :blk .{ .split = sp, .dir = .horizontal, .x = rx, .y = ry, .w = rw, .h = rh };
+                                const sync = layout_ptr.splitRatioSyncForSplit(sp) orelse return null;
+                                break :blk .{
+                                    .split = sp,
+                                    .first_anchor_uuid = sync.first_anchor_uuid,
+                                    .second_anchor_uuid = sync.second_anchor_uuid,
+                                    .dir = .horizontal,
+                                    .x = rx,
+                                    .y = ry,
+                                    .w = rw,
+                                    .h = rh,
+                                };
                             }
                             if (mx < div_x) {
-                                break :blk rec(sp.first, rx, ry, first_w, rh, mx, my);
+                                break :blk rec(layout_ptr, sp.first, rx, ry, first_w, rh, mx, my);
                             }
                             if (mx > div_x) {
                                 const second_w = rw -| first_w -| 1;
-                                break :blk rec(sp.second, rx + first_w + 1, ry, second_w, rh, mx, my);
+                                break :blk rec(layout_ptr, sp.second, rx + first_w + 1, ry, second_w, rh, mx, my);
                             }
                             break :blk null;
                         },
@@ -260,14 +270,24 @@ fn hitTestDivider(layout: *layout_mod.Layout, x: u16, y: u16) ?DividerHit {
                             const first_h: u16 = @as(u16, @intFromFloat(@as(f32, @floatFromInt(rh)) * sp.ratio)) -| 1;
                             const div_y = ry + first_h;
                             if (my == div_y and mx >= rx and mx < rx + rw) {
-                                break :blk .{ .split = sp, .dir = .vertical, .x = rx, .y = ry, .w = rw, .h = rh };
+                                const sync = layout_ptr.splitRatioSyncForSplit(sp) orelse return null;
+                                break :blk .{
+                                    .split = sp,
+                                    .first_anchor_uuid = sync.first_anchor_uuid,
+                                    .second_anchor_uuid = sync.second_anchor_uuid,
+                                    .dir = .vertical,
+                                    .x = rx,
+                                    .y = ry,
+                                    .w = rw,
+                                    .h = rh,
+                                };
                             }
                             if (my < div_y) {
-                                break :blk rec(sp.first, rx, ry, rw, first_h, mx, my);
+                                break :blk rec(layout_ptr, sp.first, rx, ry, rw, first_h, mx, my);
                             }
                             if (my > div_y) {
                                 const second_h = rh -| first_h -| 1;
-                                break :blk rec(sp.second, rx, ry + first_h + 1, rw, second_h, mx, my);
+                                break :blk rec(layout_ptr, sp.second, rx, ry + first_h + 1, rw, second_h, mx, my);
                             }
                             break :blk null;
                         },
@@ -277,7 +297,7 @@ fn hitTestDivider(layout: *layout_mod.Layout, x: u16, y: u16) ?DividerHit {
         }
     };
 
-    return Rec.rec(layout.root.?, layout.x, layout.y, layout.width, layout.height, x, y);
+    return Rec.rec(layout, layout.root.?, layout.x, layout.y, layout.width, layout.height, x, y);
 }
 
 fn beginFloatMove(state: *State, pane: *Pane, start_x: u16, start_y: u16) void {
@@ -562,7 +582,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             if (is_wheel) return true;
             if (ev.is_release) {
                 state.mouse_drag = .none;
-                state.syncActiveTabLayout();
+                state.syncSessionSplitRatio(d.first_anchor_uuid, d.second_anchor_uuid, d.split.ratio);
                 return true;
             }
             if (!is_motion) return true;

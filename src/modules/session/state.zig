@@ -727,6 +727,147 @@ pub const SesState = struct {
             snapshot.tabs.items[snapshot.active_tab].focused_pane_uuid;
     }
 
+    fn findSnapshotTabIndex(snapshot: *session_model.SessionSnapshot, tab_uuid: [32]u8) ?usize {
+        for (snapshot.tabs.items, 0..) |tab, idx| {
+            if (std.mem.eql(u8, tab.uuid[0..], tab_uuid[0..])) return idx;
+        }
+        return null;
+    }
+
+    fn setSnapshotActiveTab(snapshot: *session_model.SessionSnapshot, active_tab: u16) void {
+        if (snapshot.tabs.items.len == 0) {
+            snapshot.active_tab = 0;
+            return;
+        }
+        snapshot.active_tab = @min(@as(usize, @intCast(active_tab)), snapshot.tabs.items.len - 1);
+    }
+
+    fn setSnapshotSplitFocus(
+        snapshot: *session_model.SessionSnapshot,
+        tab_index: usize,
+        focused_pane_uuid: ?[32]u8,
+    ) void {
+        if (tab_index < snapshot.tabs.items.len) {
+            snapshot.tabs.items[tab_index].focused_pane_uuid = focused_pane_uuid;
+        }
+        snapshot.active_float_uuid = null;
+        snapshot.focused_pane_uuid = focused_pane_uuid;
+    }
+
+    pub fn splitClientSessionPane(
+        self: *SesState,
+        client_id: usize,
+        tab_uuid: [32]u8,
+        source_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        active_tab: u16,
+        focused_pane_uuid: ?[32]u8,
+        dir: session_model.SessionSplitDir,
+    ) !void {
+        const client = self.getClient(client_id) orelse return;
+        const snapshot = try self.ensureClientSessionSnapshot(client);
+        const tab_index = findSnapshotTabIndex(snapshot, tab_uuid) orelse return error.InvalidLayout;
+        const root = snapshot.tabs.items[tab_index].root orelse return error.InvalidLayout;
+
+        if (!try session_model.splitPaneInLayout(
+            snapshot.allocator,
+            root,
+            source_pane_uuid,
+            new_pane_uuid,
+            dir,
+        )) {
+            return error.InvalidLayout;
+        }
+
+        try snapshot.panes.put(new_pane_uuid, .{
+            .uuid = new_pane_uuid,
+            .kind = .split,
+            .parent_tab = tab_index,
+        });
+
+        setSnapshotActiveTab(snapshot, active_tab);
+        setSnapshotSplitFocus(snapshot, tab_index, focused_pane_uuid);
+    }
+
+    pub fn closeClientSessionSplitPane(
+        self: *SesState,
+        client_id: usize,
+        tab_uuid: [32]u8,
+        pane_uuid: [32]u8,
+        active_tab: u16,
+        focused_pane_uuid: ?[32]u8,
+    ) !void {
+        const client = self.getClient(client_id) orelse return;
+        const snapshot = try self.ensureClientSessionSnapshot(client);
+        const tab_index = findSnapshotTabIndex(snapshot, tab_uuid) orelse return error.InvalidLayout;
+
+        if (!try session_model.removePaneFromLayout(
+            snapshot.allocator,
+            &snapshot.tabs.items[tab_index].root,
+            pane_uuid,
+        )) {
+            return error.InvalidLayout;
+        }
+
+        _ = snapshot.panes.remove(pane_uuid);
+        setSnapshotActiveTab(snapshot, active_tab);
+        setSnapshotSplitFocus(snapshot, tab_index, focused_pane_uuid);
+    }
+
+    pub fn replaceClientSessionSplitPane(
+        self: *SesState,
+        client_id: usize,
+        tab_uuid: [32]u8,
+        old_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        active_tab: u16,
+        focused_pane_uuid: ?[32]u8,
+    ) !void {
+        const client = self.getClient(client_id) orelse return;
+        const snapshot = try self.ensureClientSessionSnapshot(client);
+        const tab_index = findSnapshotTabIndex(snapshot, tab_uuid) orelse return error.InvalidLayout;
+        const root = snapshot.tabs.items[tab_index].root orelse return error.InvalidLayout;
+
+        if (!session_model.replacePaneUuidInLayout(root, old_pane_uuid, new_pane_uuid)) {
+            return error.InvalidLayout;
+        }
+
+        var new_pane_state = snapshot.panes.get(old_pane_uuid) orelse session_model.SessionPane{
+            .uuid = new_pane_uuid,
+            .kind = .split,
+            .parent_tab = tab_index,
+        };
+        _ = snapshot.panes.remove(old_pane_uuid);
+        new_pane_state.uuid = new_pane_uuid;
+        new_pane_state.kind = .split;
+        new_pane_state.parent_tab = tab_index;
+        try snapshot.panes.put(new_pane_uuid, new_pane_state);
+
+        setSnapshotActiveTab(snapshot, active_tab);
+        setSnapshotSplitFocus(snapshot, tab_index, focused_pane_uuid);
+    }
+
+    pub fn setClientSessionSplitRatio(
+        self: *SesState,
+        client_id: usize,
+        tab_uuid: [32]u8,
+        active_tab: u16,
+        first_anchor_uuid: [32]u8,
+        second_anchor_uuid: [32]u8,
+        ratio: f32,
+    ) !void {
+        const client = self.getClient(client_id) orelse return;
+        const snapshot = try self.ensureClientSessionSnapshot(client);
+        const tab_index = findSnapshotTabIndex(snapshot, tab_uuid) orelse return error.InvalidLayout;
+        const root = snapshot.tabs.items[tab_index].root orelse return error.InvalidLayout;
+
+        if (!session_model.setSplitRatioByAnchors(root, first_anchor_uuid, second_anchor_uuid, ratio)) {
+            return error.InvalidLayout;
+        }
+
+        setSnapshotActiveTab(snapshot, active_tab);
+    }
+
     pub fn syncClientSessionFloat(
         self: *SesState,
         client_id: usize,

@@ -590,4 +590,72 @@ pub const FrontendRuntime = struct {
     ) !void {
         try self.client.sessionSyncTabLayout(tab_uuid, active_tab, focused_pane_uuid, root_json);
     }
+
+    pub fn sessionSplitPane(
+        self: *FrontendRuntime,
+        tab_uuid: [32]u8,
+        source_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        active_tab: usize,
+        focused_pane_uuid: ?[32]u8,
+        dir: session_model.SessionSplitDir,
+    ) !void {
+        try self.client.sessionSplitPane(
+            tab_uuid,
+            source_pane_uuid,
+            new_pane_uuid,
+            active_tab,
+            focused_pane_uuid,
+            dir,
+        );
+    }
+
+    pub fn sessionCloseSplitPane(
+        self: *FrontendRuntime,
+        tab_uuid: [32]u8,
+        pane_uuid: [32]u8,
+        active_tab: usize,
+        focused_pane_uuid: ?[32]u8,
+    ) !void {
+        try self.client.sessionCloseSplitPane(
+            tab_uuid,
+            pane_uuid,
+            active_tab,
+            focused_pane_uuid,
+        );
+    }
+
+    pub fn sessionReplaceSplitPane(
+        self: *FrontendRuntime,
+        tab_uuid: [32]u8,
+        old_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        active_tab: usize,
+        focused_pane_uuid: ?[32]u8,
+    ) !void {
+        try self.client.sessionReplaceSplitPane(
+            tab_uuid,
+            old_pane_uuid,
+            new_pane_uuid,
+            active_tab,
+            focused_pane_uuid,
+        );
+    }
+
+    pub fn sessionSetSplitRatio(
+        self: *FrontendRuntime,
+        tab_uuid: [32]u8,
+        active_tab: usize,
+        first_anchor_uuid: [32]u8,
+        second_anchor_uuid: [32]u8,
+        ratio: f32,
+    ) !void {
+        try self.client.sessionSetSplitRatio(
+            tab_uuid,
+            active_tab,
+            first_anchor_uuid,
+            second_anchor_uuid,
+            ratio,
+        );
+    }
 };

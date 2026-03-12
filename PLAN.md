@@ -41,8 +41,8 @@ That is better than the old mux-owned model, but it is not full separation.
   - `TerminalViewState` still owns `tabs` and `floats`.
   - `Tab` still owns `Layout`.
 - `src/frontends/terminal/state_sync.zig`
-  - still serializes terminal `Layout` into normal-path `session_sync_tab_layout`
-    mutations.
+  - still owns the remaining legacy `session_sync_tab_layout` path for config /
+    bootstrap / template application.
 - `src/frontends/terminal/state_reattach.zig`
   - still reconstructs terminal session objects from the shared projection.
 - `src/frontends/terminal/pane.zig`
@@ -392,12 +392,16 @@ Done when:
 
 1. Done: Delete `buildSessionSnapshot()` from the terminal frontend.
 2. Done: Remove `syncStateToSes()` as a source of truth.
-3. Remove terminal-authored normal-path layout/tree sync.
+3. Done: Remove terminal-authored normal-path layout/tree sync.
 4. Done: Add semantic commands for normal tab/float/layout/focus mutations the
    terminal UI can trigger.
 5. Done: Make SES mutate its session graph from those commands instead of
    frontend-authored whole-session state.
 6. Done: After each accepted mutation, SES publishes the new authoritative state.
+
+Note: the legacy `session_sync_tab_layout` path still exists for config /
+bootstrap / template application. It is no longer used by the normal
+interactive terminal split-mutation path.
 
 Done when:
 

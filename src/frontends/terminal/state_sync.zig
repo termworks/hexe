@@ -148,6 +148,85 @@ pub fn syncActiveTabLayout(self: anytype) void {
     };
 }
 
+pub fn syncSessionSplitPane(
+    self: anytype,
+    source_pane_uuid: [32]u8,
+    new_pane_uuid: [32]u8,
+    dir: layout_mod.SplitDir,
+    focused_pane_uuid: ?[32]u8,
+) void {
+    if (!self.runtime.isConnected()) return;
+    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
+    self.runtime.sessionSplitPane(
+        tab_uuid,
+        source_pane_uuid,
+        new_pane_uuid,
+        self.activeTabIndex(),
+        focused_pane_uuid,
+        switch (dir) {
+            .horizontal => .horizontal,
+            .vertical => .vertical,
+        },
+    ) catch |err| {
+        core.logging.logError("terminal", "failed sessionSplitPane IPC", err);
+    };
+}
+
+pub fn syncSessionCloseSplitPane(
+    self: anytype,
+    pane_uuid: [32]u8,
+    focused_pane_uuid: ?[32]u8,
+) void {
+    if (!self.runtime.isConnected()) return;
+    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
+    self.runtime.sessionCloseSplitPane(
+        tab_uuid,
+        pane_uuid,
+        self.activeTabIndex(),
+        focused_pane_uuid,
+    ) catch |err| {
+        core.logging.logError("terminal", "failed sessionCloseSplitPane IPC", err);
+    };
+}
+
+pub fn syncSessionReplaceSplitPane(
+    self: anytype,
+    old_pane_uuid: [32]u8,
+    new_pane_uuid: [32]u8,
+    focused_pane_uuid: ?[32]u8,
+) void {
+    if (!self.runtime.isConnected()) return;
+    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
+    self.runtime.sessionReplaceSplitPane(
+        tab_uuid,
+        old_pane_uuid,
+        new_pane_uuid,
+        self.activeTabIndex(),
+        focused_pane_uuid,
+    ) catch |err| {
+        core.logging.logError("terminal", "failed sessionReplaceSplitPane IPC", err);
+    };
+}
+
+pub fn syncSessionSplitRatio(
+    self: anytype,
+    first_anchor_uuid: [32]u8,
+    second_anchor_uuid: [32]u8,
+    ratio: f32,
+) void {
+    if (!self.runtime.isConnected()) return;
+    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
+    self.runtime.sessionSetSplitRatio(
+        tab_uuid,
+        self.activeTabIndex(),
+        first_anchor_uuid,
+        second_anchor_uuid,
+        ratio,
+    ) catch |err| {
+        core.logging.logError("terminal", "failed sessionSetSplitRatio IPC", err);
+    };
+}
+
 pub fn getCurrentFocusedUuid(self: anytype) ?[32]u8 {
     if (self.focusedPaneUuid()) |uuid| {
         if (self.findPaneByUuid(uuid) != null) return uuid;
@@ -169,6 +248,15 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
     if (pane.uuid[0] == 0) return;
 
     if (pane.focused) {
+        setLayoutFocusedSplitId(self, pane);
+        if (self.paneIsFloating(pane)) {
+            rememberFloatingFocus(self, pane);
+            self.setActiveFloatingUuid(pane.uuid);
+        } else {
+            rememberSplitFocus(self, pane);
+            self.setActiveFloatingIndex(null);
+        }
+        self.setFocusedPaneUuid(pane.uuid);
         self.unfocusAllPanes();
         pane.focused = true;
     }

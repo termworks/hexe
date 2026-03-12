@@ -687,6 +687,7 @@ pub fn runMainLoop(state: *State) !void {
 
                 if (state.currentLayout().splitCount() > 1) {
                     // Multiple splits in tab - close the specific dead pane.
+                    const dead_uuid = dead_pane.?.uuid;
                     _ = state.currentLayout().closePane(dead_id);
 
                     // Log pane death
@@ -703,10 +704,11 @@ pub fn runMainLoop(state: *State) !void {
                         state.notifications.showFor(msg, 3000);
                     }
 
+                    const next_focus_uuid = if (state.currentLayout().getFocusedPane()) |pane| pane.uuid else null;
+                    state.syncSessionCloseSplitPane(dead_uuid, next_focus_uuid);
                     if (state.currentLayout().getFocusedPane()) |new_pane| {
                         state.syncPaneFocus(new_pane, null);
                     }
-                    state.syncActiveTabLayout();
                     state.needs_render = true;
                 } else if (state.view.tabs.items.len > 1) {
                     _ = state.closeCurrentTab();

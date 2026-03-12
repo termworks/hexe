@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const ipc = @import("ipc.zig");
+const session_model = @import("session_model.zig");
 const wire = @import("wire.zig");
 
 pub const LocalIpcTransport = struct {
@@ -489,6 +490,88 @@ pub const SesClient = struct {
             .has_focused_pane = if (focused_pane_uuid != null) 1 else 0,
         };
         try wire.writeControlWithTrail(fd, .session_sync_tab_layout, std.mem.asBytes(&msg), root_json);
+    }
+
+    pub fn sessionSplitPane(
+        self: *SesClient,
+        tab_uuid: [32]u8,
+        source_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        active_tab: usize,
+        focused_pane_uuid: ?[32]u8,
+        dir: session_model.SessionSplitDir,
+    ) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionSplitPane = .{
+            .tab_uuid = tab_uuid,
+            .source_pane_uuid = source_pane_uuid,
+            .new_pane_uuid = new_pane_uuid,
+            .focused_pane_uuid = if (focused_pane_uuid) |uuid| uuid else .{0} ** 32,
+            .active_tab = @intCast(active_tab),
+            .dir = switch (dir) {
+                .horizontal => 0,
+                .vertical => 1,
+            },
+            .has_focused_pane = if (focused_pane_uuid != null) 1 else 0,
+        };
+        try wire.writeControl(fd, .session_split_pane, std.mem.asBytes(&msg));
+    }
+
+    pub fn sessionCloseSplitPane(
+        self: *SesClient,
+        tab_uuid: [32]u8,
+        pane_uuid: [32]u8,
+        active_tab: usize,
+        focused_pane_uuid: ?[32]u8,
+    ) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionCloseSplitPane = .{
+            .tab_uuid = tab_uuid,
+            .pane_uuid = pane_uuid,
+            .focused_pane_uuid = if (focused_pane_uuid) |uuid| uuid else .{0} ** 32,
+            .active_tab = @intCast(active_tab),
+            .has_focused_pane = if (focused_pane_uuid != null) 1 else 0,
+        };
+        try wire.writeControl(fd, .session_close_split_pane, std.mem.asBytes(&msg));
+    }
+
+    pub fn sessionReplaceSplitPane(
+        self: *SesClient,
+        tab_uuid: [32]u8,
+        old_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        active_tab: usize,
+        focused_pane_uuid: ?[32]u8,
+    ) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionReplaceSplitPane = .{
+            .tab_uuid = tab_uuid,
+            .old_pane_uuid = old_pane_uuid,
+            .new_pane_uuid = new_pane_uuid,
+            .focused_pane_uuid = if (focused_pane_uuid) |uuid| uuid else .{0} ** 32,
+            .active_tab = @intCast(active_tab),
+            .has_focused_pane = if (focused_pane_uuid != null) 1 else 0,
+        };
+        try wire.writeControl(fd, .session_replace_split_pane, std.mem.asBytes(&msg));
+    }
+
+    pub fn sessionSetSplitRatio(
+        self: *SesClient,
+        tab_uuid: [32]u8,
+        active_tab: usize,
+        first_anchor_uuid: [32]u8,
+        second_anchor_uuid: [32]u8,
+        ratio: f32,
+    ) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionSetSplitRatio = .{
+            .tab_uuid = tab_uuid,
+            .first_anchor_uuid = first_anchor_uuid,
+            .second_anchor_uuid = second_anchor_uuid,
+            .active_tab = @intCast(active_tab),
+            .ratio = ratio,
+        };
+        try wire.writeControl(fd, .session_set_split_ratio, std.mem.asBytes(&msg));
     }
 
     /// Create a new pane via ses.

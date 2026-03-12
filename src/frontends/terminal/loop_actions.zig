@@ -489,6 +489,7 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
         state.currentLayout().getFocusedPane();
 
     if (current_pane) |pane| {
+        const old_uuid = pane.uuid;
         if (destroy_current) {
             // Kill current pane in ses, then replace with adopted.
             state.runtime.killPane(pane.uuid) catch {};
@@ -508,12 +509,13 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
             return;
         };
 
-        // Sync the new pane info.
-        state.syncPaneAux(pane, null);
         if (state.paneIsFloating(pane)) {
+            // Sync the new pane info.
+            state.syncPaneAux(pane, null);
             state.syncSessionFloat(pane, state.activeFloatingIndex() != null);
         } else {
-            state.syncActiveTabLayout();
+            state.syncSessionReplaceSplitPane(old_uuid, pane.uuid, if (pane.focused) pane.uuid else null);
+            state.syncPaneAux(pane, null);
         }
 
         if (destroy_current) {

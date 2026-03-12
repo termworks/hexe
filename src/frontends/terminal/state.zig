@@ -58,6 +58,8 @@ pub const State = struct {
     }
     pub const MouseDragSplitResize = struct {
         split: *layout_mod.LayoutNode.Split,
+        first_anchor_uuid: [32]u8,
+        second_anchor_uuid: [32]u8,
         dir: layout_mod.SplitDir,
         x: u16,
         y: u16,
@@ -760,6 +762,42 @@ pub const State = struct {
 
     pub fn syncActiveTabLayout(self: *State) void {
         return state_sync.syncActiveTabLayout(self);
+    }
+
+    pub fn syncSessionSplitPane(
+        self: *State,
+        source_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        dir: layout_mod.SplitDir,
+        focused_pane_uuid: ?[32]u8,
+    ) void {
+        return state_sync.syncSessionSplitPane(self, source_pane_uuid, new_pane_uuid, dir, focused_pane_uuid);
+    }
+
+    pub fn syncSessionCloseSplitPane(
+        self: *State,
+        pane_uuid: [32]u8,
+        focused_pane_uuid: ?[32]u8,
+    ) void {
+        return state_sync.syncSessionCloseSplitPane(self, pane_uuid, focused_pane_uuid);
+    }
+
+    pub fn syncSessionReplaceSplitPane(
+        self: *State,
+        old_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        focused_pane_uuid: ?[32]u8,
+    ) void {
+        return state_sync.syncSessionReplaceSplitPane(self, old_pane_uuid, new_pane_uuid, focused_pane_uuid);
+    }
+
+    pub fn syncSessionSplitRatio(
+        self: *State,
+        first_anchor_uuid: [32]u8,
+        second_anchor_uuid: [32]u8,
+        ratio: f32,
+    ) void {
+        return state_sync.syncSessionSplitRatio(self, first_anchor_uuid, second_anchor_uuid, ratio);
     }
 
     pub fn getCurrentFocusedUuid(self: *State) ?[32]u8 {

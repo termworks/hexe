@@ -990,6 +990,18 @@ pub const Server = struct {
             .session_sync_tab_layout => {
                 self.handleBinarySessionSyncTabLayout(fd, hdr.payload_len, &buf);
             },
+            .session_split_pane => {
+                self.handleBinarySessionSplitPane(fd, hdr.payload_len, &buf);
+            },
+            .session_close_split_pane => {
+                self.handleBinarySessionCloseSplitPane(fd, hdr.payload_len, &buf);
+            },
+            .session_replace_split_pane => {
+                self.handleBinarySessionReplaceSplitPane(fd, hdr.payload_len, &buf);
+            },
+            .session_set_split_ratio => {
+                self.handleBinarySessionSetSplitRatio(fd, hdr.payload_len, &buf);
+            },
             // POD control channel messages
             .cwd_changed => {
                 self.handleBinaryCwdChanged(fd, hdr.payload_len, &buf);
@@ -1224,6 +1236,102 @@ pub const Server = struct {
             buf[0..msg.root_len],
         ) catch {
             self.sendBinaryError(fd, "session_sync_tab_layout_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionSplitPane)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionSplitPane, fd) catch return;
+        const dir: core.session_model.SessionSplitDir = switch (msg.dir) {
+            0 => .horizontal,
+            1 => .vertical,
+            else => {
+                self.sendBinaryError(fd, "session_split_pane: invalid dir");
+                return;
+            },
+        };
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.splitClientSessionPane(
+            client_id,
+            msg.tab_uuid,
+            msg.source_pane_uuid,
+            msg.new_pane_uuid,
+            msg.active_tab,
+            if (msg.has_focused_pane != 0) msg.focused_pane_uuid else null,
+            dir,
+        ) catch {
+            self.sendBinaryError(fd, "session_split_pane_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionCloseSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionCloseSplitPane)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionCloseSplitPane, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.closeClientSessionSplitPane(
+            client_id,
+            msg.tab_uuid,
+            msg.pane_uuid,
+            msg.active_tab,
+            if (msg.has_focused_pane != 0) msg.focused_pane_uuid else null,
+        ) catch {
+            self.sendBinaryError(fd, "session_close_split_pane_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionReplaceSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionReplaceSplitPane)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionReplaceSplitPane, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.replaceClientSessionSplitPane(
+            client_id,
+            msg.tab_uuid,
+            msg.old_pane_uuid,
+            msg.new_pane_uuid,
+            msg.active_tab,
+            if (msg.has_focused_pane != 0) msg.focused_pane_uuid else null,
+        ) catch {
+            self.sendBinaryError(fd, "session_replace_split_pane_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionSetSplitRatio(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionSetSplitRatio)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionSetSplitRatio, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.setClientSessionSplitRatio(
+            client_id,
+            msg.tab_uuid,
+            msg.active_tab,
+            msg.first_anchor_uuid,
+            msg.second_anchor_uuid,
+            msg.ratio,
+        ) catch {
+            self.sendBinaryError(fd, "session_set_split_ratio_failed");
             return;
         };
         self.pushClientSessionSnapshot(client_id);

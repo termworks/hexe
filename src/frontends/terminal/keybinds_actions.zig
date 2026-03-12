@@ -179,7 +179,8 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
-            const parent_uuid = state.getCurrentFocusedUuid();
+            const parent_pane = state.currentLayout().getFocusedPane() orelse return true;
+            const parent_uuid = parent_pane.uuid;
             var cwd: ?[]const u8 = null;
             if (state.currentLayout().getFocusedPane()) |p| {
                 cwd = state.getReliableCwd(p);
@@ -190,10 +191,10 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 cwd = std.posix.getcwd(&cwd_buf) catch null;
             }
             if (state.currentLayout().splitFocused(.horizontal, cwd) catch null) |new_pane| {
+                state.syncSessionSplitPane(parent_uuid, new_pane.uuid, .horizontal, new_pane.uuid);
                 state.syncPaneAux(new_pane, parent_uuid);
             }
             state.needs_render = true;
-            state.syncActiveTabLayout();
             return true;
         },
         .split_v => {
@@ -201,7 +202,8 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
-            const parent_uuid = state.getCurrentFocusedUuid();
+            const parent_pane = state.currentLayout().getFocusedPane() orelse return true;
+            const parent_uuid = parent_pane.uuid;
             var cwd: ?[]const u8 = null;
             if (state.currentLayout().getFocusedPane()) |p| {
                 cwd = state.getReliableCwd(p);
@@ -212,10 +214,10 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 cwd = std.posix.getcwd(&cwd_buf) catch null;
             }
             if (state.currentLayout().splitFocused(.vertical, cwd) catch null) |new_pane| {
+                state.syncSessionSplitPane(parent_uuid, new_pane.uuid, .vertical, new_pane.uuid);
                 state.syncPaneAux(new_pane, parent_uuid);
             }
             state.needs_render = true;
-            state.syncActiveTabLayout();
             return true;
         },
         .split_resize => |dir_kind| {
@@ -229,11 +231,11 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 else => null,
             };
             if (dir == null) return true;
-            if (state.currentLayout().resizeFocused(dir.?, 1)) {
+            if (state.currentLayout().resizeFocused(dir.?, 1)) |sync| {
                 state.needs_render = true;
                 state.renderer.invalidate();
                 state.force_full_render = true;
-                state.syncActiveTabLayout();
+                state.syncSessionSplitRatio(sync.first_anchor_uuid, sync.second_anchor_uuid, sync.ratio);
             }
             return true;
         },
@@ -277,11 +279,13 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                         state.popups.showConfirm("Close pane?", .{}) catch {};
                         state.needs_render = true;
                     } else {
+                        const closing_uuid = layout.getFocusedPane().?.uuid;
                         _ = layout.closePane(layout.focused_split_id);
+                        const next_focus_uuid = if (layout.getFocusedPane()) |pane| pane.uuid else null;
+                        state.syncSessionCloseSplitPane(closing_uuid, next_focus_uuid);
                         if (layout.getFocusedPane()) |new_pane| {
                             state.syncPaneFocus(new_pane, null);
                         }
-                        state.syncActiveTabLayout();
                         state.needs_render = true;
                     }
                 }

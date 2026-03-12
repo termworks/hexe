@@ -87,6 +87,176 @@ pub fn layoutNodeFromJson(allocator: std.mem.Allocator, json: []const u8) !?*Ses
     };
 }
 
+fn uuidsEqual(a: [32]u8, b: [32]u8) bool {
+    return std.mem.eql(u8, a[0..], b[0..]);
+}
+
+pub fn layoutContainsPaneUuid(node: *const SessionLayoutNode, pane_uuid: [32]u8) bool {
+    return switch (node.*) {
+        .pane => |uuid| uuidsEqual(uuid, pane_uuid),
+        .split => |split| layoutContainsPaneUuid(split.first, pane_uuid) or layoutContainsPaneUuid(split.second, pane_uuid),
+    };
+}
+
+pub fn splitPaneInLayout(
+    allocator: std.mem.Allocator,
+    node: *SessionLayoutNode,
+    source_pane_uuid: [32]u8,
+    new_pane_uuid: [32]u8,
+    dir: SessionSplitDir,
+) !bool {
+    switch (node.*) {
+        .pane => |uuid| {
+            if (!uuidsEqual(uuid, source_pane_uuid)) return false;
+
+            const first = try allocator.create(SessionLayoutNode);
+            errdefer allocator.destroy(first);
+            first.* = .{ .pane = uuid };
+
+            const second = try allocator.create(SessionLayoutNode);
+            errdefer allocator.destroy(second);
+            second.* = .{ .pane = new_pane_uuid };
+
+            node.* = .{
+                .split = .{
+                    .dir = dir,
+                    .ratio = 0.5,
+                    .first = first,
+                    .second = second,
+                },
+            };
+            return true;
+        },
+        .split => |*split| {
+            if (try splitPaneInLayout(allocator, split.first, source_pane_uuid, new_pane_uuid, dir)) return true;
+            return try splitPaneInLayout(allocator, split.second, source_pane_uuid, new_pane_uuid, dir);
+        },
+    }
+}
+
+pub fn replacePaneUuidInLayout(
+    node: *SessionLayoutNode,
+    old_pane_uuid: [32]u8,
+    new_pane_uuid: [32]u8,
+) bool {
+    switch (node.*) {
+        .pane => |*uuid| {
+            if (!uuidsEqual(uuid.*, old_pane_uuid)) return false;
+            uuid.* = new_pane_uuid;
+            return true;
+        },
+        .split => |*split| {
+            if (replacePaneUuidInLayout(split.first, old_pane_uuid, new_pane_uuid)) return true;
+            return replacePaneUuidInLayout(split.second, old_pane_uuid, new_pane_uuid);
+        },
+    }
+}
+
+const RemoveCloneResult = struct {
+    found: bool,
+    node: ?*SessionLayoutNode,
+};
+
+fn freeLayoutClone(allocator: std.mem.Allocator, node: ?*SessionLayoutNode) void {
+    if (node) |root| {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+}
+
+fn cloneWithoutPane(
+    allocator: std.mem.Allocator,
+    node: *const SessionLayoutNode,
+    pane_uuid: [32]u8,
+) !RemoveCloneResult {
+    switch (node.*) {
+        .pane => |uuid| {
+            if (uuidsEqual(uuid, pane_uuid)) {
+                return .{ .found = true, .node = null };
+            }
+            return .{ .found = false, .node = try node.clone(allocator) };
+        },
+        .split => |split| {
+            const first = try cloneWithoutPane(allocator, split.first, pane_uuid);
+            errdefer freeLayoutClone(allocator, first.node);
+
+            const second = try cloneWithoutPane(allocator, split.second, pane_uuid);
+            errdefer freeLayoutClone(allocator, second.node);
+
+            if (first.node == null and second.node == null) {
+                return .{ .found = first.found or second.found, .node = null };
+            }
+            if (first.node == null) {
+                return .{ .found = first.found or second.found, .node = second.node };
+            }
+            if (second.node == null) {
+                return .{ .found = first.found or second.found, .node = first.node };
+            }
+
+            const out = try allocator.create(SessionLayoutNode);
+            errdefer allocator.destroy(out);
+            out.* = .{
+                .split = .{
+                    .dir = split.dir,
+                    .ratio = split.ratio,
+                    .first = first.node.?,
+                    .second = second.node.?,
+                },
+            };
+            return .{ .found = first.found or second.found, .node = out };
+        },
+    }
+}
+
+pub fn removePaneFromLayout(
+    allocator: std.mem.Allocator,
+    root: *?*SessionLayoutNode,
+    pane_uuid: [32]u8,
+) !bool {
+    const current = root.* orelse return false;
+    const result = try cloneWithoutPane(allocator, current, pane_uuid);
+
+    if (!result.found) {
+        freeLayoutClone(allocator, result.node);
+        return false;
+    }
+
+    current.deinit(allocator);
+    allocator.destroy(current);
+    root.* = result.node;
+    return true;
+}
+
+pub fn setSplitRatioByAnchors(
+    node: *SessionLayoutNode,
+    first_anchor_uuid: [32]u8,
+    second_anchor_uuid: [32]u8,
+    target_ratio: f32,
+) bool {
+    switch (node.*) {
+        .pane => return false,
+        .split => |*split| {
+            if (setSplitRatioByAnchors(split.first, first_anchor_uuid, second_anchor_uuid, target_ratio)) return true;
+            if (setSplitRatioByAnchors(split.second, first_anchor_uuid, second_anchor_uuid, target_ratio)) return true;
+
+            const first_has_first = layoutContainsPaneUuid(split.first, first_anchor_uuid);
+            const first_has_second = layoutContainsPaneUuid(split.first, second_anchor_uuid);
+            const second_has_first = layoutContainsPaneUuid(split.second, first_anchor_uuid);
+            const second_has_second = layoutContainsPaneUuid(split.second, second_anchor_uuid);
+
+            if (!((first_has_first and second_has_second) or (first_has_second and second_has_first))) {
+                return false;
+            }
+
+            var ratio = target_ratio;
+            if (ratio < 0.1) ratio = 0.1;
+            if (ratio > 0.9) ratio = 0.9;
+            split.ratio = ratio;
+            return true;
+        },
+    }
+}
+
 pub const SessionTab = struct {
     uuid: [32]u8,
     name: []u8,

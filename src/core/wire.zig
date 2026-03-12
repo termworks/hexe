@@ -122,6 +122,10 @@ pub const MsgType = enum(u16) {
     session_sync_float = 0x013A,
     session_remove_float = 0x013B,
     session_sync_tab_layout = 0x013C,
+    session_split_pane = 0x013D,
+    session_close_split_pane = 0x013E,
+    session_replace_split_pane = 0x013F,
+    session_set_split_ratio = 0x0140,
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -293,6 +297,45 @@ pub const SessionSyncTabLayout = extern struct {
     active_tab: u16 align(1),
     root_len: u32 align(1),
     has_focused_pane: u8 align(1),
+};
+
+/// SessionSplitPane: split one canonical split pane into a 50/50 split.
+pub const SessionSplitPane = extern struct {
+    tab_uuid: [32]u8 align(1),
+    source_pane_uuid: [32]u8 align(1),
+    new_pane_uuid: [32]u8 align(1),
+    focused_pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    dir: u8 align(1),
+    has_focused_pane: u8 align(1),
+};
+
+/// SessionCloseSplitPane: remove one split pane from the canonical split tree.
+pub const SessionCloseSplitPane = extern struct {
+    tab_uuid: [32]u8 align(1),
+    pane_uuid: [32]u8 align(1),
+    focused_pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    has_focused_pane: u8 align(1),
+};
+
+/// SessionReplaceSplitPane: replace one split pane UUID in the canonical split tree.
+pub const SessionReplaceSplitPane = extern struct {
+    tab_uuid: [32]u8 align(1),
+    old_pane_uuid: [32]u8 align(1),
+    new_pane_uuid: [32]u8 align(1),
+    focused_pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    has_focused_pane: u8 align(1),
+};
+
+/// SessionSetSplitRatio: update one split divider by child anchor panes.
+pub const SessionSetSplitRatio = extern struct {
+    tab_uuid: [32]u8 align(1),
+    first_anchor_uuid: [32]u8 align(1),
+    second_anchor_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    ratio: f32 align(1),
 };
 
 /// Notify: message for the owning MUX.
