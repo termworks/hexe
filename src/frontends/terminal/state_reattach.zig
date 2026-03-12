@@ -831,7 +831,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
         if (self.runtime.isConnected()) {
-            tab.layout.setFrontendClient(self.frontend_client);
+            tab.layout.setFrontendRuntime(self.runtime);
         }
         tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
@@ -1081,7 +1081,7 @@ pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) boo
         var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
         if (self.runtime.isConnected()) {
-            tab.layout.setFrontendClient(self.frontend_client);
+            tab.layout.setFrontendRuntime(self.runtime);
         }
         tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
@@ -1203,7 +1203,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             defer if (tab_needs_cleanup) tab.deinit();
 
             if (self.runtime.isConnected()) {
-                tab.layout.setFrontendClient(self.frontend_client);
+                tab.layout.setFrontendRuntime(self.runtime);
             }
             tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 

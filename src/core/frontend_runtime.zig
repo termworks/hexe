@@ -116,6 +116,10 @@ pub const FrontendRuntime = struct {
         return self.client.just_started_daemon;
     }
 
+    pub fn getVtFd(self: *FrontendRuntime) ?posix.fd_t {
+        return self.client.getVtFd();
+    }
+
     pub fn shutdown(self: *FrontendRuntime, preserve_sticky: bool) !void {
         try self.client.shutdown(preserve_sticky);
     }
