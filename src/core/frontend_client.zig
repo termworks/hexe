@@ -152,7 +152,7 @@ pub const SesClient = struct {
         self.pending_pane_exits.clearRetainingCapacity();
     }
 
-    fn queuePendingSessionState(self: *SesClient, session_state_json: []const u8) void {
+    pub fn queuePendingSessionState(self: *SesClient, session_state_json: []const u8) void {
         const owned = self.allocator.dupe(u8, session_state_json) catch return;
         if (self.pending_session_state) |old| self.allocator.free(old);
         self.pending_session_state = owned;

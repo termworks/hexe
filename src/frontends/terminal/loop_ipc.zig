@@ -103,13 +103,8 @@ fn handleSessionState(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     defer state.allocator.free(session_json);
     wire.readExact(fd, session_json) catch return;
 
-    terminal_main.debugLog("handleSessionState: payload_len={d}", .{payload_len});
-    if (!state.runtime.applySessionStateJson(session_json)) {
-        terminal_main.debugLog("handleSessionState: applySessionStateJson returned false", .{});
-        return;
-    }
-    terminal_main.debugLog("handleSessionState: projection updated, applying snapshot", .{});
-    _ = state.applySessionSnapshot();
+    terminal_main.debugLog("handleSessionState: payload_len={d} (queued)", .{payload_len});
+    state.runtime.queueSessionStateJson(session_json);
 }
 
 fn handleNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {

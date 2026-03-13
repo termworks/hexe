@@ -672,6 +672,10 @@ pub const FrontendRuntime = struct {
         return self.applySessionStateJson(session_json);
     }
 
+    pub fn queueSessionStateJson(self: *FrontendRuntime, session_state_json: []const u8) void {
+        self.client.queuePendingSessionState(session_state_json);
+    }
+
     pub fn reattachSessionSnapshot(self: *FrontendRuntime, session_id_prefix: []const u8) !?ReattachSnapshotResult {
         const result = try self.client.reattachSession(session_id_prefix);
         if (result == null) return null;

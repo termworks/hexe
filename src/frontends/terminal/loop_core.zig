@@ -555,6 +555,7 @@ pub fn runMainLoop(state: *State) !void {
         try loop.run(.once);
         if (applyRuntimeStopRequest(state)) break;
         if (!state.running) break;
+        applyDeferredSessionSnapshots(state);
 
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
