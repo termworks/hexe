@@ -4,20 +4,20 @@ All commands accept `--instance <name>` (or `-I <name>`) to target a named insta
 
 ---
 
-## hexe mux
+## hexe terminal
 
 ```sh
-hexe mux new [--name <name>] [--debug] [--logfile <path>] [--test-only]
+hexe terminal new [--name <name>] [--debug] [--logfile <path>] [--test-only]
 ```
-Start a new mux session. `--test-only` starts an isolated stack with a generated instance name.
+Start a new terminal frontend session. `hexe mux` and `hexe multiplexer` are compatibility aliases. `--test-only` starts an isolated stack with a generated instance name.
 
 ```sh
-hexe mux attach <name-or-uuid-prefix>
+hexe terminal attach <name-or-uuid-prefix>
 ```
 Attach to an existing session.
 
 ```sh
-hexe mux float [options]
+hexe terminal float [options]
 ```
 Spawn a one-off floating pane.
 
@@ -35,66 +35,66 @@ Spawn a one-off floating pane.
 | `--extra-env K=V` | Additional env vars |
 
 ```sh
-hexe mux notify <message> [--uuid <pane>] [--broadcast] [--last]
+hexe terminal notify <message> [--uuid <pane>] [--broadcast] [--last]
 ```
 Send a notification to a pane or broadcast to all.
 
 ```sh
-hexe mux send <text> [--uuid <pane>] [--name <name>] [--target <t>]
+hexe terminal send <text> [--uuid <pane>] [--name <name>] [--target <t>]
 ```
 Send keystrokes to a pane.
 
 ```sh
-hexe mux focus left|right|up|down [--uuid <pane>]
+hexe terminal focus left|right|up|down [--uuid <pane>]
 ```
 Move pane focus directionally (useful for editor integration).
 
 ---
 
-## hexe ses
+## hexe session / hexe ses
 
 ```sh
-hexe ses daemon [--debug] [--logfile <path>] [--foreground]
+hexe session daemon [--debug] [--logfile <path>] [--foreground]
 ```
-Start the session daemon. Usually started automatically by `hexe mux new`.
+Start the session daemon. Usually started automatically by `hexe terminal new`.
 
 ```sh
-hexe ses list [--details] [--json]
+hexe session list [--details] [--json]
 ```
 List all sessions with their panes.
 
 ```sh
-hexe ses status
+hexe session status
 ```
 Show daemon version and uptime.
 
 ```sh
-hexe ses kill <uuid>
+hexe session kill <uuid>
 ```
 Kill a detached session and its panes.
 
 ```sh
-hexe ses clear [--force]
+hexe session clear [--force]
 ```
 Kill all detached sessions.
 
 ```sh
-hexe ses export <uuid>
+hexe session export <uuid>
 ```
 Export session layout and pane state as JSON.
 
 ```sh
-hexe ses stats
+hexe session stats
 ```
 Show resource usage for all sessions and pods.
 
 ```sh
-hexe ses open <target>[:<tab>] [--debug] [--logfile <path>]
+hexe session open <target>[:<tab>] [--debug] [--logfile <path>]
 ```
 Open a session from a `.hexe.lua` config. Target can be a directory, `.lua` file, or session name. See [session_manager](session_manager.md).
 
 ```sh
-hexe ses freeze
+hexe session freeze
 ```
 Snapshot current session as `.hexe.lua` to stdout.
 
@@ -164,7 +164,9 @@ hexe record start --scope pod|mux [--uuid <u>|--name <n>|--socket <path>] [--out
 ```
 Start background recording for the given scope/target.
 
-For `--scope pod`, if no explicit target is provided, hexe tries to resolve the active pod (`HEXE_PANE_UUID`, then `hexe mux info --last`).
+`--scope mux` is the legacy scope name for terminal frontend recording.
+
+For `--scope pod`, if no explicit target is provided, hexe tries to resolve the active pod (`HEXE_PANE_UUID`, then `hexe terminal info --last`).
 
 ```sh
 hexe record stop --scope pod|mux
@@ -182,9 +184,9 @@ hexe record toggle --scope pod|mux [--uuid <u>|--name <n>|--socket <path>] [--ou
 Toggle background recording for the given scope/target.
 
 ```sh
-hexe multiplexer record --out <file.cast> [--capture-input]
+hexe terminal record --out <file.cast> [--capture-input]
 ```
-Record a mux attach stream directly into asciicast output.
+Record a terminal attach stream directly into asciicast output.
 
 ---
 
@@ -202,7 +204,7 @@ Parse and validate `~/.config/hexe/init.lua` without starting anything.
 ```sh
 hexe com
 ```
-Print a tree of all running mux sessions, tabs, panes, and pods.
+Print a tree of all running terminal sessions, tabs, panes, and pods.
 
 ---
 

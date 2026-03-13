@@ -1,0 +1,406 @@
+const std = @import("std");
+const posix = std.posix;
+const core = @import("core");
+const terminal = @import("terminal.zig");
+
+const c = @cImport({
+    @cInclude("stdlib.h");
+});
+
+const FrontendAttach = core.FrontendAttach;
+const FrontendRuntime = core.FrontendRuntime;
+const FrontendConnectOptions = core.FrontendConnectOptions;
+const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
+const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
+
+const State = @import("state.zig").State;
+const loop_core = @import("loop_core.zig");
+const statusbar = @import("statusbar.zig");
+
+var debug_enabled: bool = false;
+
+/// Global state pointer for signal handlers.
+var global_state: std.atomic.Value(?*State) = std.atomic.Value(?*State).init(null);
+
+/// SIGHUP handler: set detach mode and stop the main loop.
+/// This is called when the terminal closes unexpectedly.
+fn sighupHandler(_: c_int) callconv(.c) void {
+    if (global_state.load(.acquire)) |state| {
+        state.runtime.requestFrontendDisconnectStop();
+    }
+}
+
+/// SIGTERM/SIGINT handler: gracefully stop the main loop.
+/// This allows the defer cleanup to run (disable kitty keyboard protocol, etc.).
+fn sigtermHandler(_: c_int) callconv(.c) void {
+    if (global_state.load(.acquire)) |state| {
+        state.running = false;
+    }
+}
+
+pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
+    if (!debug_enabled) return;
+    const ms = std.time.milliTimestamp();
+    const secs = @divTrunc(ms, 1000);
+    const frac = @mod(ms, 1000);
+    std.debug.print("{d}.{d:0>3} [terminal] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
+}
+
+pub fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
+    if (!debug_enabled) return;
+    const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
+    const ms = std.time.milliTimestamp();
+    const secs = @divTrunc(ms, 1000);
+    const frac = @mod(ms, 1000);
+    std.debug.print("{d}.{d:0>3} [terminal][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
+}
+
+fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameChange) void {
+    const msg = std.fmt.allocPrint(
+        state.allocator,
+        "Session name changed: '{s}' -> '{s}' (collision)",
+        .{ change.previous_name, change.resolved_name },
+    ) catch null;
+    if (msg) |owned| {
+        state.notifications.showFor(owned, 4000);
+        state.allocator.free(owned);
+    }
+}
+
+/// Arguments for terminal frontend commands.
+pub const TerminalArgs = struct {
+    name: ?[]const u8 = null,
+    attach: ?[]const u8 = null,
+    notify_message: ?[]const u8 = null,
+    list: bool = false,
+    debug: bool = false,
+    log_file: ?[]const u8 = null,
+    session_config_path: ?[]const u8 = null,
+    session_tab_filter: ?[]const u8 = null,
+    connect_options: FrontendConnectOptions = .{},
+};
+
+/// Entry point for the terminal frontend - can be called directly from unified CLI.
+pub fn run(terminal_args: TerminalArgs) !void {
+    const allocator = std.heap.page_allocator;
+
+    // Handle --notify: send to parent terminal frontend and exit.
+    if (terminal_args.notify_message) |msg| {
+        sendNotifyToParentTerminal(allocator, terminal_args.connect_options, msg);
+        return;
+    }
+
+    // Handle --list: show detached sessions and orphaned panes.
+    if (terminal_args.list) {
+        var runtime = try FrontendRuntime.createTerminalProbe(allocator, false, null, terminal_args.connect_options);
+        defer runtime.destroy();
+        runtime.connect() catch {
+            std.debug.print("Could not connect to ses daemon\n", .{});
+            return;
+        };
+
+        // List detached sessions.
+        var sessions: [16]DetachedSessionInfo = undefined;
+        const sess_count = runtime.listSessions(&sessions) catch 0;
+        if (sess_count > 0) {
+            std.debug.print("Detached sessions (attach by name or UUID prefix):\n", .{});
+            const instance = std.posix.getenv("HEXE_INSTANCE");
+            for (sessions[0..sess_count]) |s| {
+                const name = s.session_name[0..s.session_name_len];
+                const uuid_prefix = s.session_id[0..8];
+                if (instance) |inst| {
+                    if (inst.len > 0) {
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                        std.debug.print("    → hexe terminal attach --instance {s} {s}\n", .{ inst, uuid_prefix });
+                    } else {
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                        std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
+                    }
+                } else {
+                    std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                    std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
+                }
+            }
+        }
+
+        // List orphaned panes.
+        var tabs: [32]OrphanedPaneInfo = undefined;
+        const count = runtime.listOrphanedPanes(&tabs) catch 0;
+        if (count > 0) {
+            std.debug.print("Orphaned panes (disowned):\n", .{});
+            for (tabs[0..count]) |p| {
+                std.debug.print("  [{s}] pid={d}\n", .{ p.uuid[0..8], p.pid });
+            }
+        }
+
+        if (sess_count == 0 and count == 0) {
+            std.debug.print("No detached sessions or orphaned panes\n", .{});
+        }
+        return;
+    }
+
+    // Handle --attach: attach to detached session by name or UUID prefix.
+    if (terminal_args.attach) |uuid_arg| {
+        if (uuid_arg.len < 3) {
+            std.debug.print("Session name/UUID too short (need at least 3 chars)\n", .{});
+            return;
+        }
+        // Will be handled after state init.
+    }
+
+    // Ignore SIGPIPE so writes to disconnected pod sockets return EPIPE
+    // instead of killing the terminal frontend process.
+    const sigpipe_action = std.os.linux.Sigaction{
+        .handler = .{ .handler = std.os.linux.SIG.IGN },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(posix.SIG.PIPE, &sigpipe_action, null);
+
+    // Handle SIGHUP: terminal closed unexpectedly - preserve session for reattach.
+    const sighup_action = std.os.linux.Sigaction{
+        .handler = .{ .handler = sighupHandler },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(posix.SIG.HUP, &sighup_action, null);
+
+    // Handle SIGTERM/SIGINT: graceful shutdown (allows cleanup to run).
+    const sigterm_action = std.os.linux.Sigaction{
+        .handler = .{ .handler = sigtermHandler },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(posix.SIG.TERM, &sigterm_action, null);
+    _ = std.os.linux.sigaction(posix.SIG.INT, &sigterm_action, null);
+
+    // Redirect stderr to a log file or /dev/null to avoid display corruption.
+    // When --debug is set without --logfile, default to instance-specific log.
+    var default_log_path: ?[]const u8 = null;
+    defer if (default_log_path) |p| allocator.free(p);
+
+    const effective_log: ?[]const u8 = if (terminal_args.log_file) |p|
+        (if (p.len > 0) p else null)
+    else if (terminal_args.debug) blk: {
+        default_log_path = core.ipc.getLogPath(allocator) catch null;
+        break :blk default_log_path;
+    } else null;
+    redirectStderr(effective_log);
+    debug_enabled = terminal_args.debug;
+    debugLog("started", .{});
+
+    // Get terminal size.
+    const size = terminal.getTermSize();
+
+    // Initialize state.
+    var state = try State.init(allocator, size.cols, size.rows, terminal_args.debug, terminal_args.log_file, terminal_args.connect_options);
+    defer {
+        statusbar.deinitThreadlocals();
+        state.deinit();
+    }
+
+    // Register state for signal handlers.
+    global_state.store(&state, .release);
+    defer global_state.store(null, .release);
+
+    // Show notification for config status.
+    switch (state.config.status) {
+        .missing => state.notifications.showFor("Config not found (~/.config/hexe/init.lua), using defaults", 5000),
+        .@"error" => {
+            if (state.config.status_message) |msg| {
+                const err_msg = std.fmt.allocPrint(allocator, "Config error: {s}", .{msg}) catch null;
+                if (err_msg) |m| {
+                    state.notifications.showFor(m, 8000);
+                    allocator.free(m);
+                } else {
+                    state.notifications.showFor("Config error, using defaults", 5000);
+                }
+            } else {
+                state.notifications.showFor("Config error, using defaults", 5000);
+            }
+        },
+        .loaded => {},
+    }
+
+    // Set custom session name if provided.
+    if (terminal_args.name) |custom_name| {
+        _ = state.runtime.setSessionName(custom_name);
+    }
+
+    // Keep the legacy env var for shell integrations.
+    _ = c.setenv("HEXE_MUX_SOCKET", "1", 1);
+
+    // Connect to ses daemon FIRST (start it if needed).
+    var startup_attach = state.runtime.attachFrontend() catch |e| {
+        debugLog("ses connect failed: {s}", .{@errorName(e)});
+        std.debug.print("Could not connect to ses daemon: {s}\n", .{@errorName(e)});
+        return;
+    };
+    defer startup_attach.deinit(allocator);
+    debugLog("ses connected (started={})", .{startup_attach.started_daemon});
+
+    // If server resolved to a different name (collision avoidance), update state.
+    if (startup_attach.name_change) |*change| {
+        debugLog("session name resolved from '{s}' to '{s}'", .{ change.previous_name, change.resolved_name });
+        notifySessionNameChange(&state, change);
+    }
+
+    // Show notification if we just started the daemon.
+    if (startup_attach.started_daemon) {
+        state.notifications.showFor("ses daemon started", 2000);
+    }
+
+    // Export session ID so child panes can identify their parent terminal session.
+    // Must happen BEFORE createTab/reattach which fork pane shells.
+    var session_id_z: [33]u8 = undefined;
+    const session_uuid = state.runtime.sessionUuid();
+    @memcpy(session_id_z[0..32], &session_uuid);
+    session_id_z[32] = 0;
+    _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
+
+    // Handle --attach: try session first, then orphaned pane.
+    if (terminal_args.attach) |uuid_prefix| {
+        debugLog("attach: trying to reattach with prefix={s}", .{uuid_prefix});
+        if (state.reattachSession(uuid_prefix)) {
+            debugLog("attach: reattachSession succeeded", .{});
+            state.notifications.show("Session reattached");
+            // Reattach may change state.uuid — update env for subsequent panes.
+            const reattached_uuid = state.runtime.sessionUuid();
+            @memcpy(session_id_z[0..32], &reattached_uuid);
+            _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
+        } else if (state.attachOrphanedPane(uuid_prefix)) {
+            debugLog("attach: attachOrphanedPane succeeded", .{});
+            state.notifications.show("Attached to orphaned pane");
+        } else {
+            // Session/pane not found - EXIT with error, don't create new session
+            debugLog("attach: both reattach methods failed, exiting", .{});
+            std.debug.print("Session or pane '{s}' not found\n", .{uuid_prefix});
+            std.debug.print("Use 'hexe terminal list' to see available sessions\n", .{});
+            return; // Exit without entering main loop
+        }
+    } else if (terminal_args.session_config_path) |config_path| {
+        // Launch from session config (.hexe.lua)
+        debugLog("applying session config from: {s}", .{config_path});
+        const session_config = core.session_config;
+        var config = session_config.parseSessionLua(allocator, config_path) catch |err| {
+            if (err == error.FileNotFound) {
+                std.debug.print("Session config not found: {s}\n", .{config_path});
+            } else {
+                std.debug.print("Error parsing session config: {s}\n", .{@errorName(err)});
+            }
+            // Fall back to default tab
+            try state.createTab();
+            state.adoptStickyPanes();
+            try loop_core.runMainLoop(&state);
+            return;
+        };
+        defer config.deinit(allocator);
+
+        // Prefer layout-config name when provided.
+        if (config.name) |loaded_name| {
+            if (state.runtime.setSessionName(loaded_name)) {
+                if (state.runtime.syncSessionIdentity() catch null) |change| {
+                    var owned_change = change;
+                    defer owned_change.deinit(allocator);
+                }
+            }
+        }
+
+        state.applySessionConfig(config, terminal_args.session_tab_filter) catch |err| {
+            debugLog("applySessionConfig failed: {s}", .{@errorName(err)});
+            std.debug.print("Error applying session config: {s}\n", .{@errorName(err)});
+            // Fall back to default tab
+            try state.createTab();
+        };
+    } else {
+        // Apply the enabled SES layout on normal startup when present.
+        var applied_layout = false;
+        for (state.ses_config.layouts) |*layout| {
+            if (!layout.enabled) continue;
+            state.applyLayoutDef(layout) catch |err| {
+                debugLog("applyLayoutDef failed: {s}", .{@errorName(err)});
+                std.debug.print("Error applying configured layout '{s}': {s}\n", .{ layout.name, @errorName(err) });
+            };
+            applied_layout = true;
+            break;
+        }
+
+        if (!applied_layout) {
+            // No configured layout; create a single default tab.
+            try state.createTab();
+        }
+    }
+
+    // Auto-adopt sticky panes from ses for this directory.
+    state.adoptStickyPanes();
+
+    // Continue with main loop.
+    try loop_core.runMainLoop(&state);
+}
+
+pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    var terminal_args = TerminalArgs{};
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if ((std.mem.eql(u8, arg, "--notify") or std.mem.eql(u8, arg, "-n")) and i + 1 < args.len) {
+            i += 1;
+            terminal_args.notify_message = args[i];
+        } else if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
+            terminal_args.list = true;
+        } else if ((std.mem.eql(u8, arg, "--attach") or std.mem.eql(u8, arg, "-a")) and i + 1 < args.len) {
+            i += 1;
+            terminal_args.attach = args[i];
+        } else if ((std.mem.eql(u8, arg, "--name") or std.mem.eql(u8, arg, "-N")) and i + 1 < args.len) {
+            i += 1;
+            terminal_args.name = args[i];
+        } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
+            terminal_args.debug = true;
+        } else if ((std.mem.eql(u8, arg, "--logfile") or std.mem.eql(u8, arg, "-L")) and i + 1 < args.len) {
+            i += 1;
+            terminal_args.log_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--no-autostart-ses")) {
+            terminal_args.connect_options.autostart_ses = false;
+        } else if (std.mem.eql(u8, arg, "--ses-socket") and i + 1 < args.len) {
+            i += 1;
+            terminal_args.connect_options.socket_path = args[i];
+        }
+    }
+
+    try run(terminal_args);
+}
+
+fn redirectStderr(log_file: ?[]const u8) void {
+    var redirected = false;
+    if (log_file) |path| {
+        if (path.len > 0) {
+            const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch null;
+            if (logfd) |fd| {
+                posix.dup2(fd, posix.STDERR_FILENO) catch |err| {
+                    core.logging.logError("terminal", "failed to dup2 stderr for logging", err);
+                };
+                if (fd > 2) posix.close(fd);
+                redirected = true;
+            }
+        }
+    }
+
+    if (redirected) return;
+
+    const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .write_only }) catch return;
+    posix.dup2(devnull.handle, posix.STDERR_FILENO) catch |err| {
+        core.logging.logError("terminal", "failed to redirect stderr to /dev/null", err);
+    };
+    devnull.close();
+}
+
+fn sendNotifyToParentTerminal(allocator: std.mem.Allocator, connect_options: FrontendConnectOptions, message: []const u8) void {
+    core.FrontendTransportHelpers.sendNotifyWithConnectOptions(allocator, connect_options, message) catch |err| {
+        core.logging.logError("terminal", "failed to send notify message to parent", err);
+    };
+}

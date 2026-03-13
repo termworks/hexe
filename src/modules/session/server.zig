@@ -555,7 +555,7 @@ pub const Server = struct {
                 wire.PROTOCOL_VERSION,
             });
             // Send error message if this is a CTL channel (can receive error responses)
-            if (handshake[0] == wire.SES_HANDSHAKE_MUX_CTL or handshake[0] == wire.SES_HANDSHAKE_POD_CTL) {
+            if (handshake[0] == wire.SES_HANDSHAKE_FRONTEND_CTL or handshake[0] == wire.SES_HANDSHAKE_POD_CTL) {
                 // Send version mismatch error with version range
                 const err_msg = std.fmt.allocPrint(
                     self.allocator,
@@ -579,7 +579,7 @@ pub const Server = struct {
                 wire.PROTOCOL_VERSION,
             });
             // Send deprecation notice if this is a CTL channel
-            if (handshake[0] == wire.SES_HANDSHAKE_MUX_CTL) {
+            if (handshake[0] == wire.SES_HANDSHAKE_FRONTEND_CTL) {
                 const warn_msg = std.fmt.allocPrint(
                     self.allocator,
                     "Protocol version {d} is deprecated. Please update to version {d}.",
@@ -595,15 +595,15 @@ pub const Server = struct {
         }
 
         switch (handshake[0]) {
-            wire.SES_HANDSHAKE_MUX_CTL => {
-                // MUX binary control channel.
-                ses.debugLog("accept: MUX ctl channel fd={d}", .{conn.fd});
+            wire.SES_HANDSHAKE_FRONTEND_CTL => {
+                // Frontend binary control channel.
+                ses.debugLog("accept: frontend ctl channel fd={d}", .{conn.fd});
                 self.binary_ctl_fds.put(conn.fd, {}) catch {};
                 self.armCtlWatcher(conn.fd);
             },
-            wire.SES_HANDSHAKE_MUX_VT => {
-                // MUX VT data channel — read 32-byte session_id to identify client.
-                ses.debugLog("accept: MUX VT channel fd={d}", .{conn.fd});
+            wire.SES_HANDSHAKE_FRONTEND_VT => {
+                // Frontend VT data channel — read 32-byte session_id to identify client.
+                ses.debugLog("accept: frontend VT channel fd={d}", .{conn.fd});
                 var sid: [32]u8 = undefined;
                 wire.readExact(conn.fd, &sid) catch {
                     var tmp = conn;
@@ -626,14 +626,14 @@ pub const Server = struct {
                                 self.queueVtClose(old, null);
                             }
                             client.mux_vt_fd = conn.fd;
-                            ses.debugLog("MUX VT: assigned fd={d} to client_id={d}", .{ conn.fd, client.id });
+                            ses.debugLog("frontend VT: assigned fd={d} to client_id={d}", .{ conn.fd, client.id });
                             found = true;
                             break;
                         }
                     }
                 }
                 if (!found) {
-                    ses.debugLog("MUX VT: no client for session {s}", .{sid});
+                    ses.debugLog("frontend VT: no client for session {s}", .{sid});
                     var tmp = conn;
                     tmp.close();
                     return;
@@ -904,9 +904,6 @@ pub const Server = struct {
             .register => {
                 self.handleBinaryRegister(fd, hdr.payload_len, &buf);
             },
-            .sync_state => {
-                self.handleBinarySyncState(fd, hdr.payload_len, &buf);
-            },
             .create_pane => {
                 self.handleBinaryCreatePane(fd, hdr.payload_len, &buf);
             },
@@ -978,6 +975,30 @@ pub const Server = struct {
             .float_result => {
                 self.handleBinaryFloatResult(fd, hdr.payload_len, &buf);
             },
+            .session_add_tab => {
+                self.handleBinarySessionAddTab(fd, hdr.payload_len, &buf);
+            },
+            .session_remove_tab => {
+                self.handleBinarySessionRemoveTab(fd, hdr.payload_len, &buf);
+            },
+            .session_sync_float => {
+                self.handleBinarySessionSyncFloat(fd, hdr.payload_len, &buf);
+            },
+            .session_remove_float => {
+                self.handleBinarySessionRemoveFloat(fd, hdr.payload_len, &buf);
+            },
+            .session_split_pane => {
+                self.handleBinarySessionSplitPane(fd, hdr.payload_len, &buf);
+            },
+            .session_close_split_pane => {
+                self.handleBinarySessionCloseSplitPane(fd, hdr.payload_len, &buf);
+            },
+            .session_replace_split_pane => {
+                self.handleBinarySessionReplaceSplitPane(fd, hdr.payload_len, &buf);
+            },
+            .session_set_split_ratio => {
+                self.handleBinarySessionSetSplitRatio(fd, hdr.payload_len, &buf);
+            },
             // POD control channel messages
             .cwd_changed => {
                 self.handleBinaryCwdChanged(fd, hdr.payload_len, &buf);
@@ -1020,7 +1041,7 @@ pub const Server = struct {
             self.sendBinaryError(fd, "register: payload too small");
             return;
         }
-        const reg = wire.readStruct(wire.Register, fd) catch {
+        const reg = wire.readStruct(wire.FrontendRegister, fd) catch {
             self.sendBinaryError(fd, "register: read failed");
             return;
         };
@@ -1065,7 +1086,7 @@ pub const Server = struct {
 
         // Resolve session name to ensure uniqueness (avoid collisions with detached sessions)
         const resolved_name: ?[]u8 = if (name_slice.len > 0)
-            self.ses_state.resolveSessionName(name_slice, client_id)
+            self.ses_state.resolveSessionName(name_slice, client_id, session_id)
         else
             null;
         defer if (resolved_name) |rn| self.allocator.free(rn);
@@ -1079,7 +1100,7 @@ pub const Server = struct {
             client.session_name = if (resolved_name) |rn| client.allocator.dupe(u8, rn) catch null else null;
         }
 
-        // If this session_id matches a detached session, the MUX has successfully
+        // If this session_id matches a detached session, the frontend has successfully
         // restored it — remove the detached entry now.
         self.ses_state.removeDetachedSession(session_id);
 
@@ -1094,40 +1115,193 @@ pub const Server = struct {
         ses.debugLog("registered: session={s} name={s} (requested={s}) client_id={d}", .{ reg.session_id[0..8], final_name, name_slice, client_id });
 
         // Send Registered response with resolved name
-        const resp = wire.Registered{ .name_len = @intCast(final_name.len) };
+        const resp = wire.FrontendRegistered{ .name_len = @intCast(final_name.len) };
         wire.writeControlWithTrail(fd, .registered, std.mem.asBytes(&resp), final_name) catch {};
     }
 
-    fn handleBinarySyncState(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
-        if (payload_len < @sizeOf(wire.SyncState)) {
+    fn handleBinarySessionAddTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionAddTab)) {
             self.skipBinaryPayload(fd, payload_len, buf);
             return;
         }
-        const ss = wire.readStruct(wire.SyncState, fd) catch return;
-        if (ss.state_len > wire.MAX_PAYLOAD_LEN) {
-            self.skipBinaryPayload(fd, payload_len - @sizeOf(wire.SyncState), buf);
+        const msg = wire.readStruct(wire.SessionAddTab, fd) catch return;
+        if (msg.name_len > wire.MAX_PAYLOAD_LEN or msg.name_len > buf.len) {
+            self.skipBinaryPayload(fd, msg.name_len, buf);
+            self.sendBinaryError(fd, "session_add_tab: name too large");
             return;
         }
-
-        // Read state data into allocated buffer.
-        const state_buf = self.allocator.alloc(u8, ss.state_len) catch {
-            self.skipBinaryPayload(fd, ss.state_len, buf);
-            return;
-        };
-        defer self.allocator.free(state_buf);
-        wire.readExact(fd, state_buf) catch return;
+        if (msg.name_len > 0) {
+            wire.readExact(fd, buf[0..msg.name_len]) catch return;
+        }
 
         const client_id = self.findClientForCtlFd(fd) orelse return;
-        if (self.ses_state.getClient(client_id)) |client| {
-            // Reject stale/out-of-order updates based on version.
-            if (ss.version <= client.last_sync_version) {
-                ses.debugLog("sync_state: reject stale version {d} <= {d}", .{ ss.version, client.last_sync_version });
-                wire.writeControl(fd, .ok, &.{}) catch {};
-                return;
-            }
-            client.last_sync_version = ss.version;
-            client.updateMuxState(state_buf) catch {};
+        self.ses_state.addClientSessionTab(
+            client_id,
+            msg.tab_uuid,
+            msg.pane_uuid,
+            msg.tab_index,
+            buf[0..msg.name_len],
+        ) catch {
+            self.sendBinaryError(fd, "session_add_tab_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionRemoveTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionRemoveTab)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
         }
+        const msg = wire.readStruct(wire.SessionRemoveTab, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.removeClientSessionTab(
+            client_id,
+            msg.tab_uuid,
+            if (msg.has_active_tab != 0) msg.active_tab else null,
+        );
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionSyncFloat(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionSyncFloat)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionSyncFloat, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.syncClientSessionFloat(
+            client_id,
+            msg.pane_uuid,
+            if (msg.has_active_tab != 0) msg.active_tab else null,
+            if (msg.has_parent_tab != 0) msg.parent_tab else null,
+            msg.visible != 0,
+            msg.tab_visible,
+            msg.sticky != 0,
+            msg.is_pwd != 0,
+            msg.float_key,
+            msg.width_pct,
+            msg.height_pct,
+            msg.pos_x_pct,
+            msg.pos_y_pct,
+            msg.pad_x,
+            msg.pad_y,
+            msg.active != 0,
+        ) catch {
+            self.sendBinaryError(fd, "session_sync_float_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionRemoveFloat(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionRemoveFloat)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionRemoveFloat, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.removeClientSessionFloat(client_id, msg.pane_uuid);
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionSplitPane)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionSplitPane, fd) catch return;
+        const dir: core.session_model.SessionSplitDir = switch (msg.dir) {
+            0 => .horizontal,
+            1 => .vertical,
+            else => {
+                self.sendBinaryError(fd, "session_split_pane: invalid dir");
+                return;
+            },
+        };
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.splitClientSessionPane(
+            client_id,
+            msg.tab_uuid,
+            msg.source_pane_uuid,
+            msg.new_pane_uuid,
+            msg.active_tab,
+            if (msg.has_focused_pane != 0) msg.focused_pane_uuid else null,
+            dir,
+        ) catch {
+            self.sendBinaryError(fd, "session_split_pane_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionCloseSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionCloseSplitPane)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionCloseSplitPane, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.closeClientSessionSplitPane(
+            client_id,
+            msg.tab_uuid,
+            msg.pane_uuid,
+            msg.active_tab,
+            if (msg.has_focused_pane != 0) msg.focused_pane_uuid else null,
+        ) catch {
+            self.sendBinaryError(fd, "session_close_split_pane_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionReplaceSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionReplaceSplitPane)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionReplaceSplitPane, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.replaceClientSessionSplitPane(
+            client_id,
+            msg.tab_uuid,
+            msg.old_pane_uuid,
+            msg.new_pane_uuid,
+            msg.active_tab,
+            if (msg.has_focused_pane != 0) msg.focused_pane_uuid else null,
+        ) catch {
+            self.sendBinaryError(fd, "session_replace_split_pane_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionSetSplitRatio(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionSetSplitRatio)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionSetSplitRatio, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.setClientSessionSplitRatio(
+            client_id,
+            msg.tab_uuid,
+            msg.active_tab,
+            msg.first_anchor_uuid,
+            msg.second_anchor_uuid,
+            msg.ratio,
+        ) catch {
+            self.sendBinaryError(fd, "session_set_split_ratio_failed");
+            return;
+        };
+        self.pushClientSessionSnapshot(client_id);
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
 
@@ -1150,7 +1324,7 @@ pub const Server = struct {
             wire.readExact(fd, buf[0..trail_len]) catch return;
         }
 
-        ses.debugLog("create_pane: shell_len={d} cwd_len={d} sticky_key={d} isolation_profile_len={d}", .{ cp.shell_len, cp.cwd_len, cp.sticky_key, cp.isolation_profile_len });
+        ses.debugLog("create_pane: shell_len={d} cwd_len={d} sticky_key={d} isolation_profile_len={d} env_count={d}", .{ cp.shell_len, cp.cwd_len, cp.sticky_key, cp.isolation_profile_len, cp.env_count });
 
         var offset: usize = 0;
         const shell = if (cp.shell_len > 0 and offset + cp.shell_len <= trail_len) blk: {
@@ -1183,6 +1357,17 @@ pub const Server = struct {
         } else null;
         const sticky_key: ?u8 = if (cp.sticky_key != 0) cp.sticky_key else null;
 
+        var env_list: std.ArrayList([]const u8) = .empty;
+        defer env_list.deinit(self.allocator);
+        for (0..cp.env_count) |_| {
+            if (offset + 2 > trail_len) break;
+            const entry_len = std.mem.readInt(u16, buf[offset..][0..2], .little);
+            offset += 2;
+            if (offset + entry_len > trail_len) break;
+            env_list.append(self.allocator, buf[offset .. offset + entry_len]) catch break;
+            offset += entry_len;
+        }
+
         // Resolve parent environment if inherit_env was requested.
         var parent_env: ?[]const []const u8 = null;
         defer if (parent_env) |env_entries| {
@@ -1194,6 +1379,24 @@ pub const Server = struct {
                 parent_env = parent_pane.getProcEnviron(self.allocator);
             }
         }
+
+        var merged_env_storage: ?[]const []const u8 = null;
+        defer if (merged_env_storage) |slice| self.allocator.free(slice);
+        const spawn_env: ?[]const []const u8 = blk: {
+            if (parent_env) |base| {
+                if (env_list.items.len == 0) break :blk base;
+                const merged = self.allocator.alloc([]const u8, base.len + env_list.items.len) catch {
+                    self.sendBinaryError(fd, "create_pane: env merge alloc failed");
+                    return;
+                };
+                @memcpy(merged[0..base.len], base);
+                @memcpy(merged[base.len..], env_list.items);
+                merged_env_storage = merged;
+                break :blk merged;
+            }
+            if (env_list.items.len > 0) break :blk env_list.items;
+            break :blk null;
+        };
 
         const client_id = self.findClientForCtlFd(fd) orelse blk: {
             const cid = self.ses_state.addClient(fd) catch {
@@ -1246,7 +1449,7 @@ pub const Server = struct {
             }
         }
 
-        const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, parent_env, isolation_profile) catch {
+        const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, spawn_env, isolation_profile) catch {
             self.sendBinaryError(fd, "create_failed");
             return;
         };
@@ -1523,20 +1726,12 @@ pub const Server = struct {
             return;
         }
         const det = wire.readStruct(wire.Detach, fd) catch return;
-        if (det.state_len > wire.MAX_PAYLOAD_LEN) {
-            self.skipBinaryPayload(fd, det.state_len, buf);
-            self.sendBinaryError(fd, "detach: state too large (exceeds MAX_PAYLOAD_LEN)");
+        const extra_len = payload_len - @sizeOf(wire.Detach);
+        if (extra_len > 0) {
+            self.skipBinaryPayload(fd, extra_len, buf);
+            self.sendBinaryError(fd, "detach: legacy state payload is no longer accepted");
             return;
         }
-
-        // Read mux state.
-        const state_data = self.allocator.alloc(u8, det.state_len) catch {
-            self.skipBinaryPayload(fd, det.state_len, buf);
-            self.sendBinaryError(fd, "detach: memory allocation failed for state data");
-            return;
-        };
-        defer self.allocator.free(state_data);
-        wire.readExact(fd, state_data) catch return;
 
         // Convert session_id hex to binary.
         const session_id = core.uuid.hexToBin(det.session_id) orelse {
@@ -1561,7 +1756,7 @@ pub const Server = struct {
         };
         // Lock will be released after detach completes
 
-        if (self.ses_state.detachSession(client_id, session_id, session_name, state_data)) {
+        if (self.ses_state.detachSession(client_id, session_id, session_name)) {
             self.ses_state.markDirty();
             // Release lock after successful detach
             self.ses_state.releaseSessionLock(session_id);
@@ -1639,11 +1834,11 @@ pub const Server = struct {
             const detached = entry.value_ptr;
 
             // Exact name match (case-insensitive).
-            if (std.ascii.eqlIgnoreCase(detached.session_name, id_prefix)) {
+            if (std.ascii.eqlIgnoreCase(detached.session_snapshot.session_name, id_prefix)) {
                 if (name_match_count < name_matches.len) {
                     name_matches[name_match_count] = .{
                         .session_id = key_ptr.*,
-                        .name = detached.session_name,
+                        .name = detached.session_snapshot.session_name,
                     };
                     name_match_count += 1;
                 }
@@ -1764,6 +1959,9 @@ pub const Server = struct {
 
     /// Helper to complete reattach after session_id is resolved.
     fn completeReattach(self: *Server, fd: posix.fd_t, session_id: [16]u8, client_id: usize) void {
+        const hex_id_dbg: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+        ses.debugLog("completeReattach: begin session={s} client_id={d} fd={d}", .{ hex_id_dbg[0..8], client_id, fd });
+
         // Transaction log: reattach start
         const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
         self.ses_state.txlog.write(.reattach_start, session_id, &hex_id) catch {};
@@ -1776,37 +1974,66 @@ pub const Server = struct {
         // Note: Lock will be released in handleBinaryRegister after successful registration
 
         const result = self.ses_state.reattachSession(session_id, client_id) catch {
+            ses.debugLog("completeReattach: ses_state.reattachSession threw", .{});
             self.ses_state.releaseSessionLock(session_id);
             self.sendBinaryError(fd, "reattach_failed");
             return;
         };
         if (result == null) {
+            ses.debugLog("completeReattach: session not found after lock", .{});
             self.ses_state.releaseSessionLock(session_id);
             self.sendBinaryError(fd, "session_not_found");
             return;
         }
         const reattach_result = result.?;
-        // Data is borrowed from detached_sessions — don't free here.
-        // It will be freed when removeDetachedSession is called on successful re-register.
+        ses.debugLog("completeReattach: borrowed snapshot panes={d}", .{reattach_result.pane_uuids.len});
+        const snapshot = reattach_result.session_snapshot;
+        ses.debugLog(
+            "completeReattach: snapshot name={s} uuid={s} tabs={d} panes={d} floats={d} active_tab={d}",
+            .{
+                snapshot.session_name,
+                snapshot.uuid[0..8],
+                snapshot.tabs.items.len,
+                snapshot.panes.count(),
+                snapshot.floats.items.len,
+                snapshot.active_tab,
+            },
+        );
+        for (snapshot.tabs.items, 0..) |tab, idx| {
+            ses.debugLog(
+                "completeReattach: tab[{d}] name={s} root={} focused={}",
+                .{ idx, tab.name, tab.root != null, tab.focused_pane_uuid != null },
+            );
+        }
+        const session_json = reattach_result.session_snapshot.toJson(self.allocator) catch {
+            ses.debugLog("completeReattach: snapshot toJson failed", .{});
+            self.ses_state.releaseSessionLock(session_id);
+            self.sendBinaryError(fd, "reattach_snapshot_failed");
+            return;
+        };
+        defer self.allocator.free(session_json);
+        ses.debugLog("completeReattach: session_json_len={d}", .{session_json.len});
 
         // Send SessionReattached: header + mux_state bytes + pane_count * 32 UUID bytes.
         var resp = wire.SessionReattached{
-            .state_len = @intCast(reattach_result.mux_state_json.len),
+            .state_len = @intCast(session_json.len),
             .pane_count = @intCast(reattach_result.pane_uuids.len),
         };
         const uuid_data_len = reattach_result.pane_uuids.len * 32;
-        const total_payload = @sizeOf(wire.SessionReattached) + reattach_result.mux_state_json.len + uuid_data_len;
+        const total_payload = @sizeOf(wire.SessionReattached) + session_json.len + uuid_data_len;
 
         var ctrl_hdr: wire.ControlHeader = .{
             .msg_type = @intFromEnum(wire.MsgType.session_reattached),
             .payload_len = @intCast(total_payload),
         };
+        ses.debugLog("completeReattach: writing response payload={d}", .{total_payload});
         wire.writeAll(fd, std.mem.asBytes(&ctrl_hdr)) catch return;
         wire.writeAll(fd, std.mem.asBytes(&resp)) catch return;
-        wire.writeAll(fd, reattach_result.mux_state_json) catch return;
+        wire.writeAll(fd, session_json) catch return;
         for (reattach_result.pane_uuids) |uuid| {
             wire.writeAll(fd, &uuid) catch return;
         }
+        ses.debugLog("completeReattach: response sent", .{});
     }
 
     fn handleBinaryDisconnect(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1854,6 +2081,7 @@ pub const Server = struct {
             return;
         }
         const upa = wire.readStruct(wire.UpdatePaneAux, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd);
 
         if (self.ses_state.panes.getPtr(upa.uuid)) |pane| {
             if (upa.has_created_from != 0) {
@@ -1863,6 +2091,14 @@ pub const Server = struct {
                 pane.focused_from = upa.focused_from;
             }
             pane.is_focused = (upa.is_focused != 0);
+            if (client_id) |cid| {
+                self.ses_state.updateClientSessionFocus(
+                    cid,
+                    upa.uuid,
+                    if (upa.has_active_tab != 0) upa.active_tab else null,
+                    upa.is_focused != 0,
+                );
+            }
             self.ses_state.markDirty();
         }
         wire.writeControl(fd, .ok, &.{}) catch {};
@@ -2431,6 +2667,7 @@ pub const Server = struct {
             .pid = pane.child_pid,
             .fg_pid = pane.fg_pid orelse pane.child_pid,
             .base_pid = pane.child_pid,
+            .pane_id = pane.pane_id,
             .cols = pane.cols,
             .rows = pane.rows,
             .cursor_x = pane.cursor_x,
@@ -2616,7 +2853,7 @@ pub const Server = struct {
                 .has_session_id = 0,
                 .name_len = 0,
                 .pane_count = @intCast(client.pane_uuids.items.len),
-                .mux_state_len = 0,
+                .session_state_len = 0,
             };
 
             if (client.session_id) |sid| {
@@ -2627,22 +2864,19 @@ pub const Server = struct {
 
             const name = client.session_name orelse "";
             sc.name_len = @intCast(name.len);
-            if (full_mode) {
-                if (client.last_mux_state) |ms| {
-                    sc.mux_state_len = @intCast(ms.len);
-                }
-            }
+            const session_json = if (full_mode and client.session_snapshot != null)
+                client.session_snapshot.?.toJson(alloc) catch null
+            else
+                null;
+            defer if (session_json) |json| alloc.free(json);
+            if (session_json) |json| sc.session_state_len = @intCast(json.len);
 
             buf.appendSlice(alloc, std.mem.asBytes(&sc)) catch {
                 posix.close(fd);
                 return;
             };
             if (name.len > 0) buf.appendSlice(alloc, name) catch {};
-            if (full_mode) {
-                if (client.last_mux_state) |ms| {
-                    buf.appendSlice(alloc, ms) catch {};
-                }
-            }
+            if (session_json) |json| buf.appendSlice(alloc, json) catch {};
 
             // Pane entries for this client
             for (client.pane_uuids.items) |uuid| {
@@ -2678,18 +2912,19 @@ pub const Server = struct {
             const hex_id: [32]u8 = std.fmt.bytesToHex(detached.session_id, .lower);
             var de: wire.DetachedSessionEntry = .{
                 .session_id = hex_id,
-                .name_len = @intCast(detached.session_name.len),
+                .name_len = @intCast(detached.session_snapshot.session_name.len),
                 .pane_count = @intCast(detached.pane_uuids.len),
-                .mux_state_len = 0,
+                .session_state_len = 0,
             };
-            if (full_mode) {
-                de.mux_state_len = @intCast(detached.mux_state_json.len);
-            }
+            const session_json = if (full_mode)
+                detached.session_snapshot.toJson(alloc) catch null
+            else
+                null;
+            defer if (session_json) |json| alloc.free(json);
+            if (session_json) |json| de.session_state_len = @intCast(json.len);
             buf.appendSlice(alloc, std.mem.asBytes(&de)) catch {};
-            buf.appendSlice(alloc, detached.session_name) catch {};
-            if (full_mode) {
-                buf.appendSlice(alloc, detached.mux_state_json) catch {};
-            }
+            buf.appendSlice(alloc, detached.session_snapshot.session_name) catch {};
+            if (session_json) |json| buf.appendSlice(alloc, json) catch {};
         }
 
         // Orphaned panes
@@ -2853,7 +3088,157 @@ pub const Server = struct {
         wire.writeControl(fd, .clear_orphaned_panes, std.mem.asBytes(&result)) catch {};
     }
 
-    /// Handle get_layout CLI request — return last_mux_state for the pane's session.
+    const LayoutExportTabCtx = struct {
+        allocator: std.mem.Allocator,
+        ids: std.AutoHashMap([32]u8, u16),
+        ordered: std.ArrayList([32]u8),
+        next_id: u16 = 0,
+
+        fn init(allocator: std.mem.Allocator) LayoutExportTabCtx {
+            return .{
+                .allocator = allocator,
+                .ids = std.AutoHashMap([32]u8, u16).init(allocator),
+                .ordered = .empty,
+            };
+        }
+
+        fn deinit(self: *LayoutExportTabCtx) void {
+            self.ids.deinit();
+            self.ordered.deinit(self.allocator);
+        }
+
+        fn assign(self: *LayoutExportTabCtx, uuid: [32]u8) !void {
+            if (self.ids.contains(uuid)) return;
+            try self.ids.put(uuid, self.next_id);
+            try self.ordered.append(self.allocator, uuid);
+            self.next_id +%= 1;
+        }
+    };
+
+    fn collectLayoutPaneIds(ctx: *LayoutExportTabCtx, node: ?*const core.session_model.SessionLayoutNode) !void {
+        const root = node orelse return;
+        switch (root.*) {
+            .pane => |uuid| try ctx.assign(uuid),
+            .split => |split| {
+                try collectLayoutPaneIds(ctx, split.first);
+                try collectLayoutPaneIds(ctx, split.second);
+            },
+        }
+    }
+
+    fn writeLayoutExportNode(
+        writer: anytype,
+        node: ?*const core.session_model.SessionLayoutNode,
+        ids: *const std.AutoHashMap([32]u8, u16),
+    ) !void {
+        const root = node orelse {
+            try writer.writeAll("null");
+            return;
+        };
+
+        switch (root.*) {
+            .pane => |uuid| {
+                const pane_id = ids.get(uuid) orelse 0;
+                try writer.print("{{\"type\":\"pane\",\"id\":{d}}}", .{pane_id});
+            },
+            .split => |split| {
+                try writer.writeAll("{\"type\":\"split\",\"dir\":");
+                try writer.print("{f}", .{std.json.fmt(@tagName(split.dir), .{})});
+                try writer.print(",\"ratio\":{d},\"first\":", .{split.ratio});
+                try writeLayoutExportNode(writer, split.first, ids);
+                try writer.writeAll(",\"second\":");
+                try writeLayoutExportNode(writer, split.second, ids);
+                try writer.writeAll("}");
+            },
+        }
+    }
+
+    fn buildLayoutExportJson(self: *Server, snapshot: *const state.SessionSnapshot) ![]u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
+        var writer = buf.writer(self.allocator);
+        const active_float_index = blk: {
+            if (snapshot.active_float_uuid) |active_uuid| {
+                for (snapshot.floats.items, 0..) |float_state, idx| {
+                    if (std.mem.eql(u8, &float_state.pane_uuid, &active_uuid)) {
+                        break :blk idx;
+                    }
+                }
+            }
+            break :blk null;
+        };
+
+        try writer.writeAll("{\"active_tab\":");
+        try writer.print("{d}", .{snapshot.active_tab});
+        try writer.writeAll(",\"active_floating\":");
+        if (active_float_index) |idx| {
+            try writer.print("{d}", .{idx});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"tabs\":[");
+
+        for (snapshot.tabs.items, 0..) |tab, ti| {
+            if (ti > 0) try writer.writeAll(",");
+
+            var ctx = LayoutExportTabCtx.init(self.allocator);
+            defer ctx.deinit();
+            try collectLayoutPaneIds(&ctx, tab.root);
+
+            try writer.writeAll("{\"name\":");
+            try writer.print("{f}", .{std.json.fmt(tab.name, .{})});
+            try writer.writeAll(",\"tree\":");
+            try writeLayoutExportNode(writer, tab.root, &ctx.ids);
+            try writer.writeAll(",\"splits\":[");
+            for (ctx.ordered.items, 0..) |uuid, pi| {
+                if (pi > 0) try writer.writeAll(",");
+                const pane_id = ctx.ids.get(uuid) orelse 0;
+                try writer.print("{{\"id\":{d},\"uuid\":", .{pane_id});
+                try writer.print("{f}", .{std.json.fmt(uuid[0..], .{})});
+                if (self.ses_state.getPane(uuid)) |pane| {
+                    if (pane.cwd) |cwd| {
+                        try writer.writeAll(",\"pwd_dir\":");
+                        try writer.print("{f}", .{std.json.fmt(cwd, .{})});
+                    }
+                }
+                try writer.writeAll("}");
+            }
+            try writer.writeAll("]}");
+        }
+
+        try writer.writeAll("],\"floats\":[");
+        for (snapshot.floats.items, 0..) |float_state, fi| {
+            if (fi > 0) try writer.writeAll(",");
+            try writer.writeAll("{\"uuid\":");
+            try writer.print("{f}", .{std.json.fmt(float_state.pane_uuid[0..], .{})});
+            try writer.print(",\"visible\":{}", .{float_state.visible});
+            try writer.print(",\"tab_visible\":{d}", .{float_state.tab_visible});
+            try writer.print(",\"float_key\":{d}", .{float_state.float_key});
+            try writer.print(",\"float_width_pct\":{d}", .{float_state.width_pct});
+            try writer.print(",\"float_height_pct\":{d}", .{float_state.height_pct});
+            try writer.print(",\"float_pos_x_pct\":{d}", .{float_state.pos_x_pct});
+            try writer.print(",\"float_pos_y_pct\":{d}", .{float_state.pos_y_pct});
+            try writer.print(",\"float_pad_x\":{d}", .{float_state.pad_x});
+            try writer.print(",\"float_pad_y\":{d}", .{float_state.pad_y});
+            try writer.print(",\"is_pwd\":{}", .{float_state.is_pwd});
+            try writer.print(",\"sticky\":{}", .{float_state.sticky});
+            if (float_state.parent_tab) |parent_tab| {
+                try writer.print(",\"parent_tab\":{d}", .{parent_tab});
+            }
+            if (self.ses_state.getPane(float_state.pane_uuid)) |pane| {
+                if (pane.cwd) |cwd| {
+                    try writer.writeAll(",\"pwd_dir\":");
+                    try writer.print("{f}", .{std.json.fmt(cwd, .{})});
+                }
+            }
+            try writer.writeAll("}");
+        }
+        try writer.writeAll("]}");
+        return buf.toOwnedSlice(self.allocator);
+    }
+
+    /// Handle get_layout CLI request — derive layout export JSON from the
+    /// canonical session snapshot owned by SES.
     fn handleGetLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
         defer posix.close(fd);
 
@@ -2873,13 +3258,17 @@ pub const Server = struct {
             return;
         };
 
-        const mux_state = client.last_mux_state orelse {
-            self.sendBinaryError(fd, "no mux state");
+        const snapshot = client.session_snapshot orelse {
+            self.sendBinaryError(fd, "no session snapshot");
             return;
         };
+        const layout_json = self.buildLayoutExportJson(&snapshot) catch {
+            self.sendBinaryError(fd, "layout_export_failed");
+            return;
+        };
+        defer self.allocator.free(layout_json);
 
-        // Send the raw mux_state JSON back as get_layout response.
-        wire.writeControl(fd, .get_layout, mux_state) catch {};
+        wire.writeControl(fd, .get_layout, layout_json) catch {};
     }
 
     /// Handle get_session_state CLI request — return JSON state for detached session.
@@ -2911,11 +3300,26 @@ pub const Server = struct {
             return;
         };
 
-        // Send the mux_state_json back as session_state response
-        wire.writeControl(fd, .session_state, detached_state.mux_state_json) catch {};
+        const session_json = detached_state.session_snapshot.toJson(self.allocator) catch {
+            self.sendBinaryError(fd, "session_snapshot_failed");
+            return;
+        };
+        defer self.allocator.free(session_json);
+
+        wire.writeControl(fd, .session_state, session_json) catch {};
     }
 
-    /// Handle apply_layout CLI request — forward layout tree to MUX.
+    fn pushClientSessionSnapshot(self: *Server, client_id: usize) void {
+        const client = self.ses_state.getClient(client_id) orelse return;
+        const mux_fd = client.mux_ctl_fd orelse return;
+        const snapshot = client.session_snapshot orelse return;
+        const session_json = snapshot.toJson(self.allocator) catch return;
+        defer self.allocator.free(session_json);
+        wire.writeControl(mux_fd, .session_state, session_json) catch {};
+    }
+
+    /// Handle apply_layout CLI request — mutate canonical SES state, then push
+    /// the updated snapshot to the attached frontend.
     fn handleApplyLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
         defer posix.close(fd);
 
@@ -2947,17 +3351,21 @@ pub const Server = struct {
             return;
         };
 
-        // Find MUX CTL fd for this pane.
-        const mux_fd = self.findMuxCtlForUuid(al.uuid) orelse {
-            self.sendBinaryError(fd, "no mux");
+        const pane = self.ses_state.getPane(al.uuid) orelse {
+            self.sendBinaryError(fd, "pane not found");
+            return;
+        };
+        const client_id = pane.attached_to orelse {
+            self.sendBinaryError(fd, "pane not attached");
             return;
         };
 
-        // Forward to MUX.
-        wire.writeControlWithTrail(mux_fd, .apply_layout, std.mem.asBytes(&al), json_buf) catch {
-            self.sendBinaryError(fd, "forward failed");
+        self.ses_state.applyClientSessionLayoutTemplate(client_id, al.uuid, json_buf) catch {
+            self.sendBinaryError(fd, "apply layout failed");
             return;
         };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
     }
 
     /// Find the client (MUX) that owns a given pane UUID.

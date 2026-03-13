@@ -159,19 +159,19 @@ curl example.com      # Fails - no network
 
 ```bash
 # Spawn isolated float with sandbox profile
-hexe mux float --command "zsh" --isolation=sandbox
+hexe terminal float --command "zsh" --isolation=sandbox
 
 # Full isolation (no network, minimal filesystem)
-hexe mux float --command "zsh" --isolation=full
+hexe terminal float --command "zsh" --isolation=full
 
 # With size and title
-hexe mux float --command "zsh" \
+hexe terminal float --command "zsh" \
   --isolation=sandbox \
   --title="Isolated Shell" \
   --size "80,60,0,0"
 
 # Run untrusted script
-hexe mux float --command "bash /tmp/untrusted.sh" --isolation=full
+hexe terminal float --command "bash /tmp/untrusted.sh" --isolation=full
 ```
 
 ### 2. Configuration (Per-float in init.lua)
@@ -213,7 +213,7 @@ Control CPU, memory, and process limits:
 
 ```bash
 # 512MB limit
-hexe mux float --command "zsh" --isolation=sandbox  # Uses config
+hexe terminal float --command "zsh" --isolation=sandbox  # Uses config
 
 # In Lua config:
 isolation = {
@@ -311,7 +311,7 @@ ls /tmp              # Empty! Can't see Pane 1's files
 ### Example 1: Isolated Development Environment
 
 ```bash
-hexe mux float --command "zsh" \
+hexe terminal float --command "zsh" \
   --isolation=sandbox \
   --title="Dev Sandbox"
 
@@ -325,7 +325,7 @@ ps aux        # Only sees npm processes
 
 ```bash
 # Full isolation - no network, restricted filesystem
-hexe mux float --command "python3 /tmp/untrusted.py" \
+hexe terminal float --command "python3 /tmp/untrusted.py" \
   --isolation=full
 
 # The script:

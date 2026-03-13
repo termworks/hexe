@@ -2,7 +2,7 @@ const std = @import("std");
 const argonaut = @import("argonaut");
 const core = @import("core");
 const ipc = core.ipc;
-const mux = @import("mux");
+const terminal = @import("terminal");
 const ses = @import("ses");
 const pod = @import("pod");
 const shp = @import("shp");
@@ -61,13 +61,13 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     // Create main parser
-    const parser = try argonaut.newParser(allocator, "hexe", "Hexe terminal multiplexer");
+    const parser = try argonaut.newParser(allocator, "hexe", "Hexe terminal frontend");
     defer parser.deinit();
 
     // Top-level subcommands only
     const ses_cmd = try parser.newCommand("ses", "Session daemon management");
     const pod_cmd = try parser.newCommand("pod", "Per-pane PTY daemon");
-    const mux_cmd = try parser.newCommand("mux", "Terminal multiplexer");
+    const mux_cmd = try parser.newCommand("mux", "Terminal frontend");
     const shp_cmd = try parser.newCommand("shp", "Shell prompt renderer");
     const pop_cmd = try parser.newCommand("pop", "Popup overlays");
     const config_cmd = try parser.newCommand("config", "Configuration management");
@@ -175,6 +175,8 @@ pub fn main() !void {
     const mux_new_name = try mux_new.string("n", "name", null);
     const mux_new_dbg = try mux_new.flag("d", "debug", null);
     const mux_new_log = try mux_new.string("L", "logfile", null);
+    const mux_new_ses_socket = try mux_new.string("", "ses-socket", null);
+    const mux_new_no_autostart = try mux_new.flag("", "no-autostart-ses", null);
     const mux_new_instance = try mux_new.string("I", "instance", null);
     const mux_new_test_only = try mux_new.flag("T", "test-only", null);
 
@@ -182,6 +184,8 @@ pub fn main() !void {
     const mux_attach_name = try mux_attach.stringPositional(null);
     const mux_attach_dbg = try mux_attach.flag("d", "debug", null);
     const mux_attach_log = try mux_attach.string("L", "logfile", null);
+    const mux_attach_ses_socket = try mux_attach.string("", "ses-socket", null);
+    const mux_attach_no_autostart = try mux_attach.flag("", "no-autostart-ses", null);
     const mux_attach_instance = try mux_attach.string("I", "instance", null);
 
     const mux_float = try mux_cmd.newCommand("float", "Spawn a transient float pane");
@@ -359,22 +363,22 @@ pub fn main() !void {
     if (has_help) {
         // Show help for the most specific command found (manual strings to avoid argonaut crash)
         if (found_mux and found_layout and found_save) {
-            print("Usage: hexe mux layout save <name>\n\nSave the current tab's layout to disk.\n\nLayouts are stored in ~/.config/hexe/layouts/<name>.json\n", .{});
+            print("Usage: hexe terminal layout save <name>\n\nSave the current tab's layout to disk.\n\nLayouts are stored in ~/.config/hexe/layouts/<name>.json\n", .{});
         } else if (found_mux and found_layout and found_load) {
-            print("Usage: hexe mux layout load <name>\n\nApply a saved layout to the current tab.\n\nExisting panes are closed and new ones created to match the layout.\n", .{});
+            print("Usage: hexe terminal layout load <name>\n\nApply a saved layout to the current tab.\n\nExisting panes are closed and new ones created to match the layout.\n", .{});
         } else if (found_mux and found_layout) {
-            print("Usage: hexe mux layout <command>\n\nSave and restore layouts\n\nCommands:\n  save <name>  Save current tab's layout\n  load <name>  Apply a saved layout\n  list         List saved layouts\n", .{});
+            print("Usage: hexe terminal layout <command>\n\nSave and restore layouts\n\nCommands:\n  save <name>  Save current tab's layout\n  load <name>  Apply a saved layout\n  list         List saved layouts\n", .{});
         } else if (found_mux and found_focus) {
             print(
-                "Usage: hexe mux focus <dir>\n\nMove focus to adjacent pane in the mux. Intended for editor integration (nvim).\n\nDirs: left, right, up, down\n\nRequires running inside mux (HEXE_PANE_UUID)\n",
+                "Usage: hexe terminal focus <dir>\n\nMove focus to an adjacent pane in the terminal frontend. Intended for editor integration (nvim).\n\nDirs: left, right, up, down\n\nRequires running inside a terminal session (HEXE_PANE_UUID)\n",
                 .{},
             );
         } else if (found_mux and found_send) {
-            print("Usage: hexe mux send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>        Target specific pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all attached panes\n  -e, --enter              Append Enter key after text\n  -C, --ctrl <char>        Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n  -I, --instance <NAME>    Target a specific instance\n", .{});
+            print("Usage: hexe terminal send [OPTIONS] [text]\n\nSend keystrokes to a pane (defaults to current pane if inside a terminal session)\n\nOptions:\n  -u, --uuid <UUID>        Target specific pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all attached panes\n  -e, --enter              Append Enter key after text\n  -C, --ctrl <char>        Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n  -I, --instance <NAME>    Target a specific instance\n", .{});
         } else if (found_mux and found_notify) {
-            print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>        Target specific mux or pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all muxes\n  -I, --instance <NAME>    Target a specific instance\n", .{});
+            print("Usage: hexe terminal notify [OPTIONS] <message>\n\nSend a notification (defaults to current pane if inside a terminal session)\n\nOptions:\n  -u, --uuid <UUID>        Target specific terminal session or pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all attached frontends\n  -I, --instance <NAME>    Target a specific instance\n", .{});
         } else if (found_mux and found_info) {
-            print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>        Query specific pane by UUID (works from anywhere)\n  -c, --creator            Print only the creator pane UUID\n  -l, --last               Print only the last focused pane UUID\n  -I, --instance <NAME>    Target a specific instance\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
+            print("Usage: hexe terminal info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>        Query specific pane by UUID (works from anywhere)\n  -c, --creator            Print only the creator pane UUID\n  -l, --last               Print only the last focused pane UUID\n  -I, --instance <NAME>    Target a specific instance\n\nWithout --uuid, queries current pane (requires running inside a terminal session)\n", .{});
         } else if (found_pod and found_list) {
             print("Usage: hexe pod list [OPTIONS]\n\nList discoverable pods by scanning pod-*.meta in the hexe socket dir.\n\nOptions:\n      --where <LUA>   Lua predicate (return boolean). Variable: pod\n      --probe         Probe sockets (best-effort)\n      --alive         Only show pods whose socket is connectable (implies --probe)\n  -j, --json          Output as JSON array\n", .{});
         } else if (found_pod and found_new) {
@@ -393,7 +397,7 @@ pub fn main() !void {
             print("Usage: hexe shp exit-intent\n\nAsk the current mux session whether the shell should be allowed to exit.\nIntended for shell keybindings (exit/Ctrl+D) to avoid last-pane death.\n\nExit codes: 0=allow, 1=deny\n", .{});
         } else if (found_shp and found_shell_event) {
             print(
-                "Usage: hexe shp shell-event [--cmd <TEXT>] [--cwd <PATH>] [--jobs <N>] [--phase <start|end>] [--running] [--started-at <MS>] [--status <N>] [--duration <MS>]\n\nSend shell command metadata to the current mux session.\nUsed by shell integration to power statusbar + `hexe mux info`.\n\nNotes:\n  - No-op outside a mux session\n  - If mux is unreachable, exits 0\n",
+                "Usage: hexe shp shell-event [--cmd <TEXT>] [--cwd <PATH>] [--jobs <N>] [--phase <start|end>] [--running] [--started-at <MS>] [--status <N>] [--duration <MS>]\n\nSend shell command metadata to the current terminal session.\nUsed by shell integration to power statusbar + `hexe terminal info`.\n\nNotes:\n  - No-op outside a terminal session\n  - If the terminal frontend is unreachable, exits 0\n",
                 .{},
             );
         } else if (found_ses and found_daemon) {
@@ -411,11 +415,11 @@ pub fn main() !void {
         } else if (found_pod and found_gc) {
             print("Usage: hexe pod gc [--dry-run]\n\nDelete stale pod-*.meta and broken pod@*.sock aliases.\n\nOptions:\n  -n, --dry-run            Only print what would be deleted\n", .{});
         } else if (found_mux and found_new) {
-            print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>        Session name\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Use instance namespace\n  -T, --test-only          Create an isolated test instance\n", .{});
+            print("Usage: hexe terminal new [OPTIONS]\n\nCreate a new terminal session\n\nOptions:\n  -n, --name <NAME>        Session name\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n      --ses-socket <PATH>  Connect to an explicit ses socket\n      --no-autostart-ses   Fail instead of starting ses automatically\n  -I, --instance <NAME>    Use instance namespace\n  -T, --test-only          Create an isolated test instance\n", .{});
         } else if (found_mux and found_attach) {
-            print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Target a specific instance\n", .{});
+            print("Usage: hexe terminal attach [OPTIONS] <name>\n\nAttach to an existing session by name or UUID prefix\n\nOptions:\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n      --ses-socket <PATH>  Connect to an explicit ses socket\n      --no-autostart-ses   Fail instead of starting ses automatically\n  -I, --instance <NAME>    Target a specific instance\n", .{});
         } else if (found_mux and found_float) {
-            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -c, --command <COMMAND>       Command to run in the float\n      --title <TEXT>            Border title for the float\n      --cwd <PATH>              Working directory for the float\n      --result-file <PATH>      Read selection from PATH after exit\n      --pass-env                Send current environment to the pod\n      --extra-env <KEY=VAL,..>   Extra environment variables (comma-separated)\n      --isolated                Run command with filesystem/cgroup isolation (deprecated, use --isolation)\n      --isolation <PROFILE>     Isolation profile: none, minimal, default, balanced, sandbox, full\n      --size <W,H,X,Y>          Size and position: width%,height%,shift_x,shift_y\n      --focus                   Dim background to focus on the float\n      --key <KEY>               Exit key to close float (default: Esc)\n                                Format: Esc, C-q (Ctrl+Q), A-q (Alt+Q), C-A-q\n  -I, --instance <NAME>         Target a specific instance\n", .{});
+            print("Usage: hexe terminal float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -c, --command <COMMAND>       Command to run in the float\n      --title <TEXT>            Border title for the float\n      --cwd <PATH>              Working directory for the float\n      --result-file <PATH>      Read selection from PATH after exit\n      --pass-env                Send current environment to the pod\n      --extra-env <KEY=VAL,..>   Extra environment variables (comma-separated)\n      --isolated                Run command with filesystem/cgroup isolation (deprecated, use --isolation)\n      --isolation <PROFILE>     Isolation profile: none, minimal, default, balanced, sandbox, full\n      --size <W,H,X,Y>          Size and position: width%,height%,shift_x,shift_y\n      --focus                   Dim background to focus on the float\n      --key <KEY>               Exit key to close float (default: Esc)\n                                Format: Esc, C-q (Ctrl+Q), A-q (Alt+Q), C-A-q\n  -I, --instance <NAME>         Target a specific instance\n", .{});
         } else if (found_shp and found_prompt) {
             print("Usage: hexe shp prompt [OPTIONS]\n\nRender shell prompt\n\nOptions:\n  -s, --status <N>    Exit status of last command\n  -d, --duration <N>  Duration of last command in ms\n  -r, --right         Render right prompt\n  -S, --shell <SHELL> Shell type (bash, zsh, fish)\n  -j, --jobs <N>      Number of background jobs\n", .{});
         } else if (found_shp and found_init) {
@@ -438,7 +442,7 @@ pub fn main() !void {
         } else if (found_pod) {
             print("Usage: hexe pod <command>\n\nPer-pane PTY daemon\n\nCommands:\n  daemon  Start a per-pane pod daemon\n  new     Create a standalone pod\n  list    List discoverable pods\n  send    Send input to a pod\n  attach  Attach to a pod\n  record  Attach and record asciicast\n  kill    Kill a pod\n  gc      Clean stale pod metadata\n", .{});
         } else if (found_mux) {
-            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new      Create new multiplexer session\n  attach   Attach to existing session\n  float    Spawn a transient float pane\n  notify   Send notification\n  send     Send keystrokes to pane\n  info     Show pane info\n  layout   Save and restore layouts\n", .{});
+            print("Usage: hexe terminal <command>\n\nTerminal frontend\n\nCommands:\n  new      Create a new terminal session\n  attach   Attach to an existing session\n  float    Spawn a transient float pane\n  notify   Send notification\n  send     Send keystrokes to pane\n  info     Show pane info\n  layout   Save and restore layouts\n", .{});
         } else if (found_shp) {
             print("Usage: hexe shp <command>\n\nShell prompt renderer\n\nCommands:\n  prompt       Render shell prompt\n  init         Print shell initialization script\n  exit-intent  Ask mux permission before shell exits\n  shell-event  Send shell metadata to mux\n  spinner      Render/animate a spinner\n", .{});
         } else if (found_config and found_validate) {
@@ -446,7 +450,7 @@ pub fn main() !void {
         } else if (found_config) {
             print("Usage: hexe config <command>\n\nConfiguration management\n\nCommands:\n  validate  Validate configuration file syntax and structure\n", .{});
         } else {
-            print("Usage: hexe <command>\n\nHexe terminal multiplexer\n\nCommands:\n  ses      Session daemon management\n  pod      Per-pane PTY daemon (internal)\n  mux      Terminal multiplexer\n  shp      Shell prompt renderer\n  pop      Popup overlays\n  config   Configuration management\n", .{});
+            print("Usage: hexe <command>\n\nHexe terminal frontend\n\nCommands:\n  ses      Session daemon management\n  pod      Per-pane PTY daemon (internal)\n  mux      Terminal frontend\n  shp      Shell prompt renderer\n  pop      Popup overlays\n  config   Configuration management\n", .{});
         }
         return;
     }
@@ -455,9 +459,9 @@ pub fn main() !void {
     parser.parse(args) catch |err| {
         if (err == error.HelpRequested) return;
         if (err == error.SubCommandRequired) {
-            // Default to 'hexe mux new' if no arguments given
+            // Default to 'hexe terminal new' if no arguments are given.
             if (args.len == 1) {
-                try runMuxNew("", false, "");
+                try runTerminalNew("", false, "", "", false);
                 return;
             }
             // Show help for the deepest command that happened
@@ -615,10 +619,10 @@ pub fn main() !void {
                 // Always isolate test sessions, even if HEXE_INSTANCE is set in the environment.
                 setGeneratedTestInstance();
             }
-            try runMuxNew(mux_new_name.*, mux_new_dbg.*, mux_new_log.*);
+            try runTerminalNew(mux_new_name.*, mux_new_dbg.*, mux_new_log.*, mux_new_ses_socket.*, mux_new_no_autostart.*);
         } else if (mux_attach.happened) {
             if (mux_attach_instance.*.len > 0) setInstanceFromCli(mux_attach_instance.*);
-            try runMuxAttach(mux_attach_name.*, mux_attach_dbg.*, mux_attach_log.*);
+            try runTerminalAttach(mux_attach_name.*, mux_attach_dbg.*, mux_attach_log.*, mux_attach_ses_socket.*, mux_attach_no_autostart.*);
         } else if (mux_float.happened) {
             if (mux_float_instance.*.len > 0) setInstanceFromCli(mux_float_instance.*);
             const exit_key = if (mux_float_exit_key.*.len > 0) mux_float_exit_key.* else "Esc";
@@ -827,11 +831,18 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
     return resp.response_type == 1;
 }
 
-fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
-    // Check if we're already inside a mux (nested session)
+fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool) core.FrontendConnectOptions {
+    return .{
+        .socket_path = if (socket_path.len > 0) socket_path else null,
+        .autostart_ses = !no_autostart_ses,
+    };
+}
+
+fn runTerminalNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
+    // Check if we're already inside a terminal session (nested session)
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
-            // We're inside a mux - show confirmation popup
+            // We're inside a terminal session - show confirmation popup
             if (!try showNestedMuxConfirmation(pane_uuid)) {
                 // User cancelled or timeout
                 return;
@@ -839,21 +850,23 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
         }
     }
 
-    // Call mux run() directly
-    try mux.run(.{
+    // Call terminal.run() directly
+    try terminal.run(.{
         .name = if (name.len > 0) name else null,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
+        .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
     });
 }
 
-fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn runTerminalAttach(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (name.len > 0) {
-        // Call mux run() directly with attach option
-        try mux.run(.{
+        // Call terminal.run() directly with attach option
+        try terminal.run(.{
             .attach = name,
             .debug = debug,
             .log_file = if (log_file.len > 0) log_file else null,
+            .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
         });
     } else {
         print("Error: session name required\n", .{});
@@ -952,7 +965,7 @@ fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, me
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
+            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
@@ -990,7 +1003,7 @@ fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, m
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
+            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
@@ -1052,7 +1065,7 @@ fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, it
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
+            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {

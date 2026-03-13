@@ -53,13 +53,14 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
         if (!first) try w.writeAll(",");
         first = false;
         const hex_id: [32]u8 = std.fmt.bytesToHex(&s.session_id, .lower);
-        try w.print("{{\"session_id\":\"{s}\",\"session_name\":\"{s}\",\"detached_at\":{d},\"mux_state\":\"", .{
+        const snapshot_json = try s.session_snapshot.toJson(allocator);
+        defer allocator.free(snapshot_json);
+        try w.print("{{\"session_id\":\"{s}\",\"session_name\":\"{s}\",\"detached_at\":{d},\"session_snapshot\":\"", .{
             &hex_id,
-            s.session_name,
+            s.session_snapshot.session_name,
             s.detached_at,
         });
-        // Escape mux_state_json as JSON string
-        for (s.mux_state_json) |c| {
+        for (snapshot_json) |c| {
             switch (c) {
                 '"' => try w.writeAll("\\\""),
                 '\\' => try w.writeAll("\\\\"),
@@ -187,13 +188,19 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
 
             const name = (obj.get("session_name") orelse continue).string;
             const detached_at: i64 = @intCast((obj.get("detached_at") orelse continue).integer);
-            const mux_state = (obj.get("mux_state") orelse continue).string;
+            const session_state = if (obj.get("session_snapshot")) |v| v.string else if (obj.get("mux_state")) |v| v.string else continue;
             const panes_arr = (obj.get("panes") orelse continue).array;
 
-            const name_owned = try ses_state.allocator.dupe(u8, name);
-            errdefer ses_state.allocator.free(name_owned);
-            const mux_owned = try ses_state.allocator.dupe(u8, mux_state);
-            errdefer ses_state.allocator.free(mux_owned);
+            const state_owned = try ses_state.allocator.dupe(u8, session_state);
+            errdefer ses_state.allocator.free(state_owned);
+            const snapshot = state.SessionSnapshot.fromJson(ses_state.allocator, state_owned) catch blk: {
+                const hex_sid: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+                break :blk try state.SessionSnapshot.initMinimal(ses_state.allocator, hex_sid, name);
+            };
+            errdefer {
+                var owned_snapshot = snapshot;
+                owned_snapshot.deinit();
+            }
 
             const pane_uuids = try ses_state.allocator.alloc([32]u8, panes_arr.items.len);
             errdefer ses_state.allocator.free(pane_uuids);
@@ -206,10 +213,9 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
                 }
             }
 
-            const detached = state.DetachedMuxState{
+            const detached = state.DetachedSessionState{
                 .session_id = sid,
-                .session_name = name_owned,
-                .mux_state_json = mux_owned,
+                .session_snapshot = snapshot,
                 .pane_uuids = pane_uuids,
                 .detached_at = detached_at,
                 .allocator = ses_state.allocator,

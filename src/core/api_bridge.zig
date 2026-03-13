@@ -785,6 +785,247 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
     return 0;
 }
 
+fn parseFloatStyleTable(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.FloatStyle {
+    if (lua.typeOf(idx) != .table) return null;
+
+    var style = config.FloatStyle{};
+
+    _ = lua.getField(idx, "border");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "chars");
+        if (lua.typeOf(-1) == .table) {
+            const parseChar = struct {
+                fn parse(l: *Lua, default: u21) u21 {
+                    const s = l.toString(-1) catch return default;
+                    if (s.len == 0) return default;
+                    const codepoint = std.unicode.utf8Decode(s[0..@min(s.len, 4)]) catch return default;
+                    return codepoint;
+                }
+            }.parse;
+
+            _ = lua.getField(-1, "top_left");
+            if (lua.typeOf(-1) == .string) style.top_left = parseChar(lua, style.top_left);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "top_right");
+            if (lua.typeOf(-1) == .string) style.top_right = parseChar(lua, style.top_right);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "bottom_left");
+            if (lua.typeOf(-1) == .string) style.bottom_left = parseChar(lua, style.bottom_left);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "bottom_right");
+            if (lua.typeOf(-1) == .string) style.bottom_right = parseChar(lua, style.bottom_right);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "horizontal");
+            if (lua.typeOf(-1) == .string) style.horizontal = parseChar(lua, style.horizontal);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "vertical");
+            if (lua.typeOf(-1) == .string) style.vertical = parseChar(lua, style.vertical);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "left_t");
+            if (lua.typeOf(-1) == .string) style.left_t = parseChar(lua, style.left_t);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "right_t");
+            if (lua.typeOf(-1) == .string) style.right_t = parseChar(lua, style.right_t);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "top_t");
+            if (lua.typeOf(-1) == .string) style.top_t = parseChar(lua, style.top_t);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "bottom_t");
+            if (lua.typeOf(-1) == .string) style.bottom_t = parseChar(lua, style.bottom_t);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "cross");
+            if (lua.typeOf(-1) == .string) style.cross = parseChar(lua, style.cross);
+            lua.pop(1);
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "shadow");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "color");
+        if (lua.typeOf(-1) == .number) {
+            const color_num = lua.toNumber(-1) catch 0;
+            if (std.math.isFinite(color_num)) {
+                style.shadow_color = @intFromFloat(std.math.clamp(color_num, 0, 255));
+            }
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "title");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "position");
+        if (lua.typeOf(-1) == .string) {
+            const pos_str = lua.toString(-1) catch "";
+            style.position = std.meta.stringToEnum(config.FloatStylePosition, pos_str);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "segments");
+        if (lua.typeOf(-1) == .table) {
+            const seg_len: usize = @intCast(lua.rawLen(-1));
+            if (seg_len > 0) {
+                const segs = allocator.alloc(config.Segment, seg_len) catch null;
+                if (segs) |arr| {
+                    var count: usize = 0;
+                    var i: i32 = 1;
+                    while (i <= @as(i32, @intCast(seg_len))) : (i += 1) {
+                        _ = lua.rawGetIndex(-1, i);
+                        if (lua.typeOf(-1) == .table) {
+                            if (parseSegment(lua, -1, allocator)) |segment| {
+                                arr[count] = segment;
+                                count += 1;
+                            }
+                        }
+                        lua.pop(1);
+                    }
+                    style.title_segments = arr[0..count];
+                }
+            }
+        }
+        lua.pop(1);
+
+        if (style.title_segments.len == 0) {
+            if (parseSegment(lua, -1, allocator)) |segment| {
+                style.module = segment;
+            }
+        }
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "position");
+    if (lua.typeOf(-1) == .string) {
+        const pos_str = lua.toString(-1) catch "";
+        style.position = std.meta.stringToEnum(config.FloatStylePosition, pos_str);
+    }
+    lua.pop(1);
+
+    return style;
+}
+
+fn applyFloatVisualOptions(comptime allow_attributes: bool, lua: *Lua, idx: i32, allocator: std.mem.Allocator, target: anytype) void {
+    _ = lua.getField(idx, "size");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "width");
+        if (lua.typeOf(-1) == .number) {
+            const w = lua.toNumber(-1) catch 0;
+            target.width_percent = @intFromFloat(w);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "height");
+        if (lua.typeOf(-1) == .number) {
+            const h = lua.toNumber(-1) catch 0;
+            target.height_percent = @intFromFloat(h);
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "padding");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "x");
+        if (lua.typeOf(-1) == .number) {
+            const x = lua.toNumber(-1) catch 0;
+            target.padding_x = @intFromFloat(x);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "y");
+        if (lua.typeOf(-1) == .number) {
+            const y = lua.toNumber(-1) catch 0;
+            target.padding_y = @intFromFloat(y);
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "color");
+    if (lua.typeOf(-1) == .table) {
+        var color = config.BorderColor{};
+        _ = lua.getField(-1, "active");
+        if (lua.typeOf(-1) == .number) {
+            const a = lua.toNumber(-1) catch 0;
+            color.active = @intFromFloat(a);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "passive");
+        if (lua.typeOf(-1) == .number) {
+            const p = lua.toNumber(-1) catch 0;
+            color.passive = @intFromFloat(p);
+        }
+        lua.pop(1);
+
+        target.color = color;
+    }
+    lua.pop(1);
+
+    if (allow_attributes) {
+        _ = lua.getField(idx, "attributes");
+        if (lua.typeOf(-1) == .table) {
+            if (target.attributes == null) {
+                target.attributes = config.FloatAttributes{};
+            }
+
+            _ = lua.getField(-1, "exclusive");
+            if (lua.typeOf(-1) == .boolean) target.attributes.?.exclusive = lua.toBoolean(-1);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "sticky");
+            if (lua.typeOf(-1) == .boolean) target.attributes.?.sticky = lua.toBoolean(-1);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "global");
+            if (lua.typeOf(-1) == .boolean) target.attributes.?.global = lua.toBoolean(-1);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "destroy");
+            if (lua.typeOf(-1) == .boolean) target.attributes.?.destroy = lua.toBoolean(-1);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "per_cwd");
+            if (lua.typeOf(-1) == .boolean) target.attributes.?.per_cwd = lua.toBoolean(-1);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "navigatable");
+            if (lua.typeOf(-1) == .boolean) target.attributes.?.navigatable = lua.toBoolean(-1);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "isolated");
+            if (lua.typeOf(-1) == .boolean) target.attributes.?.isolated = lua.toBoolean(-1);
+            lua.pop(1);
+
+            _ = lua.getField(-1, "inherit_env");
+            if (lua.typeOf(-1) == .boolean) target.attributes.?.inherit_env = lua.toBoolean(-1);
+            lua.pop(1);
+        }
+        lua.pop(1);
+    }
+
+    _ = lua.getField(idx, "style");
+    if (lua.typeOf(-1) == .table) {
+        if (target.style) |*existing| {
+            var copy = @constCast(existing);
+            copy.deinit(allocator);
+        }
+        target.style = parseFloatStyleTable(lua, -1, allocator);
+    }
+    lua.pop(1);
+}
+
 /// Lua C function: hexe.mux.float.set_defaults(opts)
 pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
@@ -805,185 +1046,68 @@ pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.c) c_int {
     if (mux.float_defaults == null) {
         mux.float_defaults = .{};
     }
+    applyFloatVisualOptions(true, lua, 1, mux.allocator, &mux.float_defaults.?);
 
-    // Parse size table
-    _ = lua.getField(1, "size");
-    if (lua.typeOf(-1) == .table) {
-        _ = lua.getField(-1, "width");
-        if (lua.typeOf(-1) == .number) {
-            const w = lua.toNumber(-1) catch 0;
-            mux.float_defaults.?.width_percent = @intFromFloat(w);
-        }
-        lua.pop(1);
+    return 0;
+}
 
-        _ = lua.getField(-1, "height");
-        if (lua.typeOf(-1) == .number) {
-            const h = lua.toNumber(-1) catch 0;
-            mux.float_defaults.?.height_percent = @intFromFloat(h);
-        }
-        lua.pop(1);
+/// Lua C function: hexe.mux.float.set_adhoc(opts)
+pub export fn hexe_mux_float_set_adhoc(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("float.set_adhoc: argument must be a table");
+        lua.raiseError();
     }
-    lua.pop(1);
 
-    // Parse padding table
-    _ = lua.getField(1, "padding");
-    if (lua.typeOf(-1) == .table) {
-        _ = lua.getField(-1, "x");
-        if (lua.typeOf(-1) == .number) {
-            const x = lua.toNumber(-1) catch 0;
-            mux.float_defaults.?.padding_x = @intFromFloat(x);
-        }
-        lua.pop(1);
+    const mux = getMuxBuilder(lua) catch {
+        _ = lua.pushString("float.set_adhoc: failed to get config builder");
+        lua.raiseError();
+    };
 
-        _ = lua.getField(-1, "y");
-        if (lua.typeOf(-1) == .number) {
-            const y = lua.toNumber(-1) catch 0;
-            mux.float_defaults.?.padding_y = @intFromFloat(y);
-        }
-        lua.pop(1);
+    if (mux.float_adhoc == null) {
+        mux.float_adhoc = .{};
     }
-    lua.pop(1);
+    applyFloatVisualOptions(false, lua, 1, mux.allocator, &mux.float_adhoc.?);
 
-    // Parse color table
-    _ = lua.getField(1, "color");
-    if (lua.typeOf(-1) == .table) {
-        var color = config.BorderColor{};
-        _ = lua.getField(-1, "active");
-        if (lua.typeOf(-1) == .number) {
-            const a = lua.toNumber(-1) catch 0;
-            color.active = @intFromFloat(a);
-        }
-        lua.pop(1);
+    return 0;
+}
 
-        _ = lua.getField(-1, "passive");
-        if (lua.typeOf(-1) == .number) {
-            const p = lua.toNumber(-1) catch 0;
-            color.passive = @intFromFloat(p);
-        }
-        lua.pop(1);
+/// Lua C function: hexe.mux.float.set_match(pattern, opts)
+pub export fn hexe_mux_float_set_match(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
 
-        mux.float_defaults.?.color = color;
+    const pattern = lua.toString(1) catch {
+        _ = lua.pushString("float.set_match: first argument must be a regex string");
+        lua.raiseError();
+    };
+    if (pattern.len == 0) {
+        _ = lua.pushString("float.set_match: regex string must not be empty");
+        lua.raiseError();
     }
-    lua.pop(1);
-
-    // Parse attributes table
-    _ = lua.getField(1, "attributes");
-    if (lua.typeOf(-1) == .table) {
-        if (mux.float_defaults) |*defaults| {
-            // Initialize attributes if not set
-            if (defaults.attributes == null) {
-                defaults.attributes = config.FloatAttributes{};
-            }
-
-            _ = lua.getField(-1, "exclusive");
-            if (lua.typeOf(-1) == .boolean) {
-                defaults.attributes.?.exclusive = lua.toBoolean(-1);
-            }
-            lua.pop(1);
-
-            _ = lua.getField(-1, "sticky");
-            if (lua.typeOf(-1) == .boolean) {
-                defaults.attributes.?.sticky = lua.toBoolean(-1);
-            }
-            lua.pop(1);
-
-            _ = lua.getField(-1, "global");
-            if (lua.typeOf(-1) == .boolean) {
-                defaults.attributes.?.global = lua.toBoolean(-1);
-            }
-            lua.pop(1);
-
-            _ = lua.getField(-1, "destroy");
-            if (lua.typeOf(-1) == .boolean) {
-                defaults.attributes.?.destroy = lua.toBoolean(-1);
-            }
-            lua.pop(1);
-
-            _ = lua.getField(-1, "per_cwd");
-            if (lua.typeOf(-1) == .boolean) {
-                defaults.attributes.?.per_cwd = lua.toBoolean(-1);
-            }
-            lua.pop(1);
-
-            _ = lua.getField(-1, "navigatable");
-            if (lua.typeOf(-1) == .boolean) {
-                defaults.attributes.?.navigatable = lua.toBoolean(-1);
-            }
-            lua.pop(1);
-
-            _ = lua.getField(-1, "isolated");
-            if (lua.typeOf(-1) == .boolean) {
-                defaults.attributes.?.isolated = lua.toBoolean(-1);
-            }
-            lua.pop(1);
-        }
+    if (lua.typeOf(2) != .table) {
+        _ = lua.pushString("float.set_match: second argument must be a table");
+        lua.raiseError();
     }
-    lua.pop(1);
 
-    // Parse style table
-    _ = lua.getField(1, "style");
-    if (lua.typeOf(-1) == .table) {
-        if (mux.float_defaults) |*defaults| {
-            // Initialize style if not set
-            if (defaults.style == null) {
-                defaults.style = config.FloatStyle{};
-            }
+    const mux = getMuxBuilder(lua) catch {
+        _ = lua.pushString("float.set_match: failed to get config builder");
+        lua.raiseError();
+    };
 
-            // Parse title segment
-            _ = lua.getField(-1, "title");
-            if (lua.typeOf(-1) == .table) {
-                // Parse position
-                _ = lua.getField(-1, "position");
-                if (lua.typeOf(-1) == .string) {
-                    const pos_str = lua.toString(-1) catch "";
-                    defaults.style.?.position = std.meta.stringToEnum(config.FloatStylePosition, pos_str);
-                }
-                lua.pop(1);
-
-                if (defaults.style.?.title_segments.len > 0) {
-                    for (defaults.style.?.title_segments) |*seg_ptr| {
-                        var seg = seg_ptr.*;
-                        freeParsedSegment(&seg, mux.allocator);
-                    }
-                    mux.allocator.free(defaults.style.?.title_segments);
-                    defaults.style.?.title_segments = &[_]config.Segment{};
-                }
-
-                _ = lua.getField(-1, "segments");
-                if (lua.typeOf(-1) == .table) {
-                    const seg_len: usize = @intCast(lua.rawLen(-1));
-                    if (seg_len > 0) {
-                        const segs = mux.allocator.alloc(config.Segment, seg_len) catch null;
-                        if (segs) |arr| {
-                            var count: usize = 0;
-                            var i: i32 = 1;
-                            while (i <= @as(i32, @intCast(seg_len))) : (i += 1) {
-                                _ = lua.rawGetIndex(-1, i);
-                                if (lua.typeOf(-1) == .table) {
-                                    if (parseSegment(lua, -1, mux.allocator)) |segment| {
-                                        arr[count] = segment;
-                                        count += 1;
-                                    }
-                                }
-                                lua.pop(1);
-                            }
-                            defaults.style.?.title_segments = arr[0..count];
-                        }
-                    }
-                }
-                lua.pop(1);
-
-                // Parse full Segment structure
-                if (defaults.style.?.title_segments.len == 0) {
-                    if (parseSegment(lua, -1, mux.allocator)) |segment| {
-                        defaults.style.?.module = segment;
-                    }
-                }
-            }
-            lua.pop(1); // pop title table
-        }
-    }
-    lua.pop(1); // pop style table
+    var rule = config_builder.MuxConfigBuilder.FloatMatchRule{
+        .pattern = mux.allocator.dupe(u8, pattern) catch {
+            _ = lua.pushString("float.set_match: failed to allocate regex pattern");
+            lua.raiseError();
+        },
+        .visual = .{},
+    };
+    errdefer rule.deinit(mux.allocator);
+    applyFloatVisualOptions(false, lua, 2, mux.allocator, &rule.visual);
+    mux.float_matches.append(mux.allocator, rule) catch {
+        _ = lua.pushString("float.set_match: failed to store float match rule");
+        lua.raiseError();
+    };
 
     return 0;
 }
@@ -1811,6 +1935,10 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         return null;
     }
 
+    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "padding", "hexe.mux.float.set_defaults / set_adhoc / set_match");
+    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "color", "hexe.mux.float.set_defaults / set_adhoc / set_match");
+    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "style", "hexe.mux.float.set_defaults / set_adhoc / set_match");
+
     // Get key (required)
     _ = lua.getField(idx, "key");
     const key_str = lua.toString(-1) catch {
@@ -1958,186 +2086,6 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         lua.pop(1);
     }
     lua.pop(1); // pop position table
-
-    // Parse padding table
-    _ = lua.getField(idx, "padding");
-    if (lua.typeOf(-1) == .table) {
-        _ = lua.getField(-1, "x");
-        if (lua.typeOf(-1) == .number) {
-            const x = lua.toNumber(-1) catch 0;
-            if (std.math.isFinite(x)) {
-                float_def.padding_x = @intFromFloat(std.math.clamp(x, 0, 255));
-            }
-        }
-        lua.pop(1);
-
-        _ = lua.getField(-1, "y");
-        if (lua.typeOf(-1) == .number) {
-            const y = lua.toNumber(-1) catch 0;
-            if (std.math.isFinite(y)) {
-                float_def.padding_y = @intFromFloat(std.math.clamp(y, 0, 255));
-            }
-        }
-        lua.pop(1);
-    }
-    lua.pop(1); // pop padding table
-
-    // Parse color table
-    _ = lua.getField(idx, "color");
-    if (lua.typeOf(-1) == .table) {
-        var color = config.BorderColor{};
-
-        _ = lua.getField(-1, "active");
-        if (lua.typeOf(-1) == .number) {
-            const a = lua.toNumber(-1) catch 1;
-            if (std.math.isFinite(a)) {
-                color.active = @intFromFloat(std.math.clamp(a, 0, 255));
-            }
-        }
-        lua.pop(1);
-
-        _ = lua.getField(-1, "passive");
-        if (lua.typeOf(-1) == .number) {
-            const p = lua.toNumber(-1) catch 237;
-            if (std.math.isFinite(p)) {
-                color.passive = @intFromFloat(std.math.clamp(p, 0, 255));
-            }
-        }
-        lua.pop(1);
-
-        float_def.color = color;
-    }
-    lua.pop(1); // pop color table
-
-    // Parse style table
-    _ = lua.getField(idx, "style");
-    if (lua.typeOf(-1) == .table) {
-        var style = config.FloatStyle{};
-
-        // Parse shadow.color
-        _ = lua.getField(-1, "shadow");
-        if (lua.typeOf(-1) == .table) {
-            _ = lua.getField(-1, "color");
-            if (lua.typeOf(-1) == .number) {
-                const color_num = lua.toNumber(-1) catch 0;
-                if (std.math.isFinite(color_num)) {
-                    style.shadow_color = @intFromFloat(std.math.clamp(color_num, 0, 255));
-                }
-            }
-            lua.pop(1); // pop color
-        }
-        lua.pop(1); // pop shadow table
-
-        // Parse border.chars
-        _ = lua.getField(-1, "border");
-        if (lua.typeOf(-1) == .table) {
-            _ = lua.getField(-1, "chars");
-            if (lua.typeOf(-1) == .table) {
-                // Helper to parse a single char field
-                const parseChar = struct {
-                    fn parse(l: *Lua, default: u21) u21 {
-                        const s = l.toString(-1) catch return default;
-                        if (s.len == 0) return default;
-                        const codepoint = std.unicode.utf8Decode(s[0..@min(s.len, 4)]) catch return default;
-                        return codepoint;
-                    }
-                }.parse;
-
-                _ = lua.getField(-1, "top_left");
-                if (lua.typeOf(-1) == .string) style.top_left = parseChar(lua, style.top_left);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "top_right");
-                if (lua.typeOf(-1) == .string) style.top_right = parseChar(lua, style.top_right);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "bottom_left");
-                if (lua.typeOf(-1) == .string) style.bottom_left = parseChar(lua, style.bottom_left);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "bottom_right");
-                if (lua.typeOf(-1) == .string) style.bottom_right = parseChar(lua, style.bottom_right);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "horizontal");
-                if (lua.typeOf(-1) == .string) style.horizontal = parseChar(lua, style.horizontal);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "vertical");
-                if (lua.typeOf(-1) == .string) style.vertical = parseChar(lua, style.vertical);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "cross");
-                if (lua.typeOf(-1) == .string) style.cross = parseChar(lua, style.cross);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "top_t");
-                if (lua.typeOf(-1) == .string) style.top_t = parseChar(lua, style.top_t);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "bottom_t");
-                if (lua.typeOf(-1) == .string) style.bottom_t = parseChar(lua, style.bottom_t);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "left_t");
-                if (lua.typeOf(-1) == .string) style.left_t = parseChar(lua, style.left_t);
-                lua.pop(1);
-
-                _ = lua.getField(-1, "right_t");
-                if (lua.typeOf(-1) == .string) style.right_t = parseChar(lua, style.right_t);
-                lua.pop(1);
-            }
-            lua.pop(1); // pop chars table
-        }
-        lua.pop(1); // pop border table
-
-        // Parse title module (simplified - full Segment parsing would be complex)
-        _ = lua.getField(-1, "title");
-        if (lua.typeOf(-1) == .table) {
-            // Parse position
-            _ = lua.getField(-1, "position");
-            if (lua.typeOf(-1) == .string) {
-                const pos_str = lua.toString(-1) catch "";
-                style.position = std.meta.stringToEnum(config.FloatStylePosition, pos_str);
-            }
-            lua.pop(1); // pop position
-
-            _ = lua.getField(-1, "segments");
-            if (lua.typeOf(-1) == .table) {
-                const seg_len: usize = @intCast(lua.rawLen(-1));
-                if (seg_len > 0) {
-                    const segs = allocator.alloc(config.Segment, seg_len) catch null;
-                    if (segs) |arr| {
-                        var count: usize = 0;
-                        var i: i32 = 1;
-                        while (i <= @as(i32, @intCast(seg_len))) : (i += 1) {
-                            _ = lua.rawGetIndex(-1, i);
-                            if (lua.typeOf(-1) == .table) {
-                                if (parseSegment(lua, -1, allocator)) |segment| {
-                                    arr[count] = segment;
-                                    count += 1;
-                                }
-                            }
-                            lua.pop(1);
-                        }
-                        style.title_segments = arr[0..count];
-                    }
-                }
-            }
-            lua.pop(1); // pop segments
-
-            // Parse full Segment structure
-            if (style.title_segments.len == 0) {
-                if (parseSegment(lua, -1, allocator)) |segment| {
-                    style.module = segment;
-                }
-            }
-        }
-        lua.pop(1); // pop title table
-
-        float_def.style = style;
-    }
-    lua.pop(1); // pop style table
 
     // Parse isolation table
     _ = lua.getField(idx, "isolation");

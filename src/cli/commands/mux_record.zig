@@ -8,7 +8,7 @@ const posix = std.posix;
 
 pub fn runMuxRecord(out_path: []const u8, capture_input: bool) !void {
     if (out_path.len == 0) {
-        print("Error: --out is required for mux record\n", .{});
+        print("Error: --out is required for terminal record\n", .{});
         return;
     }
 
@@ -16,15 +16,15 @@ pub fn runMuxRecord(out_path: []const u8, capture_input: bool) !void {
     var rec = try AsciicastWriter.init(out_path, .{
         .width = term_size.cols,
         .height = term_size.rows,
-        .title = "hexe mux record",
-        .command = "hexe mux attach",
+        .title = "hexe terminal record",
+        .command = "hexe terminal attach",
     });
     defer {
         rec.flush() catch {};
         rec.deinit();
     }
 
-    var pty = try core.Pty.spawn("hexe mux attach");
+    var pty = try core.Pty.spawn("hexe terminal attach");
     defer pty.close();
     pty.setSize(term_size.cols, term_size.rows) catch {};
 

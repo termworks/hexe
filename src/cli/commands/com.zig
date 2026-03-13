@@ -132,14 +132,14 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         const sc = std.mem.bytesToValue(wire.StatusClient, payload[off..][0..@sizeOf(wire.StatusClient)]);
         off += @sizeOf(wire.StatusClient);
 
-        // Read trailing: name, mux_state
+        // Read trailing: name, canonical session snapshot
         if (off + sc.name_len > payload.len) return;
         const name_str = if (sc.name_len > 0) payload[off .. off + sc.name_len] else "unknown";
         off += sc.name_len;
 
-        if (off + sc.mux_state_len > payload.len) return;
-        const mux_state = if (sc.mux_state_len > 0) payload[off .. off + sc.mux_state_len] else "";
-        off += sc.mux_state_len;
+        if (off + sc.session_state_len > payload.len) return;
+        const session_state = if (sc.session_state_len > 0) payload[off .. off + sc.session_state_len] else "";
+        off += sc.session_state_len;
 
         const is_last_client = (ci + 1 == status_hdr.client_count);
         const branch = if (is_last_client) "\xe2\x94\x94" else "\xe2\x94\x9c";
@@ -172,8 +172,8 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
             }
         }
 
-        if (mux_state.len > 0) {
-            printMuxTree(allocator, mux_state, child_prefix, &pane_names);
+        if (session_state.len > 0) {
+            printSessionTree(allocator, session_state, child_prefix, &pane_names);
         }
     }
 
@@ -192,9 +192,9 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         const name_str = if (de.name_len > 0) payload[off .. off + de.name_len] else "unknown";
         off += de.name_len;
 
-        if (off + de.mux_state_len > payload.len) return;
-        const mux_state = if (de.mux_state_len > 0) payload[off .. off + de.mux_state_len] else "";
-        off += de.mux_state_len;
+        if (off + de.session_state_len > payload.len) return;
+        const session_state = if (de.session_state_len > 0) payload[off .. off + de.session_state_len] else "";
+        off += de.session_state_len;
 
         // Include --instance flag if not in default instance
         const uuid_prefix = de.session_id[0..8];
@@ -205,16 +205,16 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
 
         if (instance) |instance_name| {
             if (instance_name.len > 0) {
-                print("    → hexe mux attach --instance {s} {s}\n", .{ instance_name, uuid_prefix });
+                print("    → hexe terminal attach --instance {s} {s}\n", .{ instance_name, uuid_prefix });
             } else {
-                print("    → hexe mux attach {s}\n", .{uuid_prefix});
+                print("    → hexe terminal attach {s}\n", .{uuid_prefix});
             }
         } else {
-            print("    → hexe mux attach {s}\n", .{uuid_prefix});
+            print("    → hexe terminal attach {s}\n", .{uuid_prefix});
         }
 
-        if (mux_state.len > 0) {
-            printMuxTree(allocator, mux_state, "    ", null);
+        if (session_state.len > 0) {
+            printSessionTree(allocator, session_state, "    ", null);
         }
     }
 
@@ -363,7 +363,7 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
         } else return;
     } else {
         const env_uuid = posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Not inside a hexe mux session (use --uuid to query specific pane)\n", .{});
+            print("Not inside a hexe terminal session (use --uuid to query a specific pane)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
@@ -610,7 +610,7 @@ fn resolveRelatedPane(allocator: std.mem.Allocator, want_creator: bool) ?[32]u8 
     const posix = std.posix;
 
     const current_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: --creator/--last requires running inside hexe mux\n", .{});
+        print("Error: --creator/--last requires running inside hexe terminal\n", .{});
         return null;
     };
     const parsed_current = parseUuid32Hex(current_uuid) orelse return null;
@@ -645,60 +645,64 @@ fn resolveRelatedPane(allocator: std.mem.Allocator, want_creator: bool) ?[32]u8 
 
 // ─── End binary CLI helpers ────────────────────────────────────────────────
 
-pub fn printMuxTree(allocator: std.mem.Allocator, json: []const u8, indent: []const u8, pane_name_map: ?*const std.StringHashMap([]const u8)) void {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return;
-    defer parsed.deinit();
+fn appendSessionLayoutPanes(
+    allocator: std.mem.Allocator,
+    node: ?*const core.session_model.SessionLayoutNode,
+    out: *std.ArrayList([32]u8),
+) void {
+    const root = node orelse return;
+    switch (root.*) {
+        .pane => |uuid| out.append(allocator, uuid) catch {},
+        .split => |split| {
+            appendSessionLayoutPanes(allocator, split.first, out);
+            appendSessionLayoutPanes(allocator, split.second, out);
+        },
+    }
+}
 
-    const root = parsed.value.object;
-    const floats_arr = if (root.get("floats")) |fv| fv.array.items else &[_]std.json.Value{};
+pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: []const u8, pane_name_map: ?*const std.StringHashMap([]const u8)) void {
+    var snapshot = core.session_model.SessionSnapshot.fromJson(allocator, json) catch return;
+    defer snapshot.deinit();
 
-    const active_tab: usize = if (root.get("active_tab")) |at| @as(usize, @intCast(at.integer)) else 0;
-
-    // Precompute global floats (no parent_tab).
     var global_floats: std.ArrayList(usize) = .empty;
     defer global_floats.deinit(allocator);
-    for (floats_arr, 0..) |float_val, fi| {
-        const float = float_val.object;
-        if (float.get("parent_tab") == null) {
+    for (snapshot.floats.items, 0..) |float_state, fi| {
+        if (float_state.parent_tab == null) {
             global_floats.append(allocator, fi) catch {};
         }
     }
 
-    const tabs_items = if (root.get("tabs")) |tv| tv.array.items else &[_]std.json.Value{};
-
-    // Top-level children under mux: tabs, then global floats.
-    const top_count: usize = tabs_items.len + global_floats.items.len;
+    const top_count: usize = snapshot.tabs.items.len + global_floats.items.len;
     var top_index: usize = 0;
 
-    // Tabs
-    for (tabs_items, 0..) |tab_val, ti| {
-        const tab = tab_val.object;
-        const tname = if (tab.get("name")) |n| n.string else "tab";
-        const tab_uuid = if (tab.get("uuid")) |u| u.string else "?";
-        const marker = if (ti == active_tab) "*" else " ";
+    for (snapshot.tabs.items, 0..) |tab, ti| {
+        const marker = if (ti == snapshot.active_tab) "*" else " ";
 
         const is_last_top = (top_index + 1 == top_count);
         const branch = if (is_last_top) "└" else "├";
 
         var prefix_buf: [256]u8 = undefined;
         const prefix = std.fmt.bufPrint(&prefix_buf, "{s}{s}─ ", .{ indent, branch }) catch indent;
-        printTreeNode(prefix, marker, ansi.TAB, "tab", tname, tab_uuid[0..@min(8, tab_uuid.len)]);
+        printTreeNode(prefix, marker, ansi.TAB, "tab", tab.name, tab.uuid[0..8]);
 
-        // Children of tab: splits + tab-bound floats.
-        var children: std.ArrayList(struct { kind: enum { split, float }, obj: std.json.ObjectMap }) = .empty;
+        var split_uuids: std.ArrayList([32]u8) = .empty;
+        defer split_uuids.deinit(allocator);
+        appendSessionLayoutPanes(allocator, tab.root, &split_uuids);
+
+        var children: std.ArrayList(struct {
+            kind: enum { split, float },
+            uuid: [32]u8,
+        }) = .empty;
         defer children.deinit(allocator);
 
-        if (tab.get("splits")) |splits_val| {
-            for (splits_val.array.items) |split_val| {
-                children.append(allocator, .{ .kind = .split, .obj = split_val.object }) catch {};
-            }
+        for (split_uuids.items) |uuid| {
+            children.append(allocator, .{ .kind = .split, .uuid = uuid }) catch {};
         }
 
-        for (floats_arr) |float_val| {
-            const float = float_val.object;
-            if (float.get("parent_tab")) |pt| {
-                if (pt == .integer and @as(usize, @intCast(pt.integer)) == ti) {
-                    children.append(allocator, .{ .kind = .float, .obj = float }) catch {};
+        for (snapshot.floats.items) |float_state| {
+            if (float_state.parent_tab) |parent_tab| {
+                if (parent_tab == ti) {
+                    children.append(allocator, .{ .kind = .float, .uuid = float_state.pane_uuid }) catch {};
                 }
             }
         }
@@ -714,15 +718,21 @@ pub fn printMuxTree(allocator: std.mem.Allocator, json: []const u8, indent: []co
                 var lp_buf: [256]u8 = undefined;
                 const lp = std.fmt.bufPrint(&lp_buf, "{s}{s}─ ", .{ child_indent, cbranch }) catch child_indent;
 
-                const uuid = if (child.obj.get("uuid")) |u| u.string else "?";
-                const uuid8 = uuid[0..@min(8, uuid.len)];
-                const focused = if (child.obj.get("focused")) |f| f.bool else false;
-                const sym = if (focused) ">" else " ";
-                const pname = if (pane_name_map) |m| (m.get(uuid) orelse "-") else "-";
+                const sym = switch (child.kind) {
+                    .split => if (tab.focused_pane_uuid) |focused_uuid|
+                        if (std.mem.eql(u8, &focused_uuid, &child.uuid)) ">" else " "
+                    else
+                        " ",
+                    .float => if (snapshot.active_float_uuid) |focused_uuid|
+                        if (std.mem.eql(u8, &focused_uuid, &child.uuid)) ">" else " "
+                    else
+                        " ",
+                };
+                const pname = if (pane_name_map) |m| (m.get(child.uuid[0..]) orelse "-") else "-";
 
                 switch (child.kind) {
-                    .split => printTreeNode(lp, sym, ansi.SPLIT, "split", pname, uuid8),
-                    .float => printTreeNode(lp, sym, ansi.FLOAT, "float", pname, uuid8),
+                    .split => printTreeNode(lp, sym, ansi.SPLIT, "split", pname, child.uuid[0..8]),
+                    .float => printTreeNode(lp, sym, ansi.FLOAT, "float", pname, child.uuid[0..8]),
                 }
             }
         }
@@ -730,20 +740,19 @@ pub fn printMuxTree(allocator: std.mem.Allocator, json: []const u8, indent: []co
         top_index += 1;
     }
 
-    // Global floats
     for (global_floats.items) |fi| {
-        const float = floats_arr[fi].object;
-        const uuid = if (float.get("uuid")) |u| u.string else "?";
-        const uuid8 = uuid[0..@min(8, uuid.len)];
-        const focused = if (float.get("focused")) |f| f.bool else false;
-        const sym = if (focused) ">" else " ";
-        const pname = if (pane_name_map) |m| (m.get(uuid) orelse "-") else "-";
+        const float_state = snapshot.floats.items[fi];
+        const sym = if (snapshot.active_float_uuid) |focused_uuid|
+            if (std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid)) ">" else " "
+        else
+            " ";
+        const pname = if (pane_name_map) |m| (m.get(float_state.pane_uuid[0..]) orelse "-") else "-";
 
         const is_last_top = (top_index + 1 == top_count);
         const branch = if (is_last_top) "└" else "├";
         var prefix_buf: [256]u8 = undefined;
         const prefix = std.fmt.bufPrint(&prefix_buf, "{s}{s}─ ", .{ indent, branch }) catch indent;
-        printTreeNode(prefix, sym, ansi.FLOAT, "float", pname, uuid8);
+        printTreeNode(prefix, sym, ansi.FLOAT, "float", pname, float_state.pane_uuid[0..8]);
 
         top_index += 1;
     }
@@ -1019,9 +1028,9 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const name_str = if (sc.name_len > 0) payload[off .. off + sc.name_len] else "";
         off += sc.name_len;
 
-        if (off + sc.mux_state_len > payload.len) break;
-        const mux_state = if (sc.mux_state_len > 0) payload[off .. off + sc.mux_state_len] else "{}";
-        off += sc.mux_state_len;
+        if (off + sc.session_state_len > payload.len) break;
+        const session_state = if (sc.session_state_len > 0) payload[off .. off + sc.session_state_len] else "{}";
+        off += sc.session_state_len;
 
         stdout.writeAll("{\"name\":\"") catch return;
         writeJsonStr(stdout, name_str);
@@ -1031,7 +1040,7 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const pane_str = std.fmt.bufPrint(&buf, "{d}", .{sc.pane_count}) catch continue;
         stdout.writeAll(pane_str) catch return;
         stdout.writeAll(",\"state\":") catch return;
-        stdout.writeAll(mux_state) catch return;
+        stdout.writeAll(session_state) catch return;
 
         // Skip pane entries
         var pi: u16 = 0;
@@ -1059,9 +1068,9 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const name_str = if (de.name_len > 0) payload[off .. off + de.name_len] else "";
         off += de.name_len;
 
-        if (off + de.mux_state_len > payload.len) break;
-        const mux_state = if (de.mux_state_len > 0) payload[off .. off + de.mux_state_len] else "{}";
-        off += de.mux_state_len;
+        if (off + de.session_state_len > payload.len) break;
+        const session_state = if (de.session_state_len > 0) payload[off .. off + de.session_state_len] else "{}";
+        off += de.session_state_len;
 
         stdout.writeAll("{\"name\":\"") catch return;
         writeJsonStr(stdout, name_str);
@@ -1071,7 +1080,7 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const pane_str = std.fmt.bufPrint(&buf, "{d}", .{de.pane_count}) catch continue;
         stdout.writeAll(pane_str) catch return;
         stdout.writeAll(",\"state\":") catch return;
-        stdout.writeAll(mux_state) catch return;
+        stdout.writeAll(session_state) catch return;
         stdout.writeAll("}") catch return;
     }
     stdout.writeAll("],") catch return;
@@ -1258,7 +1267,7 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
 
     // Get current pane UUID.
     const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: not inside a hexe mux session (HEXE_PANE_UUID not set)\n", .{});
+        print("Error: not inside a hexe terminal session (HEXE_PANE_UUID not set)\n", .{});
         return;
     };
     const uuid_arr = parseUuid32Hex(uuid_str) orelse {
@@ -1266,7 +1275,7 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
         return;
     };
 
-    // Connect to SES and request mux state.
+    // Connect to SES and request the current layout export.
     const fd = connectSesCliChannel(allocator) orelse return;
     defer posix.close(fd);
 
@@ -1310,20 +1319,20 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
         return;
     }
 
-    // Read raw mux state JSON.
-    const mux_state = allocator.alloc(u8, hdr.payload_len) catch {
+    // Read raw layout export JSON.
+    const layout_export = allocator.alloc(u8, hdr.payload_len) catch {
         print("Error: allocation failed\n", .{});
         return;
     };
-    defer allocator.free(mux_state);
-    wire.readExact(fd, mux_state) catch {
-        print("Error: failed to read mux state\n", .{});
+    defer allocator.free(layout_export);
+    wire.readExact(fd, layout_export) catch {
+        print("Error: failed to read layout export\n", .{});
         return;
     };
 
-    // Parse mux state, find active tab, extract tree + splits for CWD lookup.
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, mux_state, .{}) catch {
-        print("Error: failed to parse mux state\n", .{});
+    // Parse the layout export, find the active tab, and extract tree + splits for CWD lookup.
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, layout_export, .{}) catch {
+        print("Error: failed to parse layout export\n", .{});
         return;
     };
     defer parsed.deinit();
@@ -1331,14 +1340,14 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     const root_obj = switch (parsed.value) {
         .object => |o| o,
         else => {
-            print("Error: invalid mux state format\n", .{});
+            print("Error: invalid layout export format\n", .{});
             return;
         },
     };
 
     // Find active tab.
     const active_tab_val = root_obj.get("active_tab") orelse {
-        print("Error: no active_tab in mux state\n", .{});
+        print("Error: no active_tab in layout export\n", .{});
         return;
     };
     const active_tab_idx: usize = switch (active_tab_val) {
@@ -1347,7 +1356,7 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     };
 
     const tabs_val = root_obj.get("tabs") orelse {
-        print("Error: no tabs in mux state\n", .{});
+        print("Error: no tabs in layout export\n", .{});
         return;
     };
     const tabs_arr = switch (tabs_val) {
@@ -1588,7 +1597,7 @@ pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
 
     // Get current pane UUID.
     const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: not inside a hexe mux session (HEXE_PANE_UUID not set)\n", .{});
+        print("Error: not inside a hexe terminal session (HEXE_PANE_UUID not set)\n", .{});
         return;
     };
     const uuid_arr = parseUuid32Hex(uuid_str) orelse {

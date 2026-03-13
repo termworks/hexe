@@ -122,6 +122,60 @@ if section == nil or section == "mux" then
     },
   })
 
+  hx.mux.float.set_adhoc({
+    size = { width = 82, height = 72 },
+    color = { active = 4, passive = 237 },
+    style = {
+      title = {
+        name = "title",
+        value = function(ctx)
+          local t = hx.segment.title(ctx)
+          return {
+            { text = " ", style = "bg:0 fg:4" },
+            { text = t, style = "bg:4 fg:0" },
+            { text = " ", style = "bg:0 fg:4" },
+          }
+        end,
+        position = "topright",
+      },
+    },
+  })
+
+  hx.mux.float.set_match("^explorer$", {
+    color = { active = 1, passive = 237 },
+    padding = { x = 2, y = 1 },
+    style = {
+      shadow = { color = 236 },
+      border = {
+        chars = {
+          top_left = "╔",
+          top_right = "╗",
+          bottom_left = "╚",
+          bottom_right = "╝",
+          horizontal = "═",
+          vertical = "║",
+          left_t = "╠",
+          right_t = "╣",
+          top_t = "╦",
+          bottom_t = "╩",
+          cross = "╬",
+        },
+      },
+      title = {
+        name = "title",
+        value = function(ctx)
+          local t = hx.segment.title(ctx)
+          return {
+            { text = " ", style = "bg:0 fg:1" },
+            { text = t, style = "bg:1 fg:0" },
+            { text = " ", style = "bg:0 fg:1" },
+          }
+        end,
+        position = "topright",
+      },
+    },
+  })
+
   -- Splits configuration
   hx.mux.splits.setup({
     color = { active = 1, passive = 237 },

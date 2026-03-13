@@ -339,6 +339,6 @@ hx.mux.config.setup({
 Send with CLI:
 
 ```sh
-hexe mux notify "Build complete"
-hexe mux notify --broadcast "Deploying..."
+hexe terminal notify "Build complete"
+hexe terminal notify --broadcast "Deploying..."
 ```

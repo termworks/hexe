@@ -13,6 +13,8 @@ const hexe_mux_config_set = api_bridge.hexe_mux_config_set;
 const hexe_mux_config_setup = api_bridge.hexe_mux_config_setup;
 const hexe_mux_keymap_set = api_bridge.hexe_mux_keymap_set;
 const hexe_mux_float_set_defaults = api_bridge.hexe_mux_float_set_defaults;
+const hexe_mux_float_set_adhoc = api_bridge.hexe_mux_float_set_adhoc;
+const hexe_mux_float_set_match = api_bridge.hexe_mux_float_set_match;
 const hexe_mux_float_define = api_bridge.hexe_mux_float_define;
 const hexe_mux_tabs_add_segment = api_bridge.hexe_mux_tabs_add_segment;
 const hexe_mux_tabs_set_status = api_bridge.hexe_mux_tabs_set_status;
@@ -733,10 +735,14 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "set");
     lua.setField(-2, "keymap");
 
-    // hexe.mux.float = { set_defaults = fn, define = fn }
-    lua.createTable(0, 2);
+    // hexe.mux.float = { set_defaults = fn, set_adhoc = fn, set_match = fn, define = fn }
+    lua.createTable(0, 4);
     lua.pushFunction(hexe_mux_float_set_defaults);
     lua.setField(-2, "set_defaults");
+    lua.pushFunction(hexe_mux_float_set_adhoc);
+    lua.setField(-2, "set_adhoc");
+    lua.pushFunction(hexe_mux_float_set_match);
+    lua.setField(-2, "set_match");
     lua.pushFunction(hexe_mux_float_define);
     lua.setField(-2, "define");
     lua.setField(-2, "float");

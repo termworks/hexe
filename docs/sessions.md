@@ -10,17 +10,17 @@ Sessions survive mux restarts. Detach and reattach freely — your shells keep r
 
 ```sh
 # Start a new session
-hexe mux new
+hexe terminal new
 
 # Start a named session
-hexe mux new --name work
+hexe terminal new --name work
 
 # List sessions
 hexe ses list
 
 # Attach to a session (by name or UUID prefix)
-hexe mux attach work
-hexe mux attach a3f2
+hexe terminal attach work
+hexe terminal attach a3f2
 
 # Detach from current session (leaves everything running)
 # (default keybind: Alt+Shift+D release)

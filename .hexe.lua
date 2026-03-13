@@ -2,18 +2,18 @@ return {
   keybingings = {},
   layout = {
     name = "hexe",
-    root = "/doc/code/tools/hexe",
+    root = "/home/bresilla/data/code/tools/hexe",
     tabs = {
       {
-        name = "tau-1",
+        name = "hexe-1",
         split = {
-        dir = "horizontal",
-        { size = 50 },
-        { size = 50 },
-      },
+          dir = "horizontal",
+          { size = 50 },
+          { size = 50 },
+        },
       },
       {
-        name = "tau-2",
+        name = "hexe-2",
       }
     },
   }

@@ -179,6 +179,108 @@ pub const FloatStyle = struct {
     position: ?FloatStylePosition = null,
     module: ?Segment = null,
     title_segments: []const Segment = &[_]Segment{},
+
+    pub fn deinit(self: *FloatStyle, allocator: std.mem.Allocator) void {
+        const freeSegment = struct {
+            fn call(seg: *Segment, a: std.mem.Allocator) void {
+                a.free(@constCast(seg.name));
+                if (seg.outputs.len > 0) {
+                    for (seg.outputs) |*out| {
+                        a.free(@constCast(out.style));
+                        a.free(@constCast(out.format));
+                    }
+                    a.free(seg.outputs);
+                }
+                if (seg.command) |cmd| a.free(@constCast(cmd));
+                if (seg.builtin) |b| a.free(@constCast(b));
+                if (seg.progress_show_when) |s| a.free(@constCast(s));
+                if (seg.on_click) |cmd| a.free(@constCast(cmd));
+                if (seg.on_right_click) |cmd| a.free(@constCast(cmd));
+                if (seg.on_middle_click) |cmd| a.free(@constCast(cmd));
+                if (seg.button_active_bash) |cmd| a.free(@constCast(cmd));
+                if (seg.button_left_style) |s| a.free(@constCast(s));
+                if (seg.button_middle_style) |s| a.free(@constCast(s));
+                if (seg.button_right_style) |s| a.free(@constCast(s));
+                if (seg.when) |*w| {
+                    var when = @constCast(w);
+                    when.deinit(a);
+                }
+                if (seg.spinner) |*sp| {
+                    var spinner = @constCast(sp);
+                    spinner.deinit(a);
+                }
+                a.free(@constCast(seg.active_style));
+                a.free(@constCast(seg.inactive_style));
+                a.free(@constCast(seg.separator));
+                a.free(@constCast(seg.separator_style));
+                a.free(@constCast(seg.tab_title));
+                a.free(@constCast(seg.left_arrow));
+                a.free(@constCast(seg.right_arrow));
+            }
+        }.call;
+
+        if (self.module) |*mod| {
+            freeSegment(@constCast(mod), allocator);
+        }
+        if (self.title_segments.len > 0) {
+            for (self.title_segments) |*seg_ptr| {
+                freeSegment(@constCast(seg_ptr), allocator);
+            }
+            allocator.free(self.title_segments);
+        }
+        self.* = .{};
+    }
+};
+
+/// Border color config (active/passive)
+pub const BorderColor = struct {
+    active: u8 = 1,
+    passive: u8 = 237,
+};
+
+pub const FloatVisualPreset = struct {
+    width_percent: u8 = 60,
+    height_percent: u8 = 60,
+    padding_x: u8 = 1,
+    padding_y: u8 = 0,
+    color: BorderColor = .{},
+    style: ?FloatStyle = null,
+
+    pub fn deinit(self: *FloatVisualPreset, allocator: std.mem.Allocator) void {
+        if (self.style) |*style| {
+            var copy = @constCast(style);
+            copy.deinit(allocator);
+        }
+        self.* = .{};
+    }
+};
+
+pub const FloatVisualRule = struct {
+    width_percent: ?u8 = null,
+    height_percent: ?u8 = null,
+    padding_x: ?u8 = null,
+    padding_y: ?u8 = null,
+    color: ?BorderColor = null,
+    style: ?FloatStyle = null,
+
+    pub fn deinit(self: *FloatVisualRule, allocator: std.mem.Allocator) void {
+        if (self.style) |*style| {
+            var copy = @constCast(style);
+            copy.deinit(allocator);
+        }
+        self.* = .{};
+    }
+};
+
+pub const FloatMatchRule = struct {
+    pattern: []const u8,
+    visual: FloatVisualRule = .{},
+
+    pub fn deinit(self: *FloatMatchRule, allocator: std.mem.Allocator) void {
+        allocator.free(@constCast(self.pattern));
+        self.visual.deinit(allocator);
+        self.* = undefined;
+    }
 };
 
 pub const FloatAttributes = struct {
@@ -224,12 +326,6 @@ pub const FloatDef = struct {
     style: ?FloatStyle = null,
     // Per-float isolation config (null = use global isolation)
     isolation: ?IsolationConfig = null,
-};
-
-/// Border color config (active/passive)
-pub const BorderColor = struct {
-    active: u8 = 1,
-    passive: u8 = 237,
 };
 
 /// Split border style with junction characters
@@ -363,64 +459,11 @@ pub const LayoutFloatDef = struct {
     height_percent: ?u8 = null,
     pos_x: ?u8 = null,
     pos_y: ?u8 = null,
-    padding_x: ?u8 = null,
-    padding_y: ?u8 = null,
-    color: ?BorderColor = null,
-    style: ?FloatStyle = null,
     isolation: ?IsolationConfig = null,
 
     pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
         if (self.command) |c| allocator.free(@constCast(c));
         if (self.title) |t| allocator.free(@constCast(t));
-        if (self.style) |*style_ptr| {
-            const freeSegment = struct {
-                fn call(seg: *Segment, a: std.mem.Allocator) void {
-                    a.free(@constCast(seg.name));
-                    if (seg.outputs.len > 0) {
-                        for (seg.outputs) |*out| {
-                            a.free(@constCast(out.style));
-                            a.free(@constCast(out.format));
-                        }
-                        a.free(seg.outputs);
-                    }
-                    if (seg.command) |cmd| a.free(@constCast(cmd));
-                    if (seg.builtin) |b| a.free(@constCast(b));
-                    if (seg.progress_show_when) |s| a.free(@constCast(s));
-                    if (seg.on_click) |cmd| a.free(@constCast(cmd));
-                    if (seg.on_right_click) |cmd| a.free(@constCast(cmd));
-                    if (seg.on_middle_click) |cmd| a.free(@constCast(cmd));
-                    if (seg.button_active_bash) |cmd| a.free(@constCast(cmd));
-                    if (seg.button_left_style) |s| a.free(@constCast(s));
-                    if (seg.button_middle_style) |s| a.free(@constCast(s));
-                    if (seg.button_right_style) |s| a.free(@constCast(s));
-                    if (seg.when) |*w| {
-                        var when = @constCast(w);
-                        when.deinit(a);
-                    }
-                    if (seg.spinner) |*sp| {
-                        var spinner = @constCast(sp);
-                        spinner.deinit(a);
-                    }
-                    a.free(@constCast(seg.active_style));
-                    a.free(@constCast(seg.inactive_style));
-                    a.free(@constCast(seg.separator));
-                    a.free(@constCast(seg.separator_style));
-                    a.free(@constCast(seg.tab_title));
-                    a.free(@constCast(seg.left_arrow));
-                    a.free(@constCast(seg.right_arrow));
-                }
-            }.call;
-
-            if (style_ptr.module) |*mod| {
-                freeSegment(@constCast(mod), allocator);
-            }
-            if (style_ptr.title_segments.len > 0) {
-                for (style_ptr.title_segments) |*seg_ptr| {
-                    freeSegment(@constCast(seg_ptr), allocator);
-                }
-                allocator.free(style_ptr.title_segments);
-            }
-        }
         if (self.isolation) |*iso| {
             var isolation = @constCast(iso);
             isolation.deinit(allocator);
@@ -504,17 +547,16 @@ pub const SesConfig = struct {
 
         runtime.loadConfig(config_path) catch return config;
 
-        // Use ConfigBuilder API approach
-        if (runtime.getBuilder()) |builder| {
-            if (builder.ses) |ses_builder| {
-                config = ses_builder.build() catch config;
+        if (!shouldLoadLocalConfig()) {
+            if (runtime.getBuilder()) |builder| {
+                if (builder.ses) |ses_builder| {
+                    config = ses_builder.build() catch config;
+                }
             }
+            // Pop global config return value (if any) from stack
+            runtime.pop();
+            return config;
         }
-
-        // Pop config return value (if any) from stack
-        runtime.pop();
-
-        if (!shouldLoadLocalConfig()) return config;
 
         // Try to load local .hexe.lua from current directory
         const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
@@ -523,16 +565,32 @@ pub const SesConfig = struct {
         // Check if local config exists
         std.fs.cwd().access(local_path, .{}) catch {
             // No local config, use global only
+            if (runtime.getBuilder()) |builder| {
+                if (builder.ses) |ses_builder| {
+                    config = ses_builder.build() catch config;
+                }
+            }
+            // Pop global config return value (if any) from stack
+            runtime.pop();
             return config;
         };
 
         // Local config exists, load it and merge/overwrite
         runtime.loadConfig(local_path) catch {
             // Failed to load local config, but global is already loaded
+            if (runtime.getBuilder()) |builder| {
+                if (builder.ses) |ses_builder| {
+                    config = ses_builder.build() catch config;
+                }
+            }
+            // Pop global config return value (if any) from stack
+            runtime.pop();
             return config;
         };
 
-        // Use ConfigBuilder API approach for local config (merge/overwrite)
+        // Build once after both global and local config have run. Building the
+        // SES builder eagerly consumes layout definitions, so a second build
+        // after loading local config would otherwise wipe the global layouts.
         if (runtime.getBuilder()) |builder| {
             if (builder.ses) |ses_builder| {
                 config = ses_builder.build() catch config;
@@ -706,13 +764,9 @@ pub const Config = struct {
     confirm_on_close: bool = false, // When Alt+x closes a float/tab
 
     // Floating pane defaults
-    float_width_percent: u8 = 60,
-    float_height_percent: u8 = 60,
-    float_padding_x: u8 = 1, // left/right padding inside border
-    float_padding_y: u8 = 0, // top/bottom padding inside border
-    // Float borders default to active=1, passive=237.
-    float_color: BorderColor = .{},
-    float_style_default: ?FloatStyle = null,
+    float_named_defaults: FloatVisualPreset = .{},
+    float_adhoc_defaults: FloatVisualPreset = .{},
+    float_match_rules: []FloatMatchRule = &[_]FloatMatchRule{},
     // Default float attributes (from mux.float.attributes)
     float_default_attributes: FloatAttributes = .{},
 
@@ -939,6 +993,16 @@ pub const Config = struct {
                 rt.deinit();
                 alloc.destroy(rt);
                 self._lua_runtime = null;
+            }
+
+            self.float_named_defaults.deinit(alloc);
+            self.float_adhoc_defaults.deinit(alloc);
+            if (self.float_match_rules.len > 0) {
+                for (self.float_match_rules) |*rule| {
+                    var mutable_rule = @constCast(rule);
+                    mutable_rule.deinit(alloc);
+                }
+                alloc.free(self.float_match_rules);
             }
         }
     }
@@ -1376,12 +1440,12 @@ fn parseFloat(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocato
     }
 
     // Apply to config defaults
-    if (width) |w| config.float_width_percent = w;
-    if (height) |h| config.float_height_percent = h;
-    if (pad_x) |p| config.float_padding_x = p;
-    if (pad_y) |p| config.float_padding_y = p;
-    if (color) |c| config.float_color = c;
-    if (style) |s| config.float_style_default = s;
+    if (width) |w| config.float_named_defaults.width_percent = w;
+    if (height) |h| config.float_named_defaults.height_percent = h;
+    if (pad_x) |p| config.float_named_defaults.padding_x = p;
+    if (pad_y) |p| config.float_named_defaults.padding_y = p;
+    if (color) |c| config.float_named_defaults.color = c;
+    if (style) |s| config.float_named_defaults.style = s;
 }
 
 fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyle {

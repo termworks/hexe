@@ -63,8 +63,10 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
 
     debugLog("txlog: checking {d} entries for incomplete transactions", .{entries.items.len});
 
-    // Find incomplete transactions (start without commit)
-    var incomplete = try txlog.findIncompleteTransactions(entries.items);
+    // Find incomplete transactions (start without commit) and keep the
+    // operation type so recovery can roll back detaches without destroying a
+    // still-valid detached session after a failed reattach.
+    var incomplete = try txlog.findIncompleteOperations(entries.items);
     defer incomplete.deinit(allocator);
 
     if (incomplete.items.len == 0) {
@@ -76,23 +78,34 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
 
     // Handle incomplete transactions: remove detached sessions
     debugLog("txlog: found {d} incomplete transactions, rolling back", .{incomplete.items.len});
-    for (incomplete.items) |session_id| {
-        const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
-        debugLog("txlog: removing incomplete session {s}", .{hex_id[0..8]});
+    for (incomplete.items) |entry| {
+        const hex_id: [32]u8 = std.fmt.bytesToHex(&entry.session_id, .lower);
+        switch (entry.tx_type) {
+            .detach_start => {
+                debugLog("txlog: removing incomplete detached session {s}", .{hex_id[0..8]});
 
-        // Remove from detached sessions (best-effort cleanup)
-        ses_state.removeDetachedSession(session_id);
+                // Remove from detached sessions (best-effort cleanup)
+                ses_state.removeDetachedSession(entry.session_id);
 
-        // Mark all panes with this session_id as orphaned
-        var pane_iter = ses_state.panes.valueIterator();
-        while (pane_iter.next()) |pane| {
-            if (pane.session_id) |sid| {
-                if (std.mem.eql(u8, &sid, &session_id)) {
-                    _ = pane.transitionState(.orphaned, "txlog recovery (incomplete transaction)");
-                    pane.session_id = null;
-                    debugLog("txlog: marked pane {s} as orphaned", .{pane.uuid[0..8]});
+                // Mark all panes with this session_id as orphaned
+                var pane_iter = ses_state.panes.valueIterator();
+                while (pane_iter.next()) |pane| {
+                    if (pane.session_id) |sid| {
+                        if (std.mem.eql(u8, &sid, &entry.session_id)) {
+                            _ = pane.transitionState(.orphaned, "txlog recovery (incomplete detach)");
+                            pane.session_id = null;
+                            debugLog("txlog: marked pane {s} as orphaned", .{pane.uuid[0..8]});
+                        }
+                    }
                 }
-            }
+            },
+            .reattach_start => {
+                // Reattach start does not mutate detached session storage.
+                // If SES dies before the client re-registers with the restored
+                // session ID, the safe rollback is to keep the detached session.
+                debugLog("txlog: preserving detached session after incomplete reattach {s}", .{hex_id[0..8]});
+            },
+            else => {},
         }
     }
 
@@ -292,24 +305,23 @@ fn printUsage() !void {
 fn sendNotify(allocator: std.mem.Allocator, message: []const u8, target_uuid: ?[]const u8) !void {
     const wire = core.wire;
 
-    const socket_path = try ipc.getSesSocketPath(allocator);
-    defer allocator.free(socket_path);
-
-    var client = ipc.Client.connect(socket_path) catch |err| {
-        if (err == error.ConnectionRefused or err == error.FileNotFound) {
-            print("ses daemon is not running\n", .{});
-            return;
-        }
-        return err;
-    };
-    defer client.close();
-    const fd = client.fd;
-
-    // CLI handshake
-    const handshake: [1]u8 = .{wire.SES_HANDSHAKE_CLI};
-    wire.writeAll(fd, &handshake) catch return;
-
     if (target_uuid) |uuid| {
+        const socket_path = try ipc.getSesSocketPath(allocator);
+        defer allocator.free(socket_path);
+
+        var client = ipc.Client.connect(socket_path) catch |err| {
+            if (err == error.ConnectionRefused or err == error.FileNotFound) {
+                print("ses daemon is not running\n", .{});
+                return;
+            }
+            return err;
+        };
+        defer client.close();
+        const fd = client.fd;
+
+        const handshake: [1]u8 = .{wire.SES_HANDSHAKE_CLI};
+        wire.writeAll(fd, &handshake) catch return;
+
         if (uuid.len >= 32) {
             var tn: wire.TargetedNotify = .{
                 .uuid = undefined,
@@ -320,8 +332,13 @@ fn sendNotify(allocator: std.mem.Allocator, message: []const u8, target_uuid: ?[
             wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch return;
         }
     } else {
-        const notify = wire.Notify{ .msg_len = @intCast(message.len) };
-        wire.writeControlWithTrail(fd, .notify, std.mem.asBytes(&notify), message) catch return;
+        core.FrontendTransportHelpers.sendNotify(allocator, .{ .local_ipc = .{} }, message) catch |err| {
+            if (err == error.ConnectionRefused or err == error.FileNotFound) {
+                print("ses daemon is not running\n", .{});
+                return;
+            }
+            return err;
+        };
     }
     print("Notification sent\n", .{});
 }
@@ -387,9 +404,9 @@ fn listStatus(allocator: std.mem.Allocator, full_mode: bool) !void {
         const name_str = if (sc.name_len > 0) payload[off .. off + sc.name_len] else "unknown";
         off += sc.name_len;
 
-        if (off + sc.mux_state_len > payload.len) return;
-        const mux_state = if (sc.mux_state_len > 0) payload[off .. off + sc.mux_state_len] else "";
-        off += sc.mux_state_len;
+        if (off + sc.session_state_len > payload.len) return;
+        const session_state = if (sc.session_state_len > 0) payload[off .. off + sc.session_state_len] else "";
+        off += sc.session_state_len;
 
         const sid8: []const u8 = if (sc.has_session_id != 0) sc.session_id[0..8] else "????????";
         print("  {s} [{s}] (mux #{d}, {d} panes)\n", .{ name_str, sid8, sc.id, sc.pane_count });
@@ -406,8 +423,8 @@ fn listStatus(allocator: std.mem.Allocator, full_mode: bool) !void {
             off += pe.sticky_pwd_len;
         }
 
-        if (mux_state.len > 0) {
-            printMuxStateTree(allocator, mux_state, "    ");
+        if (session_state.len > 0) {
+            printMuxStateTree(allocator, session_state, "    ");
         }
     }
 
@@ -426,24 +443,24 @@ fn listStatus(allocator: std.mem.Allocator, full_mode: bool) !void {
         const name_str = if (de.name_len > 0) payload[off .. off + de.name_len] else "unknown";
         off += de.name_len;
 
-        if (off + de.mux_state_len > payload.len) return;
-        const mux_state = if (de.mux_state_len > 0) payload[off .. off + de.mux_state_len] else "";
-        off += de.mux_state_len;
+        if (off + de.session_state_len > payload.len) return;
+        const session_state = if (de.session_state_len > 0) payload[off .. off + de.session_state_len] else "";
+        off += de.session_state_len;
 
         // Include --instance flag if not in default instance
         const instance = posix.getenv("HEXE_INSTANCE");
         if (instance) |inst| {
             if (inst.len > 0) {
-                print("  {s} [{s}] {d} panes - reattach: hexe mux attach --instance {s} {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, inst, name_str });
+                print("  {s} [{s}] {d} panes - reattach: hexe terminal attach --instance {s} {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, inst, name_str });
             } else {
-                print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+                print("  {s} [{s}] {d} panes - reattach: hexe terminal attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
             }
         } else {
-            print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+            print("  {s} [{s}] {d} panes - reattach: hexe terminal attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
         }
 
-        if (mux_state.len > 0) {
-            printMuxStateTree(allocator, mux_state, "    ");
+        if (session_state.len > 0) {
+            printMuxStateTree(allocator, session_state, "    ");
         }
     }
 
@@ -491,72 +508,48 @@ fn listStatus(allocator: std.mem.Allocator, full_mode: bool) !void {
     }
 }
 
+fn printSessionLayoutPanes(node: ?*const core.session_model.SessionLayoutNode, focused_uuid: ?[32]u8, indent: []const u8) void {
+    const root = node orelse return;
+    switch (root.*) {
+        .pane => |uuid| {
+            const marker = if (focused_uuid) |focused|
+                if (std.mem.eql(u8, &focused, &uuid)) ">" else " "
+            else
+                " ";
+            print("{s}  {s} Pane [{s}]\n", .{ indent, marker, uuid[0..8] });
+        },
+        .split => |split| {
+            printSessionLayoutPanes(split.first, focused_uuid, indent);
+            printSessionLayoutPanes(split.second, focused_uuid, indent);
+        },
+    }
+}
+
 fn printMuxStateTree(allocator: std.mem.Allocator, mux_state_json: []const u8, indent: []const u8) void {
-    // Parse the mux state JSON
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, mux_state_json, .{}) catch {
-        print("{s}(failed to parse mux state)\n", .{indent});
+    var snapshot = core.session_model.SessionSnapshot.fromJson(allocator, mux_state_json) catch {
+        print("{s}(failed to parse session snapshot)\n", .{indent});
         return;
     };
-    defer parsed.deinit();
-
-    const root = parsed.value.object;
+    defer snapshot.deinit();
 
     // Print tabs
-    if (root.get("tabs")) |tabs_val| {
-        const tabs = tabs_val.array;
-        const active_tab = if (root.get("active_tab")) |at| @as(usize, @intCast(at.integer)) else 0;
-
-        for (tabs.items, 0..) |tab_val, ti| {
-            const tab = tab_val.object;
-            const tab_name = if (tab.get("name")) |n| n.string else "tab";
-            const marker = if (ti == active_tab) "*" else " ";
-
-            print("{s}{s} Tab: {s}\n", .{ indent, marker, tab_name });
-
-            // Print panes in this tab
-            if (tab.get("panes")) |panes_val| {
-                const panes = panes_val.array;
-                for (panes.items) |pane_val| {
-                    const pane = pane_val.object;
-                    const uuid = if (pane.get("uuid")) |u| u.string else "?";
-                    const pane_id = if (pane.get("id")) |id| @as(i64, id.integer) else 0;
-                    const focused = if (pane.get("focused")) |f| f.bool else false;
-                    const focus_marker = if (focused) ">" else " ";
-
-                    print("{s}  {s} Pane {d} [{s}]\n", .{ indent, focus_marker, pane_id, uuid[0..@min(8, uuid.len)] });
-                }
-            }
-
-            // Print layout tree if present
-            if (tab.get("tree")) |tree_val| {
-                if (tree_val != .null) {
-                    printLayoutTree(tree_val.object, indent, 2);
-                }
-            }
-        }
+    for (snapshot.tabs.items, 0..) |tab, ti| {
+        const marker = if (ti == snapshot.active_tab) "*" else " ";
+        print("{s}{s} Tab: {s}\n", .{ indent, marker, tab.name });
+        printSessionLayoutPanes(tab.root, tab.focused_pane_uuid, indent);
     }
 
     // Print floats
-    if (root.get("floats")) |floats_val| {
-        const floats = floats_val.array;
-        if (floats.items.len > 0) {
-            const active_float = if (root.get("active_floating")) |af|
-                if (af != .null) @as(?usize, @intCast(af.integer)) else null
+    if (snapshot.floats.items.len > 0) {
+        print("{s}Floats:\n", .{indent});
+        for (snapshot.floats.items) |float_state| {
+            const marker = if (snapshot.active_float_uuid) |active_uuid|
+                if (std.mem.eql(u8, &active_uuid, &float_state.pane_uuid)) "*" else " "
             else
-                null;
-
-            print("{s}Floats:\n", .{indent});
-            for (floats.items, 0..) |float_val, fi| {
-                const float = float_val.object;
-                const uuid = if (float.get("uuid")) |u| u.string else "?";
-                const visible = if (float.get("visible")) |v| v.bool else true;
-                const is_pwd = if (float.get("is_pwd")) |p| p.bool else false;
-                const marker = if (active_float != null and active_float.? == fi) "*" else " ";
-                const vis_str = if (visible) "" else " (hidden)";
-                const pwd_str = if (is_pwd) " [pwd]" else "";
-
-                print("{s}  {s} Float [{s}]{s}{s}\n", .{ indent, marker, uuid[0..@min(8, uuid.len)], pwd_str, vis_str });
-            }
+                " ";
+            const vis_str = if (float_state.visible) "" else " (hidden)";
+            const pwd_str = if (float_state.is_pwd) " [pwd]" else "";
+            print("{s}  {s} Float [{s}]{s}{s}\n", .{ indent, marker, float_state.pane_uuid[0..8], pwd_str, vis_str });
         }
     }
 }

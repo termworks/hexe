@@ -42,14 +42,14 @@ This overrides `HEXE_INSTANCE` for that invocation (and any processes it spawns)
 Examples:
 
 ```sh
-hexe mux new -I dev
+hexe terminal new -I dev
 hexe ses list -I dev
-hexe mux attach -I dev nidoking
+hexe terminal attach -I dev nidoking
 ```
 
 ## Test-Only Sessions
 
-`hexe mux new` supports:
+`hexe terminal new` supports:
 
 - `-T` / `--test-only`
 
@@ -60,7 +60,7 @@ This starts an isolated stack by generating a unique instance name like:
 The command prints the chosen instance so you can target it later:
 
 ```sh
-hexe mux new -T
+hexe terminal new -T
 # prints: test instance: test-acde1234
 ```
 
@@ -117,11 +117,11 @@ To make "working" vs "dev" unambiguous, use explicit instances:
 
 ```sh
 # your daily session
-hexe mux new -I prod
+hexe terminal new -I prod
 
 # your development stack
-hexe mux new -I dev
+hexe terminal new -I dev
 
 # quick experiments
-hexe mux new -T
+hexe terminal new -T
 ```

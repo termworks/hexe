@@ -2,6 +2,9 @@
 
 Floats are overlay panes that appear on top of your splits. They are toggled with a keybinding and can be configured with rich behavior around persistence, scope, and lifecycle.
 
+`layout.lua` owns float structure and behavior: key, command, title, size, position, and attributes.
+`init.lua` owns float visuals: default borders, ad-hoc float visuals, and title-based visual matches.
+
 ---
 
 ## Defining floats
@@ -17,8 +20,7 @@ hx.ses.layout.define({
       command = "lazygit",
       title   = "git",
       attributes = { per_cwd = true, sticky = true, global = true },
-      width_percent  = 90,
-      height_percent = 90,
+      size = { width = 90, height = 90 },
     },
     {
       key     = "f",
@@ -28,10 +30,8 @@ hx.ses.layout.define({
     {
       key        = "t",
       attributes = { global = false, destroy = true },
-      width_percent  = 40,
-      height_percent = 30,
-      pos_x = 100,
-      pos_y = 0,
+      size = { width = 40, height = 30 },
+      position = { x = 100, y = 0 },
     },
   },
 })
@@ -51,12 +51,10 @@ And toggled via keybindings:
 
 | Field | Default | Description |
 |---|---|---|
-| `width_percent` | 60 | Width as % of terminal (10–100) |
-| `height_percent` | 60 | Height as % of terminal (10–100) |
-| `pos_x` | 50 | Horizontal anchor (0=left, 50=center, 100=right) |
-| `pos_y` | 50 | Vertical anchor (0=top, 50=center, 100=bottom) |
-| `padding_x` | 1 | Left/right inner padding |
-| `padding_y` | 0 | Top/bottom inner padding |
+| `size.width` | float default | Width as % of terminal (10–100) |
+| `size.height` | float default | Height as % of terminal (10–100) |
+| `position.x` | `50` | Horizontal anchor (0=left, 50=center, 100=right) |
+| `position.y` | `50` | Vertical anchor (0=top, 50=center, 100=bottom) |
 
 ---
 
@@ -108,23 +106,75 @@ The float runs inside a sandboxed pod (Linux namespaces + cgroups).
 
 See [isolation](isolation.md) for profiles and resource limits.
 
-## Border style
+## Visual policy
 
-Each float can have custom border characters and colors:
+Float visuals are configured in `init.lua`, not inside `layout.lua`.
+
+Named floats use `set_defaults(...)` as their base.
+Ad-hoc CLI floats use `set_adhoc(...)` as their base.
+Then every `set_match(pattern, ...)` rule whose regex pattern matches the float title is applied in declaration order. Later matches win.
 
 ```lua
-style = {
-  top_left     = "╭",
-  top_right    = "╮",
-  bottom_left  = "╰",
-  bottom_right = "╯",
-  horizontal   = "─",
-  vertical     = "│",
-},
-color = {
-  active  = 2,   -- palette index when focused
-  passive = 8,   -- palette index when unfocused
-},
+hx.mux.float.set_defaults({
+  size = { width = 65, height = 65 },
+  color = { active = 2, passive = 237 },
+  attributes = { global = true },
+})
+
+hx.mux.float.set_adhoc({
+  size = { width = 80, height = 70 },
+  color = { active = 4, passive = 237 },
+})
+
+hx.mux.float.set_match("^explorer$", {
+  padding = { x = 2, y = 1 },
+  color = { active = 6, passive = 238 },
+  style = {
+    shadow = { color = 236 },
+    border = {
+      chars = {
+        top_left = "╔",
+        top_right = "╗",
+        bottom_left = "╚",
+        bottom_right = "╝",
+        horizontal = "═",
+        vertical = "║",
+      },
+    },
+  },
+})
+```
+
+`set_match(...)` uses the float title, not the Pokemon pane name.
+
+### Border style
+
+Border characters and colors live in `set_defaults`, `set_adhoc`, or `set_match`:
+
+```lua
+hx.mux.float.set_match("^git$", {
+  style = {
+    border = {
+      chars = {
+        top_left     = "╭",
+        top_right    = "╮",
+        bottom_left  = "╰",
+        bottom_right = "╯",
+        horizontal   = "─",
+        vertical     = "│",
+      },
+    },
+  },
+})
+```
+
+```lua
+hx.mux.float.set_match("^git$", {
+  color = {
+    active  = 2,
+    passive = 8,
+  },
+})
 ```
 
 ### Border title
@@ -132,29 +182,26 @@ color = {
 Embed a title or status module in the border:
 
 ```lua
-style = {
-  position = "topcenter",   -- topleft | topcenter | topright | bottomleft | bottomcenter | bottomright
-  module   = "time",        -- any built-in segment name
-  outputs  = {
-    { style = "bg:0 fg:1",   format = "[" },
-    { style = "bg:237 fg:250", format = " $output " },
-    { style = "bg:0 fg:1",   format = "]" },
+hx.mux.float.set_match("^git$", {
+  style = {
+    title = {
+      name = "title",
+      position = "topcenter",
+      segments = {
+        {
+          name = "title",
+          value = function(ctx)
+            local t = hx.segment.title(ctx)
+            return {
+              { text = "[", style = "bg:0 fg:1" },
+              { text = " " .. t .. " ", style = "bg:237 fg:250" },
+              { text = "]", style = "bg:0 fg:1" },
+            }
+          end,
+        },
+      },
+    },
   },
-},
-```
-
----
-
-## Global defaults
-
-Set defaults for all floats in your mux config. Per-float values override these:
-
-```lua
-hx.mux.float.set_defaults({
-  width_percent  = 65,
-  height_percent = 65,
-  color = { active = 2, passive = 237 },
-  attributes = { global = true },
 })
 ```
 
@@ -165,9 +212,9 @@ hx.mux.float.set_defaults({
 Spawn a one-off float from the command line:
 
 ```sh
-hexe mux float --command "btop" --title "monitor" --size "80,70,0,0"
-hexe mux float --command "zsh" --isolation sandbox
-hexe mux float --command "bash /tmp/script.sh" --result-file /tmp/result
+hexe terminal float --command "btop" --title "monitor" --size "80,70,0,0"
+hexe terminal float --command "zsh" --isolation sandbox
+hexe terminal float --command "bash /tmp/script.sh" --result-file /tmp/result
 ```
 
 Options:

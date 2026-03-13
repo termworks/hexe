@@ -50,7 +50,7 @@ pub fn run() !void {
         print("  - Invalid keybinding syntax\n", .{});
         print("  - Missing required fields\n", .{});
         print("  - Type mismatches (string vs number)\n", .{});
-        print("\nRun with 'hexe mux' to see the actual config being used.\n", .{});
+        print("\nRun with 'hexe terminal' to see the actual config being used.\n", .{});
         return err;
     };
     var mutable_config = config;

@@ -2,7 +2,7 @@ const std = @import("std");
 const yazap = @import("yazap");
 const core = @import("core");
 const ipc = core.ipc;
-const mux = @import("mux");
+const terminal = @import("terminal");
 const ses = @import("ses");
 const pod = @import("pod");
 const shp = @import("shp");
@@ -10,6 +10,7 @@ const pop_handlers = @import("pop_handlers.zig");
 const cli_cmds = @import("commands/com.zig");
 const config_validate = @import("commands/config_validate.zig");
 const ses_export = @import("commands/ses_export.zig");
+const ses_pipe = @import("commands/ses_pipe.zig");
 const ses_stats = @import("commands/ses_stats.zig");
 
 const c = @cImport({
@@ -78,7 +79,8 @@ fn parseOptionalI64(value: ?[]const u8, field_name: []const u8) !i64 {
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
     if (std.mem.eql(u8, command, "ses")) return "session";
     if (std.mem.eql(u8, command, "lay")) return "layout";
-    if (std.mem.eql(u8, command, "mux")) return "multiplexer";
+    if (std.mem.eql(u8, command, "mux")) return "terminal";
+    if (std.mem.eql(u8, command, "multiplexer")) return "terminal";
     if (std.mem.eql(u8, command, "shp")) return "shell";
     if (std.mem.eql(u8, command, "pop")) return "popup";
     if (std.mem.eql(u8, command, "cfg")) return "config";
@@ -101,24 +103,24 @@ fn firstCommandToken(args: []const [:0]u8) ?[]const u8 {
 
 fn printHelpRoot() void {
     print("{s}{s}Hexe CLI{s}\n", .{ help_ansi.BOLD, help_ansi.TITLE, help_ansi.RESET });
-    print("{s}A terminal multiplexer where UI is disposable.{s}\n\n", .{ help_ansi.DIM, help_ansi.RESET });
+    print("{s}A terminal frontend where UI is disposable.{s}\n\n", .{ help_ansi.DIM, help_ansi.RESET });
     print("{s}Usage{s}: hexe <command> [subcommand] [options]\n\n", .{ help_ansi.SECTION, help_ansi.RESET });
     print("{s}Commands{s}:\n", .{ help_ansi.SECTION, help_ansi.RESET });
     print("  {s}session{s}      {s}(alias: ses){s}  Session daemon management\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}layout{s}       {s}(alias: lay){s}  Saved session layouts (.lua)\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-    print("  {s}multiplexer{s}  {s}(alias: mux){s}  Terminal multiplexer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("  {s}terminal{s}     {s}(aliases: mux, multiplexer){s}  Terminal frontend\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}pod{s}          {s}(alias: pod){s}  Per-pane PTY daemon\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}shell{s}        {s}(alias: shp){s}  Shell prompt renderer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}popup{s}        {s}(alias: pop){s}  Popup overlays\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}record{s}       Record lifecycle control\n", .{ help_ansi.CMD, help_ansi.RESET });
     print("  {s}config{s}       {s}(alias: cfg){s}  Configuration management\n\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-    print("Try {s}hexe session --help{s} or {s}hexe multiplexer --help{s}\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.CMD, help_ansi.RESET });
+    print("Try {s}hexe session --help{s} or {s}hexe terminal --help{s}\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.CMD, help_ansi.RESET });
 }
 
 fn printHelpCommand(command: []const u8) void {
     if (std.mem.eql(u8, command, "session")) {
         print("{s}{s}session{s} {s}(alias: ses){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: daemon, status, list, kill, clear, export, stats\n", .{});
+        print("Subcommands: daemon, status, list, kill, clear, export, stats, pipe\n", .{});
         return;
     }
     if (std.mem.eql(u8, command, "layout")) {
@@ -126,8 +128,8 @@ fn printHelpCommand(command: []const u8) void {
         print("Subcommands: list, open, save\n", .{});
         return;
     }
-    if (std.mem.eql(u8, command, "multiplexer")) {
-        print("{s}{s}multiplexer{s} {s}(alias: mux){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    if (std.mem.eql(u8, command, "terminal")) {
+        print("{s}{s}terminal{s} {s}(aliases: mux, multiplexer){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
         print("Subcommands: new, attach, record, float, notify, send, info, layout, focus\n", .{});
         return;
     }
@@ -164,7 +166,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var app = App.init(allocator, "hexe", "Hexe terminal multiplexer");
+    var app = App.init(allocator, "hexe", "Hexe terminal frontend");
     defer app.deinit();
 
     var root = app.rootCommand();
@@ -178,8 +180,8 @@ pub fn main() !void {
     var pod_cmd = app.createCommand("pod", "Per-pane PTY daemon");
     pod_cmd.setProperty(.help_on_empty_args);
 
-    var mux_cmd = app.createCommand("multiplexer", "Terminal multiplexer");
-    mux_cmd.setProperty(.help_on_empty_args);
+    var terminal_cmd = app.createCommand("terminal", "Terminal frontend");
+    terminal_cmd.setProperty(.help_on_empty_args);
 
     var shp_cmd = app.createCommand("shell", "Shell prompt renderer");
     shp_cmd.setProperty(.help_on_empty_args);
@@ -225,6 +227,9 @@ pub fn main() !void {
     var ses_stats_cmd = app.createCommand("stats", "Show resource usage statistics");
     try ses_stats_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
 
+    var ses_pipe_cmd = app.createCommand("pipe", "Internal SES byte-stream bridge");
+    try ses_pipe_cmd.addArg(Arg.singleValueOption("ses-socket", null, null));
+
     try ses_cmd.addSubcommands(&[_]yazap.Command{
         ses_daemon,
         ses_status_cmd,
@@ -233,6 +238,7 @@ pub fn main() !void {
         ses_clear,
         ses_export_cmd,
         ses_stats_cmd,
+        ses_pipe_cmd,
     });
 
     var layout_list = app.createCommand("list", "List saved session layouts");
@@ -319,10 +325,12 @@ pub fn main() !void {
     try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_record, pod_kill, pod_gc });
 
     // MUX subcommands
-    var mux_new = app.createCommand("new", "Create new multiplexer session");
+    var mux_new = app.createCommand("new", "Create new terminal session");
     try mux_new.addArg(Arg.singleValueOption("name", 'n', null));
     try mux_new.addArg(Arg.booleanOption("debug", 'd', null));
     try mux_new.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try mux_new.addArg(Arg.singleValueOption("ses-socket", null, null));
+    try mux_new.addArg(Arg.booleanOption("no-autostart-ses", null, null));
     try mux_new.addArg(Arg.singleValueOption("instance", 'I', null));
     try mux_new.addArg(Arg.booleanOption("test-only", 'T', null));
 
@@ -330,9 +338,11 @@ pub fn main() !void {
     try mux_attach.addArg(Arg.positional("name", null, null));
     try mux_attach.addArg(Arg.booleanOption("debug", 'd', null));
     try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try mux_attach.addArg(Arg.singleValueOption("ses-socket", null, null));
+    try mux_attach.addArg(Arg.booleanOption("no-autostart-ses", null, null));
     try mux_attach.addArg(Arg.singleValueOption("instance", 'I', null));
 
-    var mux_record = app.createCommand("record", "Attach to mux and record asciicast");
+    var mux_record = app.createCommand("record", "Attach to terminal frontend and record asciicast");
     try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
     try mux_record.addArg(Arg.booleanOption("capture-input", null, null));
     try mux_record.addArg(Arg.singleValueOption("instance", 'I', null));
@@ -391,7 +401,7 @@ pub fn main() !void {
     var mux_focus = app.createCommand("focus", "Move focus to adjacent pane");
     try mux_focus.addArg(Arg.positional("dir", null, null));
 
-    try mux_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
+    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
 
     // SHP subcommands
     var shp_prompt = app.createCommand("prompt", "Render shell prompt");
@@ -473,7 +483,7 @@ pub fn main() !void {
     try record_toggle.addArg(Arg.booleanOption("capture-input", null, null));
     try record_cmd.addSubcommands(&[_]yazap.Command{ record_start, record_stop, record_status, record_toggle });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, mux_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
 
     const raw_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, raw_args);
@@ -522,7 +532,7 @@ pub fn main() !void {
             }
         }
 
-        try runMuxNew("", false, "");
+        try runTerminalNew("", false, "", "", false);
         return;
     }
 
@@ -574,6 +584,10 @@ pub fn main() !void {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
             try ses_stats.run(allocator);
+            return;
+        }
+        if (ses_matches.subcommandMatches("pipe")) |m| {
+            try ses_pipe.run(allocator, m.getSingleValue("ses-socket") orelse "");
             return;
         }
     } else if (matches.subcommandMatches("layout")) |layout_matches| {
@@ -713,7 +727,7 @@ pub fn main() !void {
             try cli_cmds.runPodGc(allocator, m.containsArg("dry-run"));
             return;
         }
-    } else if (matches.subcommandMatches("multiplexer")) |mux_matches| {
+    } else if (matches.subcommandMatches("terminal")) |mux_matches| {
         if (mux_matches.subcommandMatches("new")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) {
@@ -722,13 +736,25 @@ pub fn main() !void {
             } else if (m.containsArg("test-only")) {
                 setGeneratedTestInstance();
             }
-            try runMuxNew(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            try runTerminalNew(
+                m.getSingleValue("name") orelse "",
+                m.containsArg("debug"),
+                m.getSingleValue("logfile") orelse "",
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
             return;
         }
         if (mux_matches.subcommandMatches("attach")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            try runMuxAttach(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            try runTerminalAttach(
+                m.getSingleValue("name") orelse "",
+                m.containsArg("debug"),
+                m.getSingleValue("logfile") orelse "",
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
             return;
         }
         if (mux_matches.subcommandMatches("record")) |m| {
@@ -1041,7 +1067,14 @@ fn askUseLocalLayout() bool {
     return false;
 }
 
-fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool) core.FrontendConnectOptions {
+    return .{
+        .socket_path = if (socket_path.len > 0) socket_path else null,
+        .autostart_ses = !no_autostart_ses,
+    };
+}
+
+fn runTerminalNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
             if (!try showNestedMuxConfirmation(pane_uuid)) {
@@ -1050,19 +1083,21 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
         }
     }
 
-    try mux.run(.{
+    try terminal.run(.{
         .name = if (name.len > 0) name else null,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
+        .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
     });
 }
 
-fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn runTerminalAttach(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (name.len > 0) {
-        try mux.run(.{
+        try terminal.run(.{
             .attach = name,
             .debug = debug,
             .log_file = if (log_file.len > 0) log_file else null,
+            .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
         });
     } else {
         print("Error: session name required\n", .{});

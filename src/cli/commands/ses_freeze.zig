@@ -12,14 +12,14 @@ pub const LayoutSaveScope = enum {
     both,
 };
 
-/// Save current mux layout to .hexe.lua in CWD and register in sessions.json.
+/// Save the current terminal layout to .hexe.lua in CWD and register in sessions.json.
 pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void {
     const wire = core.wire;
     const posix = std.posix;
 
     // Get current pane UUID from environment
     const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: not inside a hexe mux session (HEXE_PANE_UUID not set)\n", .{});
+        print("Error: not inside a hexe terminal session (HEXE_PANE_UUID not set)\n", .{});
         return;
     };
     if (uuid_str.len < 32) {
@@ -29,7 +29,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
     var uuid_arr: [32]u8 = undefined;
     @memcpy(&uuid_arr, uuid_str[0..32]);
 
-    // Connect to SES and request mux state
+    // Connect to SES and request the current layout export.
     const fd = com.connectSesCliChannel(allocator) orelse return;
     defer posix.close(fd);
 
@@ -55,20 +55,20 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         return;
     }
 
-    // Read raw mux state JSON
-    const mux_state = allocator.alloc(u8, hdr.payload_len) catch {
+    // Read raw layout export JSON.
+    const layout_export = allocator.alloc(u8, hdr.payload_len) catch {
         print("Error: allocation failed\n", .{});
         return;
     };
-    defer allocator.free(mux_state);
-    wire.readExact(fd, mux_state) catch {
-        print("Error: failed to read mux state\n", .{});
+    defer allocator.free(layout_export);
+    wire.readExact(fd, layout_export) catch {
+        print("Error: failed to read layout export\n", .{});
         return;
     };
 
-    // Parse the mux state JSON
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, mux_state, .{}) catch {
-        print("Error: failed to parse mux state\n", .{});
+    // Parse the layout export JSON.
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, layout_export, .{}) catch {
+        print("Error: failed to parse layout export\n", .{});
         return;
     };
     defer parsed.deinit();
@@ -76,7 +76,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
     const root_obj = switch (parsed.value) {
         .object => |o| o,
         else => {
-            print("Error: invalid mux state format\n", .{});
+            print("Error: invalid layout export format\n", .{});
             return;
         },
     };
@@ -368,8 +368,8 @@ fn collectUsedLayoutNames(allocator: std.mem.Allocator) ![][]u8 {
         off += sc.name_len;
         if (name.len > 0) try names.append(allocator, try allocator.dupe(u8, name));
 
-        if (off + sc.mux_state_len > payload.len) break;
-        off += sc.mux_state_len;
+        if (off + sc.session_state_len > payload.len) break;
+        off += sc.session_state_len;
 
         var pi: u16 = 0;
         while (pi < sc.pane_count) : (pi += 1) {
@@ -390,8 +390,8 @@ fn collectUsedLayoutNames(allocator: std.mem.Allocator) ![][]u8 {
         const name = payload[off .. off + de.name_len];
         off += de.name_len;
         if (name.len > 0) try names.append(allocator, try allocator.dupe(u8, name));
-        if (off + de.mux_state_len > payload.len) break;
-        off += de.mux_state_len;
+        if (off + de.session_state_len > payload.len) break;
+        off += de.session_state_len;
     }
 
     return names.toOwnedSlice(allocator);

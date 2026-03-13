@@ -22,14 +22,14 @@ return {
         enabled = true,
         title = "opencode",
         attributes = { per_cwd = true, inherit_env = true },
-        command = "/env/bin/opencode",
+        command = "opencode",
       },
       {
         key = "2",
         enabled = true,
         attributes = { per_cwd = true, inherit_env = true },
         title = "opencode",
-        command = "/env/bin/opencode",
+        command = "opencode",
       },
       {
         key = "3",
@@ -37,46 +37,15 @@ return {
         attributes = { per_cwd = true, inherit_env = true },
         title = "claude",
         -- command = "/env/bin/bun x --package @anthropic-ai/claude-code claude",
-        command = "/env/bin/codex",
+        command = "codex",
       },
       {
         key = "p",
         enabled = true,
-        title = "scratchpad",
+        title = "explorer",
         position = { x = 100, y = 50 },
         size = { width = 40, height = 80 },
-        padding = { x = 2, y = 1 },
         attributes = { global = false, navigatable = true, inherit_env = true },
-        style = {
-          shadow = { color = 236 },
-          border = {
-            chars = {
-              top_left = "╔",
-              top_right = "╗",
-              bottom_left = "╚",
-              bottom_right = "╝",
-              horizontal = "═",
-              vertical = "║",
-              left_t = "╠",
-              right_t = "╣",
-              top_t = "╦",
-              bottom_t = "╩",
-              cross = "╬",
-            },
-          },
-          title = {
-            name = "title",
-            value = function(ctx)
-              local t = hx.segment.title(ctx)
-              return {
-                { text = " ", style = "bg:0 fg:1" },
-                { text = t, style = "bg:1 fg:0" },
-                { text = " ", style = "bg:0 fg:1" },
-              }
-            end,
-            position = "topright",
-          },
-        },
       },
       {
         key = "0",

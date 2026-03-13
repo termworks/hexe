@@ -87,29 +87,6 @@ hx.mux.config.setup({
               offset = 1, alignment = "center", duration_ms = 3000 },
   },
 
-  -- Float defaults
-  float_width_percent  = 60,
-  float_height_percent = 60,
-  float_padding_x      = 1,
-  float_padding_y      = 0,
-  float_color          = { active = 1, passive = 237 },
-  float_default_attributes = {
-    exclusive = false,
-    per_cwd   = false,
-    sticky    = false,
-    global    = false,
-    destroy   = false,
-    isolated  = false,
-  },
-  float_style_default = {
-    top_left     = "╭",
-    top_right    = "╮",
-    bottom_left  = "╰",
-    bottom_right = "╯",
-    horizontal   = "─",
-    vertical     = "│",
-  },
-
   -- Input
   input = {
     timing = {
@@ -120,6 +97,32 @@ hx.mux.config.setup({
   },
 })
 ```
+
+---
+
+Float visuals are configured through the Lua API, not inside `layout.lua`:
+
+```lua
+hx.mux.float.set_defaults({
+  size = { width = 60, height = 60 },
+  color = { active = 1, passive = 237 },
+  attributes = { sticky = true, global = true },
+})
+
+hx.mux.float.set_adhoc({
+  size = { width = 80, height = 70 },
+  color = { active = 4, passive = 237 },
+})
+
+hx.mux.float.set_match("^explorer$", {
+  padding = { x = 2, y = 1 },
+  style = {
+    shadow = { color = 236 },
+  },
+})
+```
+
+`set_match(...)` uses the float title with full libc regex matching.
 
 ---
 
@@ -154,14 +157,8 @@ hx.ses.layout.define({
       enabled        = true,
       command        = "lazygit",
       title          = "git",
-      width_percent  = 90,
-      height_percent = 90,
-      pos_x          = 50,
-      pos_y          = 50,
-      padding_x      = 1,
-      padding_y      = 0,
-      color          = { active = 2, passive = 237 },
-      style          = { ... },       -- border characters
+      size           = { width = 90, height = 90 },
+      position       = { x = 50, y = 50 },
       attributes     = {
         per_cwd   = true,
         sticky    = true,

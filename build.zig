@@ -37,6 +37,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("vaxis");
 
+    // Get liblink dependency (remote transport backend)
+    const liblink_mod = if (b.lazyDependency("liblink", .{
+        .target = target,
+        .optimize = optimize,
+    })) |liblink_dep| liblink_dep.module("liblink") else null;
+
     // Create core module
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/mod.zig"),
@@ -56,6 +62,9 @@ pub fn build(b: *std.Build) void {
     }
     core_module.addImport("vaxis", vaxis_mod);
     core_module.addImport("xev", xev_mod);
+    if (liblink_mod) |ll| {
+        core_module.addImport("liblink", ll);
+    }
 
     // Create shell module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{
@@ -73,21 +82,22 @@ pub fn build(b: *std.Build) void {
     });
     pop_module.addImport("core", core_module);
 
-    // Create multiplexer module for unified CLI
-    const mux_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/multiplexer/main.zig"),
+    // Create terminal frontend module for unified CLI
+    const terminal_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    mux_module.addImport("core", core_module);
-    mux_module.addImport("xev", xev_mod);
-    mux_module.addImport("shp", shp_module);
-    mux_module.addImport("pop", pop_module);
+    terminal_module.addIncludePath(b.path("src/frontends/terminal"));
+    terminal_module.addImport("core", core_module);
+    terminal_module.addImport("xev", xev_mod);
+    terminal_module.addImport("shp", shp_module);
+    terminal_module.addImport("pop", pop_module);
     if (ghostty_vt_mod) |vt| {
-        mux_module.addImport("ghostty-vt", vt);
+        terminal_module.addImport("ghostty-vt", vt);
     }
-    mux_module.addImport("vaxis", vaxis_mod);
+    terminal_module.addImport("vaxis", vaxis_mod);
 
     // Create session module for unified CLI
     const ses_module = b.createModule(.{
@@ -123,7 +133,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     cli_root.addImport("core", core_module);
-    cli_root.addImport("mux", mux_module);
+    cli_root.addImport("terminal", terminal_module);
     cli_root.addImport("ses", ses_module);
     cli_root.addImport("pod", pod_module);
     cli_root.addImport("shp", shp_module);
@@ -134,6 +144,10 @@ pub fn build(b: *std.Build) void {
     const cli_exe = b.addExecutable(.{
         .name = "hexe",
         .root_module = cli_root,
+    });
+    cli_exe.addIncludePath(b.path("src/frontends/terminal"));
+    cli_exe.addCSourceFile(.{
+        .file = b.path("src/frontends/terminal/regex_shim.c"),
     });
     b.installArtifact(cli_exe);
 

@@ -31,7 +31,7 @@ pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
+            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
@@ -69,7 +69,7 @@ pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i6
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
+            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
@@ -129,7 +129,7 @@ pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
+            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {

@@ -77,7 +77,7 @@ pub fn runRecordStart(
             try argv.append(allocator, socket);
         }
     } else {
-        try argv.append(allocator, "multiplexer");
+        try argv.append(allocator, "terminal");
         try argv.append(allocator, "record");
     }
     try argv.append(allocator, "--out");
@@ -209,7 +209,7 @@ fn resolveActivePodUuid(allocator: std.mem.Allocator) !?[]u8 {
     const exe = try std.fs.selfExePathAlloc(allocator);
     defer allocator.free(exe);
 
-    var child = std.process.Child.init(&[_][]const u8{ exe, "multiplexer", "info", "--last" }, allocator);
+    var child = std.process.Child.init(&[_][]const u8{ exe, "terminal", "info", "--last" }, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Ignore;

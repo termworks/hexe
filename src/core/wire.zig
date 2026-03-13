@@ -33,10 +33,14 @@ pub fn isProtocolVersionDeprecated(version: u8) bool {
 // Second byte is always PROTOCOL_VERSION.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Sent by MUX to SES to open the control channel (①).
-pub const SES_HANDSHAKE_MUX_CTL: u8 = 0x01;
-/// Sent by MUX to SES to open the VT data channel (②).
-pub const SES_HANDSHAKE_MUX_VT: u8 = 0x02;
+/// Sent by a frontend to SES to open the control channel (①).
+pub const SES_HANDSHAKE_FRONTEND_CTL: u8 = 0x01;
+/// Sent by a frontend to SES to open the VT data channel (②).
+pub const SES_HANDSHAKE_FRONTEND_VT: u8 = 0x02;
+/// Legacy alias kept while terminal mux call sites are being rewritten.
+pub const SES_HANDSHAKE_MUX_CTL: u8 = SES_HANDSHAKE_FRONTEND_CTL;
+/// Legacy alias kept while terminal mux call sites are being rewritten.
+pub const SES_HANDSHAKE_MUX_VT: u8 = SES_HANDSHAKE_FRONTEND_VT;
 /// Sent by POD to SES to open the pod control uplink (④).
 /// Followed by 16 raw bytes of UUID (binary, not hex).
 pub const SES_HANDSHAKE_POD_CTL: u8 = 0x03;
@@ -58,7 +62,7 @@ pub const POD_HANDSHAKE_AUX_OBSERVER: u8 = 0x04;
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub const MsgType = enum(u16) {
-    // Channel ① — MUX ↔ SES control
+    // Channel ① — frontend ↔ SES control
     register = 0x0100,
     registered = 0x0101,
     create_pane = 0x0102,
@@ -67,13 +71,11 @@ pub const MsgType = enum(u16) {
     detach = 0x0105,
     reattach = 0x0106,
     session_state = 0x0107,
-    layout_sync = 0x0108,
     notify = 0x0109,
     pop_confirm = 0x010A,
     pop_choose = 0x010B,
     pop_response = 0x010C,
     disconnect = 0x010D,
-    sync_state = 0x010E,
     orphan_pane = 0x010F,
     list_orphaned = 0x0110,
     adopt_pane = 0x0111,
@@ -107,14 +109,22 @@ pub const MsgType = enum(u16) {
     float_created = 0x012D,
     float_result = 0x012E,
     pane_exited = 0x012F,
-    replay_backlogs = 0x0130, // MUX tells SES it's ready for backlog replay
+    replay_backlogs = 0x0130, // frontend tells SES it's ready for backlog replay
     kill_session = 0x0131, // CLI → SES: kill a detached session
     clear_sessions = 0x0132, // CLI → SES: kill all detached sessions
     clear_orphaned_panes = 0x0133, // CLI → SES: kill all orphaned/sticky panes
-    get_layout = 0x0134, // CLI → SES: get mux state for layout save
-    apply_layout = 0x0135, // CLI → SES → MUX: apply saved layout tree
+    get_layout = 0x0134, // CLI → SES: get layout export JSON for layout save
+    apply_layout = 0x0135, // CLI → SES → terminal frontend: apply saved layout tree
     get_session_state = 0x0136, // CLI → SES: export detached session to JSON
     session_stolen = 0x0137, // SES → MUX: this session was attached elsewhere
+    session_add_tab = 0x0138,
+    session_remove_tab = 0x0139,
+    session_sync_float = 0x013A,
+    session_remove_float = 0x013B,
+    session_split_pane = 0x013D,
+    session_close_split_pane = 0x013E,
+    session_replace_split_pane = 0x013F,
+    session_set_split_ratio = 0x0140,
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -152,26 +162,44 @@ pub const MuxVtHeader = extern struct {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Channel ① payloads — MUX ↔ SES control
+// Channel ① payloads — frontend ↔ SES control
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Register: session_id[32] + keepalive(u8) + name_len(u16)
+pub const FrontendKind = enum(u8) {
+    terminal = 1,
+    web = 2,
+    desktop = 3,
+};
+
+pub const FrontendTransportKind = enum(u8) {
+    local_ipc = 1,
+    liblink = 2,
+    preconnected = 3,
+};
+
+/// Register: session_id[32] + keepalive(u8) + frontend_kind(u8) +
+/// transport_kind(u8) + name_len(u16)
 /// Followed by: name bytes (name_len).
-pub const Register = extern struct {
+pub const FrontendRegister = extern struct {
     session_id: [32]u8 align(1),
     keepalive: u8 align(1),
+    frontend_kind: u8 align(1),
+    transport_kind: u8 align(1),
     name_len: u16 align(1),
 };
+pub const Register = FrontendRegister;
 
 /// Registered (response to Register).
 /// Trailing data: resolved session_name (may differ from requested if collision).
-pub const Registered = extern struct {
+pub const FrontendRegistered = extern struct {
     name_len: u16 align(1) = 0,
 };
+pub const Registered = FrontendRegistered;
 
 /// CreatePane: lengths of variable fields.
 /// Followed by: shell bytes, cwd bytes, sticky_pwd bytes, isolation_profile bytes,
-/// and optionally inherit_env_parent_uuid bytes (32 bytes when inherit_env_parent_uuid_len > 0).
+/// optionally inherit_env_parent_uuid bytes (32 bytes when inherit_env_parent_uuid_len > 0),
+/// then env_count entries each prefixed with u16 len.
 pub const CreatePane = extern struct {
     shell_len: u16 align(1),
     cwd_len: u16 align(1),
@@ -179,6 +207,7 @@ pub const CreatePane = extern struct {
     sticky_pwd_len: u16 align(1),
     isolation_profile_len: u8 align(1),
     inherit_env_parent_uuid_len: u8 align(1) = 0,
+    env_count: u16 align(1) = 0,
 };
 
 /// PaneCreated (response to CreatePane).
@@ -195,11 +224,9 @@ pub const PaneUuid = extern struct {
     uuid: [32]u8 align(1),
 };
 
-/// Detach: session_id + length of mux_state JSON.
-/// Followed by: mux_state bytes (state_len).
+/// Detach: session_id only. SES detaches using its own canonical session snapshot.
 pub const Detach = extern struct {
     session_id: [32]u8 align(1),
-    state_len: u32 align(1),
 };
 
 /// Reattach: prefix of session_id to match.
@@ -209,7 +236,7 @@ pub const Reattach = extern struct {
 };
 
 /// SessionReattached response.
-/// Followed by: mux_state bytes (state_len), then pane_count * 32 bytes of UUIDs.
+/// Followed by: canonical session snapshot bytes (state_len), then pane_count * 32 bytes of UUIDs.
 pub const SessionReattached = extern struct {
     state_len: u32 align(1),
     pane_count: u16 align(1),
@@ -221,11 +248,85 @@ pub const Disconnect = extern struct {
     preserve_sticky: u8 align(1),
 };
 
-/// SyncState: length of mux_state JSON.
-/// Followed by: mux_state bytes (state_len).
-pub const SyncState = extern struct {
-    state_len: u32 align(1),
-    version: u32 align(1), // Monotonically increasing version; SES rejects stale updates.
+/// SessionAddTab: add a new tab with a single split pane to the canonical snapshot.
+/// Followed by: tab name bytes (name_len).
+pub const SessionAddTab = extern struct {
+    tab_uuid: [32]u8 align(1),
+    pane_uuid: [32]u8 align(1),
+    tab_index: u16 align(1),
+    name_len: u16 align(1),
+};
+
+/// SessionRemoveTab: remove a tab from the canonical snapshot.
+pub const SessionRemoveTab = extern struct {
+    tab_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    has_active_tab: u8 align(1),
+};
+
+/// SessionSyncFloat: upsert a float record in the canonical snapshot.
+pub const SessionSyncFloat = extern struct {
+    pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    parent_tab: u16 align(1),
+    tab_visible: u64 align(1),
+    has_active_tab: u8 align(1),
+    has_parent_tab: u8 align(1),
+    visible: u8 align(1),
+    sticky: u8 align(1),
+    is_pwd: u8 align(1),
+    float_key: u8 align(1),
+    width_pct: u8 align(1),
+    height_pct: u8 align(1),
+    pos_x_pct: u8 align(1),
+    pos_y_pct: u8 align(1),
+    pad_x: u8 align(1),
+    pad_y: u8 align(1),
+    active: u8 align(1),
+};
+
+/// SessionRemoveFloat: remove a float record from the canonical snapshot.
+pub const SessionRemoveFloat = extern struct {
+    pane_uuid: [32]u8 align(1),
+};
+
+/// SessionSplitPane: split one canonical split pane into a 50/50 split.
+pub const SessionSplitPane = extern struct {
+    tab_uuid: [32]u8 align(1),
+    source_pane_uuid: [32]u8 align(1),
+    new_pane_uuid: [32]u8 align(1),
+    focused_pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    dir: u8 align(1),
+    has_focused_pane: u8 align(1),
+};
+
+/// SessionCloseSplitPane: remove one split pane from the canonical split tree.
+pub const SessionCloseSplitPane = extern struct {
+    tab_uuid: [32]u8 align(1),
+    pane_uuid: [32]u8 align(1),
+    focused_pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    has_focused_pane: u8 align(1),
+};
+
+/// SessionReplaceSplitPane: replace one split pane UUID in the canonical split tree.
+pub const SessionReplaceSplitPane = extern struct {
+    tab_uuid: [32]u8 align(1),
+    old_pane_uuid: [32]u8 align(1),
+    new_pane_uuid: [32]u8 align(1),
+    focused_pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    has_focused_pane: u8 align(1),
+};
+
+/// SessionSetSplitRatio: update one split divider by child anchor panes.
+pub const SessionSetSplitRatio = extern struct {
+    tab_uuid: [32]u8 align(1),
+    first_anchor_uuid: [32]u8 align(1),
+    second_anchor_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    ratio: f32 align(1),
 };
 
 /// Notify: message for the owning MUX.
@@ -317,8 +418,10 @@ pub const UpdatePaneAux = extern struct {
     uuid: [32]u8 align(1),
     created_from: [32]u8 align(1),
     focused_from: [32]u8 align(1),
+    active_tab: u16 align(1),
     has_created_from: u8 align(1),
     has_focused_from: u8 align(1),
+    has_active_tab: u8 align(1),
     is_focused: u8 align(1),
 };
 
@@ -443,8 +546,8 @@ pub const ClearOrphanedPanesResult = extern struct {
     killed_panes: u16 align(1),
 };
 
-/// ApplyLayout: CLI → SES → MUX: apply a saved layout tree.
-/// uuid identifies the source pane (to find the right session/MUX).
+/// ApplyLayout: CLI → SES: apply a saved layout tree to the session owning uuid.
+/// SES mutates canonical session state, then pushes a session snapshot event.
 /// Followed by: tree_json bytes (tree_json_len).
 pub const ApplyLayout = extern struct {
     uuid: [32]u8 align(1),
@@ -535,6 +638,7 @@ pub const PaneInfoResp = extern struct {
     pid: i32 align(1),
     fg_pid: i32 align(1),
     base_pid: i32 align(1),
+    pane_id: u16 align(1),
     cols: u16 align(1),
     rows: u16 align(1),
     cursor_x: u16 align(1),
@@ -583,7 +687,7 @@ pub const StatusResp = extern struct {
 };
 
 /// StatusClient entry (connected mux).
-/// Followed by: name bytes (name_len), mux_state bytes (mux_state_len),
+/// Followed by: name bytes (name_len), session snapshot bytes (session_state_len),
 ///   then pane_count StatusPaneEntry entries.
 pub const StatusClient = extern struct {
     id: u16 align(1),
@@ -591,7 +695,7 @@ pub const StatusClient = extern struct {
     has_session_id: u8 align(1),
     name_len: u16 align(1),
     pane_count: u16 align(1),
-    mux_state_len: u32 align(1),
+    session_state_len: u32 align(1),
 };
 
 /// StatusPaneEntry (pane within a client or orphaned pane).
@@ -604,12 +708,12 @@ pub const StatusPaneEntry = extern struct {
 };
 
 /// DetachedSessionEntry.
-/// Followed by: name bytes (name_len), mux_state bytes (mux_state_len).
+/// Followed by: name bytes (name_len), session snapshot bytes (session_state_len).
 pub const DetachedSessionEntry = extern struct {
     session_id: [32]u8 align(1),
     name_len: u16 align(1),
     pane_count: u16 align(1),
-    mux_state_len: u32 align(1),
+    session_state_len: u32 align(1),
 };
 
 /// StickyPaneEntry.

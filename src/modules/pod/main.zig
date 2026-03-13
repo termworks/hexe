@@ -773,6 +773,10 @@ const Pod = struct {
             const read_buf = pty_ctx.io_buf[0..@min(pty_ctx.io_buf.len, free)];
             const n = pty_ctx.pod.pty.read(read_buf) catch |err| switch (err) {
                 error.WouldBlock => 0,
+                // PTY masters commonly report EIO once the child side is gone.
+                // Treat that as clean end-of-stream so the pod can keep the
+                // socket alive briefly and SES can still attach/read backlog.
+                error.InputOutput => 0,
                 else => {
                     pty_ctx.callback_error.* = err;
                     pty_ctx.armed.* = false;
@@ -802,6 +806,7 @@ const Pod = struct {
 
         const n = pty_ctx.pod.pty.read(pty_ctx.io_buf) catch |err| switch (err) {
             error.WouldBlock => 0,
+            error.InputOutput => 0,
             else => {
                 pty_ctx.callback_error.* = err;
                 pty_ctx.armed.* = false;

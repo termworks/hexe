@@ -34,6 +34,10 @@
             .url = "git+https://github.com/PrajwalCH/yazap#a85c65beefe911db5fc17bc90e756738d742dc63",
             .hash = "yazap-0.6.3-Z1t-EmrzAQA-8vFR-JGpI7vCSpHv5_6z6PAIDq2X4PoH",
         },
+        .liblink = .{
+            .url = "git+https://github.com/libzig/liblink#0.0.13",
+            .hash = "liblink-0.0.13-gQe8cxyDCwCS346uD6q8CCpd6RHyMNhVT0od7Z1jQzsg",
+        },
     },
     .fingerprint = 0x4c99ab0b473f252d,
 }

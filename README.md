@@ -1,17 +1,20 @@
 # Hexa
 
-A terminal multiplexer where the UI is disposable and your shells are not.
+A session-based terminal workspace where the frontend is disposable and your
+shells are not.
 
-Crash the mux, restart it, reattach — your terminals keep running exactly where you left them.
+Crash the terminal frontend, restart it, reattach, and your terminals keep
+running exactly where you left them.
 
 ---
 
 ## How it works
 
-Hexa splits into three cooperating processes:
+Hexa splits into four layers:
 
-- **`hexe mux`** — the UI (tabs, splits, floats, keybindings, status bar). Safe to kill and restart.
-- **`hexe ses`** — a persistent registry that tracks sessions, panes, and layouts.
+- **`hexe terminal`** — the terminal UI frontend (aliases: `hexe mux`, `hexe multiplexer`).
+- **shared frontend runtime** — attach lifecycle, transport, and the frontend-side session projection.
+- **`hexe session` / `hexe ses`** — the session authority that owns canonical session state.
 - **`hexe pod`** — one per pane. Owns the PTY, holds the shell, buffers output even while detached.
 
 See [architecture](docs/architecture.md) for the full picture.
@@ -22,7 +25,7 @@ See [architecture](docs/architecture.md) for the full picture.
 
 | Topic | Description |
 |---|---|
-| [Architecture](docs/architecture.md) | How mux, ses, and pod fit together |
+| [Architecture](docs/architecture.md) | How terminal, runtime, ses, and pod fit together |
 | [Sessions](docs/sessions.md) | Detach, reattach, layouts, pane adoption |
 | [Floats](docs/floats.md) | Overlay panes — per-directory, persistent, isolated |
 | [Float attributes](docs/float_attributes.md) | Detailed flag reference for float behavior |
@@ -47,14 +50,14 @@ zig build -Doptimize=ReleaseFast
 **Run:**
 
 ```sh
-hexe mux new
+hexe terminal new
 ```
 
 **Detach** (default: `Alt+Shift+D` release), then reattach:
 
 ```sh
-hexe mux attach <session-name-or-prefix>
-hexe ses list   # to find sessions
+hexe terminal attach <session-name-or-prefix>
+hexe session list   # to find sessions
 ```
 
 **Config** lives at `~/.config/hexe/init.lua`. See [config](docs/config.md).
