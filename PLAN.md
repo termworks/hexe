@@ -1,537 +1,284 @@
-# Full UI / SES Separation Plan
-
-This replaces the previous plan.
-
-The previous work moved canonical session authority into SES, but it did not
-finish the decoupling. The terminal frontend still owns a local attached-session
-view/controller layer. This document starts from the code as it exists now and
-defines the remaining work required to make the terminal frontend only a UI.
-
-Completion must not be claimed until the exit criteria at the end of this file
-are true.
-
-## Current Truth
-
-Right now the architecture is:
-
-```text
-terminal frontend
-  = UI
-  + local materialized tab/float/layout objects
-
-shared frontend runtime
-  = attached-session projection
-  + attach/controller state
-  + transport client
-
-SES
-  = canonical session authority
-  + pod owner
-  + VT router
-```
-
-That is better than the old mux-owned model, but it is not full separation.
-
-### Concrete blockers in the current tree
-
-- `src/frontends/terminal/state.zig`
-  - still owns the live terminal view graph and a large amount of
-    terminal-specific controller glue.
-- `src/frontends/terminal/state_types.zig`
-  - `TerminalViewState` still owns `tabs` and `floats`.
-  - `Tab` still owns `Layout`.
-- `src/frontends/terminal/state_reattach.zig`
-  - still reconstructs terminal session objects from the shared projection.
-- `src/frontends/terminal/pane.zig`
-  - no longer carries float/session ownership flags, but still mixes VT widget
-    behavior with float presentation behavior.
-- `src/core/frontend_client.zig`
-  - transport is abstracted, but `liblink` is still missing.
-- `src/cli/commands/com.zig` and `src/cli/commands/ses_freeze.zig`
-  - still expose older derived "mux state" / layout export surfaces that need
-    cleanup after the frontend/runtime boundary is fully honest.
-
-## Target Architecture
-
-The target architecture is:
-
-```text
-                 +---------------------------+
-                 |         FRONTEND          |
-                 | terminal / web / desktop  |
-                 |---------------------------|
-                 | rendering                 |
-                 | input mapping             |
-                 | viewport geometry         |
-                 | selection / popups        |
-                 | local widget state        |
-                 +-------------+-------------+
-                               |
-                               v
-                 +---------------------------+
-                 |   SHARED FRONTEND RUNTIME |
-                 |---------------------------|
-                 | attach lifecycle          |
-                 | transport client          |
-                 | session projection        |
-                 | pane stream/backlog cache |
-                 | command API               |
-                 +-------------+-------------+
-                               |
-                  local IPC or | or liblink
-                               v
-                 +---------------------------+
-                 |            SES            |
-                 |---------------------------|
-                 | canonical session graph   |
-                 | focus / tabs / floats     |
-                 | pane + pod lifecycle      |
-                 | PTY size authority        |
-                 | backlog retention         |
-                 | metadata authority        |
-                 +-------------+-------------+
-                               |
-                               v
-                 +---------------------------+
-                 |           PODS            |
-                 | PTY + shell + processes   |
-                 +---------------------------+
-```
-
-The important rule is:
-
-```text
-frontends do not own session truth
-frontends do not describe session truth back to SES
-frontends only render and send commands
-SES is the only authority
-```
-
-## What "Full Separation" Actually Means
-
-Full separation does not mean SES becomes a renderer.
-
-SES must own:
-
-- session identity
-- tab list and tab order
-- split tree
-- float list and float visibility
-- focused pane
-- active tab
-- active float
-- pane membership
-- pane metadata
-- pane lifecycle
-- pod lifecycle
-- attach/detach
-- backlog retention
-- PTY size truth
-
-Frontends must own only:
-
-- renderer objects
-- VT parser/render caches
-- screen-coordinate layout math
-- selection state
-- hover / drag / popup state
-- theme / statusbar widgets
-- local notifications
-- transient input buffers
-
-Shared frontend runtime may own:
-
-- transport connection state
-- current SES session projection
-- pane stream caches
-- attach lifecycle state
-- command helpers
-
-The shared frontend runtime is not the authority. It is a client-side mirror.
-
-## Non-Goals
-
-- Backward compatibility is not a goal.
-- Multi-view collaborative control is not part of this rewrite.
-- SES should not become a terminal renderer.
-- Remote is not a separate architecture. It is the same frontend runtime over a
-  different transport.
-- Incremental diff events are not required for correctness. Full SES snapshots
-  are acceptable if SES is the only author of them.
-
-## Architecture Rules
-
-These rules are mandatory for the rewrite.
-
-### Rule 1: the terminal frontend must stop building `SessionSnapshot`
-
-`src/frontends/terminal/state_sync.zig` must stop walking terminal `Layout`,
-tabs, and floats to build canonical session state.
-
-If the terminal frontend still constructs `SessionSnapshot`, then the terminal
-frontend still owns session semantics.
-
-### Rule 2: the terminal frontend must stop parsing session JSON directly
-
-`src/frontends/terminal/state_reattach.zig` must stop being the place where SES
-session state is parsed and turned into canonical attached-session objects.
-
-That work belongs in a shared frontend runtime layer.
-
-### Rule 3: SES must stop accepting frontend-authored whole-session truth
-
-`sync_state` and terminal-authored layout/tree sync are the wrong model for the
-end state.
-
-The frontend may send commands like:
-
-- focus pane
-- switch tab
-- split pane
-- close pane
-- close tab
-- create float
-- move float
-- resize float
-- hide/show float
-- rename tab
-- set sticky
-
-SES applies those mutations, then publishes the new authoritative state.
-
-### Rule 4: session structure must move out of terminal `TerminalViewState`
-
-`TerminalViewState` may keep visual widget state, but it must not be the owner
-of:
-
-- tab identity
-- tab order
-- split tree truth
-- float identity
-- float visibility truth
-- active tab truth
-- active float truth
-- focused pane truth
-
-Those belong in SES and the shared frontend runtime mirror.
-
-### Rule 5: remote must reuse the exact same frontend runtime
-
-There must not be a second remote-specific frontend architecture.
-
-The target is:
-
-```text
-terminal frontend
-  -> shared frontend runtime
-  -> local IPC transport
-  -> SES
-```
-
-and:
-
-```text
-terminal/web/desktop frontend
-  -> shared frontend runtime
-  -> liblink transport
-  -> SES
-```
-
-Same protocol. Same projection model. Same attach lifecycle.
-
-## Required New Core Pieces
-
-These are the missing shared layers.
-
-### 1. `FrontendRuntime`
-
-New shared core type, likely in `src/core/frontend_runtime.zig`.
-
-Responsibilities:
-
-- own the transport client
-- own attach lifecycle
-- own the frontend-side session projection
-- own pane stream/backlog state
-- expose semantic commands to the frontend
-- receive SES snapshots/events
-- update the projection
-
-The terminal frontend should depend on this runtime instead of directly owning
-session cache and attach state.
-
-### 2. `SessionProjection`
-
-New shared core type, likely in `src/core/session_projection.zig`.
-
-Responsibilities:
-
-- frontend-neutral mirror of SES session state
-- tabs, floats, panes, focus, active tab, active float
-- no screen coordinates
-- no terminal renderer objects
-- no popup state
-
-This becomes the frontend-visible session model.
-
-### 3. `PaneStreamState`
-
-New shared core type, likely in `src/core/pane_stream_state.zig`.
-
-Responsibilities:
-
-- backlog buffer or replay state
-- live VT byte stream state
-- pane-level metadata mirrored from SES
-- frontend-neutral mapping by pane UUID
-
-Terminal-specific VT parser/render objects may wrap this, but should not be the
-canonical attached-session model anymore.
-
-### 4. Terminal-only view state
-
-Terminal-specific state should remain under `src/frontends/terminal/`.
-
-It should contain:
-
-- widget layout caches
-- computed pane rectangles
-- z-order for rendering
-- selection
-- popups
-- drag state
-- notification display
-
-It should not define session truth.
-
-## Protocol Reset
-
-The wire protocol should be reshaped around this rule:
-
-```text
-frontends send commands
-SES sends authoritative state
-```
-
-### Keep
-
-- register / registered
-- reattach / session_reattached
-- session_state
-- pane_exited
-- notify
-- VT frames
-- pane metadata updates from SES/pods
-
-### Remove or deprecate
-
-- `sync_state`
-- frontend-authored whole-session JSON sync
-- frontend-authored layout-tree replacement as a normal UI mutation path
-
-### Replace with semantic session commands
-
-At minimum:
-
-- `set_active_tab`
-- `focus_pane`
-- `split_pane`
-- `close_pane`
-- `close_tab`
-- `create_tab`
-- `rename_tab`
-- `create_float`
-- `close_float`
-- `show_float`
-- `hide_float`
-- `move_float`
-- `resize_float`
-- `set_active_float`
-- `set_sticky`
-- `report_viewport_sizes`
-
-Important note:
-
-`report_viewport_sizes` is not a session-ownership leak. The frontend computes
-screen-space rectangles; SES still decides and applies PTY size authority.
-
-### Snapshot vs event model
-
-For this rewrite, full SES-authored snapshots are acceptable.
-
-Incremental events can be added later, but they are not required to complete
-the separation. The critical thing is that SES is the only author of session
-truth, and the frontend runtime is the only place that applies that truth
-client-side.
-
-## Execution Plan
-
-This is the actual remaining rewrite, in order.
-
-### Phase 1: build the shared runtime and move session parsing there
-
-Status: complete
-
-1. Done: Introduce `FrontendRuntime` and `SessionProjection`.
-2. Done: Move `frontend_session_cache.zig` functionality into the runtime/projection.
-3. Done: Move `frontend_attach_state.zig` and `frontend_attach.zig` into the runtime.
-4. Done: Move session JSON parsing and snapshot application out of
-   `src/frontends/terminal/state_reattach.zig`.
-5. Done: Make the terminal frontend consume projection state from the runtime.
-
-Done when:
-
-- terminal no longer owns `session_cache`
-- terminal no longer owns `attach_state`
-- terminal no longer parses `SessionSnapshot` JSON
-
-### Phase 2: stop frontend-authored state sync
-
-1. Done: Delete `buildSessionSnapshot()` from the terminal frontend.
-2. Done: Remove `syncStateToSes()` as a source of truth.
-3. Done: Remove terminal-authored normal-path layout/tree sync.
-4. Done: Add semantic commands for normal tab/float/layout/focus mutations the
-   terminal UI can trigger.
-5. Done: Make SES mutate its session graph from those commands instead of
-   frontend-authored whole-session state.
-6. Done: After each accepted mutation, SES publishes the new authoritative state.
-
-Done when:
-
-- terminal does not construct `SessionSnapshot`
-- SES does not accept terminal-authored whole-session state
-- session mutations are command-based
-
-### Phase 3: move session graph ownership out of terminal view structs
-
-1. Done: Remove session identity and session structure ownership from
-   `TerminalViewState`.
-2. Done: Replace `Tab.layout` as session truth with terminal view objects derived from
-   `SessionProjection`.
-3. Done: Keep only terminal-specific widget/layout caches in terminal state.
-4. Done: Make terminal view reconciliation derive from projection state instead of
-   being the owner of tabs/floats/layout truth.
-
-Done when:
-
-- `TerminalViewState` is visual-only
-- terminal `Tab` is a view/widget, not a session owner
-- split tree truth lives only in SES + shared projection
-
-### Phase 4: split terminal `Pane` into view vs session/runtime pieces
-
-Progress: pane-local exit status and cached SES CWD have been removed,
-float/session metadata queries now read through runtime/projection helpers, and
-the remaining float presentation behavior has been moved out of
-`src/frontends/terminal/pane.zig` so it is back to being a terminal widget.
-
-1. Done: Audit `src/frontends/terminal/pane.zig`.
-2. Done: Move session-shaped fields out of terminal pane objects into shared
-   runtime records.
-3. Done: Keep terminal pane widgets responsible only for VT/render/input
-   behavior.
-4. Done: Make pane metadata and lifecycle queries go through the
-   runtime/projection.
-
-Done when:
-
-- terminal pane objects are render/input widgets
-- session metadata lives in SES/runtime projection
-
-### Phase 5: make attach/detach/reattach fully runtime-driven
-
-1. Done: Terminal startup should just create the runtime and attach.
-2. Done: Reattach should rebuild the projection in shared core, not in
-   terminal code.
-3. Done: Backlog replay coordination should live in the runtime.
-4. Done: Session stolen / reconnect / detach flows should live in the
-   runtime.
-
-Done when:
-
-- terminal main loop does not implement attach semantics itself
-- shared runtime owns the attach lifecycle
-
-### Phase 6: make transport truly frontend-neutral
-
-1. Done: Extend `FrontendClient.Transport` beyond `local_ipc`.
-2. Done: Add `liblink` transport.
-3. Done: Make transport selection a runtime concern, not a terminal concern.
-4. Done: Reuse the exact same attach/session/VT path for remote frontends.
-
-Done when:
-
-- local and remote frontend attachment share the same runtime path
-- no terminal-specific remote architecture exists
-
-### Phase 7: delete the leftover coupling
-
-1. Done: Delete dead snapshot sync code.
-2. Done: Delete dead layout-tree sync code used by normal UI mutations.
-3. Done: Delete no-longer-needed terminal-side session caches.
-4. Done: Rename leftovers so the code reads honestly.
-5. Done: Update docs after the code is actually finished.
-
-Legacy compatibility aliases can remain where they are part of the public CLI
-or config surface, but the live frontend/runtime/session code paths should read
-as `terminal` / `frontend` / `session`, not `mux`.
-
-Done when:
-
-- the old coupling paths are removed, not just unused
-
-## Test Plan
-
-This rewrite needs tests at the boundary that actually matters now.
-
-### SES tests
-
-- command mutates canonical session graph correctly
-- attach/reattach returns correct authoritative state
-- pane/pod lifecycle updates session state correctly
-- viewport-size reports update PTY sizes correctly
-
-### Shared frontend runtime tests
-
-- snapshot application builds the correct `SessionProjection`
-- command helpers send the right wire messages
-- attach/detach/session-stolen flows update runtime state correctly
-- backlog replay populates pane stream state correctly
-
-### Terminal frontend tests or smoke checks
-
-- startup attach
-- open/close tabs
-- split/resize/close panes
-- show/hide/move/resize floats
-- detach/reattach
-- statusbar and focus behavior
-
-### Transport tests
-
-- same runtime behavior over `local_ipc`
-- same runtime behavior over `liblink`
-
-## Exit Criteria
-
-The rewrite is done only when all of the following are true:
-
-1. Done: The terminal frontend does not build `SessionSnapshot`.
-2. Done: The terminal frontend does not parse SES session JSON directly.
-3. Done: The terminal frontend does not send whole-session or whole-layout truth to
-   SES as the normal UI mutation path.
-4. Done: SES is the only author of session structure.
-5. Done: A shared frontend runtime owns attach lifecycle and session projection.
-6. Done: Terminal state contains only terminal-specific view/render/input state.
-7. Done: Local and remote frontends use the same runtime and protocol shape.
-8. Done: `PLAN.md` can be removed or marked complete without hand-waving.
-
-The rewrite is complete.
-
-Final honest description:
-
-```text
-SES is canonical authority,
-and the only remaining work is final documentation/cleanup around the new
-frontend runtime and remote transport path.
-```
+# Hexe Hardening Plan
+
+Replaces the prior UI/SES separation plan (which is complete).
+
+This plan consolidates findings from a five-agent audit (dead code, stubs,
+implementation bugs, architecture, security) into a prioritized, sequenced work
+list. Each phase is independently shippable — don't merge later phases before
+earlier ones land.
+
+Completion is not claimed until every checkbox in a phase is done AND the
+phase's exit criteria hold.
+
+---
+
+## Phase 1 — Memory-safety fixes (mechanical, shippable as one PR)
+
+Small, isolated fixes for confirmed memory-safety bugs. No design work, no
+refactors.
+
+- [x] **P1.1** — `src/core/ipc.zig:147` — `Client.connect()` now clamps the
+      socket path copy via `@min(path.len, addr.path.len - 1)`, matching the
+      pattern at `:40` and `:77`.
+- [~] **P1.2** — `src/modules/pod/buffering.zig:40-47` — **false positive**.
+      Line 32 early-returns when `data.len >= self.buf.len`, so the remaining
+      path is reached only with `data.len < cap`. That invariant makes
+      `drop = self.len + data.len - cap < self.len`, so the `self.len -= drop`
+      at line 47 cannot underflow. Skipped.
+- [x] **P1.3** — `src/frontends/terminal/state.zig:272` — `stdin_tail_len`
+      widened from `u8` to `u16`. The `@intCast(tail.len)` at
+      `loop_input.zig:130` is bounded by `stdin_tail.len == 256`, which fits.
+- [x] **P1.4** — `src/core/pty.zig:272` — `closeExtraFds` fallback now walks
+      up to `getrlimit(RLIMIT_NOFILE).cur` instead of 1024. `close_range` is
+      still the primary path.
+
+**Exit criteria:** `zig build` clean. ✅
+
+---
+
+## Phase 2 — Silent-failure cleanup (one-shot refactor)
+
+Retire the ~250 `catch {}` patterns on wire writes by routing them through a
+single helper that logs and marks the client connection broken.
+
+- [x] **P2.1** — Added `Server.replyOrClose` and `Server.replyOrCloseWithTrail`
+      helpers in `src/modules/session/server.zig`. Both log at warn level and
+      queue the fd for close via the existing `queueCtlClose` pending path,
+      which triggers `removeClientWithWatcherCleanup` on the next poll tick.
+- [~] **P2.2** — No separate "broken" flag needed. `queueCtlClose` already
+      feeds into the unified cleanup path used by EPIPE/ECONNRESET handling,
+      so we reuse it directly. Rejected as redundant.
+- [x] **P2.3** — All 50 `wire.writeControl(...) catch {}` sites in
+      `server.zig` migrated to `self.replyOrClose(...)`.
+- [x] **P2.4** — All 18 `wire.writeControlWithTrail(...) catch {}` sites in
+      `server.zig` migrated to `self.replyOrCloseWithTrail(...)`. Also
+      migrated the one `writeControlMsg(...) catch {}` at `:2283` inline
+      (no helper added for a single call site).
+- [x] **P2.5** — `src/core/frontend_client.zig` had two swallows: the
+      shutdown `disconnect` notify (now logs at debug level — there's
+      nothing else to do mid-shutdown) and `update_pane_aux` (now logs and
+      nulls `self.ctl_fd` so subsequent ops fail fast).
+      `frontend_liblink_transport.zig` has no `wire.writeControl.*catch {}`
+      patterns.
+
+**Exit criteria:** `grep -rn "wire\.writeControl.*catch {}" src/` returns
+zero. ✅ Build clean. ✅
+
+---
+
+## Phase 3 — Protocol input validation (payload caps)
+
+Every control-message read path must enforce `wire.MAX_PAYLOAD_LEN` before
+allocating.
+
+- [ ] **P3.1** — Add `wire.readControlFrame(fd, allocator, max_payload)`
+      that: reads the header, validates `payload_len <= max_payload`, reads
+      the payload into a bounded allocation, returns
+      `{ header, payload: []u8 }`. All call sites in SES and frontend go
+      through this.
+- [ ] **P3.2** — Replace ad-hoc reads in `src/modules/session/server.zig`
+      (the binary control loop) and `src/core/frontend_client.zig` with
+      `readControlFrame`.
+- [ ] **P3.3** — Add a read timeout at the frame level (not just
+      `VT_ROUTE_IO_TIMEOUT_MS`) so a client can't stall SES by advertising a
+      payload then never sending it. Reuse the existing timeout constant or
+      add `CONTROL_READ_TIMEOUT_MS`.
+- [ ] **P3.4** — Persistence hardening (same "validate before allocate"
+      principle):
+      - `src/modules/session/persist.zig:94-200` — cap each string field
+        (`sticky_pwd`, `pod_socket_path`, names) at 4KB; skip the session
+        entry on overflow with a log warning.
+      - `src/modules/session/txlog.zig:115-120` — cap total replay at 10MB;
+        truncate the log and warn on overflow.
+      - Add parent-directory `fsync` after `renameAbsolute` in `persist.zig`.
+
+**Exit criteria:** a fuzz test (or hand-crafted malicious JSON session file)
+can't OOM SES on startup. A stalled client can't hang the poll loop.
+
+---
+
+## Phase 4 — Privacy fixes (file perms + password mode)
+
+- [ ] **P4.1** — `src/modules/pod/main.zig:238` — pod metadata sidecar
+      created with `0o600`.
+- [ ] **P4.2** — `src/core/recording/asciicast.zig:21` — recording files
+      created with `0o600`.
+- [ ] **P4.3** — `src/modules/pod/buffering.zig` — gate ring-buffer appends
+      on `pane.flags.password_input`. When set, don't capture the input (or
+      the echo back from the shell) into the backlog. Same guard in
+      `src/core/recording/asciicast.zig` for recording.
+- [ ] **P4.4** — Audit `state.overlays.recordKeypress` call sites
+      (`src/frontends/terminal/loop_input_keys.zig:26` already checks it for
+      keycast — verify the same guard is applied everywhere user input could
+      be observed).
+
+**Exit criteria:** typing `sudo <password>` into a recorded pane leaves no
+trace in the asciicast or session backlog. New asciicast and pod metadata
+files are `-rw-------`.
+
+---
+
+## Phase 5 — Peer authentication for frontends
+
+- [ ] **P5.1** — Extract `verifyPeerCredentials` from
+      `src/modules/pod/main.zig:23-37` into `src/core/ipc.zig` as a reusable
+      helper.
+- [ ] **P5.2** — Call it from every `accept()` in
+      `src/modules/session/server.zig` (`dispatchNewConnection`, etc.). Reject
+      connections whose peer UID differs from the SES process UID.
+- [ ] **P5.3** — Add an env override `HEXE_ALLOW_CROSS_UID=1` for test setups
+      that legitimately need it (don't document it prominently).
+
+**Exit criteria:** a sibling process running as a different UID cannot
+`register` or `reattach` against our SES socket.
+
+---
+
+## Phase 6 — Clean up stubs, dead code, and half-wired features
+
+Small individually but they add up to significant clarity improvements.
+
+- [ ] **P6.1** — Delete or wire up:
+      - `src/modules/session/main.zig:589` — stub `printLayoutTree()` with no
+        callers. Delete.
+      - `src/frontends/terminal/mouse_selection.zig:29` — `EdgeScroll.up/down`
+        are set but never consumed. Either finish edge scrolling or drop the
+        enum variants.
+      - `src/frontends/terminal/keybinds.zig:694` — `.hold => unreachable`.
+        Replace with an explicit no-op + comment, or implement hold handling.
+      - `src/modules/session/state.zig:2016` — comment references a deleted
+        function. Remove the stale reference.
+- [ ] **P6.2** — Allocator parameter cleanup. Four functions take an
+      `Allocator` they never use (inline page_allocator because of fork
+      issues). Either:
+      - delete the parameter from all four signatures, OR
+      - honor the passed allocator and document the fork invariant.
+      Files: `src/modules/session/main.zig:378`, `persist.zig:94`,
+      `server.zig:74`, `state.zig:500`. Also remove `listStatus(full_mode)`
+      parameter — it's always treated as `true`.
+- [ ] **P6.3** — Unhandled `MsgType` variants in `src/core/wire.zig`:
+      `query_state`, `title_changed`, `pod_register`, `shp_prompt_req/resp`.
+      Audit each:
+      - if a handler is planned, add a TODO with a tracking reference;
+      - if not, delete the enum variant and corresponding constants.
+      Don't leave half-defined protocol surface.
+- [ ] **P6.4** — TODO resolution in `src/core/api_bridge.zig`:
+      - `:1169` — `hexe_mux_float_define` drops size/position/padding/
+        attributes/color/style. Wire each field from the Lua table into
+        `FloatDef`.
+      - `:1317` — `hexe_mux_splits_setup` skips split junction styling.
+        Parse the style subtable into `SplitStyle`.
+- [ ] **P6.5** — `src/core/config_builder.zig:45` — `ConfigBuilder.build()`
+      returns an empty `Config`. Primary config still works via `parseConfig`,
+      but `ses`/`shp`/`pop` section builders are orphaned. Either:
+      - delete the `ses`/`shp`/`pop` builder scaffolding entirely, OR
+      - implement `build()` so their accumulated state becomes runtime
+        config and `applyBuilderConfig` invokes it.
+      I recommend deleting for now; bring back when those config surfaces
+      are actually needed.
+
+**Exit criteria:** `grep -rn "TODO\|FIXME\|XXX" src/ | wc -l` is materially
+lower (track the before/after numbers in the PR description). No public
+symbols with zero call sites.
+
+---
+
+## Phase 7 — Test coverage (blocking for Phase 8)
+
+Before touching architecture, lay down a safety net so refactors don't break
+silently.
+
+- [ ] **P7.1** — Wire protocol round-trip test.
+      `src/core/wire_test.zig` — for every `MsgType` enum variant, encode a
+      representative payload and decode it; assert equality. This catches
+      encoding regressions and forces every new `MsgType` to have a test.
+- [ ] **P7.2** — Input encoding matrix test.
+      `src/frontends/terminal/keybinds_test.zig` — for each `BindKeyKind`
+      (`.char`, `.space`, `.up`/`.down`/`.left`/`.right`, and a few special
+      keys) × each mod combination (none, shift, ctrl, alt, ctrl+alt), assert
+      the exact bytes that `forwardKeyToPaneWithText` would produce against
+      a VT in legacy mode AND in kitty-mode-with-report-all. This is the
+      test that would have caught the space bug we just fixed.
+- [ ] **P7.3** — Snapshot mutation tests.
+      `src/modules/session/state_test.zig` — expand with test cases for
+      `removePaneFromSessionSnapshot` covering: last pane in a tab, last pane
+      in session, pane inside a split tree, pane that is a float, orphan
+      adoption on reattach. Every code path through that 100-line function
+      needs an assertion.
+- [ ] **P7.4** — TxLog corruption / recovery test.
+      Write a valid log, truncate mid-entry, assert `readAll` returns the
+      prefix that was complete and skips the trailing partial entry without
+      crashing or OOMing.
+
+**Exit criteria:** `zig build test` runs all four suites and they pass. The
+input encoding test includes an explicit case for bare space (regression
+test for the space-key bug).
+
+---
+
+## Phase 8 — Architectural fixes (requires Phase 7 safety net)
+
+These are the cross-cutting fixes that need tests in place first.
+
+- [ ] **P8.1** — Kill state duplication in `SessionProjection`.
+      `src/core/session_projection.zig` — remove the shadow maps
+      (`local_floats`, `pane_shell`, `pane_proc`, `pane_names`,
+      `active_float_uuid`, `focused_pane_uuid`, `active_tab`). Make every
+      getter compute derived state from `attached_snapshot` on demand. Adjust
+      `syncFloatState` to be a single write into the snapshot rather than 2–3
+      parallel writes.
+- [ ] **P8.2** — Enforce pane ownership in `session_*` handlers.
+      `src/modules/session/server.zig` — every handler that takes a
+      `pane_uuid` or `tab_uuid` must look it up via
+      `client.session_panes.contains(uuid)` (or equivalent) before mutating.
+      Reject with `error` reply on mismatch. Include test coverage for the
+      rejection path.
+- [ ] **P8.3** — Split `SesState`.
+      `src/modules/session/state.zig` — extract:
+      - `SessionStore` (panes, clients, detached_sessions, session ownership)
+      - `Persistence` (txlog + session file I/O)
+      - `PollingState` (pending_poll_fds, pending_remove_poll_fds)
+      - `SessionLocks` (mutation serialization)
+      Keep `SesState` as a thin composition struct that owns the four
+      substructs. Don't change external APIs in this phase; only internal
+      structure.
+
+**Exit criteria:** `SessionProjection` has no fields that shadow
+`attached_snapshot`. Every `session_*` handler has a test proving it rejects
+a pane_uuid the client doesn't own. `SesState` is < 150 LOC after the split.
+
+---
+
+## Out of scope (for now)
+
+These showed up in the audit but aren't on the plan. Revisit after Phase 8:
+
+- **Liblink transport polishing** — the remote transport is untested; either
+  drop it or write an integration test harness. Not urgent until a user
+  actually needs remote attach.
+- **Config hot reload** — nice-to-have but requires runtime config diffing
+  and keybind rebuild. Too big for this pass.
+- **`MuxConfigBuilder` TODO items** (`:802` empty `hx.shp.segment` table) —
+  belongs to a separate "Lua API completeness" pass once `shp` is actually
+  consumed anywhere.
+- **Orphan PTY reaping on SES crash** — needs a supervisor model. Deferrable.
+- **Landlock isolation rules** — the constants are defined but unused.
+  They're load-bearing for future work; leave them.
+
+---
+
+## Working order
+
+1. Phase 1 (memory safety) — can ship today, no dependencies.
+2. Phase 2 (silent failure cleanup) — ship after Phase 1 so broken-client
+   handling doesn't collide with the ipc fix.
+3. Phase 3 (input validation) — independent of Phase 2; can be parallel if
+   someone else is on P2.
+4. Phase 4 (privacy) — independent; small PR on its own.
+5. Phase 5 (peer auth) — small, independent.
+6. Phase 6 (dead code / stubs) — independent; fine to interleave as cleanup
+   commits alongside earlier phases.
+7. Phase 7 (tests) — must be done before Phase 8.
+8. Phase 8 (architecture) — final, after the safety net is in place.
+
+Phases 1–6 are shippable as individual PRs. Phase 7 unblocks Phase 8.

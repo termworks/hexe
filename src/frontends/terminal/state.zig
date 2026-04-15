@@ -235,7 +235,7 @@ pub const State = struct {
     // encodings (CSI-u, mouse events, etc) we must not forward partial sequences
     // into the focused pane. Keep a small tail buffer to stitch reads.
     stdin_tail: [256]u8 = undefined,
-    stdin_tail_len: u8 = 0,
+    stdin_tail_len: u16 = 0,
 
     // Track bracketed paste mode to suppress keycast during paste
     in_bracketed_paste: bool = false,
