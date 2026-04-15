@@ -266,6 +266,29 @@ pub const Server = struct {
         self.pending_vt_close_fds.append(self.allocator, .{ .fd = fd, .watcher = watcher }) catch {};
     }
 
+    /// Write a control reply to a client fd; on failure log and queue the
+    /// connection for close so stale fds don't accumulate.
+    fn replyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
+        wire.writeControl(fd, msg_type, payload) catch |err| {
+            core.logging.warnWithSource("ses", "reply failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
+            self.queueCtlClose(fd, null);
+        };
+    }
+
+    /// Same as replyOrClose but for messages with a trailing byte blob.
+    fn replyOrCloseWithTrail(
+        self: *Server,
+        fd: posix.fd_t,
+        msg_type: wire.MsgType,
+        payload: []const u8,
+        trail: []const u8,
+    ) void {
+        wire.writeControlWithTrail(fd, msg_type, payload, trail) catch |err| {
+            core.logging.warnWithSource("ses", "reply-with-trail failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
+            self.queueCtlClose(fd, null);
+        };
+    }
+
     fn flushDeferredDestroys(self: *Server) void {
         for (self.deferred_destroy_ctl.items) |node| {
             self.allocator.destroy(node);
@@ -522,7 +545,7 @@ pub const Server = struct {
             // Try to send error message before closing
             const err_msg = "server_overloaded: connection/rate limit exceeded";
             const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
-            wire.writeControlWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg) catch {};
+            self.replyOrCloseWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
             var tmp = conn;
             tmp.close();
             return;
@@ -565,7 +588,7 @@ pub const Server = struct {
                 defer if (!std.mem.eql(u8, err_msg, "protocol_version_mismatch")) self.allocator.free(err_msg);
 
                 const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
-                wire.writeControlWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg) catch {};
+                self.replyOrCloseWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
             }
             var tmp = conn;
             tmp.close();
@@ -589,7 +612,7 @@ pub const Server = struct {
 
                 if (warn_msg.len > 0) {
                     const notify = wire.Notify{ .msg_len = @intCast(warn_msg.len) };
-                    wire.writeControlWithTrail(conn.fd, .notify, std.mem.asBytes(&notify), warn_msg) catch {};
+                    self.replyOrCloseWithTrail(conn.fd, .notify, std.mem.asBytes(&notify), warn_msg);
                 }
             }
         }
@@ -837,7 +860,7 @@ pub const Server = struct {
                                 const uuid = entry.key_ptr.*;
                                 ses.debugLog("pane_exited: uuid={s} pane_id={?d}", .{ uuid[0..8], pane_id });
                                 var msg = wire.PaneUuid{ .uuid = uuid };
-                                wire.writeControl(ctl_fd, .pane_exited, std.mem.asBytes(&msg)) catch {};
+                                self.replyOrClose(ctl_fd, .pane_exited, std.mem.asBytes(&msg));
                             }
                         }
                     }
@@ -899,7 +922,7 @@ pub const Server = struct {
 
         switch (msg_type) {
             .ping => {
-                wire.writeControl(fd, .pong, &.{}) catch {};
+                self.replyOrClose(fd, .pong, &.{});
             },
             .register => {
                 self.handleBinaryRegister(fd, hdr.payload_len, &buf);
@@ -922,7 +945,7 @@ pub const Server = struct {
                 // Running replay inline here can block on pod VT reconnect
                 // handshake and freeze the event loop for seconds.
                 ses.debugLog("replay_backlogs: sending ok (deferred processing)", .{});
-                wire.writeControl(fd, .ok, &.{}) catch {};
+                self.replyOrClose(fd, .ok, &.{});
             },
             .kill_pane => {
                 self.handleBinaryKillPane(fd, hdr.payload_len, &buf);
@@ -936,7 +959,7 @@ pub const Server = struct {
             .pane_info => {
                 if (hdr.payload_len < @sizeOf(wire.PaneUuid)) {
                     self.skipBinaryPayload(fd, hdr.payload_len, &buf);
-                    wire.writeControl(fd, .@"error", &.{}) catch {};
+                    self.replyOrClose(fd, .@"error", &.{});
                     return false;
                 }
                 const pu = wire.readStruct(wire.PaneUuid, fd) catch return false;
@@ -1015,7 +1038,7 @@ pub const Server = struct {
             else => {
                 // Unknown — skip payload and send error so the MUX doesn't hang.
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
-                wire.writeControl(fd, .@"error", &.{}) catch {};
+                self.replyOrClose(fd, .@"error", &.{});
             },
         }
         return true;
@@ -1030,9 +1053,9 @@ pub const Server = struct {
         }
     }
 
-    fn sendBinaryError(_: *Server, fd: posix.fd_t, msg: []const u8) void {
+    fn sendBinaryError(self: *Server, fd: posix.fd_t, msg: []const u8) void {
         var err_payload: wire.Error = .{ .msg_len = @intCast(@min(msg.len, std.math.maxInt(u16))) };
-        wire.writeControlWithTrail(fd, .@"error", std.mem.asBytes(&err_payload), msg[0..err_payload.msg_len]) catch {};
+        self.replyOrCloseWithTrail(fd, .@"error", std.mem.asBytes(&err_payload), msg[0..err_payload.msg_len]);
     }
 
     fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1116,7 +1139,7 @@ pub const Server = struct {
 
         // Send Registered response with resolved name
         const resp = wire.FrontendRegistered{ .name_len = @intCast(final_name.len) };
-        wire.writeControlWithTrail(fd, .registered, std.mem.asBytes(&resp), final_name) catch {};
+        self.replyOrCloseWithTrail(fd, .registered, std.mem.asBytes(&resp), final_name);
     }
 
     fn handleBinarySessionAddTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1146,7 +1169,7 @@ pub const Server = struct {
             return;
         };
         self.pushClientSessionSnapshot(client_id);
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinarySessionRemoveTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1162,7 +1185,7 @@ pub const Server = struct {
             if (msg.has_active_tab != 0) msg.active_tab else null,
         );
         self.pushClientSessionSnapshot(client_id);
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinarySessionSyncFloat(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1194,7 +1217,7 @@ pub const Server = struct {
             return;
         };
         self.pushClientSessionSnapshot(client_id);
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinarySessionRemoveFloat(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1206,7 +1229,7 @@ pub const Server = struct {
         const client_id = self.findClientForCtlFd(fd) orelse return;
         self.ses_state.removeClientSessionFloat(client_id, msg.pane_uuid);
         self.pushClientSessionSnapshot(client_id);
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinarySessionSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1237,7 +1260,7 @@ pub const Server = struct {
             return;
         };
         self.pushClientSessionSnapshot(client_id);
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinarySessionCloseSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1258,7 +1281,7 @@ pub const Server = struct {
             return;
         };
         self.pushClientSessionSnapshot(client_id);
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinarySessionReplaceSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1280,7 +1303,7 @@ pub const Server = struct {
             return;
         };
         self.pushClientSessionSnapshot(client_id);
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinarySessionSetSplitRatio(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1302,7 +1325,7 @@ pub const Server = struct {
             return;
         };
         self.pushClientSessionSnapshot(client_id);
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1443,7 +1466,7 @@ pub const Server = struct {
                         .pane_id = existing.pane_id,
                         .socket_path_len = @intCast(existing.pod_socket_path.len),
                     };
-                    wire.writeControlWithTrail(fd, .pane_created, std.mem.asBytes(&existing_resp), existing.pod_socket_path) catch {};
+                    self.replyOrCloseWithTrail(fd, .pane_created, std.mem.asBytes(&existing_resp), existing.pod_socket_path);
                     return;
                 }
             }
@@ -1463,19 +1486,19 @@ pub const Server = struct {
             .pane_id = pane.pane_id,
             .socket_path_len = @intCast(pane.pod_socket_path.len),
         };
-        wire.writeControlWithTrail(fd, .pane_created, std.mem.asBytes(&resp), pane.pod_socket_path) catch {};
+        self.replyOrCloseWithTrail(fd, .pane_created, std.mem.asBytes(&resp), pane.pod_socket_path);
     }
 
     fn handleBinaryFindSticky(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
         if (payload_len < @sizeOf(wire.FindSticky)) {
             self.skipBinaryPayload(fd, payload_len, buf);
-            wire.writeControl(fd, .pane_not_found, &.{}) catch {};
+            self.replyOrClose(fd, .pane_not_found, &.{});
             return;
         }
         const fs = wire.readStruct(wire.FindSticky, fd) catch return;
         if (fs.pwd_len > buf.len) {
             self.skipBinaryPayload(fd, fs.pwd_len, buf);
-            wire.writeControl(fd, .pane_not_found, &.{}) catch {};
+            self.replyOrClose(fd, .pane_not_found, &.{});
             return;
         }
         if (fs.pwd_len > 0) {
@@ -1484,7 +1507,7 @@ pub const Server = struct {
         const pwd = buf[0..fs.pwd_len];
 
         const client_id = self.findClientForCtlFd(fd) orelse {
-            wire.writeControl(fd, .pane_not_found, &.{}) catch {};
+            self.replyOrClose(fd, .pane_not_found, &.{});
             return;
         };
 
@@ -1502,7 +1525,7 @@ pub const Server = struct {
             }
 
             _ = self.ses_state.attachPane(pane.uuid, client_id) catch {
-                wire.writeControl(fd, .pane_not_found, &.{}) catch {};
+                self.replyOrClose(fd, .pane_not_found, &.{});
                 return;
             };
 
@@ -1519,9 +1542,9 @@ pub const Server = struct {
                 .pane_id = pane.pane_id,
                 .socket_path_len = @intCast(pane.pod_socket_path.len),
             };
-            wire.writeControlWithTrail(fd, .pane_found, std.mem.asBytes(&resp), pane.pod_socket_path) catch {};
+            self.replyOrCloseWithTrail(fd, .pane_found, std.mem.asBytes(&resp), pane.pod_socket_path);
         } else {
-            wire.writeControl(fd, .pane_not_found, &.{}) catch {};
+            self.replyOrClose(fd, .pane_not_found, &.{});
         }
     }
 
@@ -1533,7 +1556,7 @@ pub const Server = struct {
         const pu = wire.readStruct(wire.PaneUuid, fd) catch return;
         self.ses_state.suspendPane(pu.uuid) catch {};
         self.ses_state.markDirty();
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinaryAdoptPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1567,7 +1590,7 @@ pub const Server = struct {
             .pane_id = pane.pane_id,
             .socket_path_len = @intCast(pane.pod_socket_path.len),
         };
-        wire.writeControlWithTrail(fd, .pane_found, std.mem.asBytes(&resp), pane.pod_socket_path) catch {};
+        self.replyOrCloseWithTrail(fd, .pane_found, std.mem.asBytes(&resp), pane.pod_socket_path);
     }
 
     fn handleBinaryKillPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1628,7 +1651,7 @@ pub const Server = struct {
             }
             self.ses_state.markDirty();
         }
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinaryGetPaneCwd(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -1642,20 +1665,20 @@ pub const Server = struct {
             const cwd = pane.getProcCwd();
             if (cwd) |c| {
                 var resp = wire.PaneCwd{ .cwd_len = @intCast(c.len) };
-                wire.writeControlWithTrail(fd, .get_pane_cwd, std.mem.asBytes(&resp), c) catch {};
+                self.replyOrCloseWithTrail(fd, .get_pane_cwd, std.mem.asBytes(&resp), c);
                 return;
             }
         }
         // No CWD available.
         var resp = wire.PaneCwd{ .cwd_len = 0 };
-        wire.writeControl(fd, .get_pane_cwd, std.mem.asBytes(&resp)) catch {};
+        self.replyOrClose(fd, .get_pane_cwd, std.mem.asBytes(&resp));
     }
 
     fn handleBinaryListOrphaned(self: *Server, fd: posix.fd_t, buf: []u8) void {
         _ = buf;
         const orphaned = self.ses_state.getOrphanedPanes(self.allocator) catch {
             var resp = wire.OrphanedPanes{ .pane_count = 0 };
-            wire.writeControl(fd, .orphaned_panes, std.mem.asBytes(&resp)) catch {};
+            self.replyOrClose(fd, .orphaned_panes, std.mem.asBytes(&resp));
             return;
         };
         defer self.allocator.free(orphaned);
@@ -1685,7 +1708,7 @@ pub const Server = struct {
         _ = buf;
         const sessions = self.ses_state.listDetachedSessions(self.allocator) catch {
             var resp = wire.SessionsList{ .session_count = 0 };
-            wire.writeControl(fd, .sessions_list, std.mem.asBytes(&resp)) catch {};
+            self.replyOrClose(fd, .sessions_list, std.mem.asBytes(&resp));
             return;
         };
         defer self.allocator.free(sessions);
@@ -1760,7 +1783,7 @@ pub const Server = struct {
             self.ses_state.markDirty();
             // Release lock after successful detach
             self.ses_state.releaseSessionLock(session_id);
-            wire.writeControl(fd, .session_detached, &.{}) catch {};
+            self.replyOrClose(fd, .session_detached, &.{});
         } else {
             // Release lock on failure too
             self.ses_state.releaseSessionLock(session_id);
@@ -2049,7 +2072,7 @@ pub const Server = struct {
         } else {
             self.ses_state.removeClientGraceful(client_id);
         }
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinaryUpdatePaneName(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -2072,7 +2095,7 @@ pub const Server = struct {
             pane.name = if (upn.name_len > 0) self.allocator.dupe(u8, buf[0..upn.name_len]) catch null else null;
             self.ses_state.markDirty();
         }
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinaryUpdatePaneAux(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -2101,7 +2124,7 @@ pub const Server = struct {
             }
             self.ses_state.markDirty();
         }
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinaryUpdatePaneShell(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -2144,7 +2167,7 @@ pub const Server = struct {
             }
             self.ses_state.markDirty();
         }
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     fn handleBinaryPopResponse(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -2157,7 +2180,7 @@ pub const Server = struct {
         // Find the CLI fd waiting for this response.
         const cli_fd = self.pending_pop_requests.fetchRemove(fd);
         if (cli_fd) |kv| {
-            wire.writeControl(kv.value, .pop_response, std.mem.asBytes(&pr)) catch {};
+            self.replyOrClose(kv.value, .pop_response, std.mem.asBytes(&pr));
             posix.close(kv.value);
         }
     }
@@ -2257,7 +2280,10 @@ pub const Server = struct {
                 if (self.ses_state.getClient(client_id)) |client| {
                     if (client.mux_ctl_fd) |mux_fd| {
                         const trails: []const []const u8 = &.{buf[0..trail_len]};
-                        wire.writeControlMsg(mux_fd, .shell_event, std.mem.asBytes(&fwd), trails) catch {};
+                        wire.writeControlMsg(mux_fd, .shell_event, std.mem.asBytes(&fwd), trails) catch |err| {
+                            core.logging.warnWithSource("ses", "shell_event forward failed: fd={d} err={s}", .{ mux_fd, @errorName(err) }, @src());
+                            self.queueCtlClose(mux_fd, null);
+                        };
                     }
                 }
             }
@@ -2278,7 +2304,7 @@ pub const Server = struct {
                 if (self.ses_state.getClient(client_id)) |client| {
                     if (client.mux_ctl_fd) |ctl_fd| {
                         var msg = wire.PaneUuid{ .uuid = ex.uuid };
-                        wire.writeControl(ctl_fd, .pane_exited, std.mem.asBytes(&msg)) catch {};
+                        self.replyOrClose(ctl_fd, .pane_exited, std.mem.asBytes(&msg));
                     }
                 }
             }
@@ -2317,7 +2343,7 @@ pub const Server = struct {
                     return;
                 };
                 // Forward to MUX.
-                wire.writeControl(mux_fd, .focus_move, std.mem.asBytes(&fm)) catch {};
+                self.replyOrClose(mux_fd, .focus_move, std.mem.asBytes(&fm));
                 posix.close(fd);
             },
             .exit_intent => {
@@ -2333,7 +2359,7 @@ pub const Server = struct {
                 const mux_fd = self.findMuxCtlForUuid(ei.uuid) orelse {
                     // No MUX — allow exit.
                     const allow = wire.ExitIntentResult{ .allow = 1 };
-                    wire.writeControl(fd, .exit_intent_result, std.mem.asBytes(&allow)) catch {};
+                    self.replyOrClose(fd, .exit_intent_result, std.mem.asBytes(&allow));
                     posix.close(fd);
                     return;
                 };
@@ -2344,7 +2370,7 @@ pub const Server = struct {
                 wire.writeControl(mux_fd, .exit_intent, std.mem.asBytes(&ei)) catch {
                     // If forward fails, allow exit.
                     const allow = wire.ExitIntentResult{ .allow = 1 };
-                    wire.writeControl(fd, .exit_intent_result, std.mem.asBytes(&allow)) catch {};
+                    self.replyOrClose(fd, .exit_intent_result, std.mem.asBytes(&allow));
                     posix.close(fd);
                     self.pending_exit_intent_cli_fd = null;
                 };
@@ -2410,7 +2436,7 @@ pub const Server = struct {
                     posix.close(fd);
                     return;
                 };
-                wire.writeControl(mux_fd, .notify, buf[0..hdr.payload_len]) catch {};
+                self.replyOrClose(mux_fd, .notify, buf[0..hdr.payload_len]);
                 posix.close(fd);
             },
             .send_keys => {
@@ -2436,7 +2462,7 @@ pub const Server = struct {
                 else
                     self.findMuxCtlForUuid(sk.uuid) orelse self.findAnyMuxCtl();
                 if (mux_fd) |mfd| {
-                    wire.writeControl(mfd, .send_keys, buf[0..hdr.payload_len]) catch {};
+                    self.replyOrClose(mfd, .send_keys, buf[0..hdr.payload_len]);
                 }
                 posix.close(fd);
             },
@@ -2459,7 +2485,7 @@ pub const Server = struct {
                 };
                 const mux_fd = self.findMuxCtlForUuid(tn.uuid) orelse self.findAnyMuxCtl();
                 if (mux_fd) |mfd| {
-                    wire.writeControl(mfd, .targeted_notify, buf[0..hdr.payload_len]) catch {};
+                    self.replyOrClose(mfd, .targeted_notify, buf[0..hdr.payload_len]);
                 }
                 posix.close(fd);
             },
@@ -2477,7 +2503,7 @@ pub const Server = struct {
                 // Forward to all connected MUX clients.
                 for (self.ses_state.clients.items) |*client| {
                     if (client.mux_ctl_fd) |mfd| {
-                        wire.writeControl(mfd, .notify, buf[0..hdr.payload_len]) catch {};
+                        self.replyOrClose(mfd, .notify, buf[0..hdr.payload_len]);
                     }
                 }
                 posix.close(fd);
@@ -2505,7 +2531,7 @@ pub const Server = struct {
                 else
                     self.findMuxCtlForUuid(pc.uuid) orelse self.findAnyMuxCtl();
                 if (mux_fd) |mfd| {
-                    wire.writeControl(mfd, .pop_confirm, buf[0..hdr.payload_len]) catch {};
+                    self.replyOrClose(mfd, .pop_confirm, buf[0..hdr.payload_len]);
                     self.pending_pop_requests.put(mfd, fd) catch {
                         posix.close(fd);
                     };
@@ -2536,7 +2562,7 @@ pub const Server = struct {
                 else
                     self.findMuxCtlForUuid(pch.uuid) orelse self.findAnyMuxCtl();
                 if (mux_fd) |mfd| {
-                    wire.writeControl(mfd, .pop_choose, buf[0..hdr.payload_len]) catch {};
+                    self.replyOrClose(mfd, .pop_choose, buf[0..hdr.payload_len]);
                     self.pending_pop_requests.put(mfd, fd) catch {
                         posix.close(fd);
                     };
@@ -2606,7 +2632,7 @@ pub const Server = struct {
         }
         const result = wire.readStruct(wire.ExitIntentResult, fd) catch return;
         if (self.pending_exit_intent_cli_fd) |cli_fd| {
-            wire.writeControl(cli_fd, .exit_intent_result, std.mem.asBytes(&result)) catch {};
+            self.replyOrClose(cli_fd, .exit_intent_result, std.mem.asBytes(&result));
             posix.close(cli_fd);
             self.pending_exit_intent_cli_fd = null;
         }
@@ -2640,9 +2666,9 @@ pub const Server = struct {
                     posix.close(cfd);
                     return;
                 };
-                wire.writeControlWithTrail(cfd, .float_result, std.mem.asBytes(&result), buf[0..trail_len]) catch {};
+                self.replyOrCloseWithTrail(cfd, .float_result, std.mem.asBytes(&result), buf[0..trail_len]);
             } else {
-                wire.writeControl(cfd, .float_result, std.mem.asBytes(&result)) catch {};
+                self.replyOrClose(cfd, .float_result, std.mem.asBytes(&result));
                 if (trail_len > 0) self.skipBinaryPayload(fd, @intCast(trail_len), buf);
             }
             posix.close(cfd);
@@ -2658,7 +2684,7 @@ pub const Server = struct {
         ses.debugLog("pane_info: uuid={s} fd={d}", .{ uuid[0..8], fd });
         const pane = self.ses_state.panes.get(uuid) orelse {
             ses.debugLog("pane_info: not found", .{});
-            wire.writeControl(fd, .pane_not_found, &.{}) catch {};
+            self.replyOrClose(fd, .pane_not_found, &.{});
             return;
         };
 
@@ -2809,7 +2835,7 @@ pub const Server = struct {
             trail_len += n;
         }
 
-        wire.writeControlWithTrail(fd, .pane_info, std.mem.asBytes(&resp), trail_buf[0..trail_len]) catch {};
+        self.replyOrCloseWithTrail(fd, .pane_info, std.mem.asBytes(&resp), trail_buf[0..trail_len]);
     }
 
     /// Handle binary status query from CLI — respond with StatusResp + entries.
@@ -2963,7 +2989,7 @@ pub const Server = struct {
         }
 
         // Send all at once
-        wire.writeControl(fd, .status, buf.items) catch {};
+        self.replyOrClose(fd, .status, buf.items);
         posix.close(fd);
     }
 
@@ -3015,25 +3041,25 @@ pub const Server = struct {
         if (payload_len < @sizeOf(wire.KillSession)) {
             self.skipBinaryPayload(fd, payload_len, buf);
             const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 15 };
-            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "invalid payload") catch {};
+            self.replyOrCloseWithTrail(fd, .kill_session, std.mem.asBytes(&result), "invalid payload");
             return;
         }
 
         const ks = wire.readStruct(wire.KillSession, fd) catch {
             const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
-            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "read failed") catch {};
+            self.replyOrCloseWithTrail(fd, .kill_session, std.mem.asBytes(&result), "read failed");
             return;
         };
 
         if (ks.id_len == 0 or ks.id_len > buf.len) {
             const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 10 };
-            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "invalid id") catch {};
+            self.replyOrCloseWithTrail(fd, .kill_session, std.mem.asBytes(&result), "invalid id");
             return;
         }
 
         wire.readExact(fd, buf[0..ks.id_len]) catch {
             const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
-            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "read failed") catch {};
+            self.replyOrCloseWithTrail(fd, .kill_session, std.mem.asBytes(&result), "read failed");
             return;
         };
         const session_id_str = buf[0..ks.id_len];
@@ -3043,20 +3069,20 @@ pub const Server = struct {
         // Find session by name or UUID prefix.
         const session_id = self.ses_state.findDetachedSessionByNameOrPrefix(session_id_str) orelse {
             const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 17 };
-            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "session not found") catch {};
+            self.replyOrCloseWithTrail(fd, .kill_session, std.mem.asBytes(&result), "session not found");
             return;
         };
 
         // Kill the session.
         const killed_panes = self.ses_state.killDetachedSession(session_id) orelse {
             const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
-            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "kill failed") catch {};
+            self.replyOrCloseWithTrail(fd, .kill_session, std.mem.asBytes(&result), "kill failed");
             return;
         };
 
         ses.debugLog("kill_session: killed {d} panes", .{killed_panes});
         const result = wire.KillSessionResult{ .success = 1, .killed_panes = @intCast(killed_panes), .error_len = 0 };
-        wire.writeControl(fd, .kill_session, std.mem.asBytes(&result)) catch {};
+        self.replyOrClose(fd, .kill_session, std.mem.asBytes(&result));
     }
 
     /// Handle clear_sessions CLI request.
@@ -3071,7 +3097,7 @@ pub const Server = struct {
             .killed_sessions = @intCast(counts.sessions),
             .killed_panes = @intCast(counts.panes),
         };
-        wire.writeControl(fd, .clear_sessions, std.mem.asBytes(&result)) catch {};
+        self.replyOrClose(fd, .clear_sessions, std.mem.asBytes(&result));
     }
 
     /// Handle clear_orphaned_panes CLI request.
@@ -3085,7 +3111,7 @@ pub const Server = struct {
         const result = wire.ClearOrphanedPanesResult{
             .killed_panes = @intCast(killed),
         };
-        wire.writeControl(fd, .clear_orphaned_panes, std.mem.asBytes(&result)) catch {};
+        self.replyOrClose(fd, .clear_orphaned_panes, std.mem.asBytes(&result));
     }
 
     const LayoutExportTabCtx = struct {
@@ -3268,7 +3294,7 @@ pub const Server = struct {
         };
         defer self.allocator.free(layout_json);
 
-        wire.writeControl(fd, .get_layout, layout_json) catch {};
+        self.replyOrClose(fd, .get_layout, layout_json);
     }
 
     /// Handle get_session_state CLI request — return JSON state for detached session.
@@ -3306,7 +3332,7 @@ pub const Server = struct {
         };
         defer self.allocator.free(session_json);
 
-        wire.writeControl(fd, .session_state, session_json) catch {};
+        self.replyOrClose(fd, .session_state, session_json);
     }
 
     fn pushClientSessionSnapshot(self: *Server, client_id: usize) void {
@@ -3315,7 +3341,7 @@ pub const Server = struct {
         const snapshot = client.session_snapshot orelse return;
         const session_json = snapshot.toJson(self.allocator) catch return;
         defer self.allocator.free(session_json);
-        wire.writeControl(mux_fd, .session_state, session_json) catch {};
+        self.replyOrClose(mux_fd, .session_state, session_json);
     }
 
     /// Handle apply_layout CLI request — mutate canonical SES state, then push
@@ -3365,7 +3391,7 @@ pub const Server = struct {
             return;
         };
         self.pushClientSessionSnapshot(client_id);
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        self.replyOrClose(fd, .ok, &.{});
     }
 
     /// Find the client (MUX) that owns a given pane UUID.

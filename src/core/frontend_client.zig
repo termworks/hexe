@@ -431,7 +431,9 @@ pub const SesClient = struct {
             .preserve_sticky = if (preserve_sticky) 1 else 0,
         };
         // Best-effort: don't block on a reply.
-        wire.writeControl(fd, .disconnect, std.mem.asBytes(&msg)) catch {};
+        wire.writeControl(fd, .disconnect, std.mem.asBytes(&msg)) catch |err| {
+            self.debugLog("disconnect notify write failed: {s}", .{@errorName(err)});
+        };
         // Close fds after notifying
         if (self.ctl_fd) |cfd| posix.close(cfd);
         if (self.vt_fd) |vfd| posix.close(vfd);
@@ -888,7 +890,10 @@ pub const SesClient = struct {
             .has_active_tab = if (active_tab != null) 1 else 0,
             .is_focused = if (is_focused) 1 else 0,
         };
-        wire.writeControl(fd, .update_pane_aux, std.mem.asBytes(&msg)) catch {};
+        wire.writeControl(fd, .update_pane_aux, std.mem.asBytes(&msg)) catch |err| {
+            self.debugLog("update_pane_aux write failed: {s}", .{@errorName(err)});
+            self.ctl_fd = null;
+        };
     }
 
     /// Get auxiliary pane info — queries SES for created_from/focused_from.
