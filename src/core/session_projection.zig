@@ -154,9 +154,18 @@ pub const SessionProjection = struct {
         return current;
     }
 
+    // Coherence note: `active_tab`, `active_float_uuid`, and `focused_pane_uuid`
+    // used to live exclusively on the projection struct while the attached
+    // snapshot carried parallel copies. Every setter still writes both sides
+    // so existing callers that reach through either path stay consistent, but
+    // the getters now prefer the snapshot value when present. That way any
+    // direct mutation of the snapshot (e.g. deserialization of a fresh
+    // snapshot from SES) is visible to readers without a separate sync step.
+
     pub fn activeTab(self: *const SessionProjection, tab_count: usize) usize {
         if (tab_count == 0) return 0;
-        return @min(self.active_tab, tab_count - 1);
+        const raw = if (self.attached_snapshot) |*snapshot| snapshot.active_tab else self.active_tab;
+        return @min(raw, tab_count - 1);
     }
 
     pub fn setActiveTab(self: *SessionProjection, active_tab: usize) void {
@@ -167,6 +176,7 @@ pub const SessionProjection = struct {
     }
 
     pub fn activeFloatUuid(self: *const SessionProjection) ?[32]u8 {
+        if (self.attached_snapshot) |*snapshot| return snapshot.active_float_uuid;
         return self.active_float_uuid;
     }
 
@@ -178,6 +188,7 @@ pub const SessionProjection = struct {
     }
 
     pub fn focusedPaneUuid(self: *const SessionProjection) ?[32]u8 {
+        if (self.attached_snapshot) |*snapshot| return snapshot.focused_pane_uuid;
         return self.focused_pane_uuid;
     }
 

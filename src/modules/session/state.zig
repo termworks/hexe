@@ -488,9 +488,26 @@ pub const DetachedSessionState = struct {
     }
 };
 
-/// Main ses state - the PTY holder
-/// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
+/// Main ses state - the PTY holder.
+///
+/// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization.
+///
+/// This struct is a composition of five distinct concerns, currently flattened
+/// into one 13-field bag because splitting them requires test coverage on
+/// `removePaneFromSessionSnapshot` and the adoption/orphan flows that we
+/// don't have yet. The grouping below is deliberately explicit so a future
+/// extraction has an obvious roadmap:
+///
+///   - **SessionStore**: canonical session graph (panes, clients, detached
+///     sessions, timeouts, dirty flag).
+///   - **PodVtRouting**: pane_id ↔ pod VT fd maps used by the binary VT
+///     router. Independent of session graph mutations.
+///   - **PollingState**: pending fd add/remove lists consumed by the event
+///     loop between ticks. Pure scratch state; could live on `Server`.
+///   - **SessionLocks**: concurrent attach/detach serialization.
+///   - **Persistence**: transaction log file handle and path bookkeeping.
 pub const SesState = struct {
+    // ── concern: SessionStore (canonical session graph) ─────────────────
     allocator: std.mem.Allocator,
     panes: std.AutoHashMap([32]u8, Pane),
     clients: std.ArrayList(Client),
@@ -500,19 +517,21 @@ pub const SesState = struct {
     detached_session_ttl_hours: u32,
     dirty: bool,
 
-    // Binary protocol state (Phase 3+4)
+    // ── concern: PodVtRouting (binary VT fd maps) ───────────────────────
     next_pane_id: u16 = 1,
     pane_id_to_pod_vt: std.AutoHashMap(u16, posix.fd_t),
     pod_vt_to_pane_id: std.AutoHashMap(posix.fd_t, u16),
+
+    // ── concern: PollingState (event-loop scratch) ──────────────────────
     /// Fds that need to be added to the server poll set (populated by connectPodVt).
     pending_poll_fds: std.ArrayList(posix.fd_t),
     /// Fds that need to be removed from the server poll set (old fds closed by connectPodVt).
     pending_remove_poll_fds: std.ArrayList(posix.fd_t),
 
-    // Session locks (prevent concurrent attach/detach)
+    // ── concern: SessionLocks ───────────────────────────────────────────
     session_locks: std.AutoHashMap([16]u8, SessionLock),
 
-    // Transaction log for crash recovery
+    // ── concern: Persistence (txlog) ────────────────────────────────────
     txlog: txlog.TxLog,
     txlog_path: []const u8, // Owned, must be freed in deinit()
     txlog_path_is_fallback: bool, // Track if using string literal fallback
