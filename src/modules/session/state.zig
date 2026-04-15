@@ -432,6 +432,26 @@ pub const Client = struct {
         }
         self.session_snapshot = snapshot;
     }
+
+    /// Does this client's canonical snapshot contain this pane UUID? Used to
+    /// reject session_* commands that reference panes the client doesn't own.
+    /// Returns `true` when no snapshot exists yet (pre-first-sync) so the
+    /// initial registration flow is not blocked — ownership is only enforced
+    /// once SES has populated the snapshot.
+    pub fn snapshotOwnsPane(self: *const Client, uuid: [32]u8) bool {
+        const snap = &(self.session_snapshot orelse return true);
+        return snap.panes.contains(uuid);
+    }
+
+    /// Does this client's canonical snapshot contain this tab UUID? Same
+    /// "no snapshot yet = allow" semantics as `snapshotOwnsPane`.
+    pub fn snapshotOwnsTab(self: *const Client, tab_uuid: [32]u8) bool {
+        const snap = &(self.session_snapshot orelse return true);
+        for (snap.tabs.items) |*tab| {
+            if (std.mem.eql(u8, &tab.uuid, &tab_uuid)) return true;
+        }
+        return false;
+    }
 };
 
 /// Session lock state - prevents concurrent attach/detach

@@ -290,6 +290,36 @@ pub const Server = struct {
         };
     }
 
+    /// Assert that `client` owns `tab_uuid` in its canonical snapshot. If
+    /// not, log a warning and reply with an error; returns `false` so the
+    /// caller can bail out. Used by session_* handlers to reject mutations
+    /// that reference tabs the client never saw.
+    fn requireSnapshotTab(self: *Server, fd: posix.fd_t, client: *const state.Client, tab_uuid: [32]u8, op: []const u8) bool {
+        if (client.snapshotOwnsTab(tab_uuid)) return true;
+        core.logging.warnWithSource(
+            "ses",
+            "{s}: client_id={d} referenced unknown tab {x}",
+            .{ op, client.id, std.fmt.bytesToHex(&tab_uuid, .lower) },
+            @src(),
+        );
+        self.sendBinaryError(fd, "unknown tab uuid");
+        return false;
+    }
+
+    /// Assert that `client` owns `pane_uuid` in its canonical snapshot.
+    /// Same contract as `requireSnapshotTab`.
+    fn requireSnapshotPane(self: *Server, fd: posix.fd_t, client: *const state.Client, pane_uuid: [32]u8, op: []const u8) bool {
+        if (client.snapshotOwnsPane(pane_uuid)) return true;
+        core.logging.warnWithSource(
+            "ses",
+            "{s}: client_id={d} referenced unknown pane {x}",
+            .{ op, client.id, std.fmt.bytesToHex(&pane_uuid, .lower) },
+            @src(),
+        );
+        self.sendBinaryError(fd, "unknown pane uuid");
+        return false;
+    }
+
     fn flushDeferredDestroys(self: *Server) void {
         for (self.deferred_destroy_ctl.items) |node| {
             self.allocator.destroy(node);
@@ -1207,6 +1237,8 @@ pub const Server = struct {
         }
         const msg = wire.readStruct(wire.SessionRemoveTab, fd) catch return;
         const client_id = self.findClientForCtlFd(fd) orelse return;
+        const client = self.ses_state.getClient(client_id) orelse return;
+        if (!self.requireSnapshotTab(fd, client, msg.tab_uuid, "session_remove_tab")) return;
         self.ses_state.removeClientSessionTab(
             client_id,
             msg.tab_uuid,
@@ -1255,6 +1287,8 @@ pub const Server = struct {
         }
         const msg = wire.readStruct(wire.SessionRemoveFloat, fd) catch return;
         const client_id = self.findClientForCtlFd(fd) orelse return;
+        const client = self.ses_state.getClient(client_id) orelse return;
+        if (!self.requireSnapshotPane(fd, client, msg.pane_uuid, "session_remove_float")) return;
         self.ses_state.removeClientSessionFloat(client_id, msg.pane_uuid);
         self.pushClientSessionSnapshot(client_id);
         self.replyOrClose(fd, .ok, &.{});
@@ -1275,6 +1309,9 @@ pub const Server = struct {
             },
         };
         const client_id = self.findClientForCtlFd(fd) orelse return;
+        const client = self.ses_state.getClient(client_id) orelse return;
+        if (!self.requireSnapshotTab(fd, client, msg.tab_uuid, "session_split_pane")) return;
+        if (!self.requireSnapshotPane(fd, client, msg.source_pane_uuid, "session_split_pane")) return;
         self.ses_state.splitClientSessionPane(
             client_id,
             msg.tab_uuid,
@@ -1298,6 +1335,9 @@ pub const Server = struct {
         }
         const msg = wire.readStruct(wire.SessionCloseSplitPane, fd) catch return;
         const client_id = self.findClientForCtlFd(fd) orelse return;
+        const client = self.ses_state.getClient(client_id) orelse return;
+        if (!self.requireSnapshotTab(fd, client, msg.tab_uuid, "session_close_split_pane")) return;
+        if (!self.requireSnapshotPane(fd, client, msg.pane_uuid, "session_close_split_pane")) return;
         self.ses_state.closeClientSessionSplitPane(
             client_id,
             msg.tab_uuid,
@@ -1319,6 +1359,9 @@ pub const Server = struct {
         }
         const msg = wire.readStruct(wire.SessionReplaceSplitPane, fd) catch return;
         const client_id = self.findClientForCtlFd(fd) orelse return;
+        const client = self.ses_state.getClient(client_id) orelse return;
+        if (!self.requireSnapshotTab(fd, client, msg.tab_uuid, "session_replace_split_pane")) return;
+        if (!self.requireSnapshotPane(fd, client, msg.old_pane_uuid, "session_replace_split_pane")) return;
         self.ses_state.replaceClientSessionSplitPane(
             client_id,
             msg.tab_uuid,
@@ -1341,6 +1384,8 @@ pub const Server = struct {
         }
         const msg = wire.readStruct(wire.SessionSetSplitRatio, fd) catch return;
         const client_id = self.findClientForCtlFd(fd) orelse return;
+        const client = self.ses_state.getClient(client_id) orelse return;
+        if (!self.requireSnapshotTab(fd, client, msg.tab_uuid, "session_set_split_ratio")) return;
         self.ses_state.setClientSessionSplitRatio(
             client_id,
             msg.tab_uuid,
