@@ -130,16 +130,17 @@ pub const MsgType = enum(u16) {
     cwd_changed = 0x0400,
     fg_changed = 0x0401,
     shell_event = 0x0402,
-    title_changed = 0x0403,
+    // 0x0403 (title_changed) reserved — removed 2026-04, never implemented.
     bell = 0x0404,
     exited = 0x0405,
-    query_state = 0x0406,
-    pod_register = 0x0407,
+    // 0x0406 (query_state) reserved — removed 2026-04, never implemented.
+    // 0x0407 (pod_register) reserved — removed 2026-04, POD registration
+    // happens via the initial handshake instead.
 
     // Channel ⑤ — SHP → POD control
     shp_shell_event = 0x0500,
-    shp_prompt_req = 0x0501,
-    shp_prompt_resp = 0x0502,
+    // 0x0501/0x0502 (shp_prompt_req/resp) reserved — removed 2026-04,
+    // shell prompt metadata flows through shell_event instead.
 
     _,
 };

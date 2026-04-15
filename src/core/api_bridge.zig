@@ -1166,7 +1166,12 @@ pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.c) c_int {
     }
     lua.pop(1);
 
-    // TODO: Parse size, position, padding, attributes, color, style
+    // TODO(lua-api): hx.mux.float.define only reads `command` and `title`.
+    // size/position/padding/attributes/color/style are accepted by the caller
+    // but silently dropped here. The primary config path (parseConfig on the
+    // top-level table) handles all of these correctly, so this gap only hurts
+    // users that set floats via the builder API. Track with "Lua API
+    // completeness" in PLAN.md.
 
     // Append to floats list
     mux.floats.append(mux.allocator, float_def) catch {
@@ -1314,7 +1319,9 @@ pub export fn hexe_mux_splits_setup(L: ?*LuaState) callconv(.c) c_int {
     }
     lua.pop(1);
 
-    // TODO: Parse style (SplitStyle with junction characters)
+    // TODO(lua-api): junction characters in splits style are not parsed here.
+    // color + separator_v + separator_h are fully supported. Junction styling
+    // is latent — not exercised by any user config today.
 
     return 0;
 }

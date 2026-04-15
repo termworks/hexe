@@ -18,7 +18,6 @@ pub const SesArgs = struct {
     log_level: ?core.logging.Level = null,
     log_file: ?[]const u8 = null,
     list: bool = false,
-    full: bool = false,
     notify_message: ?[]const u8 = null,
     notify_uuid: ?[]const u8 = null,
 };
@@ -131,7 +130,7 @@ pub fn run(args: SesArgs) !void {
 
     // List mode - connect to running daemon and show status (use page_alloc, no fork)
     if (args.list) {
-        try listStatus(page_alloc, args.full);
+        try listStatus(page_alloc);
         return;
     }
 
@@ -247,8 +246,6 @@ pub fn main() !void {
             ses_args.daemon = true;
         } else if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
             ses_args.list = true;
-        } else if (std.mem.eql(u8, arg, "--full") or std.mem.eql(u8, arg, "-f")) {
-            ses_args.full = true;
         } else if (std.mem.eql(u8, arg, "--log")) {
             if (i + 1 < args.len) {
                 i += 1;
@@ -375,7 +372,7 @@ fn sendNotify(allocator: std.mem.Allocator, message: []const u8, target_uuid: ?[
     print("Notification sent\n", .{});
 }
 
-fn listStatus(allocator: std.mem.Allocator, full_mode: bool) !void {
+fn listStatus(allocator: std.mem.Allocator) !void {
     const wire = core.wire;
 
     const socket_path = try ipc.getSesSocketPath(allocator);
@@ -395,8 +392,7 @@ fn listStatus(allocator: std.mem.Allocator, full_mode: bool) !void {
     const handshake: [1]u8 = .{wire.SES_HANDSHAKE_CLI};
     wire.writeAll(fd, &handshake) catch return;
 
-    // Always request full to get mux_state trees
-    _ = full_mode;
+    // Always request full to get mux_state trees.
     const flag: [1]u8 = .{1}; // full mode
     wire.writeControl(fd, .status, &flag) catch return;
 
@@ -584,10 +580,6 @@ fn printMuxStateTree(allocator: std.mem.Allocator, mux_state_json: []const u8, i
             print("{s}  {s} Float [{s}]{s}{s}\n", .{ indent, marker, float_state.pane_uuid[0..8], pwd_str, vis_str });
         }
     }
-}
-
-fn printLayoutTree(_: std.json.ObjectMap, _: []const u8, _: usize) void {
-    // Layout tree printing is optional - the pane list above shows the essentials
 }
 
 fn daemonize(log_file: ?[]const u8) !void {

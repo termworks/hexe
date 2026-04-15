@@ -71,8 +71,9 @@ pub const Server = struct {
     // Resource monitoring and limits
     resource_monitor: core.resource_limits.ResourceMonitor,
 
+    /// Allocator is ignored — see `SesState.init` for the rationale. Everything
+    /// that outlives the fork runs on `page_allocator`.
     pub fn init(_: std.mem.Allocator, ses_state: *state.SesState) !Server {
-        // Use page_allocator for everything to avoid GPA issues after fork
         const page_alloc = std.heap.page_allocator;
         const socket_path = try ipc.getSesSocketPath(page_alloc);
         defer page_alloc.free(socket_path);

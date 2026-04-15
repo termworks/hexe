@@ -41,15 +41,12 @@ pub const ConfigBuilder = struct {
         }
     }
 
-    /// Build final Config from accumulated state
-    pub fn build(self: *ConfigBuilder) !config.Config {
-        var result = config.Config{};
-        result._allocator = self.allocator;
-
-        // TODO: Build config from section builders
-
-        return result;
-    }
+    // Note: there is no top-level `build()` because each section is consumed
+    // independently — `MuxConfigBuilder.build()` by the mux config loader,
+    // `SesConfigBuilder.build()` by the ses config loader, and the shp/pop
+    // builders are read field-by-field by their respective loaders. Callers
+    // that need a section's final config should reach through the specific
+    // section builder.
 };
 
 /// MUX section builder - accumulates mux configuration

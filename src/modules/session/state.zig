@@ -497,8 +497,13 @@ pub const SesState = struct {
     txlog_path: []const u8, // Owned, must be freed in deinit()
     txlog_path_is_fallback: bool, // Track if using string literal fallback
 
+    /// The allocator argument is ignored: SES daemonizes by `fork()` + `exec()`-less
+    /// continuation, and any heap-allocating bookkeeping that lives across the
+    /// fork must be on `page_allocator` so the child doesn't inherit a broken
+    /// GPA arena. The parameter is kept in the signature for call-site symmetry
+    /// with other modules (and so tests can still pass `testing.allocator`
+    /// without the callsite looking wrong).
     pub fn init(_: std.mem.Allocator) SesState {
-        // Always use page_allocator to avoid GPA issues after fork/daemonization
         const page_alloc = std.heap.page_allocator;
 
         // Initialize transaction log path

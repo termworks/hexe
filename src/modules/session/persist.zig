@@ -109,9 +109,10 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
     }
 }
 
+/// Allocator is ignored — see `SesState.init` for the rationale. Temporary
+/// parsing allocations use `page_allocator`; owned data goes on
+/// `ses_state.allocator` (which is also `page_allocator` in production).
 pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
-    // Use page_allocator for ALL temporary allocations to avoid GPA issues after fork.
-    // Only ses_state.allocator is used for final owned data that persists.
     const tmp_alloc = std.heap.page_allocator;
 
     const path = try ipc.getSesStatePath(tmp_alloc);
