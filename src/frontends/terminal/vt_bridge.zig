@@ -74,9 +74,15 @@ pub fn drawRenderState(
                 continue;
             }
 
-            const cell_width: u8 = if (raw.wide == .wide) 2 else 1;
             const is_direct_color = (raw.content_tag == .bg_color_rgb or
                 raw.content_tag == .bg_color_palette);
+            const cp = raw.codepoint();
+            if (!is_direct_color and raw.style_id == 0 and !raw.hyperlink and (cp == 0 or cp == ' ')) {
+                col += 1;
+                continue;
+            }
+
+            const cell_width: u8 = if (raw.wide == .wide) 2 else 1;
 
             const grapheme_tail: []const u21 = if (raw.content_tag == .codepoint_grapheme)
                 graphemes_arr[col]

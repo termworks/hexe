@@ -475,7 +475,7 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                                 else => {},
                             }
                         } else {
-                            // User cancelled - if exit was from shell death, defer respawn
+                            // User cancelled a shell-death exit; keep the session alive.
                             if (action == .exit and state.exit_from_shell_death) {
                                 state.needs_respawn = true;
                             }

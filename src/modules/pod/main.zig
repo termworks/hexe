@@ -830,10 +830,7 @@ const Pod = struct {
             }
 
             const data = read_buf[0..n];
-            pty_ctx.pod.scanOsc7(data);
-            if (containsClearSeq(data)) {
-                pty_ctx.pod.backlog.clear();
-            }
+            pty_ctx.pod.scanOutputMetadata(data);
             if (pty_ctx.pod.password_mode) return .rearm;
             if (!pty_ctx.pod.backlog.appendNoDrop(data) or pty_ctx.pod.backlog.isFull()) {
                 pty_ctx.pod.pty_paused = true;
@@ -1084,10 +1081,7 @@ const Pod = struct {
     }
 
     fn processPtyOutput(self: *Pod, data: []const u8) void {
-        self.scanOsc7(data);
-        if (containsClearSeq(data)) {
-            self.backlog.clear();
-        }
+        self.scanOutputMetadata(data);
         if (!self.password_mode) {
             self.backlog.append(data);
         }
@@ -1298,6 +1292,23 @@ const Pod = struct {
             if (self.osc7_cwd) |old| self.allocator.free(old);
             self.osc7_cwd = copy;
         }
+    }
+
+    fn scanOutputMetadata(self: *Pod, data: []const u8) void {
+        if (!self.shouldScanOutputMetadata(data)) return;
+        self.scanOsc7(data);
+        if (containsClearSeq(data)) {
+            self.backlog.clear();
+        }
+    }
+
+    fn shouldScanOutputMetadata(self: *const Pod, data: []const u8) bool {
+        if (data.len == 0) return false;
+        if (!self.osc7_scanner.isIdle()) return true;
+        for (data) |byte| {
+            if (byte == 0x1b or byte == 0x0c) return true;
+        }
+        return false;
     }
 };
 

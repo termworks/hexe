@@ -86,9 +86,6 @@ pub const VT = struct {
     }
 
     /// Mark the VT as needing a fresh render snapshot.
-    ///
-    /// Kept for API compatibility with callers, but RenderState is currently not
-    /// cached so this is a no-op.
     pub fn invalidateRenderState(self: *VT) void {
         _ = self;
     }

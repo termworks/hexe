@@ -99,6 +99,10 @@ pub const Osc7Scanner = struct {
         osc7_esc,
     };
 
+    pub fn isIdle(self: *const Osc7Scanner) bool {
+        return self.state == .normal;
+    }
+
     pub fn feed(self: *Osc7Scanner, data: []const u8, out_cwd: *?[]const u8) void {
         for (data) |byte| {
             switch (self.state) {

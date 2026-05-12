@@ -1,7 +1,10 @@
-.PHONY: build install release
+.PHONY: build test install release
 
 build:
 	zig build -Doptimize=ReleaseFast
+
+test:
+	zig build test -Doptimize=ReleaseFast
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"

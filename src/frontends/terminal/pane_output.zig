@@ -11,6 +11,11 @@ fn writeResponse(self: *Pane, data: []const u8, comptime context: []const u8) vo
 }
 
 pub fn processOutput(self: *Pane, data: []const u8) void {
+    if (canSkipControlScanners(self, data)) {
+        updateEscTail(self, data);
+        return;
+    }
+
     handleCsiQueries(self, data);
     handleDcsQueries(self, data);
     forwardOsc(self, data);
@@ -19,11 +24,27 @@ pub fn processOutput(self: *Pane, data: []const u8) void {
         self.did_clear = true;
     }
 
-    const take: usize = @min(@as(usize, 3), data.len);
-    if (take > 0) {
-        @memcpy(self.esc_tail[0..take], data[data.len - take .. data.len]);
-        self.esc_tail_len = @intCast(take);
+    updateEscTail(self, data);
+}
+
+fn canSkipControlScanners(self: *const Pane, data: []const u8) bool {
+    if (data.len == 0) return true;
+    if (self.csi_query_state != .idle) return false;
+    if (self.dcs_query_state != .idle) return false;
+    if (self.osc_in_progress or self.osc_pending_esc or self.osc_prev_esc) return false;
+    if (std.mem.indexOfScalar(u8, self.esc_tail[0..self.esc_tail_len], 0x1b) != null) return false;
+
+    for (data) |b| {
+        if (b == 0x1b or b == 0x0c or b == 0x9d) return false;
     }
+    return true;
+}
+
+fn updateEscTail(self: *Pane, data: []const u8) void {
+    const take: usize = @min(@as(usize, 3), data.len);
+    if (take == 0) return;
+    @memcpy(self.esc_tail[0..take], data[data.len - take .. data.len]);
+    self.esc_tail_len = @intCast(take);
 }
 
 fn handleCsiQueries(self: *Pane, data: []const u8) void {

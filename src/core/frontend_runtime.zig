@@ -631,6 +631,10 @@ pub const FrontendRuntime = struct {
         self.projection.setPaneNameOwned(uuid, name_owned);
     }
 
+    pub fn updatePaneName(self: *FrontendRuntime, uuid: [32]u8, name: ?[]const u8) !void {
+        try self.client.updatePaneName(uuid, name);
+    }
+
     pub fn paneName(self: *const FrontendRuntime, uuid: [32]u8) ?[]const u8 {
         return self.projection.paneName(uuid);
     }

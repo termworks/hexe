@@ -8,8 +8,6 @@ const xev = @import("xev").Dynamic;
 const terminal = @import("terminal.zig");
 
 const State = @import("state.zig").State;
-const FrontendRuntime = core.FrontendRuntime;
-const helpers = @import("helpers.zig");
 
 const terminal_main = @import("main.zig");
 const loop_input = @import("loop_input.zig");
@@ -114,6 +112,7 @@ fn applyDeferredPaneInfoResponse(state: *State) void {
                 return;
             };
             state.setPaneNameOwned(resp.uuid, name_owned);
+            state.syncPaneName(resp.uuid);
         }
         if (resp.fg_name != null or resp.fg_pid != null) {
             state.setPaneProc(resp.uuid, resp.fg_name, resp.fg_pid);
@@ -459,6 +458,13 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     }
 }
 
+fn handleDeferredRespawn(state: *State) void {
+    if (!state.needs_respawn) return;
+
+    state.needs_respawn = false;
+    _ = state.respawnFocusedPaneAfterShellDeath();
+}
+
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
 
@@ -501,11 +507,13 @@ pub fn runMainLoop(state: *State) !void {
     defer {
         var tty_restore_buf: [512]u8 = undefined;
         var tty_restore = stdout.writer(&tty_restore_buf);
-        {
+        if (state.view.tab_views.items.len > 0) {
             var split_it = state.currentLayout().splitIterator();
             while (split_it.next()) |pane| {
                 pane.*.vt.freeCachedKittyImages(&state.renderer.vx, &tty_restore.interface);
             }
+        }
+        {
             for (state.view.float_views.items) |pane| {
                 pane.vt.freeCachedKittyImages(&state.renderer.vx, &tty_restore.interface);
             }
@@ -575,6 +583,20 @@ pub fn runMainLoop(state: *State) !void {
         applyDeferredCwdResponse(state);
         applyDeferredPaneInfoResponse(state);
         applyDeferredSessionSnapshots(state);
+        if (state.view.tab_views.items.len == 0) {
+            handleDeferredRespawn(state);
+            if (state.view.tab_views.items.len == 0) {
+                if (state.pending_action == .exit and state.exit_from_shell_death) {
+                    continue;
+                }
+                state.createTab() catch |err| {
+                    core.logging.logError("terminal", "main loop: failed to create fallback tab", err);
+                    state.running = false;
+                    break;
+                };
+                state.skip_dead_check = true;
+            }
+        }
 
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
@@ -675,6 +697,10 @@ pub fn runMainLoop(state: *State) !void {
             last_status_update = now2;
         }
 
+        // Handle a cancelled shell-death exit confirmation before dead-pane
+        // cleanup re-enters the last-pane exit path.
+        handleDeferredRespawn(state);
+
         dead_splits.clearRetainingCapacity();
         {
             var pane_it = state.currentLayout().splitIterator();
@@ -755,85 +781,6 @@ pub fn runMainLoop(state: *State) !void {
                     } else if (state.pending_action != .exit or !state.exit_from_shell_death) {
                         state.running = false;
                     }
-                }
-            }
-        }
-
-        // Handle deferred respawn (from shell death "No" response)
-        if (state.needs_respawn) {
-            state.needs_respawn = false;
-            if (state.currentLayout().getFocusedPane()) |pane| {
-                const old_uuid = pane.uuid;
-                var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                var cwd = state.getReliableCwd(pane);
-                if (cwd == null) {
-                    cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
-                        core.logging.logError("terminal", "respawn dead pane: failed to get fallback cwd", err);
-                        break :blk null;
-                    };
-                }
-                const old_aux = state.runtime.getPaneAux(pane.uuid) catch FrontendRuntime.PaneAuxInfo{
-                    .created_from = null,
-                    .focused_from = null,
-                };
-                if (state.runtime.createPane(null, cwd, null, null, null, null, null)) |result| {
-                    const vt_fd = state.runtime.getVtFd();
-                    var replaced = true;
-                    if (vt_fd) |fd| {
-                        const active_float = state.paneIsFloating(pane);
-                        replaced = state.replacePaneWithPodSynced(
-                            old_uuid,
-                            result.uuid,
-                            result.pane_id,
-                            fd,
-                            pane,
-                            active_float,
-                            .kill_new_pane,
-                            "respawn dead pane: rollback killPane failed after replacement error",
-                        );
-                    } else replaced = false;
-                    if (replaced) {
-                        state.runtime.killPane(old_uuid) catch |e| {
-                            terminal_main.debugLogUuid(&old_uuid, "respawn dead pane: killPane failed after replace: {s}", .{@errorName(e)});
-                        };
-                        const pane_type: FrontendRuntime.PaneType = if (state.paneIsFloating(pane)) .float else .split;
-                        const cursor = pane.getCursorPos();
-                        const cursor_style = pane.vt.getCursorStyle();
-                        const cursor_visible = pane.vt.isCursorVisible();
-                        const alt_screen = pane.vt.inAltScreen();
-                        const layout_path = helpers.getLayoutPath(state, pane) catch |err| blk: {
-                            core.logging.logError("terminal", "respawn dead pane: failed to resolve layout path", err);
-                            break :blk null;
-                        };
-                        defer if (layout_path) |path| state.allocator.free(path);
-                        state.runtime.updatePaneAux(
-                            pane.uuid,
-                            state.activeTabIndex(),
-                            state.paneIsFloating(pane),
-                            state.paneIsFocused(pane),
-                            pane_type,
-                            old_aux.created_from,
-                            old_aux.focused_from,
-                            .{ .x = cursor.x, .y = cursor.y },
-                            cursor_style,
-                            cursor_visible,
-                            alt_screen,
-                            .{ .cols = pane.width, .rows = pane.height },
-                            pane.getPwd(),
-                            null,
-                            null,
-                            layout_path,
-                        ) catch |err| {
-                            core.logging.logError("terminal", "respawn dead pane: updatePaneAux failed after replacement", err);
-                            state.notifications.show("Respawn metadata sync failed");
-                        };
-                        state.skip_dead_check = true;
-                        state.needs_render = true;
-                    } else {
-                        state.notifications.show("Respawn failed");
-                    }
-                } else |_| {
-                    state.notifications.show("Respawn failed");
                 }
             }
         }

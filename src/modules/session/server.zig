@@ -55,6 +55,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .deferred_destroy_vt = .empty,
         .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(allocator),
         .resource_monitor = core.resource_limits.ResourceMonitor.init(.{}),
+        .vt_route_buf = allocator.alloc(u8, wire.MAX_PAYLOAD_LEN) catch unreachable,
     };
 }
 
@@ -74,6 +75,7 @@ fn deinitTestServer(server: *Server) void {
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
+    server.allocator.free(server.vt_route_buf);
 }
 
 fn expectBinaryError(fd: posix.fd_t, expected: []const u8) !void {
@@ -316,6 +318,8 @@ pub const Server = struct {
 
     // Resource monitoring and limits
     resource_monitor: core.resource_limits.ResourceMonitor,
+    // Reused by the single-threaded VT router to avoid alloc/free per output frame.
+    vt_route_buf: []u8,
 
     /// Allocator is ignored — see `SesState.init` for the rationale. Everything
     /// that outlives the fork runs on `page_allocator`.
@@ -342,6 +346,7 @@ pub const Server = struct {
             .deferred_destroy_vt = .empty,
             .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
+            .vt_route_buf = try page_alloc.alloc(u8, wire.MAX_PAYLOAD_LEN),
         };
     }
 
@@ -369,6 +374,7 @@ pub const Server = struct {
         self.deferred_destroy_vt.deinit(self.allocator);
 
         self.binary_ctl_fds.deinit();
+        self.allocator.free(self.vt_route_buf);
         self.socket.deinit();
     }
 
@@ -1112,13 +1118,12 @@ pub const Server = struct {
             return true;
         };
 
-        // Read the full payload before sending any MUX header.
-        const payload = self.allocator.alloc(u8, payload_len) catch |err| {
-            core.logging.logError("ses", "failed to allocate POD VT payload buffer", err);
+        if (payload_len > self.vt_route_buf.len) {
+            core.logging.warn("ses", "POD VT frame exceeds route buffer: fd={d} len={d}", .{ pod_vt_fd, payload_len });
             self.skipBytes(pod_vt_fd, payload_len);
             return true;
-        };
-        defer self.allocator.free(payload);
+        }
+        const payload = self.vt_route_buf[0..payload_len];
 
         wire.readExactTimeout(pod_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
             core.logging.logError("ses", "failed to read POD VT payload", err);

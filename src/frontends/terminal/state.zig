@@ -31,6 +31,7 @@ const OverlayManager = pop.overlay.OverlayManager;
 
 const Pane = @import("pane.zig").Pane;
 const VtWriteQueue = @import("vt_write_queue.zig").Queue;
+const helpers = @import("helpers.zig");
 
 const BindKey = core.Config.BindKey;
 
@@ -1181,6 +1182,123 @@ pub const State = struct {
         return true;
     }
 
+    pub fn respawnFocusedPaneAfterShellDeath(self: *State) bool {
+        if (self.view.tab_views.items.len == 0) {
+            core.logging.warn("terminal", "respawn shell death: no local tabs remain; creating replacement tab", .{});
+            self.createTab() catch |err| {
+                core.logging.logError("terminal", "respawn dead pane: failed to create replacement tab", err);
+                self.notifications.show("Respawn failed");
+                return false;
+            };
+            self.skip_dead_check = true;
+            self.needs_render = true;
+            return true;
+        }
+
+        const pane = self.currentLayout().getFocusedPane() orelse return false;
+        const old_uuid = pane.uuid;
+        if (!pane.isAlive() and self.currentLayout().splitCount() <= 1) {
+            core.logging.warn("terminal", "respawn shell death: replacing last dead split with fresh tab", .{});
+            self.runtime.killPane(old_uuid) catch |err| {
+                core.logging.logError("terminal", "respawn dead pane: kill old pane failed", err);
+            };
+            self.clearTransientPaneState(pane);
+            while (self.view.tab_views.items.len > 0) {
+                const tab_opt = self.view.tab_views.pop();
+                if (tab_opt) |tab_const| {
+                    var tab = tab_const;
+                    tab.deinit();
+                }
+            }
+            self.runtime.clearTabMeta();
+            self.runtime.clearTabFocusMemory();
+            self.setActiveTabIndex(0);
+            self.runtime.setFocusedPaneUuid(null);
+            self.createTab() catch |err| {
+                core.logging.logError("terminal", "respawn dead pane: failed to create replacement tab after clearing dead split", err);
+                self.notifications.show("Respawn failed");
+                return false;
+            };
+            self.skip_dead_check = true;
+            self.needs_render = true;
+            return true;
+        }
+
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var cwd = self.getReliableCwd(pane);
+        if (cwd == null) {
+            cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+                core.logging.logError("terminal", "respawn dead pane: failed to get fallback cwd", err);
+                break :blk null;
+            };
+        }
+        const old_aux = self.runtime.getPaneAux(pane.uuid) catch FrontendRuntime.PaneAuxInfo{
+            .created_from = null,
+            .focused_from = null,
+        };
+        const result = self.runtime.createPane(null, cwd, null, null, null, null, null) catch {
+            self.notifications.show("Respawn failed");
+            return false;
+        };
+        const vt_fd = self.runtime.getVtFd() orelse {
+            self.runtime.killPane(result.uuid) catch {};
+            self.notifications.show("Respawn failed: no VT channel");
+            return false;
+        };
+
+        const active_float = self.paneIsFloating(pane);
+        if (!self.replacePaneWithPodSynced(
+            old_uuid,
+            result.uuid,
+            result.pane_id,
+            vt_fd,
+            pane,
+            active_float,
+            .kill_new_pane,
+            "respawn dead pane: rollback killPane failed after replacement error",
+        )) {
+            self.notifications.show("Respawn failed");
+            return false;
+        }
+
+        self.runtime.killPane(old_uuid) catch {};
+        const pane_type: FrontendRuntime.PaneType = if (self.paneIsFloating(pane)) .float else .split;
+        const cursor = pane.getCursorPos();
+        const cursor_style = pane.vt.getCursorStyle();
+        const cursor_visible = pane.vt.isCursorVisible();
+        const alt_screen = pane.vt.inAltScreen();
+        const layout_path = helpers.getLayoutPath(self, pane) catch |err| blk: {
+            core.logging.logError("terminal", "respawn dead pane: failed to resolve layout path", err);
+            break :blk null;
+        };
+        defer if (layout_path) |path| self.allocator.free(path);
+        self.runtime.updatePaneAux(
+            pane.uuid,
+            self.activeTabIndex(),
+            self.paneIsFloating(pane),
+            self.paneIsFocused(pane),
+            pane_type,
+            old_aux.created_from,
+            old_aux.focused_from,
+            .{ .x = cursor.x, .y = cursor.y },
+            cursor_style,
+            cursor_visible,
+            alt_screen,
+            .{ .cols = pane.width, .rows = pane.height },
+            pane.getPwd(),
+            null,
+            null,
+            layout_path,
+        ) catch |err| {
+            core.logging.logError("terminal", "respawn dead pane: updatePaneAux failed after replacement", err);
+            self.notifications.show("Respawn metadata sync failed");
+        };
+
+        self.skip_dead_check = true;
+        self.needs_render = true;
+        return true;
+    }
+
     pub fn syncSessionSplitRatio(
         self: *State,
         first_anchor_uuid: [32]u8,
@@ -1794,6 +1912,13 @@ pub const State = struct {
 
     pub fn setPaneNameOwned(self: *State, uuid: [32]u8, name_owned: []u8) void {
         self.runtime.setPaneNameOwned(uuid, name_owned);
+    }
+
+    pub fn syncPaneName(self: *State, uuid: [32]u8) void {
+        const name = self.runtime.paneName(uuid);
+        self.runtime.updatePaneName(uuid, name) catch |err| {
+            core.logging.logError("terminal", "failed to sync pane name to session", err);
+        };
     }
 
     pub fn paneName(self: *const State, uuid: [32]u8) ?[]const u8 {
