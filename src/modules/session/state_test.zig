@@ -338,6 +338,71 @@ test "SessionProjection: failed snapshot replacement preserves old projection" {
     try testing.expectEqual(@as(usize, 1), projection.tab_last_focus_kind.items.len);
 }
 
+test "SessionProjection: snapshot replacement preserves per-tab float focus memory" {
+    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{4} ** 32, "focus-memory");
+    defer projection.deinit();
+
+    const tab_a = [_]u8{'a'} ** 32;
+    const tab_b = [_]u8{'b'} ** 32;
+    const split_a = [_]u8{'1'} ** 32;
+    const split_b = [_]u8{'2'} ** 32;
+    const float_a = [_]u8{'f'} ** 32;
+    const float_b = [_]u8{'g'} ** 32;
+
+    var old_snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'o'} ** 32, "old");
+    try old_snapshot.tabs.append(testing.allocator, .{
+        .uuid = tab_a,
+        .name = try testing.allocator.dupe(u8, "a"),
+        .focused_pane_uuid = split_a,
+        .allocator = testing.allocator,
+    });
+    try old_snapshot.tabs.append(testing.allocator, .{
+        .uuid = tab_b,
+        .name = try testing.allocator.dupe(u8, "b"),
+        .focused_pane_uuid = split_b,
+        .allocator = testing.allocator,
+    });
+    try old_snapshot.panes.put(split_a, .{ .uuid = split_a, .kind = .split, .parent_tab = 0 });
+    try old_snapshot.panes.put(split_b, .{ .uuid = split_b, .kind = .split, .parent_tab = 1 });
+    try old_snapshot.panes.put(float_a, .{ .uuid = float_a, .kind = .float, .parent_tab = null });
+    try old_snapshot.floats.append(testing.allocator, .{ .pane_uuid = float_a, .tab_visible = 1 });
+    old_snapshot.active_tab = 0;
+    old_snapshot.active_float_uuid = float_a;
+    old_snapshot.focused_pane_uuid = float_a;
+    try projection.replaceAttachedSnapshotOwned(old_snapshot);
+    projection.rememberFloatingFocus(0, float_a);
+
+    var new_snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'n'} ** 32, "new");
+    try new_snapshot.tabs.append(testing.allocator, .{
+        .uuid = tab_a,
+        .name = try testing.allocator.dupe(u8, "a"),
+        .focused_pane_uuid = split_a,
+        .allocator = testing.allocator,
+    });
+    try new_snapshot.tabs.append(testing.allocator, .{
+        .uuid = tab_b,
+        .name = try testing.allocator.dupe(u8, "b"),
+        .focused_pane_uuid = split_b,
+        .allocator = testing.allocator,
+    });
+    try new_snapshot.panes.put(split_a, .{ .uuid = split_a, .kind = .split, .parent_tab = 0 });
+    try new_snapshot.panes.put(split_b, .{ .uuid = split_b, .kind = .split, .parent_tab = 1 });
+    try new_snapshot.panes.put(float_a, .{ .uuid = float_a, .kind = .float, .parent_tab = null });
+    try new_snapshot.panes.put(float_b, .{ .uuid = float_b, .kind = .float, .parent_tab = null });
+    try new_snapshot.floats.append(testing.allocator, .{ .pane_uuid = float_a, .tab_visible = 1 });
+    try new_snapshot.floats.append(testing.allocator, .{ .pane_uuid = float_b, .tab_visible = 2 });
+    new_snapshot.active_tab = 1;
+    new_snapshot.active_float_uuid = float_b;
+    new_snapshot.focused_pane_uuid = float_b;
+
+    try projection.replaceAttachedSnapshotOwned(new_snapshot);
+
+    try testing.expectEqual(core.SessionProjectionTabFocusKind.float, projection.lastFocusKind(0).?);
+    try testing.expectEqual(float_a, projection.lastFloatingUuid(0).?);
+    try testing.expectEqual(core.SessionProjectionTabFocusKind.float, projection.lastFocusKind(1).?);
+    try testing.expectEqual(float_b, projection.lastFloatingUuid(1).?);
+}
+
 test "reattachSession: returns snapshot borrowed from detached session map" {
     var ses_state = state.SesState.init(testing.allocator);
     defer ses_state.deinit();

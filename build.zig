@@ -228,6 +228,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_wire_tests = b.addRunArtifact(wire_tests);
 
+    // Core VT behavior tests.
+    const vt_test_module = b.createModule(.{
+        .root_source_file = b.path("src/core/vt_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vt_test_module.addImport("core", core_module);
+
+    const vt_tests = b.addTest(.{
+        .root_module = vt_test_module,
+    });
+    const run_vt_tests = b.addRunArtifact(vt_tests);
+
     // Terminal frontend fast-path encoding regression tests.
     const fast_path_test_module = b.createModule(.{
         .root_source_file = b.path("src/frontends/terminal/fast_path_test.zig"),
@@ -245,5 +258,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);
+    test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
 }

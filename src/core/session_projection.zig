@@ -201,10 +201,10 @@ pub const SessionProjection = struct {
         var next_tabs = try self.buildTabMetaFromSnapshot(snapshot.tabs.items);
         errdefer deinitTabMetaList(self.allocator, &next_tabs);
 
-        var next_floating = try buildTabLastFloating(self.allocator, snapshot.tabs.items.len);
+        var next_floating = try self.buildReplacementTabLastFloating(&snapshot);
         errdefer next_floating.deinit(self.allocator);
 
-        var next_kind = try buildTabLastFocusKind(self.allocator, snapshot.tabs.items.len);
+        var next_kind = try self.buildReplacementTabLastFocusKind(&snapshot, next_floating.items);
         errdefer next_kind.deinit(self.allocator);
 
         if (self.attached_snapshot) |*old| old.deinit();
@@ -265,6 +265,80 @@ pub const SessionProjection = struct {
             if (std.mem.eql(u8, &f.pane_uuid, &uuid)) return f;
         }
         return null;
+    }
+
+    fn findFloat(snapshot: *const session_model.SessionSnapshot, uuid: [32]u8) ?session_model.SessionFloat {
+        for (snapshot.floats.items) |f| {
+            if (std.mem.eql(u8, &f.pane_uuid, &uuid)) return f;
+        }
+        return null;
+    }
+
+    fn floatVisibleOnTab(float_state: session_model.SessionFloat, tab: usize) bool {
+        if (float_state.parent_tab) |parent| return parent == tab and float_state.visible;
+        if (tab >= 64) return false;
+        return (float_state.tab_visible & (@as(u64, 1) << @intCast(tab))) != 0;
+    }
+
+    fn snapshotFloatVisibleOnTab(snapshot: *const session_model.SessionSnapshot, uuid: [32]u8, tab: usize) bool {
+        const float_state = findFloat(snapshot, uuid) orelse return false;
+        return floatVisibleOnTab(float_state, tab);
+    }
+
+    fn buildReplacementTabLastFloating(
+        self: *const SessionProjection,
+        snapshot: *const session_model.SessionSnapshot,
+    ) !std.ArrayList(?[32]u8) {
+        var next_floating = try buildTabLastFloating(self.allocator, snapshot.tabs.items.len);
+        errdefer next_floating.deinit(self.allocator);
+
+        const preserve_len = @min(next_floating.items.len, self.tab_last_floating_uuid.items.len);
+        for (0..preserve_len) |idx| {
+            const uuid = self.tab_last_floating_uuid.items[idx] orelse continue;
+            if (!snapshot.panes.contains(uuid)) continue;
+            if (!snapshotFloatVisibleOnTab(snapshot, uuid, idx)) continue;
+            next_floating.items[idx] = uuid;
+        }
+
+        if (snapshot.active_tab < next_floating.items.len) {
+            if (snapshot.active_float_uuid) |uuid| {
+                if (snapshotFloatVisibleOnTab(snapshot, uuid, snapshot.active_tab)) {
+                    next_floating.items[snapshot.active_tab] = uuid;
+                }
+            }
+        }
+
+        return next_floating;
+    }
+
+    fn buildReplacementTabLastFocusKind(
+        self: *const SessionProjection,
+        snapshot: *const session_model.SessionSnapshot,
+        next_floating: []const ?[32]u8,
+    ) !std.ArrayList(TabFocusKind) {
+        var next_kind = try buildTabLastFocusKind(self.allocator, snapshot.tabs.items.len);
+        errdefer next_kind.deinit(self.allocator);
+
+        const preserve_len = @min(next_kind.items.len, self.tab_last_focus_kind.items.len);
+        for (0..preserve_len) |idx| {
+            if (self.tab_last_focus_kind.items[idx] == .float and next_floating[idx] != null) {
+                next_kind.items[idx] = .float;
+            }
+        }
+
+        if (snapshot.active_tab < next_kind.items.len) {
+            if (snapshot.active_float_uuid) |uuid| {
+                if (snapshotFloatVisibleOnTab(snapshot, uuid, snapshot.active_tab)) {
+                    next_kind.items[snapshot.active_tab] = .float;
+                }
+            } else if (snapshot.focused_pane_uuid) |uuid| {
+                if (snapshot.panes.get(uuid)) |pane| {
+                    if (pane.kind != .float) next_kind.items[snapshot.active_tab] = .split;
+                }
+            }
+        }
+
+        return next_kind;
     }
 
     pub fn syncFloatState(
