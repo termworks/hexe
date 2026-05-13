@@ -1,4 +1,4 @@
-# Terminal Status Bar (`hx.mux.tabs.status`)
+# Terminal Status Bar
 
 This page documents the terminal frontend status bar system.
 
@@ -7,25 +7,24 @@ For shell prompt details, see `docs/prompt.md`.
 ## Configure Status Bar
 
 ```lua
-local hx = require("hexe")
+local hexe = require("hexe")
 
-hx.mux.config.setup({
-  tabs = {
-    status = {
-      enabled = true,
+return hexe.setup({
+  status = {
+    enabled = true,
+    left = {
+      hexe.segment({
+        name = "session",
+        outputs = {
+          { style = "bg:237 fg:15", format = " $output " },
+        },
+      }),
     },
-  },
-})
-
-hx.mux.tabs.add_segment("left", {
-  name = "session",
-  outputs = {
-    { style = "bg:237 fg:15", format = " $output " },
   },
 })
 ```
 
-You can also provide arrays with `left`, `center`, `right` using your preferred config style.
+Use `left`, `center`, and `right` arrays of `hexe.segment(...)` objects.
 
 ## Segment Schema (Lua-first)
 
@@ -33,8 +32,8 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
 {
   name     = "tabs",
   priority = 50,
-  -- value segment (text or styled blocks)
-  value = function(ctx)
+  -- render segment (text or styled blocks)
+  render = function(ctx)
     return {
       { text = " ", style = "bg:237 fg:250" },
       { text = os.date("%H:%M:%S"), style = "bold bg:237 fg:250" },
@@ -57,12 +56,12 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
   -- optional click behavior
   button = {
     on_left_click = "hexe record toggle --scope pod --out /tmp/pod.cast",
-  on_right_click = "hexe record stop --scope pod --out /tmp/pod.cast",
-  active_when = function(_)
-    local st = hx.status.recording("pod")
-    return st and st.active == true
-  end,
-  left_style = "bg:2 fg:0",
+    on_right_click = "hexe record stop --scope pod --out /tmp/pod.cast",
+    active_when = function(_)
+      local st = hexe.status.recording("pod")
+      return st and st.active == true
+    end,
+    left_style = "bg:2 fg:0",
     middle_style = "bg:3 fg:0",
     right_style = "bg:1 fg:0",
     inverse_on_hover = true,
@@ -72,7 +71,7 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
   progress = {
     every_ms = 1000,
     show_when = function(ctx) return ctx.jobs > 0 end,
-    value = function(ctx) return tostring(ctx.jobs) end,
+    render = function(ctx) return tostring(ctx.jobs) end,
   },
 
   -- tabs-only styling fields:
@@ -96,9 +95,9 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
 }
 ```
 
-Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); you do not need to set a `kind` field.
+Kind is inferred from fields (`render`, `builtin`, `button`, `progress`); you do not need to set a `kind` field.
 
-Unlike prompt, statusbar is not builtin-allowlisted: statusbar can use `value`, `builtin`, `button`, and `progress` segment kinds and full statusbar builtins (including `spinner`).
+Unlike prompt, statusbar is not builtin-allowlisted: statusbar can use `render`, `builtin`, `button`, and `progress` segment kinds and full statusbar builtins (including `spinner`).
 
 `on_click`, `on_right_click`, and `on_middle_click` support:
 
@@ -120,14 +119,14 @@ Button click-state behavior:
 - Clicking the same button again unclicks (toggle off).
 - If already clicked with one button, clicking a different button unclicks (does not switch to the other clicked state).
 
-`hx.status.recording("pod")` returns a table like `{ active = true|false, scope = "pod", pid = ..., out = "...", started_ms = ... }`.
+`hexe.status.recording("pod")` returns a table like `{ active = true|false, scope = "pod", pid = ..., out = "...", started_ms = ... }`.
 
 Recording command helper sugar is available:
 
 ```lua
 button = {
   on_left_click = function(ctx)
-    local rec = hx.record.active(ctx, {
+    local rec = hexe.record.active(ctx, {
       scope = "pod",
       out = "/tmp/hexe-active-pod.cast",
       capture_input = false,
@@ -136,17 +135,17 @@ button = {
     return rec.switch()
   end,
   on_right_click = function(_)
-    return hx.record.stop({ scope = "pod" })
+    return hexe.record.stop({ scope = "pod" })
   end,
 }
 ```
 
-`hx.status.active_pod(ctx?)` returns `{ uuid = "...", pane = <pane_table> }` for the focused pane.
+`hexe.status.active_pod(ctx?)` returns `{ uuid = "...", pane = <pane_table> }` for the focused pane.
 
 Unified recording helpers:
 
-- `hx.record.target(target, defaults?)` -> `{ start(), stop(), toggle(), status(), switch() }`
-- `hx.record.active(ctx?, defaults?)` -> same helper object for focused pod (or `nil`)
+- `hexe.record.target(target, defaults?)` -> `{ start(), stop(), toggle(), status(), switch() }`
+- `hexe.record.active(ctx?, defaults?)` -> same helper object for focused pod (or `nil`)
 
 Statusbar button actions export focused pane UUID env vars at click time:
 
@@ -231,9 +230,9 @@ Condition evaluation is cached internally:
 
 - Callback conditions: short TTL (fast re-use)
 
-## Value/Builtin Output Model
+## Render/Builtin Output Model
 
-`value` return behavior:
+`render` return behavior:
 
 - `string` -> rendered text
 - `number` -> rendered text
@@ -245,7 +244,7 @@ Example:
 ```lua
 {
   name = "virt",
-  value = function(_)
+  render = function(_)
     local p = io.popen("systemd-detect-virt 2>/dev/null")
     if not p then return nil end
     local v = (p:read("*a") or ""):match("^%s*(.-)%s*$")
@@ -267,7 +266,6 @@ Builtin descriptor behavior:
   - string: `prefix = " "`
   - object: `prefix = { output = " ", style = "bg:0 fg:8" }`
   - same schema for `suffix`
-- `sufix = { output = ..., style = ... }` is accepted as alias for `suffix`.
 - For spinner builtin descriptors, optional fields `kind`, `width`, `step`/`step_ms`, `hold`/`hold_frames`, `colors`, `bg`, and `placeholder` are supported.
 - Descriptor style is authoritative when provided (it does not merge with builtin segment style).
 
@@ -275,14 +273,14 @@ Convenience constructor:
 
 ```lua
 builtin = function(_)
-  return hx.segment.builtin.git_status({
+  return hexe.segment.builtin.git_status({
     style = "bg:1 fg:0",
     suffix = " ",
   })
 end
 ```
 
-Use `hx.segment.builtin`. The old typo alias `segment.buildin` has been removed.
+Use `hexe.segment.builtin`. The old typo alias `segment.buildin` has been removed.
 
 ## Width and Priority
 
@@ -320,8 +318,9 @@ Left and right modules are width-budgeted and priority-sorted.
 Status-area notifications are configured separately from segment lists:
 
 ```lua
-hx.mux.config.setup({
-  notifications = {
+return hexe.setup({
+  pop = {
+    notify = {
     mux = {
       fg = 0,
       bg = 3,
@@ -332,6 +331,7 @@ hx.mux.config.setup({
       alignment = "center",
       duration_ms = 3000,
     },
+  },
   },
 })
 ```

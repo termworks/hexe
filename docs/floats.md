@@ -2,8 +2,8 @@
 
 Floats are overlay panes that appear on top of your splits. They are toggled with a keybinding and can be configured with rich behavior around persistence, scope, and lifecycle.
 
-`layout.lua` owns float structure and behavior: key, command, title, size, position, and attributes.
-`init.lua` owns float visuals: default borders, ad-hoc float visuals, and title-based visual matches.
+Layouts own float structure and behavior: key, command, title, size, position, and attrs.
+Mux config owns float visuals: default borders, ad-hoc float visuals, and title-based visual matches.
 
 ---
 
@@ -12,27 +12,26 @@ Floats are overlay panes that appear on top of your splits. They are toggled wit
 Floats are defined under `floats` in your session layout:
 
 ```lua
-hx.ses.layout.define({
-  name = "default",
+return hexe.layout("default", {
   floats = {
-    {
+    hexe.float("git", {
       key     = "g",
       command = "lazygit",
       title   = "git",
-      attributes = { per_cwd = true, sticky = true, global = true },
+      attrs = { per_cwd = true, sticky = true, global = true },
       size = { width = 90, height = 90 },
-    },
-    {
+    }),
+    hexe.float("files", {
       key     = "f",
       command = "fzf",
-      attributes = { per_cwd = true, sticky = true, global = true },
-    },
-    {
+      attrs = { per_cwd = true, sticky = true, global = true },
+    }),
+    hexe.float("scratch", {
       key        = "t",
-      attributes = { global = false, destroy = true },
+      attrs = { global = false, destroy = true },
       size = { width = 40, height = 30 },
       position = { x = 100, y = 0 },
-    },
+    }),
   },
 })
 ```
@@ -40,9 +39,9 @@ hx.ses.layout.define({
 And toggled via keybindings:
 
 ```lua
-{ on = "press", mods = { hx.mod.alt }, key = "g",
+{ on = "press", mods = { hexe.mod.alt }, key = "g",
   when = "focus:any",
-  action = { type = hx.action.float_toggle, float = "g" } },
+  action = hexe.action.float.toggle("g") },
 ```
 
 ---
@@ -60,7 +59,7 @@ And toggled via keybindings:
 
 ## Attributes
 
-Attributes control behavior. They are set under `attributes = { ... }`:
+Attributes control behavior. They are set under `attrs = { ... }`:
 
 ### `per_cwd`
 
@@ -108,73 +107,72 @@ See [isolation](isolation.md) for profiles and resource limits.
 
 ## Visual policy
 
-Float visuals are configured in `init.lua`, not inside `layout.lua`.
+Float visuals are configured in the `mux.floats` section.
 
-Named floats use `set_defaults(...)` as their base.
-Ad-hoc CLI floats use `set_adhoc(...)` as their base.
-Then every `set_match(pattern, ...)` rule whose regex pattern matches the float title is applied in declaration order. Later matches win.
+Named floats use `defaults` as their base. Ad-hoc CLI floats use `adhoc`.
+Then every `match[pattern]` rule whose regex pattern matches the float title is applied in declaration order. Later matches win.
 
 ```lua
-hx.mux.float.set_defaults({
-  size = { width = 65, height = 65 },
-  color = { active = 2, passive = 237 },
-  attributes = { global = true },
-})
-
-hx.mux.float.set_adhoc({
-  size = { width = 80, height = 70 },
-  color = { active = 4, passive = 237 },
-})
-
-hx.mux.float.set_match("^explorer$", {
-  padding = { x = 2, y = 1 },
-  color = { active = 6, passive = 238 },
-  style = {
-    shadow = { color = 236 },
-    border = {
-      chars = {
-        top_left = "╔",
-        top_right = "╗",
-        bottom_left = "╚",
-        bottom_right = "╝",
-        horizontal = "═",
-        vertical = "║",
+return {
+  floats = {
+    defaults = {
+      size = { width = 65, height = 65 },
+      color = { active = 2, passive = 237 },
+      attrs = { global = true },
+    },
+    adhoc = {
+      size = { width = 80, height = 70 },
+      color = { active = 4, passive = 237 },
+    },
+    match = {
+      ["^explorer$"] = {
+        padding = { x = 2, y = 1 },
+        color = { active = 6, passive = 238 },
       },
     },
   },
-})
+}
 ```
 
-`set_match(...)` uses the float title, not the Pokemon pane name.
+`match[...]` uses the float title, not the pane name.
 
 ### Border style
 
-Border characters and colors live in `set_defaults`, `set_adhoc`, or `set_match`:
+Border characters and colors live in `defaults`, `adhoc`, or `match`:
 
 ```lua
-hx.mux.float.set_match("^git$", {
-  style = {
-    border = {
-      chars = {
-        top_left     = "╭",
-        top_right    = "╮",
-        bottom_left  = "╰",
-        bottom_right = "╯",
-        horizontal   = "─",
-        vertical     = "│",
+return {
+  floats = {
+    match = {
+      ["^git$"] = {
+        style = {
+          border = {
+            chars = {
+              top_left = "╭",
+              top_right = "╮",
+              bottom_left = "╰",
+              bottom_right = "╯",
+              horizontal = "─",
+              vertical = "│",
+            },
+          },
+        },
       },
     },
   },
-})
+}
 ```
 
 ```lua
-hx.mux.float.set_match("^git$", {
-  color = {
-    active  = 2,
-    passive = 8,
+return {
+  floats = {
+    match = {
+      ["^git$"] = {
+        color = { active = 2, passive = 8 },
+      },
+    },
   },
-})
+}
 ```
 
 ### Border title
@@ -182,27 +180,33 @@ hx.mux.float.set_match("^git$", {
 Embed a title or status module in the border:
 
 ```lua
-hx.mux.float.set_match("^git$", {
-  style = {
-    title = {
-      name = "title",
-      position = "topcenter",
-      segments = {
-        {
-          name = "title",
-          value = function(ctx)
-            local t = hx.segment.title(ctx)
-            return {
-              { text = "[", style = "bg:0 fg:1" },
-              { text = " " .. t .. " ", style = "bg:237 fg:250" },
-              { text = "]", style = "bg:0 fg:1" },
-            }
-          end,
+return {
+  floats = {
+    match = {
+      ["^git$"] = {
+        style = {
+          title = {
+            name = "title",
+            position = "topcenter",
+            segments = {
+              {
+                name = "title",
+                render = function(ctx)
+                  local t = hexe.segment.title(ctx)
+                  return {
+                    { text = "[", style = "bg:0 fg:1" },
+                    { text = " " .. t .. " ", style = "bg:237 fg:250" },
+                    { text = "]", style = "bg:0 fg:1" },
+                  }
+                end,
+              },
+            },
+          },
         },
       },
     },
   },
-})
+}
 ```
 
 ---
@@ -238,8 +242,8 @@ Options:
 You can nudge a float's position with a keybinding:
 
 ```lua
-{ on = "press", mods = { hx.mod.alt, hx.mod.shift }, key = "up",
-  action = { type = hx.action.float_nudge, dir = "up" } },
+{ on = "press", mods = { hexe.mod.alt, hexe.mod.shift }, key = "up",
+  action = hexe.action.float.nudge("up") },
 ```
 
 ---

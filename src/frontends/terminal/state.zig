@@ -1914,13 +1914,6 @@ pub const State = struct {
         self.runtime.setPaneNameOwned(uuid, name_owned);
     }
 
-    pub fn syncPaneName(self: *State, uuid: [32]u8) void {
-        const name = self.runtime.paneName(uuid);
-        self.runtime.updatePaneName(uuid, name) catch |err| {
-            core.logging.logError("terminal", "failed to sync pane name to session", err);
-        };
-    }
-
     pub fn paneName(self: *const State, uuid: [32]u8) ?[]const u8 {
         return self.runtime.paneName(uuid);
     }

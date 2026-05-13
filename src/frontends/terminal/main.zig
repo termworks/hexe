@@ -142,7 +142,8 @@ pub fn run(terminal_args: TerminalArgs) !void {
         if (orphan_count > 0) {
             std.debug.print("Orphaned panes (disowned):\n", .{});
             for (tabs[0..orphan_count]) |p| {
-                std.debug.print("  [{s}] pid={d}\n", .{ p.uuid[0..8], p.pid });
+                const name = if (p.name_len > 0) p.nameSlice() else "-";
+                std.debug.print("  [{s}] {s} pid={d}\n", .{ p.uuid[0..8], name, p.pid });
             }
         }
 

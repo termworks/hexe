@@ -1,18 +1,19 @@
 # Keybindings
 
-Keybindings are defined with `hx.mux.keymap.set({...})` in your config.
-The `mux` namespace is the terminal frontend UI API (kept for compatibility naming).
+Keybindings are defined in the top-level `keys` array passed to `hexe.setup`.
 
 ---
 
 ## Basic structure
 
 ```lua
-local hx = require("hexe")
+local hexe = require("hexe")
 
-hx.mux.keymap.set({
-  { key = { hx.key.ctrl, hx.key.alt, hx.key.q }, action = { type = hx.action.mux_quit } },
-  { key = { hx.key.ctrl, hx.key.alt, hx.key.t }, action = { type = hx.action.tab_new } },
+return hexe.setup({
+  keys = {
+    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit()),
+    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.t }, hexe.action.tab.new()),
+  },
 })
 ```
 
@@ -20,65 +21,65 @@ hx.mux.keymap.set({
 
 ## `key`
 
-The `key` field is a single array containing modifiers and the key, all using `hx.key.*`:
+The `key` field is a single array containing modifiers and the key, all using `hexe.key.*`:
 
 ```lua
-key = { hx.key.ctrl, hx.key.alt, hx.key.q }
-key = { hx.key.ctrl, hx.key.alt, hx.key.shift, hx.key.p }
-key = { hx.key.ctrl, hx.key.alt, hx.key.up }
-key = { hx.key.ctrl, hx.key.alt, hx.key["1"] }   -- number keys
-key = { hx.key.ctrl, hx.key.alt, hx.key.dot }
-key = { hx.key.ctrl, hx.key.alt, hx.key.comma }
+key = { hexe.key.ctrl, hexe.key.alt, hexe.key.q }
+key = { hexe.key.ctrl, hexe.key.alt, hexe.key.shift, hexe.key.p }
+key = { hexe.key.ctrl, hexe.key.alt, hexe.key.up }
+key = { hexe.key.ctrl, hexe.key.alt, hexe.key["1"] }   -- number keys
+key = { hexe.key.ctrl, hexe.key.alt, hexe.key.dot }
+key = { hexe.key.ctrl, hexe.key.alt, hexe.key.comma }
 ```
 
 **Modifiers:**
-- `hx.key.ctrl`
-- `hx.key.alt`
-- `hx.key.shift`
-- `hx.key.super`
+- `hexe.key.ctrl`
+- `hexe.key.alt`
+- `hexe.key.shift`
+- `hexe.key.super`
 
 **Named keys:**
-- Letters: `hx.key.a` … `hx.key.z`
-- Numbers: `hx.key["0"]` … `hx.key["9"]`
-- Arrows: `hx.key.up`, `hx.key.down`, `hx.key.left`, `hx.key.right`
-- Punctuation: `hx.key.dot`, `hx.key.comma`, `hx.key.space`, etc.
+- Letters: `hexe.key.a` … `hexe.key.z`
+- Numbers: `hexe.key["0"]` … `hexe.key["9"]`
+- Arrows: `hexe.key.up`, `hexe.key.down`, `hexe.key.left`, `hexe.key.right`
+- Punctuation: `hexe.key.dot`, `hexe.key.comma`, `hexe.key.space`, etc.
 
 ---
 
 ## `action`
 
-Actions trigger terminal frontend operations. Session-structure mutations are applied by SES after command handling. Available action types:
+Actions trigger terminal frontend operations. Session-structure mutations are applied by SES after command handling. Available action constructors:
 
 | Action | Description |
 |---|---|
-| `hx.action.mux_quit` | Exit the terminal frontend |
-| `hx.action.mux_detach` | Detach from session (leave running) |
-| `hx.action.pane_disown` | Orphan current pane |
-| `hx.action.pane_adopt` | Adopt an orphaned pane |
-| `hx.action.pane_close` | Close current float or split pane |
-| `hx.action.pane_select_mode` | Enter pane select/swap mode |
-| `hx.action.split_h` | Split horizontally |
-| `hx.action.split_v` | Split vertically |
-| `hx.action.split_resize` | Resize split (requires `dir`) |
-| `hx.action.tab_new` | New tab |
-| `hx.action.tab_next` | Next tab |
-| `hx.action.tab_prev` | Previous tab |
-| `hx.action.tab_close` | Close current tab |
-| `hx.action.float_toggle` | Toggle named float (requires `float`) |
-| `hx.action.float_nudge` | Move float (requires `dir`) |
-| `hx.action.focus_move` | Move focus (requires `dir`) |
-| `hx.action.clipboard_copy` | Copy selection to clipboard |
-| `hx.action.clipboard_request` | Paste from clipboard |
-| `hx.action.system_notify` | Send a system notification |
-| `hx.action.sprite_toggle` | Toggle Pokemon sprite overlay |
+| `hexe.action.quit()` | Exit the terminal frontend |
+| `hexe.action.detach()` | Detach from session |
+| `hexe.action.pane.disown()` | Orphan current pane |
+| `hexe.action.pane.adopt()` | Adopt an orphaned pane |
+| `hexe.action.pane.close()` | Close current float or split pane |
+| `hexe.action.pane.select()` | Enter pane select/swap mode |
+| `hexe.action.split.horizontal()` | Split horizontally |
+| `hexe.action.split.vertical()` | Split vertically |
+| `hexe.action.split.resize(dir)` | Resize split |
+| `hexe.action.tab.new()` | New tab |
+| `hexe.action.tab.next()` | Next tab |
+| `hexe.action.tab.prev()` | Previous tab |
+| `hexe.action.tab.close()` | Close current tab |
+| `hexe.action.float.toggle(key)` | Toggle named float |
+| `hexe.action.float.nudge(dir)` | Move float |
+| `hexe.action.focus.move(dir)` | Move focus |
+| `hexe.action.clipboard.copy()` | Copy selection to clipboard |
+| `hexe.action.clipboard.request()` | Paste from clipboard |
+| `hexe.action.system.notify()` | Send a system notification |
+| `hexe.action.overlay.sprite_toggle()` | Toggle sprite overlay |
 
 **Actions that take parameters:**
 
 ```lua
-{ key = { ... }, action = { type = hx.action.float_toggle, float = "1" } }
-{ key = { ... }, action = { type = hx.action.focus_move,   dir = "left" } }
-{ key = { ... }, action = { type = hx.action.split_resize, dir = "up" } }
-{ key = { ... }, action = { type = hx.action.float_nudge,  dir = "down" } }
+hexe.key({ ... }, hexe.action.float.toggle("1"))
+hexe.key({ ... }, hexe.action.focus.move("left"))
+hexe.key({ ... }, hexe.action.split.resize("up"))
+hexe.key({ ... }, hexe.action.float.nudge("down"))
 ```
 
 ---
@@ -89,23 +90,25 @@ Controls what happens to the key after the bind fires:
 
 | Mode | Description |
 |---|---|
-| `hx.mode.act_and_consume` | Run action, swallow the key (default) |
-| `hx.mode.act_and_passthrough` | Run action AND forward key to pane |
-| `hx.mode.passthrough_only` | Forward key to pane, no action |
+| `hexe.mode.act_and_consume` | Run action, swallow the key (default) |
+| `hexe.mode.act_and_passthrough` | Run action AND forward key to pane |
+| `hexe.mode.passthrough_only` | Forward key to pane, no action |
 
 ```lua
 -- default: key is consumed
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.t }, action = { type = hx.action.tab_new } }
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.t }, hexe.action.tab.new())
 
 -- passthrough: forward to pane, no action
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.up }, mode = hx.mode.passthrough_only,
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, nil, {
+  mode = hexe.mode.passthrough_only,
   when = function(ctx)
     local p = ctx.pane(0)
     return p and (p.process_name == "nvim" or p.process_name == "vim")
-  end }
+  end,
+})
 
 -- both: run action and also send key into pane
-{ key = { ... }, mode = hx.mode.act_and_passthrough, action = { type = hx.action.sprite_toggle } }
+hexe.key({ ... }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_and_passthrough })
 ```
 
 Keys without any binding always pass through unchanged.
@@ -143,7 +146,7 @@ end
 return false
 ```
 
-Prefer `ctx.pane(0)` (or `hx.ctx.pane(0)` when outside callback-local `ctx`).
+Prefer `ctx.pane(0)` (or `hexe.ctx.pane(0)` when outside callback-local `ctx`).
 
 Common pane fields:
 
@@ -166,7 +169,7 @@ Common pane fields:
 
 ## Lua Events
 
-You can register runtime event callbacks through `hx.events`.
+You can register runtime event callbacks through `hexe.events`.
 
 Supported events:
 - `pane_focus_changed`
@@ -175,28 +178,28 @@ Supported events:
 - `pane_shell_running_changed`
 - `statusbar_redraw` (throttled, default 120ms)
 
-Use the canonical helper API (`hx.events.*`):
+Use the canonical helper API (`hexe.events.*`):
 
 ```lua
-hx.events.on("command_finished", function(ev)
+hexe.events.on("command_finished", function(ev)
   -- ev.command, ev.cwd, ev.status, ev.duration_ms, ev.jobs, ev.pane_uuid
 end)
 
-hx.events.on("pane_shell_running_changed", function(ev)
+hexe.events.on("pane_shell_running_changed", function(ev)
   -- ev.pane_uuid, ev.previous_running, ev.running, ev.phase, ev.command, ev.now_ms
 end)
 
-hx.events.on("statusbar_redraw", function(ev)
+hexe.events.on("statusbar_redraw", function(ev)
   -- ev.now_ms, ev.term_width, ev.term_height, ev.active_tab, ev.tab_count, ev.interval_ms
 end)
 
 -- debounce helper (returns wrapped handler)
-hx.events.on("statusbar_redraw", hx.events.debounce(250, function(ev)
+hexe.events.on("statusbar_redraw", hexe.events.debounce(250, function(ev)
   -- runs at most every 250ms
 end))
 
 -- convenience helper
-hx.events.once("pane_focus_changed", function(ev)
+hexe.events.once("pane_focus_changed", function(ev)
   -- runs only once
 end)
 ```
@@ -211,16 +214,16 @@ Pass `Ctrl+Alt+Arrow` through to nvim/vim, otherwise move focus:
 
 ```lua
 -- passthrough first (evaluated before the fallback)
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.up },    when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.down },  when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.left },  when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.right }, when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up },    nil, { when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hexe.mode.passthrough_only }),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down },  nil, { when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hexe.mode.passthrough_only }),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left },  nil, { when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hexe.mode.passthrough_only }),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, nil, { when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hexe.mode.passthrough_only }),
 
 -- fallback: move frontend focus
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.up },    action = { type = hx.action.focus_move, dir = "up" } },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.down },  action = { type = hx.action.focus_move, dir = "down" } },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.left },  action = { type = hx.action.focus_move, dir = "left" } },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.right }, action = { type = hx.action.focus_move, dir = "right" } },
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up },    hexe.action.focus.move("up")),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down },  hexe.action.focus.move("down")),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left },  hexe.action.focus.move("left")),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, hexe.action.focus.move("right")),
 ```
 
 Binds are evaluated in order — first match wins.
@@ -229,16 +232,16 @@ Binds are evaluated in order — first match wins.
 
 ```lua
 -- split only when a split is focused
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.h }, when = function(ctx) return ctx.focus_split end, action = { type = hx.action.split_h } },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.v }, when = function(ctx) return ctx.focus_split end, action = { type = hx.action.split_v } },
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.h }, hexe.action.split.horizontal(), { when = function(ctx) return ctx.focus_split end }),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.v }, hexe.action.split.vertical(), { when = function(ctx) return ctx.focus_split end }),
 ```
 
 ### Float toggles
 
 ```lua
-{ key = { hx.key.ctrl, hx.key.alt, hx.key["1"] }, action = { type = hx.action.float_toggle, float = "1" } },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key["2"] }, action = { type = hx.action.float_toggle, float = "2" } },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key["0"] }, action = { type = hx.action.float_toggle, float = "p" } },
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1")),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["2"] }, hexe.action.float.toggle("2")),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["0"] }, hexe.action.float.toggle("p")),
 ```
 
 The `float` value must match the `key` field of a float defined in your layout.

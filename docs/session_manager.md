@@ -1,40 +1,49 @@
-# Session manager
+# Session Manager
 
 Drop a `.hexe.lua` file in a project root to define tabs, splits, floats, and startup commands. Launch it with `hexe ses open .`.
 
----
-
-## Quick start
+## Quick Start
 
 Create `.hexe.lua` in your project directory:
 
 ```lua
-return {
-  name = "myproject",
-  root = ".",
+local hexe = require("hexe")
 
-  tabs = {
-    {
-      name = "editor",
-      split = {
-        dir = "horizontal",
-        { cmd = "nvim", size = 70 },
-        { size = 30 },
-      },
-    },
-    {
-      name = "server",
-      split = { cmd = "npm run dev" },
-    },
-    {
-      name = "shell",
+return hexe.setup({
+  ses = {
+    layouts = {
+      hexe.layout("myproject", {
+        root = ".",
+
+        tabs = {
+          hexe.tab("editor", {
+            root = hexe.split("horizontal", {
+              hexe.pane({ command = "nvim", cwd = "." }),
+              hexe.pane({ cwd = "." }),
+            }, { ratio = 0.70 }),
+          }),
+
+          hexe.tab("server", {
+            root = hexe.pane({ command = "npm run dev" }),
+          }),
+
+          hexe.tab("shell", {
+            root = hexe.pane(),
+          }),
+        },
+
+        floats = {
+          hexe.float("git", {
+            key = "g",
+            command = "lazygit",
+            size = { width = 90, height = 90 },
+            attrs = { global = true },
+          }),
+        },
+      }),
     },
   },
-
-  floats = {
-    { key = "g", cmd = "lazygit", width = 90, height = 90 },
-  },
-}
+})
 ```
 
 Then open it:
@@ -43,9 +52,7 @@ Then open it:
 hexe ses open .
 ```
 
----
-
-## Config resolution
+## Config Resolution
 
 `hexe ses open <target>` finds the config based on the target argument:
 
@@ -58,153 +65,137 @@ hexe ses open .
 
 Named configs live in:
 
-```
+```text
 ~/.local/share/hexe/sessions/
 ```
 
----
-
-## Selective tab launch
+## Selective Tab Launch
 
 Append `:<tab>` to only open a specific tab from the config:
 
 ```sh
-# Open only the "server" tab
 hexe ses open myproject:server
-
-# Works with directory targets too
 hexe ses open .:editor
 ```
 
-If the tab name doesn't match, a default tab is created instead.
+If the tab name does not match, a default tab is created instead.
 
----
+## Config Reference
 
-## Config reference
+Local project configs use the same canonical entrypoint as the global config:
 
-### Top-level fields
+```lua
+local hexe = require("hexe")
+
+return hexe.setup({
+  ses = {
+    layouts = {
+      hexe.layout("name", {
+        root = ".",
+        tabs = {},
+        floats = {},
+      }),
+    },
+  },
+})
+```
+
+### Layout
 
 | Field | Default | Description |
 |---|---|---|
-| `name` | — | Session name |
+| `name` | required | Layout/session name |
 | `root` | config directory | Working directory for all panes |
-| `on_start` | `{}` | Shell commands to run after session starts |
-| `on_stop` | `{}` | Shell commands to run before teardown |
 | `tabs` | `{}` | Tab definitions |
-| `floats` | `{}` | Global float definitions |
+| `floats` | `{}` | Layout-level float definitions |
 
-### Tab definition
+### Tab
 
 | Field | Default | Description |
 |---|---|---|
-| `name` | `tab-N` | Tab label |
-| `split` | — | Split tree (omit for a single default shell pane) |
+| `name` | required | Tab label |
+| `root` | required | Pane or split tree |
 | `floats` | `{}` | Per-tab float definitions |
 
-### Split tree
-
-A split tree is either a **leaf pane** or a **split node**.
-
-Leaf pane:
+### Pane
 
 ```lua
-{ cmd = "nvim", cwd = "src" }
+hexe.pane({ command = "nvim", cwd = "src" })
 ```
 
 | Field | Default | Description |
 |---|---|---|
-| `cmd` | — | Command to run (omit for default shell) |
-| `cwd` | root | Working directory, relative to `root` |
+| `command` | default shell | Command to run |
+| `cwd` | layout root | Working directory, relative to `root` |
+| `keybindings` | `{}` | Pane-local keybindings |
 
-Split node:
+### Split
 
 ```lua
-{
-  dir = "horizontal",
-  { cmd = "nvim", size = 70 },
-  { size = 30 },
-}
+hexe.split("horizontal", {
+  hexe.pane({ command = "nvim" }),
+  hexe.pane(),
+}, { ratio = 0.70 })
 ```
 
 | Field | Default | Description |
 |---|---|---|
-| `dir` | required | `"horizontal"` or `"vertical"` |
-| children | required | Array of child panes/splits (1-based) |
+| direction | required | `"horizontal"` or `"vertical"` |
+| children | required | Array of panes or nested splits |
+| `ratio` | equal split | First-child ratio, `0.0` to `1.0` |
 
-Each child can have an optional `size` field (percentage). Unspecified sizes split the remaining space equally.
+### Float
 
-### Float definition
+```lua
+hexe.float("git", {
+  key = "g",
+  title = "git",
+  command = "lazygit",
+  size = { width = 90, height = 90 },
+  attrs = { global = true, per_cwd = false },
+})
+```
 
 | Field | Default | Description |
 |---|---|---|
-| `key` | — | Toggle key character |
-| `cmd` | — | Command to run |
-| `width` | `80` | Width as percentage of terminal |
-| `height` | `80` | Height as percentage of terminal |
-| `pos_x` | `50` | Horizontal position (center %) |
-| `pos_y` | `50` | Vertical position (center %) |
-| `title` | — | Border title |
-| `global` | `false` | Available across all tabs |
+| `key` | required | Toggle key character |
+| `title` | float name | Border title |
+| `command` | default shell | Command to run |
+| `cwd` | layout root | Working directory |
+| `size.width` | `80` | Width as percentage of terminal |
+| `size.height` | `80` | Height as percentage of terminal |
+| `position.x` | `50` | Horizontal position, center percent |
+| `position.y` | `50` | Vertical position, center percent |
+| `attrs.global` | `false` | Available across all tabs |
+| `attrs.sticky` | `false` | Reuse by key and directory policy |
+| `attrs.per_cwd` | `false` | Separate instance per directory |
+| `attrs.inherit_env` | `false` | Inherit environment from parent pane |
 
----
+## Nested Splits
 
-## Nested splits
-
-Splits can nest arbitrarily. Children are numbered array elements:
+Splits can nest arbitrarily:
 
 ```lua
-split = {
-  dir = "horizontal",
-  { size = 50, cmd = "nvim" },
-  {
-    size = 50,
-    dir = "vertical",
-    { cmd = "npm run dev" },
-    { cmd = "npm test" },
-  },
-}
+hexe.split("horizontal", {
+  hexe.pane({ command = "nvim" }),
+  hexe.split("vertical", {
+    hexe.pane({ command = "npm run dev" }),
+    hexe.pane({ command = "npm test" }),
+  }, { ratio = 0.50 }),
+}, { ratio = 0.50 })
 ```
-
-This creates a horizontal split: nvim on the left (50%), and a vertical split on the right with two panes.
 
 Three-way equal split:
 
 ```lua
-split = {
-  dir = "horizontal",
-  { cmd = "nvim" },
-  {},
-  {},
-}
+hexe.split("horizontal", {
+  hexe.pane({ command = "nvim" }),
+  hexe.pane(),
+  hexe.pane(),
+})
 ```
 
-Without `size`, each child gets an equal share.
-
----
-
-## Startup hooks
-
-Run shell commands when the session starts:
-
-```lua
-return {
-  name = "myproject",
-  root = "~/projects/myapp",
-
-  on_start = {
-    "docker compose up -d",
-    "redis-server --daemonize yes",
-  },
-
-  tabs = { ... },
-}
-```
-
-Hooks are fire-and-forget — they run in the background and don't block session creation.
-
----
-
-## Freezing a session
+## Freezing A Session
 
 Snapshot a live session as a `.hexe.lua` config:
 
@@ -212,82 +203,95 @@ Snapshot a live session as a `.hexe.lua` config:
 hexe ses freeze > .hexe.lua
 ```
 
-Run this from inside a hexe pane. It captures the current tab layout, split structure, and pane working directories, then outputs valid Lua to stdout.
-
-The frozen config can be reopened:
+Run this from inside a hexe pane. It captures the current tab layout, split structure, and pane working directories, then outputs canonical Lua that can be reopened:
 
 ```sh
 hexe ses open .
 ```
 
----
-
-## CLI reference
+## CLI Reference
 
 ```sh
 hexe ses open <target>[:<tab>] [--debug] [--logfile <path>]
 ```
+
 Open a session from a `.hexe.lua` config.
 
 ```sh
 hexe ses freeze
 ```
-Snapshot current session as `.hexe.lua` to stdout.
 
----
+Snapshot current session as `.hexe.lua` to stdout.
 
 ## Examples
 
-### Full-stack project
+### Full-Stack Project
 
 ```lua
-return {
-  name = "webapp",
-  root = "~/projects/webapp",
+local hexe = require("hexe")
 
-  on_start = {
-    "docker compose up -d",
-  },
+return hexe.setup({
+  ses = {
+    layouts = {
+      hexe.layout("webapp", {
+        root = "~/projects/webapp",
 
-  tabs = {
-    {
-      name = "code",
-      split = {
-        dir = "horizontal",
-        { cmd = "nvim", size = 65 },
-        {
-          size = 35,
-          dir = "vertical",
-          { cmd = "npm run dev" },
-          {},
+        tabs = {
+          hexe.tab("code", {
+            root = hexe.split("horizontal", {
+              hexe.pane({ command = "nvim" }),
+              hexe.split("vertical", {
+                hexe.pane({ command = "npm run dev" }),
+                hexe.pane(),
+              }, { ratio = 0.50 }),
+            }, { ratio = 0.65 }),
+          }),
+
+          hexe.tab("db", {
+            root = hexe.pane({ command = "pgcli" }),
+          }),
+
+          hexe.tab("shell", {
+            root = hexe.pane(),
+          }),
         },
-      },
-    },
-    {
-      name = "db",
-      split = { cmd = "pgcli" },
-    },
-    {
-      name = "shell",
-    },
-  },
 
-  floats = {
-    { key = "g", cmd = "lazygit", width = 90, height = 90 },
-    { key = "d", cmd = "lazydocker", width = 80, height = 80 },
+        floats = {
+          hexe.float("git", {
+            key = "g",
+            command = "lazygit",
+            size = { width = 90, height = 90 },
+            attrs = { global = true },
+          }),
+          hexe.float("docker", {
+            key = "d",
+            command = "lazydocker",
+            size = { width = 80, height = 80 },
+            attrs = { global = true },
+          }),
+        },
+      }),
+    },
   },
-}
+})
 ```
 
-### Simple note-taking
+### Simple Note-Taking
 
 ```lua
-return {
-  name = "notes",
-  root = "~/notes",
-  tabs = {
-    { name = "edit", split = { cmd = "nvim ." } },
-    { name = "shell" },
+local hexe = require("hexe")
+
+return hexe.setup({
+  ses = {
+    layouts = {
+      hexe.layout("notes", {
+        root = "~/notes",
+        tabs = {
+          hexe.tab("edit", { root = hexe.pane({ command = "nvim ." }) }),
+          hexe.tab("shell", { root = hexe.pane() }),
+        },
+      }),
+    },
   },
-}
+})
 ```

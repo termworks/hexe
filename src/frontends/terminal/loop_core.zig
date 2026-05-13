@@ -112,7 +112,6 @@ fn applyDeferredPaneInfoResponse(state: *State) void {
                 return;
             };
             state.setPaneNameOwned(resp.uuid, name_owned);
-            state.syncPaneName(resp.uuid);
         }
         if (resp.fg_name != null or resp.fg_pid != null) {
             state.setPaneProc(resp.uuid, resp.fg_name, resp.fg_pid);

@@ -2332,15 +2332,24 @@ pub const Server = struct {
             return;
         };
         for (orphaned[0..entry_count]) |pane| {
+            const name = pane.name orelse "";
             var entry = wire.OrphanedPaneEntry{
                 .uuid = pane.uuid,
                 .pid = pane.child_pid,
+                .name_len = @intCast(@min(name.len, 64)),
             };
             writer.writeAll(std.mem.asBytes(&entry)) catch |err| {
                 core.logging.logError("ses", "failed to build orphaned panes list entry", err);
                 self.sendBinaryError(fd, "list_orphaned: response alloc failed");
                 return;
             };
+            if (entry.name_len > 0) {
+                writer.writeAll(name[0..entry.name_len]) catch |err| {
+                    core.logging.logError("ses", "failed to build orphaned pane name", err);
+                    self.sendBinaryError(fd, "list_orphaned: response alloc failed");
+                    return;
+                };
+            }
         }
         self.replyOrClose(fd, .orphaned_panes, payload.items);
     }

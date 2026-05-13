@@ -16,7 +16,7 @@ pub fn getOrphanedPanes(store: *store_mod.SessionStore, allocator: std.mem.Alloc
 
     var iter = store.panes.valueIterator();
     while (iter.next()) |pane| {
-        if (pane.state == .orphaned or pane.state == .sticky) {
+        if (pane.state == .orphaned) {
             try result.append(allocator, pane.*);
         }
     }

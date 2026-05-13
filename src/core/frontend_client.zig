@@ -1196,8 +1196,25 @@ pub const SesClient = struct {
                 if (self.ctl_fd == fd) self.ctl_fd = null;
                 return err;
             };
+            var name_buf: [64]u8 = .{0} ** 64;
+            const copy_len = @min(@as(usize, entry.name_len), name_buf.len);
+            if (copy_len > 0) {
+                wire.readExact(fd, name_buf[0..copy_len]) catch |err| {
+                    logging.logError("frontend-client", "failed to read orphaned pane name", err);
+                    if (self.ctl_fd == fd) self.ctl_fd = null;
+                    return err;
+                };
+            }
+            if (@as(usize, entry.name_len) > copy_len) {
+                self.skipPayloadU16(fd, entry.name_len - @as(u16, @intCast(copy_len)));
+            }
             if (count < out_buf.len) {
-                out_buf[count] = .{ .uuid = entry.uuid, .pid = entry.pid };
+                out_buf[count] = .{
+                    .uuid = entry.uuid,
+                    .pid = entry.pid,
+                    .name = name_buf,
+                    .name_len = copy_len,
+                };
                 count += 1;
             }
         }
@@ -1805,6 +1822,12 @@ pub const SesClient = struct {
 pub const OrphanedPaneInfo = struct {
     uuid: [32]u8,
     pid: posix.pid_t,
+    name: [64]u8 = .{0} ** 64,
+    name_len: usize = 0,
+
+    pub fn nameSlice(self: *const OrphanedPaneInfo) []const u8 {
+        return self.name[0..self.name_len];
+    }
 };
 
 pub const DetachedSessionInfo = struct {

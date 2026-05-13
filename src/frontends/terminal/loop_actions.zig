@@ -549,12 +549,25 @@ pub fn startAdoptFlow(state: *State) void {
                 state.notifications.show("Failed to read orphaned pane");
                 return;
             };
-            items_list.append(state.allocator, orphan.uuid[0..]) catch {
+            const item = if (orphan.name_len > 0)
+                std.fmt.allocPrint(state.allocator, "{s} [{s}]", .{ orphan.nameSlice(), orphan.uuid[0..8] }) catch {
+                    state.notifications.show("Failed to show picker");
+                    return;
+                }
+            else
+                std.fmt.allocPrint(state.allocator, "{s}", .{orphan.uuid[0..8]}) catch {
+                    state.notifications.show("Failed to show picker");
+                    return;
+                };
+            errdefer state.allocator.free(item);
+            items_list.append(state.allocator, item) catch {
+                state.allocator.free(item);
                 state.notifications.show("Failed to show picker");
                 return;
             };
         }
         _ = state.showPickerOrNotify(.adopt_choose, items_list.items, "Select pane to adopt");
+        for (items_list.items) |item| state.allocator.free(item);
     }
     state.needs_render = true;
 }

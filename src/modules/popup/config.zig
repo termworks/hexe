@@ -89,9 +89,6 @@ pub const PopConfig = struct {
         };
         defer runtime.deinit();
 
-        // Let a single config file avoid building other sections.
-        runtime.setHexeSection("pop");
-
         // Load global config
         runtime.loadConfig(path) catch |err| {
             switch (err) {

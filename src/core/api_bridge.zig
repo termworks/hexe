@@ -48,7 +48,7 @@ fn bridgeLuaString(lua: *Lua, idx: i32, comptime context: []const u8) ?[]const u
     };
 }
 
-fn deinitPromptSegmentDef(segment: *config_builder.ShpConfigBuilder.SegmentDef, allocator: std.mem.Allocator) void {
+pub fn deinitPromptSegmentDef(segment: *config_builder.ShpConfigBuilder.SegmentDef, allocator: std.mem.Allocator) void {
     allocator.free(segment.name);
     if (segment.command) |cmd| allocator.free(cmd);
     if (segment.builtin) |builtin| allocator.free(builtin);
@@ -58,19 +58,6 @@ fn deinitPromptSegmentDef(segment: *config_builder.ShpConfigBuilder.SegmentDef, 
         allocator.free(output.format);
     }
     if (segment.outputs.len > 0) allocator.free(segment.outputs);
-}
-
-fn appendPromptSegmentOrLog(
-    list: *std.ArrayList(config_builder.ShpConfigBuilder.SegmentDef),
-    allocator: std.mem.Allocator,
-    segment: config_builder.ShpConfigBuilder.SegmentDef,
-    context: []const u8,
-) void {
-    list.append(allocator, segment) catch |err| {
-        log.warn("{s}: failed to append prompt segment: {}", .{ context, err });
-        var owned = segment;
-        deinitPromptSegmentDef(&owned, allocator);
-    };
 }
 
 fn luaNumberOrRaise(lua: *Lua, idx: i32, message: []const u8) f64 {
@@ -268,7 +255,7 @@ pub const ParsedKey = struct {
 };
 
 /// Parse Lua array of keys into mods + key
-/// Format: { hx.key.ctrl, hx.key.alt, hx.key.q }
+/// Format: { hexe.key.ctrl, hexe.key.alt, hexe.key.q }
 /// Modifiers are prefixed with "mod:", actual keys are not
 pub fn parseKeyArray(lua: *Lua, table_idx: i32) ?ParsedKey {
     if (lua.typeOf(table_idx) != .table) return null;
@@ -280,9 +267,11 @@ pub fn parseKeyArray(lua: *Lua, table_idx: i32) ?ParsedKey {
     var i: i32 = 1;
     while (i <= len) : (i += 1) {
         _ = lua.rawGetIndex(table_idx, i);
-        defer lua.pop(1);
 
-        const elem = bridgeLuaString(lua, -1, "failed to read key sequence element") orelse continue;
+        const elem = bridgeLuaString(lua, -1, "failed to read key sequence element") orelse {
+            lua.pop(1);
+            continue;
+        };
 
         // Check if it's a modifier (prefixed with "mod:")
         if (std.mem.startsWith(u8, elem, "mod:")) {
@@ -302,6 +291,7 @@ pub fn parseKeyArray(lua: *Lua, table_idx: i32) ?ParsedKey {
                 key = k;
             }
         }
+        lua.pop(1);
     }
 
     if (key) |k| {
@@ -526,350 +516,100 @@ pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
 
 // ===== MUX API Functions =====
 
-/// Lua C function: hexe.mux.config.set(key, value)
-pub fn hexe_mux_config_set(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Get key (arg 1)
-    const key = lua.toString(1) catch {
-        _ = lua.pushString("config.set: key must be a string");
-        lua.raiseError();
-    };
-
-    // Get MuxConfigBuilder
-    const mux = getMuxBuilder(lua) catch {
-        _ = lua.pushString("config.set: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Type-based value parsing (arg 2)
-    const val_type = lua.typeOf(2);
-
-    // Boolean options
-    if (val_type == .boolean) {
-        const val = lua.toBoolean(2);
-        if (std.mem.eql(u8, key, "confirm_on_exit")) {
-            mux.confirm_on_exit = val;
-        } else if (std.mem.eql(u8, key, "confirm_on_detach")) {
-            mux.confirm_on_detach = val;
-        } else if (std.mem.eql(u8, key, "confirm_on_disown")) {
-            mux.confirm_on_disown = val;
-        } else if (std.mem.eql(u8, key, "confirm_on_close")) {
-            mux.confirm_on_close = val;
-        } else {
-            const msg = std.fmt.allocPrint(mux.allocator, "config.set: unknown boolean key '{s}'", .{key}) catch "config.set: unknown key";
-            _ = lua.pushString(msg);
-            lua.raiseError();
-        }
-        return 0;
-    }
-
-    // Number options
-    if (val_type == .number) {
-        const val_f64 = lua.toNumber(2) catch {
-            _ = lua.pushString("config.set: failed to parse number");
-            lua.raiseError();
-        };
-
-        if (std.mem.eql(u8, key, "selection_color")) {
-            mux.selection_color = @intFromFloat(val_f64);
-        } else if (std.mem.eql(u8, key, "mouse_selection_override_mods")) {
-            mux.mouse_selection_override_mods = @intFromFloat(val_f64);
-        } else {
-            const msg = std.fmt.allocPrint(mux.allocator, "config.set: unknown number key '{s}'", .{key}) catch "config.set: unknown key";
-            _ = lua.pushString(msg);
-            lua.raiseError();
-        }
-        return 0;
-    }
-
-    // Unknown type
-    _ = lua.pushString("config.set: value must be boolean or number");
-    lua.raiseError();
-}
-
-/// Lua C function: hexe.mux.config.setup(opts)
-pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Arg 1 must be a table
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("config.setup: argument must be a table");
-        lua.raiseError();
-    }
-
-    // Get MuxConfigBuilder once
-    const mux = getMuxBuilder(lua) catch {
-        _ = lua.pushString("config.setup: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Iterate table and set values directly
-    lua.pushNil(); // First key
-    while (lua.next(1)) {
-        // Stack: table, key, value
-        // Check if key is a string
-        if (lua.typeOf(-2) != .string) {
-            _ = lua.pushString("config.setup: all keys must be strings");
-            lua.raiseError();
-        }
-
-        const key = lua.toString(-2) catch {
-            _ = lua.pushString("config.setup: failed to read string key");
-            lua.raiseError();
-        };
-        const val_type = lua.typeOf(-1);
-
-        // Boolean options
-        if (val_type == .boolean) {
-            const val = lua.toBoolean(-1);
-            if (std.mem.eql(u8, key, "confirm_on_exit")) {
-                mux.confirm_on_exit = val;
-            } else if (std.mem.eql(u8, key, "confirm_on_detach")) {
-                mux.confirm_on_detach = val;
-            } else if (std.mem.eql(u8, key, "confirm_on_disown")) {
-                mux.confirm_on_disown = val;
-            } else if (std.mem.eql(u8, key, "confirm_on_close")) {
-                mux.confirm_on_close = val;
-            }
-        }
-        // Number options
-        else if (val_type == .number) {
-            const val_f64 = lua.toNumber(-1) catch {
-                _ = lua.pushString("config.setup: failed to parse number");
-                lua.raiseError();
-            };
-            if (std.mem.eql(u8, key, "selection_color")) {
-                mux.selection_color = @intFromFloat(val_f64);
-            }
-        }
-
-        // Pop value, keep key for next iteration
-        lua.pop(1);
-    }
-
-    return 0;
-}
-
-/// Parse keybinding `when` condition from a Lua value at the given index.
-/// New contract: `when = function(ctx) return ... end`
-fn parseWhen(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.WhenDef {
-    const ty = lua.typeOf(idx);
-
-    if (ty != .function) {
-        _ = lua.pushString("keymap when must be function(ctx)");
-        lua.raiseError();
-    }
+fn parseWhenNoRaise(lua: *Lua, idx: i32, allocator: std.mem.Allocator) !?config.WhenDef {
+    if (lua.typeOf(idx) == .nil) return null;
+    if (lua.typeOf(idx) != .function) return error.InvalidKeyBinding;
 
     lua.pushValue(idx);
     defer lua.pop(1);
 
-    if (parsePromptCallbackField(lua, allocator, "when")) |code| {
-        return .{ .lua = code };
-    }
-
-    _ = lua.pushString("failed to parse keymap when callback");
-    lua.raiseError();
+    const code = parsePromptValueChunkValue(lua, allocator, false) orelse return error.OutOfMemory;
+    return .{ .lua = code };
 }
 
-/// Lua C function: hexe.mux.keymap.set(bindings_array or key, action, opts)
-/// Supports two formats:
-/// 1. Array format: keymap.set({ {key={...}, action={...}}, {key={...}, action={...}} })
-/// 2. Single format: keymap.set({key...}, {action...}, opts)
-pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
+pub fn appendKeyBindingsFromArray(lua: *Lua, idx: i32, mux: *config_builder.MuxConfigBuilder) !void {
+    if (lua.typeOf(idx) != .table) return;
 
-    // Get MuxConfigBuilder
-    const mux = getMuxBuilder(lua) catch {
-        _ = lua.pushString("keymap.set: failed to get config builder");
-        lua.raiseError();
-    };
+    const len = lua.rawLen(idx);
+    var i: i32 = 1;
+    while (i <= len) : (i += 1) {
+        _ = lua.rawGetIndex(idx, i);
 
-    // Check if arg 1 is an array of bindings (array format) or a key array (single format)
-    if (lua.typeOf(1) == .table) {
-        // Check if it's an array by getting element 1
-        _ = lua.rawGetIndex(1, 1);
-        const is_array = lua.typeOf(-1) == .table;
-        lua.pop(1);
-
-        if (is_array) {
-            // Array format: iterate and parse each binding
-            const len = lua.rawLen(1);
-            var i: i32 = 1;
-            while (i <= len) : (i += 1) {
-                _ = lua.rawGetIndex(1, i);
-                defer lua.pop(1);
-
-                // Parse this binding table
-                if (lua.typeOf(-1) != .table) {
-                    std.debug.print("  bind[{}]: SKIP - not a table\n", .{i});
-                    continue;
-                }
-
-                // Get key array
-                _ = lua.getField(-1, "key");
-                const parsed_key = parseKeyArray(lua, -1) orelse {
-                    std.debug.print("  bind[{}]: SKIP - invalid key array\n", .{i});
-                    lua.pop(1);
-                    continue;
-                };
-                lua.pop(1);
-
-                // Get optional action
-                _ = lua.getField(-1, "action");
-                var action: config.Config.BindAction = .mux_quit; // placeholder
-                var action_found = false;
-                if (lua.typeOf(-1) != .nil) {
-                    action = parseAction(lua, -1) orelse {
-                        std.debug.print("  bind[{}]: SKIP - invalid action\n", .{i});
-                        lua.pop(1);
-                        continue;
-                    };
-                    action_found = true;
-                }
-                lua.pop(1);
-
-                // Get optional "mode"
-                _ = lua.getField(-1, "mode");
-                var mode: config.Config.BindMode = .act_and_consume;
-                if (lua.typeOf(-1) == .string) {
-                    const mode_str = lua.toString(-1) catch "act_and_consume";
-                    mode = std.meta.stringToEnum(config.Config.BindMode, mode_str) orelse .act_and_consume;
-                }
-                lua.pop(1);
-
-                // Validate action is present unless mode is passthrough_only
-                if (!action_found and mode != .passthrough_only) {
-                    std.debug.print("  bind[{}]: SKIP - no action and mode != passthrough_only\n", .{i});
-                    continue; // Skip this binding
-                }
-
-                // Get optional "when" condition
-                _ = lua.getField(-1, "when");
-                const when = if (lua.typeOf(-1) != .nil) parseWhen(lua, -1, mux.allocator) else null;
-                lua.pop(1);
-
-                // Parse "on" field
-                _ = lua.getField(-1, "on");
-                var on: config.Config.BindWhen = .press;
-                if (lua.typeOf(-1) == .string) {
-                    const on_str = lua.toString(-1) catch "press";
-                    on = std.meta.stringToEnum(config.Config.BindWhen, on_str) orelse .press;
-                }
-                lua.pop(1);
-
-                // Parse "hold_ms" field
-                _ = lua.getField(-1, "hold_ms");
-                var hold_ms: ?i64 = null;
-                if (lua.typeOf(-1) == .number) {
-                    const val = luaNumberOrRaise(lua, -1, "keymap.set: failed to parse hold_ms");
-                    hold_ms = @intFromFloat(val);
-                }
-                lua.pop(1);
-
-                // Create and append bind
-                const bind = config.Config.Bind{
-                    .on = on,
-                    .mods = parsed_key.mods,
-                    .key = parsed_key.key,
-                    .action = action,
-                    .when = when,
-                    .mode = mode,
-                    .hold_ms = hold_ms,
-                };
-
-                // Debug: check what we're appending
-
-                mux.binds.append(mux.allocator, bind) catch {
-                    _ = lua.pushString("keymap.set: failed to append binding");
-                    lua.raiseError();
-                };
-            }
-            return 0;
+        if (lua.typeOf(-1) != .table) {
+            lua.pop(1);
+            return error.InvalidKeyBinding;
         }
-    }
 
-    // Single format: parse as before
-    const parsed_key = parseKeyArray(lua, 1) orelse {
-        _ = lua.pushString("keymap.set: invalid key array");
-        lua.raiseError();
-    };
-
-    // Parse action (arg 2) - can be nil for passthrough_only mode
-    var action: config.Config.BindAction = .mux_quit; // placeholder
-    var action_found = false;
-
-    if (lua.typeOf(2) != .nil) {
-        action = parseAction(lua, 2) orelse {
-            _ = lua.pushString("keymap.set: invalid action");
-            lua.raiseError();
+        _ = lua.getField(-1, "key");
+        const parsed_key = parseKeyArray(lua, -1) orelse {
+            lua.pop(2);
+            return error.InvalidKeyBinding;
         };
-        action_found = true;
-    }
+        lua.pop(1);
 
-    // Parse opts table (arg 3, optional)
-    var on: config.Config.BindWhen = .press;
-    var mode: config.Config.BindMode = .act_and_consume;
-    var hold_ms: ?i64 = null;
-    var when: ?config.WhenDef = null;
-
-    if (lua.typeOf(3) == .table) {
-        // Parse "on" field
-        _ = lua.getField(3, "on");
-        if (lua.typeOf(-1) == .string) {
-            const on_str = lua.toString(-1) catch "press";
-            on = std.meta.stringToEnum(config.Config.BindWhen, on_str) orelse .press;
+        _ = lua.getField(-1, "action");
+        var action: config.Config.BindAction = .mux_quit;
+        var action_found = false;
+        if (lua.typeOf(-1) != .nil) {
+            action = parseAction(lua, -1) orelse {
+                lua.pop(2);
+                return error.InvalidKeyBinding;
+            };
+            action_found = true;
         }
         lua.pop(1);
 
-        // Parse "mode" field
-        _ = lua.getField(3, "mode");
+        _ = lua.getField(-1, "mode");
+        var mode: config.Config.BindMode = .act_and_consume;
         if (lua.typeOf(-1) == .string) {
             const mode_str = lua.toString(-1) catch "act_and_consume";
             mode = std.meta.stringToEnum(config.Config.BindMode, mode_str) orelse .act_and_consume;
         }
         lua.pop(1);
 
-        // Parse "hold_ms" field
-        _ = lua.getField(3, "hold_ms");
+        if (!action_found and mode != .passthrough_only) {
+            lua.pop(1);
+            return error.InvalidKeyBinding;
+        }
+
+        _ = lua.getField(-1, "when");
+        const when = parseWhenNoRaise(lua, -1, mux.allocator) catch |err| {
+            lua.pop(2);
+            return err;
+        };
+        lua.pop(1);
+
+        _ = lua.getField(-1, "on");
+        var on: config.Config.BindWhen = .press;
+        if (lua.typeOf(-1) == .string) {
+            const on_str = lua.toString(-1) catch "press";
+            on = std.meta.stringToEnum(config.Config.BindWhen, on_str) orelse .press;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "hold_ms");
+        var hold_ms: ?i64 = null;
         if (lua.typeOf(-1) == .number) {
-            const val = luaNumberOrRaise(lua, -1, "keymap.set: failed to parse hold_ms");
+            const val = luaNumberOrRaise(lua, -1, "keys: failed to parse hold_ms");
             hold_ms = @intFromFloat(val);
         }
         lua.pop(1);
 
-        // Parse "when" field
-        _ = lua.getField(3, "when");
-        if (lua.typeOf(-1) != .nil) {
-            when = parseWhen(lua, -1, mux.allocator);
-        }
+        const bind = config.Config.Bind{
+            .on = on,
+            .mods = parsed_key.mods,
+            .key = parsed_key.key,
+            .action = action,
+            .when = when,
+            .mode = mode,
+            .hold_ms = hold_ms,
+        };
+        mux.binds.append(mux.allocator, bind) catch |err| {
+            lua.pop(1);
+            return err;
+        };
         lua.pop(1);
     }
-
-    // Validate action is present unless mode is passthrough_only
-    if (!action_found and mode != .passthrough_only) {
-        _ = lua.pushString("keymap.set: action required unless mode is passthrough_only");
-        lua.raiseError();
-    }
-
-    // Create bind
-    const bind = config.Config.Bind{
-        .on = on,
-        .mods = parsed_key.mods,
-        .key = parsed_key.key,
-        .action = action,
-        .when = when,
-        .mode = mode,
-        .hold_ms = hold_ms,
-    };
-
-    // Append to binds list
-    mux.binds.append(mux.allocator, bind) catch {
-        _ = lua.pushString("keymap.set: failed to append bind");
-        lua.raiseError();
-    };
-
-    return 0;
 }
 
 fn parseFloatStyleTable(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.FloatStyle {
@@ -1023,7 +763,7 @@ fn parseLuaCodepoint(lua: *Lua, default: u21, context: []const u8) u21 {
     };
 }
 
-fn applyFloatVisualOptions(comptime allow_attributes: bool, lua: *Lua, idx: i32, allocator: std.mem.Allocator, target: anytype) void {
+pub fn applyFloatVisualOptions(comptime allow_attributes: bool, lua: *Lua, idx: i32, allocator: std.mem.Allocator, target: anytype) void {
     _ = lua.getField(idx, "size");
     if (lua.typeOf(-1) == .table) {
         _ = lua.getField(-1, "width");
@@ -1083,6 +823,13 @@ fn applyFloatVisualOptions(comptime allow_attributes: bool, lua: *Lua, idx: i32,
 
     if (allow_attributes) {
         _ = lua.getField(idx, "attributes");
+        if (lua.typeOf(-1) != .nil) {
+            _ = lua.pushString("float defaults field 'attributes' is removed; use attrs");
+            lua.raiseError();
+        }
+        lua.pop(1);
+
+        _ = lua.getField(idx, "attrs");
         if (lua.typeOf(-1) == .table) {
             if (target.attributes == null) {
                 target.attributes = config.FloatAttributes{};
@@ -1134,280 +881,10 @@ fn applyFloatVisualOptions(comptime allow_attributes: bool, lua: *Lua, idx: i32,
     lua.pop(1);
 }
 
-/// Lua C function: hexe.mux.float.set_defaults(opts)
-pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Arg 1 must be a table
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("float.set_defaults: argument must be a table");
-        lua.raiseError();
-    }
-
-    // Get MuxConfigBuilder
-    const mux = getMuxBuilder(lua) catch {
-        _ = lua.pushString("float.set_defaults: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Initialize float_defaults if not already
-    if (mux.float_defaults == null) {
-        mux.float_defaults = .{};
-    }
-    applyFloatVisualOptions(true, lua, 1, mux.allocator, &mux.float_defaults.?);
-
-    return 0;
-}
-
-/// Lua C function: hexe.mux.float.set_adhoc(opts)
-pub export fn hexe_mux_float_set_adhoc(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("float.set_adhoc: argument must be a table");
-        lua.raiseError();
-    }
-
-    const mux = getMuxBuilder(lua) catch {
-        _ = lua.pushString("float.set_adhoc: failed to get config builder");
-        lua.raiseError();
-    };
-
-    if (mux.float_adhoc == null) {
-        mux.float_adhoc = .{};
-    }
-    applyFloatVisualOptions(false, lua, 1, mux.allocator, &mux.float_adhoc.?);
-
-    return 0;
-}
-
-/// Lua C function: hexe.mux.float.set_match(pattern, opts)
-pub export fn hexe_mux_float_set_match(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    const pattern = lua.toString(1) catch {
-        _ = lua.pushString("float.set_match: first argument must be a regex string");
-        lua.raiseError();
-    };
-    if (pattern.len == 0) {
-        _ = lua.pushString("float.set_match: regex string must not be empty");
-        lua.raiseError();
-    }
-    if (lua.typeOf(2) != .table) {
-        _ = lua.pushString("float.set_match: second argument must be a table");
-        lua.raiseError();
-    }
-
-    const mux = getMuxBuilder(lua) catch {
-        _ = lua.pushString("float.set_match: failed to get config builder");
-        lua.raiseError();
-    };
-
-    var rule = config_builder.MuxConfigBuilder.FloatMatchRule{
-        .pattern = mux.allocator.dupe(u8, pattern) catch {
-            _ = lua.pushString("float.set_match: failed to allocate regex pattern");
-            lua.raiseError();
-        },
-        .visual = .{},
-    };
-    errdefer rule.deinit(mux.allocator);
-    applyFloatVisualOptions(false, lua, 2, mux.allocator, &rule.visual);
-    mux.float_matches.append(mux.allocator, rule) catch {
-        _ = lua.pushString("float.set_match: failed to store float match rule");
-        lua.raiseError();
-    };
-
-    return 0;
-}
-
-/// Lua C function: hexe.mux.float.define(key, opts)
-pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-    _ = lua.pushString("float.define is not wired into runtime config; define named floats in hexe.ses.layout.define({ floats = ... })");
-    lua.raiseError();
-    return 0;
-}
-
-/// Lua C function: hexe.mux.tabs.add_segment(position, segment)
-pub export fn hexe_mux_tabs_add_segment(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Get position (arg 1)
-    const position = lua.toString(1) catch {
-        _ = lua.pushString("tabs.add_segment: position must be a string");
-        lua.raiseError();
-    };
-
-    // Arg 2 must be a table
-    if (lua.typeOf(2) != .table) {
-        _ = lua.pushString("tabs.add_segment: second argument must be a table");
-        lua.raiseError();
-    }
-
-    // Get MuxConfigBuilder
-    const mux = getMuxBuilder(lua) catch {
-        _ = lua.pushString("tabs.add_segment: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Parse full segment
-    const path = std.fmt.allocPrint(mux.allocator, "mux.tabs.{s}[+1]", .{position}) catch "mux.tabs.segment";
-    defer if (!std.mem.eql(u8, path, "mux.tabs.segment")) mux.allocator.free(path);
-
-    const segment = parseSegmentAtPath(lua, 2, mux.allocator, path) orelse {
-        _ = lua.pushString("tabs.add_segment: failed to parse segment");
-        lua.raiseError();
-    };
-
-    // Append to appropriate list
-    if (std.mem.eql(u8, position, "left")) {
-        mux.tabs_config.segments_left.append(mux.allocator, segment) catch {
-            _ = lua.pushString("tabs.add_segment: failed to append segment");
-            lua.raiseError();
-        };
-    } else if (std.mem.eql(u8, position, "center")) {
-        mux.tabs_config.segments_center.append(mux.allocator, segment) catch {
-            _ = lua.pushString("tabs.add_segment: failed to append segment");
-            lua.raiseError();
-        };
-    } else if (std.mem.eql(u8, position, "right")) {
-        mux.tabs_config.segments_right.append(mux.allocator, segment) catch {
-            _ = lua.pushString("tabs.add_segment: failed to append segment");
-            lua.raiseError();
-        };
-    } else {
-        _ = lua.pushString("tabs.add_segment: position must be 'left', 'center', or 'right'");
-        lua.raiseError();
-    }
-
-    return 0;
-}
-
-/// Lua C function: hexe.mux.tabs.set_status(enabled)
-pub export fn hexe_mux_tabs_set_status(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Get enabled (arg 1)
-    if (lua.typeOf(1) != .boolean) {
-        _ = lua.pushString("tabs.set_status: argument must be a boolean");
-        lua.raiseError();
-    }
-    const enabled = lua.toBoolean(1);
-
-    // Get MuxConfigBuilder
-    const mux = getMuxBuilder(lua) catch {
-        _ = lua.pushString("tabs.set_status: failed to get config builder");
-        lua.raiseError();
-    };
-
-    mux.tabs_config.status_enabled = enabled;
-
-    return 0;
-}
-
-/// Lua C function: hexe.mux.splits.setup(opts)
-pub export fn hexe_mux_splits_setup(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Arg 1 must be a table
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("splits.setup: argument must be a table");
-        lua.raiseError();
-    }
-
-    // Get MuxConfigBuilder
-    const mux = getMuxBuilder(lua) catch {
-        _ = lua.pushString("splits.setup: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Parse color table
-    _ = lua.getField(1, "color");
-    if (lua.typeOf(-1) == .table) {
-        var color = config.BorderColor{};
-        _ = lua.getField(-1, "active");
-        if (lua.typeOf(-1) == .number) {
-            const a = luaNumberOrRaise(lua, -1, "splits.setup: failed to parse color.active");
-            color.active = @intFromFloat(a);
-        }
-        lua.pop(1);
-
-        _ = lua.getField(-1, "passive");
-        if (lua.typeOf(-1) == .number) {
-            const p = luaNumberOrRaise(lua, -1, "splits.setup: failed to parse color.passive");
-            color.passive = @intFromFloat(p);
-        }
-        lua.pop(1);
-
-        mux.splits_config.color = color;
-    }
-    lua.pop(1);
-
-    // Parse separator_v
-    _ = lua.getField(1, "separator_v");
-    if (lua.typeOf(-1) == .string) {
-        const sep_str = lua.toString(-1) catch "";
-        if (sep_str.len > 0) {
-            const codepoint = std.unicode.utf8Decode(sep_str[0..@min(sep_str.len, 4)]) catch mux.splits_config.separator_v;
-            mux.splits_config.separator_v = codepoint;
-        }
-    }
-    lua.pop(1);
-
-    // Parse separator_h
-    _ = lua.getField(1, "separator_h");
-    if (lua.typeOf(-1) == .string) {
-        const sep_str = lua.toString(-1) catch "";
-        if (sep_str.len > 0) {
-            const codepoint = std.unicode.utf8Decode(sep_str[0..@min(sep_str.len, 4)]) catch mux.splits_config.separator_h;
-            mux.splits_config.separator_h = codepoint;
-        }
-    }
-    lua.pop(1);
-
-    _ = lua.getField(1, "style");
-    if (lua.typeOf(-1) == .table) {
-        var style = mux.splits_config.style orelse config.SplitStyle{};
-
-        _ = lua.getField(-1, "vertical");
-        if (lua.typeOf(-1) == .string) style.vertical = parseLuaCodepoint(lua, style.vertical, "splits.setup style.vertical");
-        lua.pop(1);
-
-        _ = lua.getField(-1, "horizontal");
-        if (lua.typeOf(-1) == .string) style.horizontal = parseLuaCodepoint(lua, style.horizontal, "splits.setup style.horizontal");
-        lua.pop(1);
-
-        _ = lua.getField(-1, "cross");
-        if (lua.typeOf(-1) == .string) style.cross = parseLuaCodepoint(lua, style.cross, "splits.setup style.cross");
-        lua.pop(1);
-
-        _ = lua.getField(-1, "top_t");
-        if (lua.typeOf(-1) == .string) style.top_t = parseLuaCodepoint(lua, style.top_t, "splits.setup style.top_t");
-        lua.pop(1);
-
-        _ = lua.getField(-1, "bottom_t");
-        if (lua.typeOf(-1) == .string) style.bottom_t = parseLuaCodepoint(lua, style.bottom_t, "splits.setup style.bottom_t");
-        lua.pop(1);
-
-        _ = lua.getField(-1, "left_t");
-        if (lua.typeOf(-1) == .string) style.left_t = parseLuaCodepoint(lua, style.left_t, "splits.setup style.left_t");
-        lua.pop(1);
-
-        _ = lua.getField(-1, "right_t");
-        if (lua.typeOf(-1) == .string) style.right_t = parseLuaCodepoint(lua, style.right_t, "splits.setup style.right_t");
-        lua.pop(1);
-
-        mux.splits_config.style = style;
-    }
-    lua.pop(1);
-
-    return 0;
-}
-
 // ===== SES API Functions =====
 
 /// Parse a Segment from a Lua table at idx with path-aware errors.
-fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path: []const u8) ?config.Segment {
+pub fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path: []const u8) ?config.Segment {
     if (lua.typeOf(idx) != .table) return null;
 
     // Get name (required)
@@ -1439,21 +916,23 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
     // outputs is removed from segment schema.
     _ = lua.getField(idx, "outputs");
     if (lua.typeOf(-1) != .nil) {
-        const msg = std.fmt.allocPrint(allocator, "{s}.outputs is removed; style must be returned from '{s}.value'", .{ base_path, base_path }) catch "segment outputs field is removed";
+        const msg = std.fmt.allocPrint(allocator, "{s}.outputs is removed; style must be returned from '{s}.render'", .{ base_path, base_path }) catch "segment outputs field is removed";
         defer if (!std.mem.eql(u8, msg, "segment outputs field is removed")) allocator.free(msg);
         _ = lua.pushString(msg);
         lua.raiseError();
     }
     lua.pop(1);
 
-    // Parse value callback (required for value/progress/button segments).
+    rejectRemovedField(lua, allocator, idx, base_path, "value", "render");
+
+    // Parse canonical render callback.
     var value_command: ?[]const u8 = null;
-    _ = lua.getField(idx, "value");
-    if (callbackFieldPathAlloc(allocator, base_path, "value")) |field_path| {
+    _ = lua.getField(idx, "render");
+    if (callbackFieldPathAlloc(allocator, base_path, "render")) |field_path| {
         defer allocator.free(field_path);
         if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
             defer allocator.free(code);
-            setBridgeStringSlot(&value_command, allocator, code, "failed to allocate prompt segment value callback");
+            setBridgeStringSlot(&value_command, allocator, code, "failed to allocate segment render callback");
         }
     }
     lua.pop(1);
@@ -1472,7 +951,7 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
 
     _ = lua.getField(idx, "source");
     if (lua.typeOf(-1) != .nil) {
-        const msg = std.fmt.allocPrint(allocator, "{s}.source is removed; use '{s}.value' and '{s}.builtin' callbacks", .{ base_path, base_path, base_path }) catch "segment source field is removed";
+        const msg = std.fmt.allocPrint(allocator, "{s}.source is removed; use '{s}.render' and '{s}.builtin' callbacks", .{ base_path, base_path, base_path }) catch "segment source field is removed";
         defer if (!std.mem.eql(u8, msg, "segment source field is removed")) allocator.free(msg);
         _ = lua.pushString(msg);
         lua.raiseError();
@@ -1529,13 +1008,16 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         }
         lua.pop(1);
 
-        _ = lua.getField(-1, "value");
+        const progress_path = std.fmt.allocPrint(allocator, "{s}.progress", .{base_path}) catch "segment.progress";
+        defer if (!std.mem.eql(u8, progress_path, "segment.progress")) allocator.free(progress_path);
+        rejectRemovedField(lua, allocator, -1, progress_path, "value", "render");
+        _ = lua.getField(-1, "render");
         if (value_command == null) {
-            if (callbackFieldPathAlloc(allocator, base_path, "progress.value")) |field_path| {
+            if (callbackFieldPathAlloc(allocator, base_path, "progress.render")) |field_path| {
                 defer allocator.free(field_path);
                 if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
                     defer allocator.free(code);
-                    setBridgeStringSlot(&value_command, allocator, code, "failed to allocate prompt progress value callback");
+                    setBridgeStringSlot(&value_command, allocator, code, "failed to allocate segment progress render callback");
                 }
             }
         }
@@ -1713,13 +1195,16 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         }
         lua.pop(1);
 
-        _ = lua.getField(-1, "value");
+        const button_path = std.fmt.allocPrint(allocator, "{s}.button", .{base_path}) catch "segment.button";
+        defer if (!std.mem.eql(u8, button_path, "segment.button")) allocator.free(button_path);
+        rejectRemovedField(lua, allocator, -1, button_path, "value", "render");
+        _ = lua.getField(-1, "render");
         if (value_command == null) {
-            if (callbackFieldPathAlloc(allocator, base_path, "button.value")) |field_path| {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.render")) |field_path| {
                 defer allocator.free(field_path);
                 if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
                     defer allocator.free(code);
-                    setBridgeStringSlot(&value_command, allocator, code, "failed to allocate prompt button value callback");
+                    setBridgeStringSlot(&value_command, allocator, code, "failed to allocate segment button render callback");
                 }
             }
         }
@@ -1997,10 +1482,10 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
 
     if (segment.command == null and segment.builtin == null) {
         const msg = switch (segment.kind) {
-            .value => "value segment requires a non-empty 'value'",
+            .value => "value segment requires a non-empty 'render'",
             .builtin => "builtin segment requires non-empty 'builtin'",
-            .button => "button segment requires 'value' or 'builtin'",
-            .progress => "progress segment requires 'value' or 'builtin'",
+            .button => "button segment requires 'render' or 'builtin'",
+            .progress => "progress segment requires 'render' or 'builtin'",
         };
         const owned_msg = std.fmt.allocPrint(allocator, "{s}: {s}", .{ base_path, msg }) catch |err| blk: {
             log.warn("failed to format API bridge segment validation error: {}", .{err});
@@ -2025,9 +1510,10 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         return null;
     }
 
-    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "padding", "hexe.mux.float.set_defaults / set_adhoc / set_match");
-    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "color", "hexe.mux.float.set_defaults / set_adhoc / set_match");
-    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "style", "hexe.mux.float.set_defaults / set_adhoc / set_match");
+    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "padding", "mux.floats defaults/adhoc/match");
+    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "color", "mux.floats defaults/adhoc/match");
+    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "style", "mux.floats defaults/adhoc/match");
+    rejectRemovedField(lua, allocator, idx, "ses.layout.float", "attributes", "attrs");
 
     // Get key (required)
     _ = lua.getField(idx, "key");
@@ -2076,8 +1562,8 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
     }
     lua.pop(1);
 
-    // Parse attributes table
-    _ = lua.getField(idx, "attributes");
+    // Parse attrs table
+    _ = lua.getField(idx, "attrs");
     if (lua.typeOf(-1) == .table) {
         float_def.has_custom_attributes = true;
 
@@ -2239,47 +1725,33 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
     return float_def;
 }
 
-/// Lua C function: hexe.ses.layout.define(opts)
-pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
+pub fn parseLayoutDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) !config.LayoutDef {
+    if (lua.typeOf(idx) != .table) return error.InvalidLayout;
 
-    // Arg 1 must be a table
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("layout.define: argument must be a table");
-        lua.raiseError();
-    }
-
-    // Get name from table
-    _ = lua.getField(1, "name");
+    _ = lua.getField(idx, "name");
     const name_str = lua.toString(-1) catch {
         lua.pop(1);
-        _ = lua.pushString("layout.define: layout must have a 'name' field");
-        lua.raiseError();
+        return error.InvalidLayout;
     };
     lua.pop(1);
 
-    // Get SesConfigBuilder
-    const ses = getSesBuilder(lua) catch {
-        _ = lua.pushString("layout.define: failed to get config builder");
-        lua.raiseError();
-    };
-
-    const name = ses.allocator.dupe(u8, name_str) catch {
-        _ = lua.pushString("layout.define: failed to allocate name");
-        lua.raiseError();
-    };
+    const name = try allocator.dupe(u8, name_str);
+    errdefer allocator.free(name);
 
     // Parse enabled
-    _ = lua.getField(1, "enabled");
+    _ = lua.getField(idx, "enabled");
     const enabled = if (lua.typeOf(-1) == .boolean)
         lua.toBoolean(-1)
-    else
-        false;
+    else true;
     lua.pop(1);
 
     // Parse tabs array
     var tabs = std.ArrayList(config.LayoutTabDef){};
-    _ = lua.getField(1, "tabs");
+    errdefer {
+        for (tabs.items) |*tab| tab.deinit(allocator);
+        tabs.deinit(allocator);
+    }
+    _ = lua.getField(idx, "tabs");
     if (lua.typeOf(-1) == .table) {
         const tabs_len = lua.rawLen(-1);
         var i: i32 = 1;
@@ -2292,7 +1764,7 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
                     lua.pop(2); // pop name and tab
                     continue;
                 };
-                const tab_name = ses.allocator.dupe(u8, tab_name_str) catch {
+                const tab_name = allocator.dupe(u8, tab_name_str) catch {
                     lua.pop(2);
                     continue;
                 };
@@ -2301,14 +1773,14 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
                 // Parse root split
                 _ = lua.getField(-1, "root");
                 const root = if (lua.typeOf(-1) == .table)
-                    parseLayoutSplit(lua, -1, ses.allocator)
+                    parseLayoutSplit(lua, -1, allocator)
                 else
                     null;
                 lua.pop(1); // pop root
 
                 const root_value: ?config.LayoutSplitDef = if (root) |r| blk: {
                     const value = r.*;
-                    ses.allocator.destroy(r);
+                    allocator.destroy(r);
                     break :blk value;
                 } else null;
 
@@ -2317,9 +1789,9 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
                     .enabled = true,
                     .root = root_value,
                 };
-                tabs.append(ses.allocator, tab) catch |err| {
-                    log.warn("layout.define({s}) tab '{s}': failed to append tab: {}", .{ name_str, tab_name, err });
-                    tab.deinit(ses.allocator);
+                tabs.append(allocator, tab) catch |err| {
+                    log.warn("layout '{s}' tab '{s}': failed to append tab: {}", .{ name_str, tab_name, err });
+                    tab.deinit(allocator);
                 };
             }
             lua.pop(1); // pop tab
@@ -2329,17 +1801,21 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
 
     // Parse floats array
     var floats = std.ArrayList(config.LayoutFloatDef).empty;
-    _ = lua.getField(1, "floats");
+    errdefer {
+        for (floats.items) |*float_def| float_def.deinit(allocator);
+        floats.deinit(allocator);
+    }
+    _ = lua.getField(idx, "floats");
     if (lua.typeOf(-1) == .table) {
         const floats_len = lua.rawLen(-1);
         var i: i32 = 1;
         while (i <= floats_len) : (i += 1) {
             _ = lua.rawGetIndex(-1, i);
-            if (parseLayoutFloat(lua, -1, ses.allocator)) |parsed_float| {
+            if (parseLayoutFloat(lua, -1, allocator)) |parsed_float| {
                 var float_def = parsed_float;
-                floats.append(ses.allocator, float_def) catch |err| {
-                    log.warn("layout.define({s}) floats[{d}]: failed to append float: {}", .{ name_str, i, err });
-                    float_def.deinit(ses.allocator);
+                floats.append(allocator, float_def) catch |err| {
+                    log.warn("layout '{s}' floats[{d}]: failed to append float: {}", .{ name_str, i, err });
+                    float_def.deinit(allocator);
                 };
             }
             lua.pop(1); // pop float table
@@ -2351,150 +1827,11 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
     const layout = config.LayoutDef{
         .name = name,
         .enabled = enabled,
-        .tabs = tabs.toOwnedSlice(ses.allocator) catch &[_]config.LayoutTabDef{},
-        .floats = floats.toOwnedSlice(ses.allocator) catch &[_]config.LayoutFloatDef{},
+        .tabs = try tabs.toOwnedSlice(allocator),
+        .floats = try floats.toOwnedSlice(allocator),
     };
 
-    // Append to layouts
-    ses.layouts.append(ses.allocator, layout) catch {
-        _ = lua.pushString("layout.define: failed to append layout");
-        lua.raiseError();
-    };
-
-    return 0;
-}
-
-/// Lua C function: hexe.ses.session.setup(opts)
-/// hexe.ses.isolation.set({ profile = "balanced", memory = "1G", ... })
-/// Configure POD isolation settings (libvoid)
-pub export fn hexe_ses_isolation_set(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Get SesConfigBuilder
-    const ses = getSesBuilder(lua) catch {
-        _ = lua.pushString("isolation.set: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Arg 1 must be a table
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("isolation.set: argument must be a table");
-        lua.raiseError();
-    }
-
-    // Parse profile
-    _ = lua.getField(1, "profile");
-    if (lua.typeOf(-1) == .string) {
-        const profile_str = lua.toString(-1) catch "default";
-        const profile = ses.allocator.dupe(u8, profile_str) catch {
-            lua.pop(1);
-            _ = lua.pushString("isolation.set: failed to allocate profile");
-            lua.raiseError();
-        };
-        if (ses.isolation_profile) |old| ses.allocator.free(old);
-        ses.isolation_profile = profile;
-
-        // NOTE: Don't set env vars globally - only apply isolation per-float
-        // Environment variables will be set only when spawning PODs with explicit isolation config
-    }
-    lua.pop(1);
-
-    // Parse memory limit
-    _ = lua.getField(1, "memory");
-    if (lua.typeOf(-1) == .string) {
-        const mem_str = bridgeLuaString(lua, -1, "failed to read session isolation memory limit");
-        if (mem_str) |m| {
-            const memory = ses.allocator.dupe(u8, m) catch {
-                lua.pop(1);
-                _ = lua.pushString("isolation.set: failed to allocate memory");
-                lua.raiseError();
-            };
-            if (ses.isolation_memory) |old| ses.allocator.free(old);
-            ses.isolation_memory = memory;
-        }
-    }
-    lua.pop(1);
-
-    // Parse CPU limit
-    _ = lua.getField(1, "cpu");
-    if (lua.typeOf(-1) == .string) {
-        const cpu_str = bridgeLuaString(lua, -1, "failed to read session isolation cpu limit");
-        if (cpu_str) |cpu_val| {
-            const cpu = ses.allocator.dupe(u8, cpu_val) catch {
-                lua.pop(1);
-                _ = lua.pushString("isolation.set: failed to allocate cpu");
-                lua.raiseError();
-            };
-            if (ses.isolation_cpu) |old| ses.allocator.free(old);
-            ses.isolation_cpu = cpu;
-        }
-    }
-    lua.pop(1);
-
-    // Parse PIDs limit
-    _ = lua.getField(1, "pids");
-    if (lua.typeOf(-1) == .string) {
-        const pids_str = bridgeLuaString(lua, -1, "failed to read session isolation pids limit");
-        if (pids_str) |p| {
-            const pids = ses.allocator.dupe(u8, p) catch {
-                lua.pop(1);
-                _ = lua.pushString("isolation.set: failed to allocate pids");
-                lua.raiseError();
-            };
-            if (ses.isolation_pids) |old| ses.allocator.free(old);
-            ses.isolation_pids = pids;
-        }
-    } else if (lua.typeOf(-1) == .number) {
-        const pids_num = lua.toNumber(-1) catch 0;
-        var buf: [32]u8 = undefined;
-        const pids_str = std.fmt.bufPrint(&buf, "{d}", .{@as(i64, @intFromFloat(pids_num))}) catch {
-            lua.pop(1);
-            _ = lua.pushString("isolation.set: failed to format pids");
-            lua.raiseError();
-        };
-        const pids = ses.allocator.dupe(u8, pids_str) catch {
-            lua.pop(1);
-            _ = lua.pushString("isolation.set: failed to allocate pids");
-            lua.raiseError();
-        };
-        if (ses.isolation_pids) |old| ses.allocator.free(old);
-        ses.isolation_pids = pids;
-    }
-    lua.pop(1);
-
-    return 0;
-}
-
-pub export fn hexe_ses_session_setup(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Arg 1 must be a table
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("session.setup: argument must be a table");
-        lua.raiseError();
-    }
-
-    // Get SesConfigBuilder
-    const ses = getSesBuilder(lua) catch {
-        _ = lua.pushString("session.setup: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Parse auto_restore
-    _ = lua.getField(1, "auto_restore");
-    if (lua.typeOf(-1) == .boolean) {
-        ses.auto_restore = lua.toBoolean(-1);
-    }
-    lua.pop(1);
-
-    // Parse save_on_detach
-    _ = lua.getField(1, "save_on_detach");
-    if (lua.typeOf(-1) == .boolean) {
-        ses.save_on_detach = lua.toBoolean(-1);
-    }
-    lua.pop(1);
-
-    return 0;
+    return layout;
 }
 
 // ============================================================================
@@ -2556,7 +1893,7 @@ fn callbackFieldPathAlloc(allocator: std.mem.Allocator, base_path: []const u8, f
 }
 
 /// Helper: Parse segment definition from a table
-fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path: []const u8) ?config_builder.ShpConfigBuilder.SegmentDef {
+pub fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path: []const u8) ?config_builder.ShpConfigBuilder.SegmentDef {
     if (lua.typeOf(idx) != .table) return null;
 
     var name: ?[]const u8 = null;
@@ -2598,20 +1935,22 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path:
     // outputs is removed from segment schema.
     _ = lua.getField(idx, "outputs");
     if (lua.typeOf(-1) != .nil) {
-        const msg = std.fmt.allocPrint(allocator, "{s}.outputs is removed; style must be returned from '{s}.value'", .{ base_path, base_path }) catch "segment outputs field is removed";
+        const msg = std.fmt.allocPrint(allocator, "{s}.outputs is removed; style must be returned from '{s}.render'", .{ base_path, base_path }) catch "segment outputs field is removed";
         defer if (!std.mem.eql(u8, msg, "segment outputs field is removed")) allocator.free(msg);
         _ = lua.pushString(msg);
         lua.raiseError();
     }
     lua.pop(1);
 
-    // Parse value callback.
-    _ = lua.getField(idx, "value");
-    if (callbackFieldPathAlloc(allocator, base_path, "value")) |field_path| {
+    rejectRemovedField(lua, allocator, idx, base_path, "value", "render");
+
+    // Parse canonical render callback.
+    _ = lua.getField(idx, "render");
+    if (callbackFieldPathAlloc(allocator, base_path, "render")) |field_path| {
         defer allocator.free(field_path);
         if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
             defer allocator.free(code);
-            setBridgeStringSlot(&command, allocator, code, "failed to allocate prompt value callback");
+            setBridgeStringSlot(&command, allocator, code, "failed to allocate prompt render callback");
         }
     }
     lua.pop(1);
@@ -2689,13 +2028,16 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path:
             }
         }
         lua.pop(1);
-        _ = lua.getField(-1, "value");
+        const progress_path = std.fmt.allocPrint(allocator, "{s}.progress", .{base_path}) catch "segment.progress";
+        defer if (!std.mem.eql(u8, progress_path, "segment.progress")) allocator.free(progress_path);
+        rejectRemovedField(lua, allocator, -1, progress_path, "value", "render");
+        _ = lua.getField(-1, "render");
         if (command == null) {
-            if (callbackFieldPathAlloc(allocator, base_path, "progress.value")) |field_path| {
+            if (callbackFieldPathAlloc(allocator, base_path, "progress.render")) |field_path| {
                 defer allocator.free(field_path);
                 if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
                     defer allocator.free(code);
-                    setBridgeStringSlot(&command, allocator, code, "failed to allocate prompt progress value callback");
+                    setBridgeStringSlot(&command, allocator, code, "failed to allocate prompt progress render callback");
                 }
             }
         }
@@ -2741,9 +2083,9 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path:
     if (command == null) {
         const msg = switch (kind) {
             .builtin => "builtin segment requires non-empty 'builtin'",
-            .value => "value segment requires a non-empty 'value'",
-            .button => "button segment requires 'value' or 'builtin'",
-            .progress => "progress segment requires 'value' or 'builtin'",
+            .value => "value segment requires a non-empty 'render'",
+            .button => "button segment requires 'render' or 'builtin'",
+            .progress => "progress segment requires 'render' or 'builtin'",
         };
         const owned_msg = std.fmt.allocPrint(allocator, "{s}: {s}", .{ base_path, msg }) catch |err| blk: {
             log.warn("failed to format API bridge prompt segment validation error: {}", .{err});
@@ -2768,449 +2110,9 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path:
     };
 }
 
-/// Lua C function: hexe.shp.prompt.left(segments)
-pub export fn hexe_shp_prompt_left(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Arg 1 must be a table (array of segments)
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("prompt.left: argument must be a table");
-        lua.raiseError();
-    }
-
-    // Get ShpConfigBuilder
-    const shp = getShpBuilder(lua) catch {
-        _ = lua.pushString("prompt.left: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Parse segments array
-    const n = lua.rawLen(1);
-    var i: i32 = 1;
-    while (i <= n) : (i += 1) {
-        _ = lua.rawGetIndex(1, i);
-        const seg_path = std.fmt.allocPrint(shp.allocator, "prompt.left[{d}]", .{i}) catch "prompt.left[?]";
-        defer if (!std.mem.eql(u8, seg_path, "prompt.left[?]")) shp.allocator.free(seg_path);
-        if (parseSegmentDef(lua, -1, shp.allocator, seg_path)) |segment| {
-            appendPromptSegmentOrLog(&shp.left_segments, shp.allocator, segment, seg_path);
-        }
-        lua.pop(1);
-    }
-
-    return 0;
-}
-
-/// Lua C function: hexe.shp.prompt.right(segments)
-pub export fn hexe_shp_prompt_right(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Arg 1 must be a table (array of segments)
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("prompt.right: argument must be a table");
-        lua.raiseError();
-    }
-
-    // Get ShpConfigBuilder
-    const shp = getShpBuilder(lua) catch {
-        _ = lua.pushString("prompt.right: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Parse segments array
-    const n = lua.rawLen(1);
-    var i: i32 = 1;
-    while (i <= n) : (i += 1) {
-        _ = lua.rawGetIndex(1, i);
-        const seg_path = std.fmt.allocPrint(shp.allocator, "prompt.right[{d}]", .{i}) catch "prompt.right[?]";
-        defer if (!std.mem.eql(u8, seg_path, "prompt.right[?]")) shp.allocator.free(seg_path);
-        if (parseSegmentDef(lua, -1, shp.allocator, seg_path)) |segment| {
-            appendPromptSegmentOrLog(&shp.right_segments, shp.allocator, segment, seg_path);
-        }
-        lua.pop(1);
-    }
-
-    return 0;
-}
-
-/// Lua C function: hexe.shp.prompt.add(side, segment)
-pub export fn hexe_shp_prompt_add(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    // Arg 1: side (string: "left" or "right")
-    // Arg 2: segment (table)
-    if (lua.typeOf(1) != .string or lua.typeOf(2) != .table) {
-        _ = lua.pushString("prompt.add: arguments must be (string, table)");
-        lua.raiseError();
-    }
-
-    const side = lua.toString(1) catch {
-        _ = lua.pushString("prompt.add: invalid side string");
-        lua.raiseError();
-    };
-
-    // Get ShpConfigBuilder
-    const shp = getShpBuilder(lua) catch {
-        _ = lua.pushString("prompt.add: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Parse segment
-    if (parseSegmentDef(lua, 2, shp.allocator, "prompt.add.segment")) |segment| {
-        if (std.mem.eql(u8, side, "left")) {
-            appendPromptSegmentOrLog(&shp.left_segments, shp.allocator, segment, "prompt.add.segment");
-        } else if (std.mem.eql(u8, side, "right")) {
-            appendPromptSegmentOrLog(&shp.right_segments, shp.allocator, segment, "prompt.add.segment");
-        } else {
-            var owned = segment;
-            deinitPromptSegmentDef(&owned, shp.allocator);
-            _ = lua.pushString("prompt.add: side must be 'left' or 'right'");
-            lua.raiseError();
-        }
-    }
-
-    return 0;
-}
-
 // ============================================================================
 // Section 4: POP (Popups & Overlays) C API
 // ============================================================================
-
-/// Helper: Parse notification style from table
-fn parseNotificationStyle(lua: *Lua, idx: i32, allocator: std.mem.Allocator) config_builder.PopConfigBuilder.NotificationStyleDef {
-    var style = config_builder.PopConfigBuilder.NotificationStyleDef{};
-
-    _ = lua.getField(idx, "fg");
-    if (lua.typeOf(-1) == .number) style.fg = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "bg");
-    if (lua.typeOf(-1) == .number) style.bg = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "bold");
-    if (lua.typeOf(-1) == .boolean) style.bold = lua.toBoolean(-1);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "padding_x");
-    if (lua.typeOf(-1) == .number) style.padding_x = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "padding_y");
-    if (lua.typeOf(-1) == .number) style.padding_y = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "offset");
-    if (lua.typeOf(-1) == .number) style.offset = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "alignment");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        style.alignment = dupeBridgeString(allocator, s, "failed to allocate notification alignment");
-    }
-    lua.pop(1);
-
-    _ = lua.getField(idx, "duration_ms");
-    if (lua.typeOf(-1) == .number) style.duration_ms = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    return style;
-}
-
-/// Lua C function: hexe.pop.notify.setup(opts)
-pub export fn hexe_pop_notify_setup(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("notify.setup: argument must be a table");
-        lua.raiseError();
-    }
-
-    const pop = getPopBuilder(lua) catch {
-        _ = lua.pushString("notify.setup: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Parse carrier realm
-    _ = lua.getField(1, "carrier");
-    if (lua.typeOf(-1) == .table) {
-        pop.carrier_notification = parseNotificationStyle(lua, -1, pop.allocator);
-    }
-    lua.pop(1);
-
-    // Parse pane realm
-    _ = lua.getField(1, "pane");
-    if (lua.typeOf(-1) == .table) {
-        pop.pane_notification = parseNotificationStyle(lua, -1, pop.allocator);
-    }
-    lua.pop(1);
-
-    return 0;
-}
-
-/// Helper: Parse confirm style from table
-fn parseConfirmStyle(lua: *Lua, idx: i32, allocator: std.mem.Allocator) config_builder.PopConfigBuilder.ConfirmStyleDef {
-    var style = config_builder.PopConfigBuilder.ConfirmStyleDef{};
-
-    _ = lua.getField(idx, "fg");
-    if (lua.typeOf(-1) == .number) style.fg = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "bg");
-    if (lua.typeOf(-1) == .number) style.bg = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "bold");
-    if (lua.typeOf(-1) == .boolean) style.bold = lua.toBoolean(-1);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "padding_x");
-    if (lua.typeOf(-1) == .number) style.padding_x = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "padding_y");
-    if (lua.typeOf(-1) == .number) style.padding_y = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "yes_label");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        style.yes_label = dupeBridgeString(allocator, s, "failed to allocate confirm yes label");
-    }
-    lua.pop(1);
-
-    _ = lua.getField(idx, "no_label");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        style.no_label = dupeBridgeString(allocator, s, "failed to allocate confirm no label");
-    }
-    lua.pop(1);
-
-    return style;
-}
-
-/// Lua C function: hexe.pop.confirm.setup(opts)
-pub export fn hexe_pop_confirm_setup(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("confirm.setup: argument must be a table");
-        lua.raiseError();
-    }
-
-    const pop = getPopBuilder(lua) catch {
-        _ = lua.pushString("confirm.setup: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Parse carrier realm
-    _ = lua.getField(1, "carrier");
-    if (lua.typeOf(-1) == .table) {
-        pop.carrier_confirm = parseConfirmStyle(lua, -1, pop.allocator);
-    }
-    lua.pop(1);
-
-    // Parse pane realm
-    _ = lua.getField(1, "pane");
-    if (lua.typeOf(-1) == .table) {
-        pop.pane_confirm = parseConfirmStyle(lua, -1, pop.allocator);
-    }
-    lua.pop(1);
-
-    return 0;
-}
-
-/// Helper: Parse choose style from table
-fn parseChooseStyle(lua: *Lua, idx: i32, allocator: std.mem.Allocator) config_builder.PopConfigBuilder.ChooseStyleDef {
-    _ = allocator;
-    var style = config_builder.PopConfigBuilder.ChooseStyleDef{};
-
-    _ = lua.getField(idx, "fg");
-    if (lua.typeOf(-1) == .number) style.fg = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "bg");
-    if (lua.typeOf(-1) == .number) style.bg = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "highlight_fg");
-    if (lua.typeOf(-1) == .number) style.highlight_fg = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "highlight_bg");
-    if (lua.typeOf(-1) == .number) style.highlight_bg = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "bold");
-    if (lua.typeOf(-1) == .boolean) style.bold = lua.toBoolean(-1);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "padding_x");
-    if (lua.typeOf(-1) == .number) style.padding_x = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "padding_y");
-    if (lua.typeOf(-1) == .number) style.padding_y = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    _ = lua.getField(idx, "visible_count");
-    if (lua.typeOf(-1) == .number) style.visible_count = @intCast(lua.toInteger(-1) catch 0);
-    lua.pop(1);
-
-    return style;
-}
-
-/// Lua C function: hexe.pop.choose.setup(opts)
-pub export fn hexe_pop_choose_setup(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("choose.setup: argument must be a table");
-        lua.raiseError();
-    }
-
-    const pop = getPopBuilder(lua) catch {
-        _ = lua.pushString("choose.setup: failed to get config builder");
-        lua.raiseError();
-    };
-
-    // Parse carrier realm
-    _ = lua.getField(1, "carrier");
-    if (lua.typeOf(-1) == .table) {
-        pop.carrier_choose = parseChooseStyle(lua, -1, pop.allocator);
-    }
-    lua.pop(1);
-
-    // Parse pane realm
-    _ = lua.getField(1, "pane");
-    if (lua.typeOf(-1) == .table) {
-        pop.pane_choose = parseChooseStyle(lua, -1, pop.allocator);
-    }
-    lua.pop(1);
-
-    return 0;
-}
-
-/// Lua C function: hexe.pop.widgets.pokemon(opts)
-pub export fn hexe_pop_widgets_pokemon(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("widgets.pokemon: argument must be a table");
-        lua.raiseError();
-    }
-
-    const pop = getPopBuilder(lua) catch {
-        _ = lua.pushString("widgets.pokemon: failed to get config builder");
-        lua.raiseError();
-    };
-
-    _ = lua.getField(1, "enabled");
-    if (lua.typeOf(-1) == .boolean) {
-        pop.widgets.pokemon_enabled = lua.toBoolean(-1);
-    }
-    lua.pop(1);
-
-    _ = lua.getField(1, "position");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        pop.widgets.pokemon_position = dupeBridgeString(pop.allocator, s, "failed to allocate pokemon widget position");
-    }
-    lua.pop(1);
-
-    _ = lua.getField(1, "shiny_chance");
-    if (lua.typeOf(-1) == .number) {
-        pop.widgets.pokemon_shiny_chance = @floatCast(lua.toNumber(-1) catch 0.01);
-    }
-    lua.pop(1);
-
-    return 0;
-}
-
-/// Lua C function: hexe.pop.widgets.keycast(opts)
-pub export fn hexe_pop_widgets_keycast(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("widgets.keycast: argument must be a table");
-        lua.raiseError();
-    }
-
-    const pop = getPopBuilder(lua) catch {
-        _ = lua.pushString("widgets.keycast: failed to get config builder");
-        lua.raiseError();
-    };
-
-    _ = lua.getField(1, "enabled");
-    if (lua.typeOf(-1) == .boolean) {
-        pop.widgets.keycast_enabled = lua.toBoolean(-1);
-    }
-    lua.pop(1);
-
-    _ = lua.getField(1, "position");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        pop.widgets.keycast_position = dupeBridgeString(pop.allocator, s, "failed to allocate keycast widget position");
-    }
-    lua.pop(1);
-
-    _ = lua.getField(1, "duration_ms");
-    if (lua.typeOf(-1) == .number) {
-        pop.widgets.keycast_duration_ms = lua.toInteger(-1) catch 3000;
-    }
-    lua.pop(1);
-
-    _ = lua.getField(1, "max_entries");
-    if (lua.typeOf(-1) == .number) {
-        pop.widgets.keycast_max_entries = @intCast(lua.toInteger(-1) catch 5);
-    }
-    lua.pop(1);
-
-    _ = lua.getField(1, "grouping_timeout_ms");
-    if (lua.typeOf(-1) == .number) {
-        pop.widgets.keycast_grouping_timeout_ms = lua.toInteger(-1) catch 500;
-    }
-    lua.pop(1);
-
-    return 0;
-}
-
-/// Lua C function: hexe.pop.widgets.digits(opts)
-pub export fn hexe_pop_widgets_digits(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
-
-    if (lua.typeOf(1) != .table) {
-        _ = lua.pushString("widgets.digits: argument must be a table");
-        lua.raiseError();
-    }
-
-    const pop = getPopBuilder(lua) catch {
-        _ = lua.pushString("widgets.digits: failed to get config builder");
-        lua.raiseError();
-    };
-
-    _ = lua.getField(1, "enabled");
-    if (lua.typeOf(-1) == .boolean) {
-        pop.widgets.digits_enabled = lua.toBoolean(-1);
-    }
-    lua.pop(1);
-
-    _ = lua.getField(1, "position");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        pop.widgets.digits_position = dupeBridgeString(pop.allocator, s, "failed to allocate digits widget position");
-    }
-    lua.pop(1);
-
-    _ = lua.getField(1, "size");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        pop.widgets.digits_size = dupeBridgeString(pop.allocator, s, "failed to allocate digits widget size");
-    }
-    lua.pop(1);
-
-    return 0;
-}
 
 fn shellQuote(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     var out = std.array_list.Managed(u8).init(allocator);
@@ -3488,7 +2390,7 @@ test "parseSegmentAtPath accepts callback active_when in button table" {
     const chunk =
         "seg = {" ++
         "name='rec'," ++
-        "value=function(_) return 'REC' end," ++
+        "render=function(_) return 'REC' end," ++
         "button={ active_when=function(_) return true end }" ++
         "}";
     const z = try std.testing.allocator.dupeZ(u8, chunk);
@@ -3513,7 +2415,7 @@ test "parseSegmentAtPath accepts callback active_when at segment level" {
     const chunk =
         "seg = {" ++
         "name='rec'," ++
-        "value=function(_) return 'REC' end," ++
+        "render=function(_) return 'REC' end," ++
         "active_when=function(_) return true end" ++
         "}";
     const z = try std.testing.allocator.dupeZ(u8, chunk);
@@ -3529,4 +2431,32 @@ test "parseSegmentAtPath accepts callback active_when at segment level" {
 
     try std.testing.expect(seg.button_active_bash != null);
     try std.testing.expect(std.mem.startsWith(u8, seg.button_active_bash.?, CALLBACK_REF_PREFIX));
+}
+
+test "parseLayoutFloat reads canonical attrs table" {
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    const chunk =
+        "float = {" ++
+        "key='g'," ++
+        "command='lazygit'," ++
+        "attrs={ global=true, per_cwd=true, inherit_env=true }" ++
+        "}";
+    const z = try std.testing.allocator.dupeZ(u8, chunk);
+    defer std.testing.allocator.free(z);
+    try lua.loadString(z);
+    try lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try lua.getGlobal("float");
+    defer lua.pop(1);
+
+    var float = parseLayoutFloat(&lua, -1, std.testing.allocator) orelse return error.TestUnexpectedResult;
+    defer float.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u8, 'g'), float.key);
+    try std.testing.expect(float.has_custom_attributes);
+    try std.testing.expect(float.attributes.global);
+    try std.testing.expect(float.attributes.per_cwd);
+    try std.testing.expect(float.attributes.inherit_env);
 }

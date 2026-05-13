@@ -214,9 +214,9 @@ fn isButtonActive(mod: *const core.Segment, ctx: *shp.Context) bool {
 
 fn isHoveredRange(start_x: u16, width: u16, y: u16) bool {
     if (hover_x == null or hover_y == null) return false;
-    const hx = hover_x.?;
-    const hy = hover_y.?;
-    return hy == y and hx >= start_x and hx < start_x +| width;
+    const hover_col = hover_x.?;
+    const hover_row = hover_y.?;
+    return hover_row == y and hover_col >= start_x and hover_col < start_x +| width;
 }
 
 fn spinnerAsciiFrame(now_ms: u64, started_at_ms: u64, step_ms: u64) []const u8 {

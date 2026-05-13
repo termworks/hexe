@@ -1,6 +1,6 @@
 # Float attributes
 
-Detailed reference for float behavior flags under `floats[].attributes`.
+Detailed reference for float behavior flags under `floats[].attrs`.
 
 For the full float guide (sizing, borders, layout, CLI) see [floats.md](floats.md).
 
@@ -9,12 +9,12 @@ For the full float guide (sizing, borders, layout, CLI) see [floats.md](floats.m
 ## Setting attributes
 
 ```lua
-hx.ses.layout.define({
+return hexe.layout("default", {
   floats = {
-    {
+    hexe.float("monitor", {
       key     = "f",
       command = "btop",
-      attributes = {
+      attrs = {
         exclusive = true,
         global    = true,
         per_cwd   = false,
@@ -23,7 +23,7 @@ hx.ses.layout.define({
         isolated  = false,
         inherit_env = false,
       },
-    },
+    }),
   },
 })
 ```

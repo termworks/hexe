@@ -1117,9 +1117,6 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
     }
 
     // Update process cache.
-    if (resp.name_len > 0) {
-        state.syncPaneName(resp.uuid);
-    }
     const fg_pid: ?i32 = if (resp.fg_pid != 0) resp.fg_pid else null;
     if (fg_name != null or fg_pid != null) {
         state.setPaneProc(resp.uuid, fg_name, fg_pid);

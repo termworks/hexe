@@ -6,8 +6,8 @@ const std = @import("std");
 /// Expects payload table at stack top and always consumes it.
 ///
 /// Supported handler registration in Lua config:
-/// - `hx.events.on(event_name, function(ev) ... end)` (canonical)
-/// Internally, handlers are stored under `hexe.autocmd[event_name]` as a function
+/// - `hexe.events.on(event_name, function(ev) ... end)` (canonical)
+/// Internally, handlers are stored under `hexe.__events[event_name]` as a function
 /// or an array of functions.
 pub fn emitAutocmdWithPayloadOnStack(runtime: *LuaRuntime, event_name: []const u8) void {
     // Stack: [..., payload]
@@ -20,7 +20,7 @@ pub fn emitAutocmdWithPayloadOnStack(runtime: *LuaRuntime, event_name: []const u
         return;
     }
 
-    _ = runtime.lua.getField(-1, "autocmd");
+    _ = runtime.lua.getField(-1, "__events");
     if (runtime.lua.typeOf(-1) != .table) {
         runtime.lua.pop(3); // autocmd/hexe/payload
         return;
@@ -63,7 +63,7 @@ test "emitAutocmdWithPayloadOnStack calls single function handler" {
 
     const setup_z = try rt.allocator.dupeZ(
         u8,
-        "__t_count = 0; __t_last = ''; hx.events.on('test_event', function(ev) __t_count = __t_count + 1; __t_last = ev.kind or '' end)",
+        "__t_count = 0; __t_last = ''; hexe.events.on('test_event', function(ev) __t_count = __t_count + 1; __t_last = ev.kind or '' end)",
     );
     defer rt.allocator.free(setup_z);
     try rt.lua.loadString(setup_z);
@@ -91,7 +91,7 @@ test "emitAutocmdWithPayloadOnStack calls handler list" {
 
     const setup_z = try rt.allocator.dupeZ(
         u8,
-        "__t_a = 0; __t_b = 0; hx.events.on('test_event', function(ev) __t_a = __t_a + (ev.v or 0) end); hx.events.on('test_event', function(ev) __t_b = __t_b + 1 end)",
+        "__t_a = 0; __t_b = 0; hexe.events.on('test_event', function(ev) __t_a = __t_a + (ev.v or 0) end); hexe.events.on('test_event', function(ev) __t_b = __t_b + 1 end)",
     );
     defer rt.allocator.free(setup_z);
     try rt.lua.loadString(setup_z);
@@ -119,7 +119,7 @@ test "emitAutocmdWithPayloadOnStack continues after handler error" {
 
     const setup_z = try rt.allocator.dupeZ(
         u8,
-        "__t_ok = 0; hx.events.on('test_event', function(_) error('boom') end); hx.events.on('test_event', function(_) __t_ok = __t_ok + 1 end)",
+        "__t_ok = 0; hexe.events.on('test_event', function(_) error('boom') end); hexe.events.on('test_event', function(_) __t_ok = __t_ok + 1 end)",
     );
     defer rt.allocator.free(setup_z);
     try rt.lua.loadString(setup_z);

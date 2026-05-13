@@ -40,16 +40,16 @@ Added a feature to display Pokemon sprites overlaid in the center of panes when 
 
 ### Add Keybinding to Config
 
-Edit `~/.config/hexe/init.lua` and add to the terminal frontend keymap (`hx.mux.keymap`):
+Edit `~/.config/hexe/init.lua` and add the binding to the top-level `keys` list:
 
 ```lua
-{ on = "press", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
+{ on = "press", mods = { hexe.mod.ctrl, hexe.mod.alt }, key = "p", action = hexe.action.overlay.sprite_toggle() },
 ```
 
 Or use any key combination you prefer:
 
 ```lua
-{ on = "hold", hold_ms = 400, mods = { hx.mod.ctrl, hx.mod.alt }, key = "s", action = { type = hx.action.sprite_toggle } },
+{ on = "hold", hold_ms = 400, mods = { hexe.mod.ctrl, hexe.mod.alt }, key = "s", action = hexe.action.overlay.sprite_toggle() },
 ```
 
 ### Using the Feature
@@ -64,13 +64,13 @@ Or use any key combination you prefer:
 
 ```lua
 -- Quick toggle
-{ on = "press", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
+{ on = "press", mods = { hexe.mod.ctrl, hexe.mod.alt }, key = "p", action = hexe.action.overlay.sprite_toggle() },
 
 -- Hold to show (release to hide)
-{ on = "hold", hold_ms = 400, mods = { hx.mod.ctrl, hx.mod.alt }, key = "s", action = { type = hx.action.sprite_toggle } },
+{ on = "hold", hold_ms = 400, mods = { hexe.mod.ctrl, hexe.mod.alt }, key = "s", action = hexe.action.overlay.sprite_toggle() },
 
 -- Repeat-friendly toggle
-{ on = "repeat", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
+{ on = "repeat", mods = { hexe.mod.ctrl, hexe.mod.alt }, key = "p", action = hexe.action.overlay.sprite_toggle() },
 ```
 
 ## Available Sprites

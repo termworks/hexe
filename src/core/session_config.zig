@@ -390,16 +390,32 @@ pub fn parseSessionLua(allocator: std.mem.Allocator, path: []const u8) !SessionC
 
     var config = SessionConfig{};
 
-    // Supported formats:
-    // 1) Legacy: return { name=..., tabs=..., floats=... }
-    // 2) New:    return { keybingings={...}, layout={ name=..., tabs=..., floats=... } }
+    // Supported format:
+    // return hexe.setup({ ses = { layouts = { hexe.layout(...) } } })
     var table_idx: i32 = -1;
-    var layout_pushed = false;
-    if (runtime.pushTable(-1, "layout")) {
+    var pushed: usize = 0;
+    if (runtime.pushTable(-1, "ses")) {
+        pushed += 1;
+        if (!runtime.pushTable(-1, "layouts")) {
+            return error.InvalidConfig;
+        }
+        pushed += 1;
+        if (!runtime.pushArrayElement(-1, 1)) {
+            return error.InvalidConfig;
+        }
+        pushed += 1;
         table_idx = -1;
-        layout_pushed = true;
+    } else if (runtime.getString(-1, "__hexe_type")) |kind| {
+        if (!std.mem.eql(u8, kind, "layout")) {
+            return error.InvalidConfig;
+        }
+    } else {
+        return error.InvalidConfig;
     }
-    defer if (layout_pushed) runtime.pop();
+    defer {
+        var i: usize = 0;
+        while (i < pushed) : (i += 1) runtime.pop();
+    }
 
     // Read layout fields
     if (runtime.getStringAlloc(table_idx, "name")) |s| config.name = s;
@@ -459,8 +475,8 @@ fn parseTabs(allocator: std.mem.Allocator, runtime: *LuaRuntime, table_idx: i32)
                 .name = name,
             };
 
-            // Parse split tree
-            if (runtime.pushTable(-1, "split")) {
+            // Parse split tree.
+            if (runtime.pushTable(-1, "root")) {
                 defer runtime.pop();
                 tab.split = parseSplitConfig(allocator, runtime) catch |err| blk: {
                     logging.logError("session_config", "failed to parse tab split config", err);
@@ -482,7 +498,7 @@ fn parseTabs(allocator: std.mem.Allocator, runtime: *LuaRuntime, table_idx: i32)
 }
 
 fn parseSplitConfig(allocator: std.mem.Allocator, runtime: *LuaRuntime) !SplitConfig {
-    // Check if this is a split node (has "dir" field) or a leaf (has "cmd" or is simple)
+    // Check if this is a split node (has "dir" field) or a leaf.
     if (runtime.getString(-1, "dir")) |dir_str| {
         // It's a split node
         const dir: SplitDir = if (std.mem.eql(u8, dir_str, "vertical")) .vertical else .horizontal;
@@ -505,7 +521,7 @@ fn parseSplitConfig(allocator: std.mem.Allocator, runtime: *LuaRuntime) !SplitCo
                 const node = if (runtime.getString(-1, "dir") != null)
                     try parseSplitConfig(allocator, runtime)
                 else blk: {
-                    const cmd = runtime.getStringAlloc(-1, "cmd");
+                    const cmd = runtime.getStringAlloc(-1, "command");
                     const cwd = runtime.getStringAlloc(-1, "cwd");
                     break :blk SplitConfig{ .pane = .{ .cmd = cmd, .cwd = cwd } };
                 };
@@ -525,7 +541,7 @@ fn parseSplitConfig(allocator: std.mem.Allocator, runtime: *LuaRuntime) !SplitCo
         };
     } else {
         // It's a leaf pane
-        const cmd = runtime.getStringAlloc(-1, "cmd");
+        const cmd = runtime.getStringAlloc(-1, "command");
         const cwd = runtime.getStringAlloc(-1, "cwd");
         return SplitConfig{ .pane = .{ .cmd = cmd, .cwd = cwd } };
     }
@@ -553,17 +569,74 @@ fn parseFloats(allocator: std.mem.Allocator, runtime: *LuaRuntime, table_idx: i3
                 if (key_str.len > 0) float.key = key_str[0];
             }
 
-            float.cmd = runtime.getStringAlloc(-1, "cmd");
+            float.cmd = runtime.getStringAlloc(-1, "command");
             float.width = runtime.getInt(u8, -1, "width") orelse 80;
             float.height = runtime.getInt(u8, -1, "height") orelse 80;
             float.pos_x = runtime.getInt(u8, -1, "pos_x") orelse 50;
             float.pos_y = runtime.getInt(u8, -1, "pos_y") orelse 50;
+            if (runtime.pushTable(-1, "size")) {
+                defer runtime.pop();
+                float.width = runtime.getInt(u8, -1, "width") orelse float.width;
+                float.height = runtime.getInt(u8, -1, "height") orelse float.height;
+            }
+            if (runtime.pushTable(-1, "position")) {
+                defer runtime.pop();
+                float.pos_x = runtime.getInt(u8, -1, "x") orelse float.pos_x;
+                float.pos_y = runtime.getInt(u8, -1, "y") orelse float.pos_y;
+            }
             float.title = runtime.getStringAlloc(-1, "title");
             float.global = runtime.getBool(-1, "global") orelse false;
+            if (runtime.pushTable(-1, "attrs")) {
+                defer runtime.pop();
+                float.global = runtime.getBool(-1, "global") orelse float.global;
+            }
 
             try list.append(allocator, float);
         }
     }
 
     return list.toOwnedSlice(allocator);
+}
+
+test "parseSessionLua reads canonical hexe.setup layout config" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const code =
+        "local hexe = require('hexe')\n" ++
+        "return hexe.setup({ ses = { layouts = { hexe.layout('unit', {\n" ++
+        "  root = '.',\n" ++
+        "  tabs = { hexe.tab('main', { root = hexe.pane({ command = 'sh', cwd = 'src' }) }) },\n" ++
+        "  floats = { hexe.float('codex', { key = '3', command = 'codex', size = { width = 80, height = 70 }, attrs = { global = true } }) },\n" ++
+        "}) } } })\n";
+
+    try tmp.dir.writeFile(.{ .sub_path = "layout.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.lua");
+    defer std.testing.allocator.free(path);
+
+    var cfg = try parseSessionLua(std.testing.allocator, path);
+    defer cfg.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("unit", cfg.name.?);
+    try std.testing.expectEqual(@as(usize, 1), cfg.tabs.len);
+    try std.testing.expectEqualStrings("main", cfg.tabs[0].name);
+    try std.testing.expect(cfg.tabs[0].split != null);
+    try std.testing.expectEqual(@as(usize, 1), cfg.floats.len);
+    try std.testing.expectEqual(@as(u8, '3'), cfg.floats[0].key);
+    try std.testing.expectEqualStrings("codex", cfg.floats[0].cmd.?);
+    try std.testing.expect(cfg.floats[0].global);
+}
+
+test "parseSessionLua rejects old top-level layout wrapper" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const code =
+        "return { layout = { name = 'old', tabs = { { name = 'main', split = {} } } } }\n";
+
+    try tmp.dir.writeFile(.{ .sub_path = "old.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "old.lua");
+    defer std.testing.allocator.free(path);
+
+    try std.testing.expectError(error.InvalidConfig, parseSessionLua(std.testing.allocator, path));
 }

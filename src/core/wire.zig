@@ -379,6 +379,7 @@ pub const OrphanedPanes = extern struct {
 pub const OrphanedPaneEntry = extern struct {
     uuid: [32]u8 align(1),
     pid: i32 align(1),
+    name_len: u16 align(1),
 };
 
 /// SessionsList response.

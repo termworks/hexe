@@ -58,8 +58,17 @@ fn parseOpts(lua: *Lua, timeout_ms: *u64, cache_ms: *u64) void {
     lua.pop(1);
 }
 
-fn pushExecResult(lua: *Lua, output: []const u8, status: i32, cached: bool, timeout_hit: bool, elapsed_ms: u64) c_int {
-    lua.createTable(0, 5);
+fn pushExecResult(lua: *Lua, stdout: []const u8, stderr: []const u8, status: i32, cached: bool, timeout_hit: bool, elapsed_ms: u64) c_int {
+    const output = if (stdout.len > 0) stdout else stderr;
+    lua.createTable(0, 9);
+    lua.pushBoolean(status == 0 and !timeout_hit);
+    lua.setField(-2, "ok");
+    lua.pushInteger(status);
+    lua.setField(-2, "code");
+    _ = lua.pushString(stdout);
+    lua.setField(-2, "stdout");
+    _ = lua.pushString(stderr);
+    lua.setField(-2, "stderr");
     _ = lua.pushString(output);
     lua.setField(-2, "output");
     lua.pushInteger(status);
@@ -79,24 +88,28 @@ fn elapsedMsSince(start_ms: i64) u64 {
     return @intCast(now - start_ms);
 }
 
-/// Lua API: hexe.api.exec(cmd, opts?)
+/// Lua API: hexe.exec(cmd, opts?)
 ///
 /// opts:
 /// - timeout / timeout_ms: kill threshold in ms (default: 80)
 /// - cache / cache_ms: cache TTL in ms (default: 500)
 ///
 /// Returns table:
-/// { output = string, status = integer, cached = boolean, timeout = boolean, elapsed_ms = integer }
+/// {
+///   ok = boolean, code = integer, stdout = string, stderr = string,
+///   output = string, status = integer, cached = boolean, timeout = boolean,
+///   elapsed_ms = integer,
+/// }
 pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     if (lua.getTop() < 1 or lua.typeOf(1) != .string) {
-        _ = lua.pushString("usage: hexe.api.exec(cmd, opts?)");
+        _ = lua.pushString("usage: hexe.exec(cmd, opts?)");
         lua.raiseError();
     }
 
     const cmd = lua.toString(1) catch {
-        _ = lua.pushString("hexe.api.exec: cmd must be string");
+        _ = lua.pushString("hexe.exec: cmd must be string");
         lua.raiseError();
     };
 
@@ -107,7 +120,7 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
     const allocator = std.heap.page_allocator;
     const now_ms: u64 = @intCast(std.time.milliTimestamp());
     const cache_key = std.fmt.allocPrint(allocator, "{s}\x1f{d}\x1f{d}", .{ cmd, timeout_ms, cache_ms }) catch {
-        return pushExecResult(lua, "", 127, false, false, 0);
+        return pushExecResult(lua, "", "", 127, false, false, 0);
     };
     defer allocator.free(cache_key);
 
@@ -127,6 +140,9 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
             _ = lua.getField(-1, "output");
             const out = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "") else "";
             lua.pop(1);
+            _ = lua.getField(-1, "stderr");
+            const err = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "") else "";
+            lua.pop(1);
             _ = lua.getField(-1, "status");
             const status: i32 = if (lua.typeOf(-1) == .number) @intCast(lua.toInteger(-1) catch 0) else 0;
             lua.pop(1);
@@ -134,7 +150,7 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
             const timeout_hit = if (lua.typeOf(-1) == .boolean) lua.toBoolean(-1) else false;
             lua.pop(1);
             lua.pop(1); // cache entry
-            return pushExecResult(lua, out, status, true, timeout_hit, 0);
+            return pushExecResult(lua, out, err, status, true, timeout_hit, 0);
         }
     }
     lua.pop(1); // cache lookup result
@@ -147,7 +163,7 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
         .allocator = allocator,
         .argv = &.{ "timeout", "--preserve-status", timeout_arg, "/bin/bash", "-lc", cmd },
     }) catch {
-        return pushExecResult(lua, "", 127, false, false, elapsedMsSince(start_ms));
+        return pushExecResult(lua, "", "", 127, false, false, elapsedMsSince(start_ms));
     };
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -157,16 +173,17 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
         else => 127,
     };
     const timeout_hit = status == 124;
-    const output = if (result.stdout.len > 0) result.stdout else result.stderr;
     const elapsed_ms: u64 = elapsedMsSince(start_ms);
 
     if (cache_ms > 0) {
         _ = lua.pushString(cache_key);
-        lua.createTable(0, 4);
+        lua.createTable(0, 5);
         lua.pushInteger(@intCast(now_ms));
         lua.setField(-2, "ts");
-        _ = lua.pushString(output);
+        _ = lua.pushString(result.stdout);
         lua.setField(-2, "output");
+        _ = lua.pushString(result.stderr);
+        lua.setField(-2, "stderr");
         lua.pushInteger(status);
         lua.setField(-2, "status");
         lua.pushBoolean(timeout_hit);
@@ -174,7 +191,7 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
         lua.setTable(-3);
     }
 
-    return pushExecResult(lua, output, status, false, timeout_hit, elapsed_ms);
+    return pushExecResult(lua, result.stdout, result.stderr, status, false, timeout_hit, elapsed_ms);
 }
 
 fn clearStack(lua: *Lua) void {
@@ -219,7 +236,7 @@ fn callExecExpectError(lua: *Lua, cmd: []const u8, opt_key: []const u8, opt_valu
     return "";
 }
 
-test "hexe.api.exec returns output and uses cache" {
+test "hexe.exec returns output and uses cache" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.deinit();
 
@@ -230,12 +247,24 @@ test "hexe.api.exec returns output and uses cache" {
     _ = lua.getField(-1, "status");
     const status1: i32 = if (lua.typeOf(-1) == .number) @intCast(lua.toInteger(-1) catch 1) else 1;
     lua.pop(1);
+    _ = lua.getField(-1, "ok");
+    const ok1 = if (lua.typeOf(-1) == .boolean) lua.toBoolean(-1) else false;
+    lua.pop(1);
+    _ = lua.getField(-1, "code");
+    const code1: i32 = if (lua.typeOf(-1) == .number) @intCast(lua.toInteger(-1) catch 1) else 1;
+    lua.pop(1);
+    _ = lua.getField(-1, "stdout");
+    const stdout1 = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "") else "";
+    lua.pop(1);
     _ = lua.getField(-1, "cached");
     const cached1 = if (lua.typeOf(-1) == .boolean) lua.toBoolean(-1) else true;
     lua.pop(2); // cached + result table
 
     try std.testing.expectEqualStrings("cache_test", out1);
     try std.testing.expectEqual(@as(i32, 0), status1);
+    try std.testing.expect(ok1);
+    try std.testing.expectEqual(@as(i32, 0), code1);
+    try std.testing.expectEqualStrings("cache_test", stdout1);
     try std.testing.expect(!cached1);
 
     callExec(lua, "printf cache_test", 500, 2_000);
@@ -246,7 +275,7 @@ test "hexe.api.exec returns output and uses cache" {
     try std.testing.expect(cached2);
 }
 
-test "hexe.api.exec timeout marks timeout true" {
+test "hexe.exec timeout marks timeout true" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.deinit();
 
@@ -332,7 +361,7 @@ test "prompt pane selector shim semantics" {
     try std.testing.expect(lua.typeOf(-1) == .nil);
 }
 
-test "hexe.api.exec validates option types" {
+test "hexe.exec validates option types" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.deinit();
 

@@ -45,45 +45,43 @@ Scrollback is buffered in the pod as a ring buffer of raw PTY bytes. Ghostty VT 
 Layouts define the initial tab/split/float structure for a session. They are defined in your config and applied when a new session starts.
 
 ```lua
-local hx = require("hexe")
+local hexe = require("hexe")
 
-hx.ses.layout.define({
-  name = "default",
+return hexe.setup({
+  ses = {
+    layouts = {
+      hexe.layout("default", {
   enabled = true,
 
   tabs = {
-    {
-      name = "code",
-      root = {
-        dir = "h",
-        ratio = 0.65,
-        first = { cwd = "~/projects/myapp" },
-        second = {
-          dir = "v",
-          ratio = 0.5,
-          first  = { cwd = "~/projects/myapp", command = "btop" },
-          second = { cwd = "~/projects/myapp" },
-        },
-      },
-    },
-    {
-      name = "notes",
-      root = { cwd = "~/notes", command = "nvim" },
-    },
+    hexe.tab("code", {
+      root = hexe.split("horizontal", {
+        hexe.pane({ cwd = "~/projects/myapp" }),
+        hexe.split("vertical", {
+          hexe.pane({ cwd = "~/projects/myapp", command = "btop" }),
+          hexe.pane({ cwd = "~/projects/myapp" }),
+        }),
+      }),
+    }),
+    hexe.tab("notes", {
+      root = hexe.pane({ cwd = "~/notes", command = "nvim" }),
+    }),
   },
 
   floats = {
-    {
+    hexe.float("git", {
       key = "g",
       command = "lazygit",
-      attributes = { per_cwd = true, sticky = true },
-      width_percent = 90,
-      height_percent = 90,
-    },
-    {
+      attrs = { per_cwd = true, sticky = true },
+      size = { width = 90, height = 90 },
+    }),
+    hexe.float("files", {
       key = "f",
       command = "fzf",
-      attributes = { per_cwd = true, sticky = true },
+      attrs = { per_cwd = true, sticky = true },
+    }),
+  },
+      }),
     },
   },
 })
@@ -138,9 +136,9 @@ You can move orphaned panes between sessions.
 - **Disown**: remove a pane from the current session (pod keeps running, pane becomes orphaned)
 - **Adopt**: pick up an orphaned pane into the current session
 
-Keybinds (configure in the frontend keymap namespace `hx.mux.keymap`):
-- `action = { type = hx.action.pane_disown }`
-- `action = { type = hx.action.pane_adopt }`
+Keybinds:
+- `action = hexe.action.pane.disown()`
+- `action = hexe.action.pane.adopt()`
 
 On adopt, you can swap the adopted pane with the current one, or destroy the current pane and take its slot.
 

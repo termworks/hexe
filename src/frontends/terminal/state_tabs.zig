@@ -24,6 +24,14 @@ fn killTabPanes(self: anytype, tab: *TabView) void {
     }
 }
 
+fn attachedSnapshotOwnsTab(self: anytype, tab_uuid: [32]u8) bool {
+    const snapshot = self.runtime.attachedSnapshot() orelse return true;
+    for (snapshot.tabs.items) |*tab| {
+        if (std.mem.eql(u8, &tab.uuid, &tab_uuid)) return true;
+    }
+    return false;
+}
+
 /// Get the current tab's layout.
 pub fn currentLayout(self: anytype) *Layout {
     return &self.view.tab_views.items[self.activeTabIndex()].layout;
@@ -134,6 +142,9 @@ pub fn createTab(self: anytype) !void {
 
 /// Close the current tab.
 pub fn closeCurrentTab(self: anytype) bool {
+    if (self.runtime.applyPendingSessionSnapshot()) {
+        _ = self.applySessionSnapshot();
+    }
     if (self.view.tab_views.items.len <= 1) return false;
     const closing_tab = self.activeTabIndex();
     const closing_uuid = self.runtime.tabUuid(closing_tab) orelse {
@@ -145,9 +156,20 @@ pub fn closeCurrentTab(self: anytype) bool {
     else
         null;
 
-    if (!self.syncSessionTabRemovedChecked(closing_uuid, next_active_tab)) {
-        self.notifications.show("Close tab failed: session sync rejected removal");
-        return false;
+    if (attachedSnapshotOwnsTab(self, closing_uuid)) {
+        if (!self.syncSessionTabRemovedChecked(closing_uuid, next_active_tab)) {
+            core.logging.warn(
+                "terminal",
+                "closeCurrentTab: session rejected tab removal for {s}; closing local tab anyway",
+                .{closing_uuid[0..8]},
+            );
+        }
+    } else {
+        core.logging.warn(
+            "terminal",
+            "closeCurrentTab: local tab {s} is absent from attached session snapshot; closing local stale tab only",
+            .{closing_uuid[0..8]},
+        );
     }
 
     // Handle tab-bound floats belonging to this tab.

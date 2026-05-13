@@ -167,7 +167,7 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         printTreeNode(prefix, " ", ansi.MUX, "mux", name_str, sid8);
 
         // Read pane entries and build name map
-        var pane_names = std.StringHashMap([]const u8).init(allocator);
+        var pane_names = std.AutoHashMap([32]u8, []const u8).init(allocator);
         defer pane_names.deinit();
 
         var pi: u16 = 0;
@@ -183,7 +183,7 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
             off += pe.sticky_pwd_len; // skip sticky_pwd
 
             if (pname.len > 0) {
-                pane_names.put(&pe.uuid, pname) catch |err| {
+                pane_names.put(pe.uuid, pname) catch |err| {
                     print("Error: failed to build pane name map: {s}\n", .{@errorName(err)});
                     return;
                 };
@@ -720,7 +720,7 @@ fn appendSessionLayoutPanes(
     }
 }
 
-pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: []const u8, pane_name_map: ?*const std.StringHashMap([]const u8)) void {
+pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: []const u8, pane_name_map: ?*const std.AutoHashMap([32]u8, []const u8)) void {
     var snapshot = core.session_model.SessionSnapshot.fromJson(allocator, json) catch |err| {
         print("Error: failed to parse session tree snapshot: {s}\n", .{@errorName(err)});
         return;
@@ -803,7 +803,7 @@ pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: 
                     else
                         " ",
                 };
-                const pname = if (pane_name_map) |m| (m.get(child.uuid[0..]) orelse "-") else "-";
+                const pname = if (pane_name_map) |m| (m.get(child.uuid) orelse "-") else "-";
 
                 switch (child.kind) {
                     .split => printTreeNode(lp, sym, ansi.SPLIT, "split", pname, child.uuid[0..8]),
@@ -821,7 +821,7 @@ pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: 
             if (std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid)) ">" else " "
         else
             " ";
-        const pname = if (pane_name_map) |m| (m.get(float_state.pane_uuid[0..]) orelse "-") else "-";
+        const pname = if (pane_name_map) |m| (m.get(float_state.pane_uuid) orelse "-") else "-";
 
         const is_last_top = (top_index + 1 == top_count);
         const branch = if (is_last_top) "└" else "├";

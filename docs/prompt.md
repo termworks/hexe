@@ -20,18 +20,22 @@ hexe shp init fish | source
 Define segments in `~/.config/hexe/init.lua`:
 
 ```lua
-local hx = require("hexe")
+local hexe = require("hexe")
 
-hx.shp.prompt.left({
-  {
-    name = "ssh",
-    priority = 50,
-    value = function(ctx)
-      if not ctx.env.SSH_CONNECTION then
-        return nil
-      end
-      return { { text = " //", style = "bg:237 fg:15" } }
-    end,
+return hexe.setup({
+  prompt = {
+    left = {
+      hexe.segment({
+        name = "ssh",
+        priority = 50,
+        render = function(ctx)
+          if not ctx.env.SSH_CONNECTION then
+            return nil
+          end
+          return { { text = " //", style = "bg:237 fg:15" } }
+        end,
+      }),
+    },
   },
 })
 ```
@@ -43,17 +47,17 @@ Prompt loading order:
 1. Global config: `~/.config/hexe/init.lua`
 2. Optional local override: `./.hexe.lua`
 
-For SHP, local `./.hexe.lua` can override prompt arrays via table form:
+For SHP, local `./.hexe.lua` can override prompt arrays with the same canonical setup form:
 
 ```lua
-return {
-  shp = {
-    prompt = {
-      left = { ... },
-      right = { ... },
-    },
+local hexe = require("hexe")
+
+return hexe.setup({
+  prompt = {
+    left = { ... },
+    right = { ... },
   },
-}
+})
 ```
 
 ## Segment Model (Lua-first)
@@ -65,8 +69,8 @@ Each prompt side is an array of segment definitions.
   name     = "directory",       -- built-in segment name
   priority = 50,                 -- lower = kept longer when width is tight
 
-  -- value segment
-  value = function(ctx)
+  -- render segment
+  render = function(ctx)
     return { { text = " hello ", style = "bg:1 fg:0" } }
   end,
 
@@ -84,7 +88,7 @@ Each prompt side is an array of segment definitions.
 
 Notes:
 
-- Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); no `kind` field is required.
+- Kind is inferred from fields (`render`, `builtin`, `button`, `progress`); no `kind` field is required.
 - `outputs` is not used in the Lua-first prompt model.
 - Affix object form is supported: `prefix = { output = "...", style = "..." }`, `suffix = { output = "...", style = "..." }`.
 
@@ -92,7 +96,7 @@ Notes:
 
 Prompt intentionally supports a limited segment subset:
 
-- Allowed kinds: `value`, `builtin`
+- Allowed kinds: `render`, `builtin`
 - Not allowed in prompt: `button`, `progress`
 
 Builtin allowlist for prompt:
@@ -113,9 +117,9 @@ Examples of builtins not allowed in prompt: `spinner`, `randomdo`, `running_anim
 
 ## Output Execution Paths
 
-### `value = ...` (in-process)
+### `render = ...` (in-process)
 
-`value` runs inside Hexe and must return a value.
+`render` runs inside Hexe and must return a value.
 
 Return behavior:
 
@@ -134,13 +138,12 @@ Return behavior:
   - string form: `prefix = " "`
   - object form: `prefix = { output = " ", style = "bg:0 fg:8" }`
   - same schema for `suffix`
-- `sufix = { output = ..., style = ... }` is accepted as alias for `suffix`
 
 You can build descriptors with helpers:
 
 ```lua
 builtin = function(_)
-  return hx.segment.builtin.directory({
+  return hexe.segment.builtin.directory({
     style = "bg:237 fg:15",
     suffix = " ",
   })
@@ -154,7 +157,7 @@ Style behavior:
 
 ## Conditions (`when`)
 
-The Lua-first prompt model usually encodes visibility directly in `value`/`builtin` callbacks (return `nil` to hide). `when` is callback-only.
+The Lua-first prompt model usually encodes visibility directly in `render`/`builtin` callbacks (return `nil` to hide). `when` is callback-only.
 
 Prompt condition form:
 
@@ -168,7 +171,7 @@ Legacy forms like `when = { lua = ... }`, token tables, and bash/env conditions 
 
 ## Lua Context (`ctx`)
 
-Prompt Lua callbacks (`value`, `builtin`, and `when`) receive `ctx`:
+Prompt Lua callbacks (`render`, `builtin`, and `when`) receive `ctx`:
 
 - `ctx.cwd`
 - `ctx.home`
@@ -186,7 +189,7 @@ Prompt Lua callbacks (`value`, `builtin`, and `when`) receive `ctx`:
 Example:
 
 ```lua
-value = function(ctx)
+render = function(ctx)
   if (ctx.exit_status or 0) ~= 0 then
     return "ERR"
   end
@@ -213,6 +216,8 @@ Unsafe mode package search paths:
 
 - `${XDG_CONFIG_HOME}/hexe/lua/?.lua`
 - `${XDG_CONFIG_HOME}/hexe/lua/?/init.lua`
+- `./.hexe/lua/?.lua`
+- `./.hexe/lua/?/init.lua`
 
 If `XDG_CONFIG_HOME` is unset, `~/.config/hexe` is used.
 
@@ -257,7 +262,7 @@ Pure Lua segment:
 {
   name = "virt",
   priority = 40,
-  value = function(_)
+  render = function(_)
     local p = io.popen("systemd-detect-virt 2>/dev/null")
     if not p then return nil end
     local v = (p:read("*a") or ""):match("^%s*(.-)%s*$")

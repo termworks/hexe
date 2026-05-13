@@ -179,10 +179,9 @@ hexe terminal float --command "bash /tmp/untrusted.sh" --isolation=full
 Configure isolation for specific floats in your `~/.config/hexe/init.lua`:
 
 ```lua
-hx.ses.layout.define({
-  name = "default",
+return hexe.layout("default", {
   floats = {
-    {
+    hexe.float("sandbox", {
       key = "0",
       enabled = true,
       title = "sandbox",
@@ -192,7 +191,7 @@ hx.ses.layout.define({
         pids = 100,           -- Max processes
         cpu = "50000 100000", -- 0.5 CPU cores
       },
-    },
+    }),
   },
 })
 ```
