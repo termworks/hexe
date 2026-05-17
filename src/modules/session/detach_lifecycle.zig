@@ -26,7 +26,12 @@ fn buildDetachedSessionSnapshot(
 
     const session_name = client.session_name orelse "unknown";
     const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
-    return session_model.SessionSnapshot.initMinimal(self.allocator, hex_id, session_name);
+    var snapshot = try session_model.SessionSnapshot.initMinimal(self.allocator, hex_id, session_name);
+    errdefer snapshot.deinit();
+    if (client.base_root) |base_root| {
+        snapshot.base_root = try self.allocator.dupe(u8, base_root);
+    }
+    return snapshot;
 }
 
 fn paneProcessDead(pane: *const store_mod.Pane) bool {

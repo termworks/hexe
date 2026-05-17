@@ -73,6 +73,12 @@ pub fn run(allocator: std.mem.Allocator, session_id: []const u8, output_path: []
         }
         const name = payload[off..name_end];
         off = name_end;
+        const base_root_end = off + entry.base_root_len;
+        if (base_root_end > payload.len) {
+            print("Error: malformed session base root\n", .{});
+            return error.MalformedResponse;
+        }
+        off = base_root_end;
 
         // Check if this matches the requested session (by name or ID prefix)
         if (std.mem.eql(u8, name, session_id) or

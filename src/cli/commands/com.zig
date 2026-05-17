@@ -68,6 +68,23 @@ fn printTreeNode(prefix: []const u8, symbol: []const u8, type_color: []const u8,
     );
 }
 
+fn sessionStateBaseRoot(allocator: std.mem.Allocator, session_state: []const u8) ?[]u8 {
+    if (session_state.len == 0) return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, session_state, .{}) catch return null;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return null,
+    };
+    const value = root.get("base_root") orelse return null;
+    const str = switch (value) {
+        .string => |s| s,
+        else => return null,
+    };
+    if (str.len == 0) return null;
+    return allocator.dupe(u8, str) catch null;
+}
+
 pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !void {
     const wire = core.wire;
     const posix = std.posix;
@@ -165,6 +182,12 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         var mux_line: [256]u8 = undefined;
         const prefix = std.fmt.bufPrint(&mux_line, "{s}\xe2\x94\x80 ", .{branch}) catch "";
         printTreeNode(prefix, " ", ansi.MUX, "mux", name_str, sid8);
+        if (details) {
+            if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
+                defer allocator.free(base_root);
+                print("{s}root: {s}\n", .{ child_prefix, base_root });
+            }
+        }
 
         // Read pane entries and build name map
         var pane_names = std.AutoHashMap([32]u8, []const u8).init(allocator);
@@ -220,6 +243,10 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
 
         // Show UUID prominently as primary identifier
         print("  [{s}] {s:<12} ({d} panes)\n", .{ uuid_prefix, name_str, de.pane_count });
+        if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
+            defer allocator.free(base_root);
+            print("    root: {s}\n", .{base_root});
+        }
 
         if (instance) |instance_name| {
             if (instance_name.len > 0) {
@@ -1124,6 +1151,12 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         try stdout.writeAll("\",\"pane_count\":");
         const pane_str = std.fmt.bufPrint(&buf, "{d}", .{sc.pane_count}) catch continue;
         try stdout.writeAll(pane_str);
+        if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
+            defer allocator.free(base_root);
+            try stdout.writeAll(",\"base_root\":\"");
+            try writeJsonStr(stdout, base_root);
+            try stdout.writeAll("\"");
+        }
         try stdout.writeAll(",\"state\":");
         try stdout.writeAll(session_state);
 
@@ -1164,6 +1197,12 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         try stdout.writeAll("\",\"pane_count\":");
         const pane_str = std.fmt.bufPrint(&buf, "{d}", .{de.pane_count}) catch continue;
         try stdout.writeAll(pane_str);
+        if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
+            defer allocator.free(base_root);
+            try stdout.writeAll(",\"base_root\":\"");
+            try writeJsonStr(stdout, base_root);
+            try stdout.writeAll("\"");
+        }
         try stdout.writeAll(",\"state\":");
         try stdout.writeAll(session_state);
         try stdout.writeAll("}");
@@ -1228,7 +1267,6 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
     try stdout.writeAll("]");
 
     try stdout.writeAll("}\n");
-    _ = allocator;
 }
 
 fn writeJsonStr(stdout: std.fs.File, s: []const u8) !void {

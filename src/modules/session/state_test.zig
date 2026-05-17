@@ -243,7 +243,7 @@ test "SessionLock: releaseClient clears locks owned by disconnected client" {
 }
 
 test "SessionProjection: failed metadata replacement preserves old owned strings" {
-    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{1} ** 32, "meta-test");
+    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{1} ** 32, "meta-test", "");
     defer projection.deinit();
 
     const pane_uuid = [_]u8{'m'} ** 32;
@@ -270,7 +270,7 @@ test "SessionProjection: failed metadata replacement preserves old owned strings
 }
 
 test "SessionProjection: failed tab focus memory updates are transactional" {
-    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{2} ** 32, "focus-test");
+    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{2} ** 32, "focus-test", "");
     defer projection.deinit();
 
     try projection.resetTabFocusMemory(1);
@@ -303,7 +303,7 @@ test "SessionProjection: failed tab focus memory updates are transactional" {
 }
 
 test "SessionProjection: failed snapshot replacement preserves old projection" {
-    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{3} ** 32, "initial");
+    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{3} ** 32, "initial", "");
     defer projection.deinit();
 
     var old_snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'o'} ** 32, "old");
@@ -339,7 +339,7 @@ test "SessionProjection: failed snapshot replacement preserves old projection" {
 }
 
 test "SessionProjection: snapshot replacement preserves per-tab float focus memory" {
-    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{4} ** 32, "focus-memory");
+    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{4} ** 32, "focus-memory", "");
     defer projection.deinit();
 
     const tab_a = [_]u8{'a'} ** 32;
@@ -1519,6 +1519,7 @@ test "SessionSnapshot.fromMuxJson: parses canonical session structure" {
 test "SessionSnapshot.toJson/fromJson: round trips canonical snapshot" {
     var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha");
     defer snapshot.deinit();
+    snapshot.base_root = try testing.allocator.dupe(u8, "/tmp/hexe-root");
 
     const root = try testing.allocator.create(core.session_model.SessionLayoutNode);
     const first = try testing.allocator.create(core.session_model.SessionLayoutNode);
@@ -1578,6 +1579,7 @@ test "SessionSnapshot.toJson/fromJson: round trips canonical snapshot" {
     defer reparsed.deinit();
 
     try testing.expectEqualStrings("alpha", reparsed.session_name);
+    try testing.expectEqualStrings("/tmp/hexe-root", reparsed.base_root.?);
     try testing.expectEqual(@as(usize, 1), reparsed.tabs.items.len);
     try testing.expectEqual(@as(usize, 1), reparsed.floats.items.len);
     try testing.expectEqual([_]u8{'3'} ** 32, reparsed.active_float_uuid.?);

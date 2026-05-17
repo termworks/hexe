@@ -1503,26 +1503,35 @@ pub const Server = struct {
             return;
         };
 
-        // Read trailing name.
+        const trailing_len: usize = @as(usize, reg.name_len) + @as(usize, reg.base_root_len);
+        if (trailing_len != payload_len - @sizeOf(wire.Register)) {
+            self.skipBinaryPayload(fd, payload_len - @sizeOf(wire.Register), buf);
+            self.sendBinaryError(fd, "register: trailing payload size mismatch");
+            return;
+        }
+
+        // Read trailing name and base root.
         var name_slice: []const u8 = "";
-        if (reg.name_len > 0) {
-            if (reg.name_len > wire.MAX_PAYLOAD_LEN) {
+        var base_root_slice: []const u8 = "";
+        if (trailing_len > 0) {
+            if (trailing_len > wire.MAX_PAYLOAD_LEN) {
                 // Name exceeds protocol limit - drain and reject
-                self.skipBinaryPayload(fd, reg.name_len, buf);
-                self.sendBinaryError(fd, "register: name exceeds MAX_PAYLOAD_LEN");
+                self.skipBinaryPayload(fd, @intCast(trailing_len), buf);
+                self.sendBinaryError(fd, "register: trailing payload exceeds MAX_PAYLOAD_LEN");
                 return;
             }
-            if (reg.name_len <= buf.len) {
-                wire.readExact(fd, buf[0..reg.name_len]) catch |err| {
-                    core.logging.logError("ses", "register name read failed", err);
+            if (trailing_len <= buf.len) {
+                wire.readExact(fd, buf[0..trailing_len]) catch |err| {
+                    core.logging.logError("ses", "register trailing payload read failed", err);
                     self.sendBinaryError(fd, "register: name read failed");
                     return;
                 };
                 name_slice = buf[0..reg.name_len];
+                base_root_slice = buf[reg.name_len..trailing_len];
             } else {
                 // Name too large for buffer - drain bytes to keep stream aligned, then reject
-                self.skipBinaryPayload(fd, reg.name_len, buf);
-                self.sendBinaryError(fd, "register: name too long for buffer");
+                self.skipBinaryPayload(fd, @intCast(trailing_len), buf);
+                self.sendBinaryError(fd, "register: trailing payload too long for buffer");
                 return;
             }
         }
@@ -1559,6 +1568,23 @@ pub const Server = struct {
             client.session_id = session_id;
             client.pending_reattach_session_id = null;
             client.mux_ctl_fd = fd;
+            if (base_root_slice.len > 0) {
+                const owned_root = client.allocator.dupe(u8, base_root_slice) catch |err| {
+                    core.logging.logError("ses", "failed to store frontend base root", err);
+                    self.sendBinaryError(fd, "register: base root allocation failed");
+                    return;
+                };
+                if (client.base_root) |old| client.allocator.free(old);
+                client.base_root = owned_root;
+                if (client.session_snapshot) |*snapshot| {
+                    if (snapshot.base_root) |old| snapshot.allocator.free(old);
+                    snapshot.base_root = snapshot.allocator.dupe(u8, base_root_slice) catch |err| {
+                        core.logging.logError("ses", "failed to store snapshot base root", err);
+                        self.sendBinaryError(fd, "register: snapshot base root allocation failed");
+                        return;
+                    };
+                }
+            }
             // Store the resolved name (duplicated since resolved_name will be freed)
             if (resolved_name) |rn| {
                 const owned_name = client.allocator.dupe(u8, rn) catch |err| {
@@ -2395,11 +2421,16 @@ pub const Server = struct {
                 self.sendBinaryError(fd, "list_sessions: session name too long");
                 return;
             }
+            if (s.base_root.len > std.math.maxInt(u16)) {
+                self.sendBinaryError(fd, "list_sessions: base root too long");
+                return;
+            }
             const hex_id: [32]u8 = std.fmt.bytesToHex(&s.session_id, .lower);
             var entry = wire.SessionEntry{
                 .session_id = hex_id,
                 .pane_count = @intCast(@min(s.pane_count, std.math.maxInt(u16))),
                 .name_len = @intCast(s.session_name.len),
+                .base_root_len = @intCast(s.base_root.len),
             };
             writer.writeAll(std.mem.asBytes(&entry)) catch |err| {
                 core.logging.logError("ses", "failed to build detached sessions list entry", err);
@@ -2409,6 +2440,13 @@ pub const Server = struct {
             if (s.session_name.len > 0) {
                 writer.writeAll(s.session_name) catch |err| {
                     core.logging.logError("ses", "failed to build detached sessions list name", err);
+                    self.sendBinaryError(fd, "list_sessions: response alloc failed");
+                    return;
+                };
+            }
+            if (s.base_root.len > 0) {
+                writer.writeAll(s.base_root) catch |err| {
+                    core.logging.logError("ses", "failed to build detached sessions list base root", err);
                     self.sendBinaryError(fd, "list_sessions: response alloc failed");
                     return;
                 };

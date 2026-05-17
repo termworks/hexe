@@ -385,6 +385,7 @@ pub const Client = struct {
     session_id: ?[16]u8,
     pending_reattach_session_id: ?[16]u8,
     session_name: ?[]const u8,
+    base_root: ?[]const u8,
     session_snapshot: ?session_model.SessionSnapshot,
 
     mux_ctl_fd: ?posix.fd_t = null,
@@ -400,6 +401,7 @@ pub const Client = struct {
             .session_id = null,
             .pending_reattach_session_id = null,
             .session_name = null,
+            .base_root = null,
             .session_snapshot = null,
         };
     }
@@ -407,6 +409,7 @@ pub const Client = struct {
     pub fn deinit(self: *Client) void {
         self.pane_uuids.deinit(self.allocator);
         if (self.session_name) |name| self.allocator.free(name);
+        if (self.base_root) |root| self.allocator.free(root);
         if (self.session_snapshot) |*snapshot| snapshot.deinit();
     }
 
@@ -463,6 +466,7 @@ pub fn closeClientFds(client: *Client) void {
 pub const DetachedSession = struct {
     session_id: [16]u8,
     session_name: []const u8,
+    base_root: []const u8,
     pane_count: usize,
 };
 

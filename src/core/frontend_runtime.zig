@@ -67,6 +67,10 @@ pub const FrontendRuntime = struct {
     projection: SessionProjection,
     attach_state: FrontendAttachState,
 
+    fn currentBaseRoot(allocator: std.mem.Allocator) ![]u8 {
+        return std.fs.cwd().realpathAlloc(allocator, ".");
+    }
+
     pub fn create(
         allocator: std.mem.Allocator,
         session_id: [32]u8,
@@ -81,6 +85,9 @@ pub const FrontendRuntime = struct {
         errdefer allocator.destroy(runtime);
 
         runtime.allocator = allocator;
+        const base_root = currentBaseRoot(allocator) catch "";
+        defer if (base_root.len > 0) allocator.free(base_root);
+
         runtime.client = FrontendClient.initWithTransport(
             allocator,
             session_id,
@@ -93,7 +100,8 @@ pub const FrontendRuntime = struct {
         );
         errdefer runtime.client.deinit();
 
-        runtime.projection = try SessionProjection.init(allocator, session_id, session_name);
+        runtime.projection = try SessionProjection.init(allocator, session_id, session_name, base_root);
+        runtime.syncClientSessionIdentity();
         runtime.attach_state = .{};
         return runtime;
     }
@@ -154,6 +162,10 @@ pub const FrontendRuntime = struct {
 
     pub fn sessionName(self: *const FrontendRuntime) []const u8 {
         return self.projection.sessionName();
+    }
+
+    pub fn baseRoot(self: *const FrontendRuntime) []const u8 {
+        return self.projection.baseRoot();
     }
 
     pub fn setSessionIdentity(self: *FrontendRuntime, uuid: [32]u8, session_name: []const u8) bool {
@@ -262,6 +274,7 @@ pub const FrontendRuntime = struct {
     pub fn syncClientSessionIdentity(self: *FrontendRuntime) void {
         self.client.session_id = self.projection.sessionUuid();
         self.client.session_name = self.projection.sessionName();
+        self.client.base_root = self.projection.baseRoot();
     }
 
     pub fn shutdown(self: *FrontendRuntime, preserve_sticky: bool) !void {

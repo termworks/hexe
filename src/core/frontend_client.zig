@@ -76,6 +76,7 @@ pub const SesClient = struct {
     // Registration info
     session_id: [32]u8, // mux UUID as hex string
     session_name: []const u8, // Pokemon name
+    base_root: []const u8, // launch/root directory for this session
     keepalive: bool,
 
     // Resolved session name from server (may differ if collision detected).
@@ -129,6 +130,7 @@ pub const SesClient = struct {
             .stale_runtime_detected = false,
             .session_id = session_id,
             .session_name = session_name,
+            .base_root = "",
             .keepalive = keepalive,
             .pending_cwd_responses = .empty,
             .pending_pane_info_responses = .empty,
@@ -478,8 +480,10 @@ pub const SesClient = struct {
             .frontend_kind = @intFromEnum(self.frontend_kind),
             .transport_kind = @intFromEnum(self.transportKind()),
             .name_len = @intCast(self.session_name.len),
+            .base_root_len = @intCast(@min(self.base_root.len, std.math.maxInt(u16))),
         };
-        try wire.writeControlWithTrail(fd, .register, std.mem.asBytes(&reg), self.session_name);
+        const trails: []const []const u8 = &.{ self.session_name, self.base_root[0..reg.base_root_len] };
+        try wire.writeControlMsg(fd, .register, std.mem.asBytes(&reg), trails);
 
         // Wait for registered response.
         const hdr = try self.readSyncResponse(fd);
@@ -1408,6 +1412,25 @@ pub const SesClient = struct {
             } else {
                 info.session_name_len = 0;
             }
+
+            const base_root_len = @min(@as(usize, entry.base_root_len), info.base_root.len);
+            if (entry.base_root_len > 0) {
+                wire.readExact(fd, info.base_root[0..base_root_len]) catch |err| {
+                    logging.logError("frontend-client", "failed to read detached session base root", err);
+                    if (self.ctl_fd == fd) self.ctl_fd = null;
+                    return err;
+                };
+                info.base_root_len = base_root_len;
+                if (entry.base_root_len > info.base_root.len) {
+                    self.skipPayloadU16Checked(fd, entry.base_root_len - @as(u16, @intCast(info.base_root.len))) catch |err| {
+                        logging.logError("frontend-client", "failed to skip detached session base root overflow", err);
+                        if (self.ctl_fd == fd) self.ctl_fd = null;
+                        return err;
+                    };
+                }
+            } else {
+                info.base_root_len = 0;
+            }
             if (count < out_buf.len) {
                 out_buf[count] = info;
                 count += 1;
@@ -1881,6 +1904,8 @@ pub const DetachedSessionInfo = struct {
     session_id: [32]u8,
     session_name: [32]u8,
     session_name_len: usize,
+    base_root: [std.fs.max_path_bytes]u8 = undefined,
+    base_root_len: usize = 0,
     pane_count: usize,
 };
 

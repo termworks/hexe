@@ -185,14 +185,15 @@ pub const FrontendTransportKind = enum(u8) {
 };
 
 /// Register: session_id[32] + keepalive(u8) + frontend_kind(u8) +
-/// transport_kind(u8) + name_len(u16)
-/// Followed by: name bytes (name_len).
+/// transport_kind(u8) + name_len(u16) + base_root_len(u16)
+/// Followed by: name bytes, then base_root bytes.
 pub const FrontendRegister = extern struct {
     session_id: [32]u8 align(1),
     keepalive: u8 align(1),
     frontend_kind: u8 align(1),
     transport_kind: u8 align(1),
     name_len: u16 align(1),
+    base_root_len: u16 align(1),
 };
 pub const Register = FrontendRegister;
 
@@ -395,7 +396,8 @@ pub const SessionEntry = extern struct {
     session_id: [32]u8 align(1),
     pane_count: u16 align(1),
     name_len: u16 align(1),
-    // Followed by: name bytes (name_len).
+    base_root_len: u16 align(1),
+    // Followed by: name bytes, then base_root bytes.
 };
 
 /// Error response.

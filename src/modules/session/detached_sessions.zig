@@ -26,6 +26,7 @@ pub fn listDetachedSessions(
         try result.append(allocator, .{
             .session_id = detached.session_id,
             .session_name = detached.session_snapshot.session_name,
+            .base_root = detached.session_snapshot.base_root orelse "",
             .pane_count = detached.pane_uuids.len,
         });
     }

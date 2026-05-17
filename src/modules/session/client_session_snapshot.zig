@@ -13,6 +13,9 @@ pub fn ensureClientSessionSnapshot(
         const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
         const session_name = client.session_name orelse "session";
         client.session_snapshot = try session_model.SessionSnapshot.initMinimal(allocator, hex_id, session_name);
+        if (client.base_root) |base_root| {
+            client.session_snapshot.?.base_root = try allocator.dupe(u8, base_root);
+        }
     }
     return &client.session_snapshot.?;
 }

@@ -69,6 +69,70 @@ fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameCha
     }
 }
 
+const ResolvedAttachTarget = struct {
+    target: []const u8,
+    owned: ?[]u8 = null,
+
+    pub fn deinit(self: *ResolvedAttachTarget, allocator: std.mem.Allocator) void {
+        if (self.owned) |owned| allocator.free(owned);
+        self.* = undefined;
+    }
+};
+
+fn readAttachSelection(max: usize) ?usize {
+    var in_buf: [64]u8 = undefined;
+    var stdin = std.fs.File.stdin().reader(&in_buf);
+    const line = stdin.interface.takeDelimiterExclusive('\n') catch return null;
+    const trimmed = std.mem.trim(u8, line, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    const choice = std.fmt.parseInt(usize, trimmed, 10) catch return null;
+    if (choice == 0 or choice > max) return null;
+    return choice - 1;
+}
+
+fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntime, original: []const u8) !ResolvedAttachTarget {
+    if (!std.mem.eql(u8, original, ".")) return .{ .target = original };
+
+    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd);
+
+    var sessions: [64]DetachedSessionInfo = undefined;
+    const count = try runtime.listSessions(&sessions);
+
+    var matches: [64]usize = undefined;
+    var match_count: usize = 0;
+    for (sessions[0..count], 0..) |session, idx| {
+        const base_root = session.base_root[0..session.base_root_len];
+        if (base_root.len > 0 and std.mem.eql(u8, base_root, cwd)) {
+            matches[match_count] = idx;
+            match_count += 1;
+        }
+    }
+
+    if (match_count == 0) {
+        std.debug.print("No detached session rooted at: {s}\n", .{cwd});
+        return error.SessionNotFound;
+    }
+
+    if (match_count == 1) {
+        const session = sessions[matches[0]];
+        const target = try allocator.dupe(u8, session.session_id[0..8]);
+        return .{ .target = target, .owned = target };
+    }
+
+    std.debug.print("Detached sessions rooted at {s}:\n", .{cwd});
+    for (matches[0..match_count], 0..) |session_idx, display_idx| {
+        const session = sessions[session_idx];
+        const name = session.session_name[0..session.session_name_len];
+        std.debug.print("  {d}) [{s}] {s} ({d} panes)\n", .{ display_idx + 1, session.session_id[0..8], name, session.pane_count });
+    }
+    std.debug.print("Select session [1-{d}]: ", .{match_count});
+    const selected = readAttachSelection(match_count) orelse return error.InvalidSelection;
+    const session = sessions[matches[selected]];
+    const target = try allocator.dupe(u8, session.session_id[0..8]);
+    return .{ .target = target, .owned = target };
+}
+
 /// Arguments for terminal frontend commands.
 pub const TerminalArgs = struct {
     name: ?[]const u8 = null,
@@ -115,17 +179,18 @@ pub fn run(terminal_args: TerminalArgs) !void {
             const instance = std.posix.getenv("HEXE_INSTANCE");
             for (sessions[0..sess_count]) |s| {
                 const name = s.session_name[0..s.session_name_len];
+                const base_root = s.base_root[0..s.base_root_len];
                 const uuid_prefix = s.session_id[0..8];
                 if (instance) |inst| {
                     if (inst.len > 0) {
-                        std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}\n", .{ uuid_prefix, name, s.pane_count, base_root });
                         std.debug.print("    → hexe terminal attach --instance {s} {s}\n", .{ inst, uuid_prefix });
                     } else {
-                        std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}\n", .{ uuid_prefix, name, s.pane_count, base_root });
                         std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
                     }
                 } else {
-                    std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                    std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}\n", .{ uuid_prefix, name, s.pane_count, base_root });
                     std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
                 }
             }
@@ -155,7 +220,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Handle --attach: attach to detached session by name or UUID prefix.
     if (terminal_args.attach) |uuid_arg| {
-        if (uuid_arg.len < 3) {
+        if (uuid_arg.len < 3 and !std.mem.eql(u8, uuid_arg, ".")) {
             std.debug.print("Session name/UUID too short (need at least 3 chars)\n", .{});
             return;
         }
@@ -292,21 +357,30 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Handle --attach: try session first, then orphaned pane.
     if (terminal_args.attach) |uuid_prefix| {
-        debugLog("attach: trying to reattach with prefix={s}", .{uuid_prefix});
-        if (state.reattachSession(uuid_prefix)) {
+        var resolved_attach = resolveDotAttachTarget(allocator, state.runtime, uuid_prefix) catch |err| {
+            debugLog("attach: failed to resolve target {s}: {s}", .{ uuid_prefix, @errorName(err) });
+            if (err == error.InvalidSelection) {
+                std.debug.print("Invalid selection\n", .{});
+            }
+            return;
+        };
+        defer resolved_attach.deinit(allocator);
+
+        debugLog("attach: trying to reattach with prefix={s}", .{resolved_attach.target});
+        if (state.reattachSession(resolved_attach.target)) {
             debugLog("attach: reattachSession succeeded", .{});
             state.notifications.show("Session reattached");
             // Reattach may change state.uuid — update env for subsequent panes.
             const reattached_uuid = state.runtime.sessionUuid();
             @memcpy(session_id_z[0..32], &reattached_uuid);
             _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
-        } else if (state.attachOrphanedPane(uuid_prefix)) {
+        } else if (state.attachOrphanedPane(resolved_attach.target)) {
             debugLog("attach: attachOrphanedPane succeeded", .{});
             state.notifications.show("Attached to orphaned pane");
         } else {
             // Session/pane not found - EXIT with error, don't create new session
             debugLog("attach: both reattach methods failed, exiting", .{});
-            std.debug.print("Session or pane '{s}' not found\n", .{uuid_prefix});
+            std.debug.print("Session or pane '{s}' not found\n", .{resolved_attach.target});
             std.debug.print("Use 'hexe terminal list' to see available sessions\n", .{});
             return; // Exit without entering main loop
         }

@@ -313,6 +313,7 @@ pub const SessionSnapshot = struct {
     allocator: std.mem.Allocator,
     uuid: [32]u8,
     session_name: []u8,
+    base_root: ?[]u8 = null,
     tab_counter: usize,
     active_tab: usize,
     active_float_uuid: ?[32]u8 = null,
@@ -339,6 +340,7 @@ pub const SessionSnapshot = struct {
         self.tabs.deinit(self.allocator);
         self.panes.deinit();
         self.floats.deinit(self.allocator);
+        if (self.base_root) |root| self.allocator.free(root);
         self.allocator.free(self.session_name);
     }
 
@@ -367,6 +369,7 @@ pub const SessionSnapshot = struct {
             .allocator = allocator,
             .uuid = self.uuid,
             .session_name = try allocator.dupe(u8, self.session_name),
+            .base_root = if (self.base_root) |root| try allocator.dupe(u8, root) else null,
             .tab_counter = self.tab_counter,
             .active_tab = self.active_tab,
             .active_float_uuid = self.active_float_uuid,
@@ -403,6 +406,12 @@ pub const SessionSnapshot = struct {
         try writeJsonString(writer, self.uuid[0..]);
         try writer.writeAll(",\"session_name\":");
         try writeJsonString(writer, self.session_name);
+        try writer.writeAll(",\"base_root\":");
+        if (self.base_root) |root| {
+            try writeJsonString(writer, root);
+        } else {
+            try writer.writeAll("null");
+        }
         try writer.print(",\"tab_counter\":{d}", .{self.tab_counter});
         try writer.print(",\"active_tab\":{d}", .{self.active_tab});
         try writer.writeAll(",\"active_float_uuid\":");
@@ -517,6 +526,9 @@ fn fromMuxRoot(allocator: std.mem.Allocator, root: std.json.ObjectMap) !SessionS
     var snapshot = try SessionSnapshot.initMinimal(allocator, try parseUuid(uuid_str), session_name);
     errdefer snapshot.deinit();
 
+    if (stringField(root, "base_root")) |base_root| {
+        snapshot.base_root = try allocator.dupe(u8, base_root);
+    }
     snapshot.tab_counter = intField(root, "tab_counter") orelse 0;
     snapshot.active_tab = intField(root, "active_tab") orelse 0;
 
@@ -644,6 +656,9 @@ fn fromCanonicalRoot(allocator: std.mem.Allocator, root: std.json.ObjectMap) !Se
     var snapshot = try SessionSnapshot.initMinimal(allocator, try parseUuid(uuid_str), session_name);
     errdefer snapshot.deinit();
 
+    if (stringField(root, "base_root")) |base_root| {
+        snapshot.base_root = try allocator.dupe(u8, base_root);
+    }
     snapshot.tab_counter = intField(root, "tab_counter") orelse 0;
     snapshot.active_tab = intField(root, "active_tab") orelse 0;
     snapshot.active_float_uuid = if (nullableUuidField(root, "active_float_uuid")) |uuid| uuid else null;

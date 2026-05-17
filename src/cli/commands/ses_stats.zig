@@ -89,6 +89,12 @@ pub fn run(allocator: std.mem.Allocator) !void {
             return error.MalformedResponse;
         }
         off = name_end;
+        const base_root_end = off + entry.base_root_len;
+        if (base_root_end > payload.len) {
+            print("Error: malformed session base root\n", .{});
+            return error.MalformedResponse;
+        }
+        off = base_root_end;
 
         session_count += 1;
         total_panes += entry.pane_count;

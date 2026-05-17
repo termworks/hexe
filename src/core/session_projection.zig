@@ -54,6 +54,7 @@ pub const SessionProjection = struct {
     allocator: std.mem.Allocator,
     session_uuid: [32]u8,
     session_name_owned: []u8,
+    base_root_owned: []u8,
     tab_counter: usize = 0,
     attached_snapshot: ?session_model.SessionSnapshot = null,
     tabs: std.ArrayList(TabMeta),
@@ -67,11 +68,13 @@ pub const SessionProjection = struct {
         allocator: std.mem.Allocator,
         session_uuid: [32]u8,
         session_name: []const u8,
+        base_root: []const u8,
     ) !SessionProjection {
         return .{
             .allocator = allocator,
             .session_uuid = session_uuid,
             .session_name_owned = try allocator.dupe(u8, session_name),
+            .base_root_owned = try allocator.dupe(u8, base_root),
             .tabs = .empty,
             .pane_shell = std.AutoHashMap([32]u8, PaneShellInfo).init(allocator),
             .pane_proc = std.AutoHashMap([32]u8, PaneProcInfo).init(allocator),
@@ -109,6 +112,7 @@ pub const SessionProjection = struct {
         self.tab_last_floating_uuid.deinit(self.allocator);
         self.tab_last_focus_kind.deinit(self.allocator);
         self.allocator.free(self.session_name_owned);
+        self.allocator.free(self.base_root_owned);
         self.* = undefined;
     }
 
@@ -118,6 +122,24 @@ pub const SessionProjection = struct {
 
     pub fn sessionUuid(self: *const SessionProjection) [32]u8 {
         return self.session_uuid;
+    }
+
+    pub fn baseRoot(self: *const SessionProjection) []const u8 {
+        return self.base_root_owned;
+    }
+
+    pub fn setBaseRoot(self: *SessionProjection, base_root: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, base_root);
+        const snapshot_owned: ?[]u8 = if (self.attached_snapshot != null)
+            try self.allocator.dupe(u8, base_root)
+        else
+            null;
+        self.allocator.free(self.base_root_owned);
+        self.base_root_owned = owned;
+        if (self.attached_snapshot) |*snapshot| {
+            if (snapshot.base_root) |old| self.allocator.free(old);
+            snapshot.base_root = snapshot_owned.?;
+        }
     }
 
     pub fn setSessionIdentity(
@@ -197,6 +219,8 @@ pub const SessionProjection = struct {
     ) !void {
         const next_session_name = try self.allocator.dupe(u8, snapshot.session_name);
         errdefer self.allocator.free(next_session_name);
+        const next_base_root = try self.allocator.dupe(u8, snapshot.base_root orelse "");
+        errdefer self.allocator.free(next_base_root);
 
         var next_tabs = try self.buildTabMetaFromSnapshot(snapshot.tabs.items);
         errdefer deinitTabMetaList(self.allocator, &next_tabs);
@@ -212,6 +236,8 @@ pub const SessionProjection = struct {
 
         self.allocator.free(self.session_name_owned);
         self.session_name_owned = next_session_name;
+        self.allocator.free(self.base_root_owned);
+        self.base_root_owned = next_base_root;
         self.session_uuid = snapshot.uuid;
 
         self.clearTabMeta();
