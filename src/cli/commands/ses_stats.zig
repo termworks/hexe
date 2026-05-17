@@ -20,7 +20,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const fd = client.fd;
 
     // Send versioned CLI handshake
-    try wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI);
+    try wire.sendCliHandshake(fd);
 
     // Request status
     try wire.writeControl(fd, .status, &.{});

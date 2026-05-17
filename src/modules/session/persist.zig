@@ -10,6 +10,7 @@ const log = std.log.scoped(.session_persist);
 const MAX_SOCKET_PATH: usize = 256;
 const MAX_STICKY_PWD: usize = 4096;
 const MAX_PANES_PER_SESSION: usize = 1024;
+const SESSION_STATE_VERSION: i64 = 1;
 
 fn syncDirBestEffort(dir: std.fs.Dir) !void {
     const rc = std.os.linux.fsync(dir.fd);
@@ -116,7 +117,8 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
-    try w.writeAll("{");
+    try w.writeAll("{\"version\":");
+    try w.print("{d},", .{SESSION_STATE_VERSION});
 
     // panes
     try w.writeAll("\"panes\":[");
@@ -223,6 +225,17 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
     defer parsed.deinit();
 
     const root = jsonObject(parsed.value) orelse return;
+    const version = jsonI64(root.get("version") orelse {
+        core.logging.warn("ses", "ignoring persisted session state without version", .{});
+        return;
+    }) orelse {
+        core.logging.warn("ses", "ignoring persisted session state with invalid version", .{});
+        return;
+    };
+    if (version != SESSION_STATE_VERSION) {
+        core.logging.warn("ses", "ignoring persisted session state version {d}; expected {d}", .{ version, SESSION_STATE_VERSION });
+        return;
+    }
 
     if (root.get("panes")) |panes_val| {
         const panes = jsonArray(panes_val) orelse return;

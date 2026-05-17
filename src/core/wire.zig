@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const xev = @import("xev").Dynamic;
+const build_options = @import("build_options");
 const log = std.log.scoped(.wire);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -19,6 +20,8 @@ pub const PROTOCOL_VERSION: u8 = 2;
 /// Version 2 adds password-mode VT frames; accepting older frontends would
 /// silently disable POD-side backlog/observer privacy guarantees.
 pub const MIN_PROTOCOL_VERSION: u8 = 2;
+pub const RUNTIME_EPOCH = build_options.runtime_epoch;
+pub const SERVER_HELLO_MAGIC = "HEXEHEL1";
 
 /// Check if a client protocol version is supported.
 pub fn isProtocolVersionSupported(version: u8) bool {
@@ -1014,23 +1017,20 @@ pub fn readExact(fd: posix.fd_t, buf: []u8) !void {
 
 pub fn readExactTimeout(fd: posix.fd_t, buf: []u8, timeout_ms: i32) !void {
     var off: usize = 0;
-    var retries: usize = 0;
-    const MAX_RETRIES = @import("constants.zig").Limits.max_wire_retries;
+    const deadline_ms = std.time.milliTimestamp() + @as(i64, timeout_ms);
 
     while (off < buf.len) {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
             error.WouldBlock => {
-                // Wait for fd to become readable with timeout
-                waitReadableTimeout(fd, timeout_ms) catch |wait_err| return wait_err;
-                retries += 1;
-                if (retries > MAX_RETRIES) return error.TooManyRetries;
+                const remaining_ms = deadline_ms - std.time.milliTimestamp();
+                if (remaining_ms <= 0) return error.Timeout;
+                waitReadableTimeout(fd, @intCast(@min(remaining_ms, @as(i64, std.math.maxInt(i32))))) catch |wait_err| return wait_err;
                 continue;
             },
             else => return err,
         };
         if (n == 0) return error.ConnectionClosed;
         off += n;
-        retries = 0; // Reset retry counter on successful read
     }
 }
 
@@ -1049,6 +1049,32 @@ pub fn bytesToStruct(comptime T: type, buf: []const u8) ?T {
 pub fn sendHandshake(fd: posix.fd_t, channel_type: u8) !void {
     const handshake = [_]u8{ channel_type, PROTOCOL_VERSION };
     try writeAll(fd, &handshake);
+}
+
+/// Send the server's runtime identity after the initial client handshake.
+/// Clients validate this before sending stateful requests to avoid talking to
+/// a stale daemon from a previous dev build.
+pub fn sendServerHello(fd: posix.fd_t) !void {
+    try writeAll(fd, SERVER_HELLO_MAGIC);
+    try writeAll(fd, RUNTIME_EPOCH);
+}
+
+pub fn readAndValidateServerHello(fd: posix.fd_t) !void {
+    var magic: [SERVER_HELLO_MAGIC.len]u8 = undefined;
+    try readExact(fd, &magic);
+    if (!std.mem.eql(u8, magic[0..], SERVER_HELLO_MAGIC)) return error.RuntimeEpochMismatch;
+
+    var epoch: [RUNTIME_EPOCH.len]u8 = undefined;
+    try readExact(fd, &epoch);
+    if (!std.mem.eql(u8, epoch[0..], RUNTIME_EPOCH)) return error.RuntimeEpochMismatch;
+}
+
+pub fn sendCliHandshake(fd: posix.fd_t) !void {
+    const timeout = posix.timeval{ .sec = 3, .usec = 0 };
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+    try sendHandshake(fd, SES_HANDSHAKE_CLI);
+    try readAndValidateServerHello(fd);
 }
 
 /// Read a versioned handshake. Returns the channel type and version.

@@ -89,6 +89,10 @@ pub fn isSessionLocked(self: anytype, session_id: [16]u8) bool {
     return self.locks.isLocked(session_id);
 }
 
+pub fn cancelPendingReattach(self: anytype, session_id: [16]u8, client_id: usize) bool {
+    return detach_lifecycle.cancelPendingReattach(self, session_id, client_id);
+}
+
 pub fn deinit(self: anytype) void {
     self.store.deinit();
     self.persistence.deinit();

@@ -954,6 +954,12 @@ pub const Server = struct {
 
         switch (handshake[0]) {
             wire.SES_HANDSHAKE_FRONTEND_CTL => {
+                wire.sendServerHello(conn.fd) catch |err| {
+                    core.logging.logError("ses", "frontend CTL server hello failed", err);
+                    var tmp = conn;
+                    tmp.close();
+                    return;
+                };
                 // Frontend binary control channel.
                 ses.debugLog("accept: frontend ctl channel fd={d}", .{conn.fd});
                 self.binary_ctl_fds.put(conn.fd, {}) catch |err| {
@@ -1021,6 +1027,12 @@ pub const Server = struct {
                 }
             },
             wire.SES_HANDSHAKE_CLI => {
+                wire.sendServerHello(conn.fd) catch |err| {
+                    core.logging.logError("ses", "CLI server hello failed", err);
+                    var tmp = conn;
+                    tmp.close();
+                    return;
+                };
                 // CLI tool request (focus_move, exit_intent, float).
                 self.handleCliRequest(conn.fd);
             },
@@ -1545,6 +1557,7 @@ pub const Server = struct {
         if (self.ses_state.getClient(client_id)) |client| {
             client.keepalive = (reg.keepalive != 0);
             client.session_id = session_id;
+            client.pending_reattach_session_id = null;
             client.mux_ctl_fd = fd;
             // Store the resolved name (duplicated since resolved_name will be freed)
             if (resolved_name) |rn| {
@@ -2114,11 +2127,12 @@ pub const Server = struct {
             };
 
             // New mux needs a full screen restore for sticky adoption/takeover.
+            // Queue it for the periodic worker instead of reconnecting POD VT
+            // inline from the CTL handler, which can make attach feel hung.
             if (self.ses_state.getPane(pane.uuid)) |p| {
                 p.needs_backlog_replay = true;
             }
-            // Try replay immediately (periodic retry remains as fallback).
-            self.ses_state.processBacklogReplays();
+            ses.debugLog("find_sticky: queued deferred backlog replay for uuid={s}", .{pane.uuid[0..8]});
 
             var resp = wire.PaneFound{
                 .uuid = pane.uuid,
@@ -2175,10 +2189,12 @@ pub const Server = struct {
             return;
         };
 
-        // Adopt into a fresh mux view: force backlog replay so screen state
-        // is restored immediately instead of waiting for new output.
+        // Adopt into a fresh mux view: request a screen restore, but do not
+        // run replay inline. Reconnecting POD VT sockets from the CTL handler
+        // can stall attach/reattach; the periodic replay worker will pick this
+        // up once the mux VT channel is ready.
         pane.needs_backlog_replay = true;
-        self.ses_state.processBacklogReplays();
+        ses.debugLog("adopt_pane: queued deferred backlog replay for uuid={s}", .{pu.uuid[0..8]});
 
         self.ses_state.markDirty();
 

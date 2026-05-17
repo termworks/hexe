@@ -46,7 +46,16 @@ pub fn removeClient(self: anytype, client_id: usize) void {
             });
 
             if (client.keepalive) {
-                if (client.session_id) |session_id| {
+                if (client.pending_reattach_session_id) |session_id| {
+                    // The frontend disappeared mid-reattach. The canonical
+                    // detached session has not been committed/removed yet, so
+                    // restore any already-adopted panes back into that detached
+                    // session instead of auto-detaching under the temporary
+                    // startup session id.
+                    if (!detach_lifecycle.cancelPendingReattach(self, session_id, client.id)) {
+                        ses.debugLog("removeClient: pending reattach restore failed, leaving existing detached session untouched", .{});
+                    }
+                } else if (client.session_id) |session_id| {
                     // Use direct detach to avoid removing the client twice.
                     // If preserving fails, kill panes rather than leaving them
                     // owned by a client that is about to be removed.

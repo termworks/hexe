@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const runtime_epoch = computeRuntimeEpoch(b);
 
     // Get ghostty-vt module from dependency
     const ghostty_vt_mod = if (b.lazyDependency("ghostty", .{
@@ -56,6 +57,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "runtime_epoch", runtime_epoch);
+    core_module.addOptions("build_options", build_options);
     if (ghostty_vt_mod) |vt| {
         core_module.addImport("ghostty-vt", vt);
     }
@@ -260,4 +264,50 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_wire_tests.step);
     test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
+}
+
+fn computeRuntimeEpoch(b: *std.Build) []const u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
+    hashFile(b, &hasher, "build.zig");
+    hashFile(b, &hasher, "build.zig.zon");
+    hashFile(b, &hasher, "Makefile");
+    hashDirRecursive(b, &hasher, "src");
+
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const hex = std.fmt.bytesToHex(digest[0..16].*, .lower);
+    return std.fmt.allocPrint(b.allocator, "{s}", .{&hex}) catch @panic("failed to allocate runtime epoch");
+}
+
+fn hashFile(b: *std.Build, hasher: anytype, path: []const u8) void {
+    const data = std.fs.cwd().readFileAlloc(b.allocator, path, 64 * 1024 * 1024) catch return;
+    defer b.allocator.free(data);
+    hasher.update(path);
+    hasher.update(&[_]u8{0});
+    hasher.update(data);
+    hasher.update(&[_]u8{0});
+}
+
+fn hashDirRecursive(b: *std.Build, hasher: anytype, root_path: []const u8) void {
+    var dir = std.fs.cwd().openDir(root_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!hasRuntimeEpochExtension(entry.path)) continue;
+
+        const path = std.fs.path.join(b.allocator, &.{ root_path, entry.path }) catch continue;
+        defer b.allocator.free(path);
+        hashFile(b, hasher, path);
+    }
+}
+
+fn hasRuntimeEpochExtension(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".zig") or
+        std.mem.endsWith(u8, path, ".c") or
+        std.mem.endsWith(u8, path, ".h");
 }

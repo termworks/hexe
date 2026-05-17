@@ -7,6 +7,18 @@ local function segments(list)
   return list
 end
 
+local function concat(...)
+  local out = {}
+  for _, list in ipairs({ ... }) do
+    if list then
+      for _, item in ipairs(list) do
+        table.insert(out, item)
+      end
+    end
+  end
+  return out
+end
+
 local function focused_process_is_editor(ctx)
   local p = ctx.pane(0)
   return p and (p.process_name == "nvim" or p.process_name == "vim")
@@ -17,11 +29,16 @@ local function focused_split(ctx)
   return p and p.focus_split
 end
 
+local style_git_branch = "bg:1 fg:0"
+local style_prompt_host = "bg:237 italic fg:15"
+local style_status_directory = "bg:237 fg:15"
+local style_recording_active = "bg:1 fg:15 bold"
+
 local function git_branch(opts)
   opts = opts or {}
   return hexe.segment.git_branch({
     priority = opts.priority or 4,
-    style = opts.style or hexe.style("git.branch"),
+    style = opts.style or style_git_branch,
     prefix = opts.prefix or " ",
     suffix = opts.suffix or " ",
   })
@@ -31,7 +48,7 @@ local function git_status(opts)
   opts = opts or {}
   return hexe.segment.git_status({
     priority = opts.priority or 5,
-    style = opts.style or hexe.style("git.branch"),
+    style = opts.style or style_git_branch,
     prefix = opts.prefix or " ",
     suffix = opts.suffix or " ",
   })
@@ -41,7 +58,7 @@ local function session_segment(opts)
   opts = opts or {}
   return hexe.segment.session({
     priority = opts.priority or 30,
-    style = opts.style or hexe.style("git.branch"),
+    style = opts.style or style_git_branch,
     prefix = opts.prefix or { output = "| " },
     suffix = opts.suffix or { output = " |" },
   })
@@ -63,6 +80,15 @@ local function pod_name_segment(opts)
     style = opts.style or "bg:5 fg:0",
     prefix = opts.prefix or "| ",
     suffix = opts.suffix or " |",
+  })
+end
+
+local function directory_segment(opts)
+  opts = opts or {}
+  return hexe.segment.directory({
+    priority = opts.priority or 2,
+    style = opts.style or style_status_directory,
+    suffix = opts.suffix or " ",
   })
 end
 
@@ -138,7 +164,15 @@ local rec_opts = {
   capture_input = false,
 }
 
-local layout = dofile(os.getenv("HOME") .. "/.config/hexe/layout.lua")
+local layout_config = dofile(os.getenv("HOME") .. "/.config/hexe/layout.lua")
+local layout_keys = layout_config.keys or {}
+local layouts = {}
+
+if layout_config.__hexe_type == "layout" then
+  layouts = { layout_config }
+elseif layout_config.ses and layout_config.ses.layouts then
+  layouts = layout_config.ses.layouts
+end
 
 return hexe.setup({
   theme = hexe.theme({
@@ -165,7 +199,7 @@ return hexe.setup({
     },
   }),
 
-  keys = {
+  keys = concat(layout_keys, {
     hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit()),
     hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.d }, hexe.action.detach()),
 
@@ -193,17 +227,10 @@ return hexe.setup({
     hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down }, hexe.action.focus.move("down")),
     hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left }, hexe.action.focus.move("left")),
     hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, hexe.action.focus.move("right")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.s }, hexe.action.layout.save()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.l }, hexe.action.layout.load()),
 
     hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.p }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_and_consume }),
     hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.shift, hexe.key.p }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_and_consume }),
-
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["2"] }, hexe.action.float.toggle("2")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["3"] }, hexe.action.float.toggle("3")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["0"] }, hexe.action.float.toggle("0")),
-  },
+  }),
 
   mux = {
     confirm = {
@@ -341,7 +368,7 @@ return hexe.setup({
           return hexe.segment.tabs(ctx)
         end,
         tab_title = "basename",
-        active_style = hexe.style("git.branch"),
+        active_style = style_git_branch,
         inactive_style = "bg:237 fg:250",
         separator = " | ",
         separator_style = "fg:7",
@@ -355,9 +382,9 @@ return hexe.setup({
         render = function(_)
           local st = hexe.status.recording(rec_opts.scope)
           if st and st.active then
-            return { { text = " REC ", style = hexe.style("recording.active") } }
+            return { { text = " REC ", style = style_recording_active } }
           end
-          return { { text = " rec ", style = hexe.style("recording.active") } }
+          return { { text = " rec ", style = style_recording_active } }
         end,
         button = {
           on_left_click = function(ctx)
@@ -374,7 +401,7 @@ return hexe.setup({
           end,
           left_style = "bg:2 fg:0 bold",
           middle_style = "bg:3 fg:0 bold",
-          right_style = hexe.style("recording.active"),
+          right_style = style_recording_active,
           inverse_on_hover = true,
         },
       },
@@ -396,8 +423,8 @@ return hexe.setup({
           if cwd and cwd ~= "" then
             local truncated = fish_style_truncate(cwd)
             return {
-              { text = " " .. truncated, style = hexe.style("status.directory") },
-              { text = " ", style = hexe.style("status.directory") },
+              { text = " " .. truncated, style = style_status_directory },
+              { text = " ", style = style_status_directory },
             }
           end
           return nil
@@ -415,14 +442,14 @@ return hexe.setup({
           if not ctx.env.SSH_CONNECTION then
             return nil
           end
-          return { { text = " //", style = hexe.style("prompt.host") } }
+          return { { text = " //", style = style_prompt_host } }
         end,
       },
       {
         name = "hostname",
         priority = 15,
         builtin = function(_)
-          return hexe.segment.builtin.hostname({ style = hexe.style("prompt.host"), suffix = " " })
+          return hexe.segment.builtin.hostname({ style = style_prompt_host, suffix = " " })
         end,
       },
       {
@@ -439,14 +466,14 @@ return hexe.setup({
           if not t or t == "" then
             return nil
           end
-          return { { text = " " .. t, style = hexe.style("git.branch") } }
+          return { { text = " " .. t, style = style_git_branch } }
         end,
       },
       {
         name = "username",
         priority = 1,
         builtin = function(_)
-          return hexe.segment.builtin.username({ style = hexe.style("git.branch"), suffix = " " })
+          return hexe.segment.builtin.username({ style = style_git_branch, suffix = " " })
         end,
       },
       {
@@ -456,7 +483,7 @@ return hexe.setup({
           if not ctx.env.DIRENV_DIR then
             return nil
           end
-          return { { text = "▓", style = hexe.style("git.branch") } }
+          return { { text = "▓", style = style_git_branch } }
         end,
       },
       {
@@ -488,7 +515,7 @@ return hexe.setup({
           end
           return {
             { text = "|", style = "fg:7" },
-            { text = " " .. tostring(n) .. " ", style = hexe.style("prompt.host") },
+            { text = " " .. tostring(n) .. " ", style = style_prompt_host },
           }
         end,
       },
@@ -536,6 +563,7 @@ return hexe.setup({
 
     right = segments({
       pod_name_segment(),
+      directory_segment(),
       git_branch(),
       git_status(),
     }),
@@ -621,8 +649,6 @@ return hexe.setup({
   },
 
   ses = {
-    layouts = {
-      layout,
-    },
+    layouts = layouts,
   },
 })

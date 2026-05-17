@@ -362,7 +362,7 @@ fn sendNotify(allocator: std.mem.Allocator, message: []const u8, target_uuid: ?[
         defer client.close();
         const fd = client.fd;
 
-        wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch |err| {
+        wire.sendCliHandshake(fd) catch |err| {
             print("Failed to send CLI handshake: {s}\n", .{@errorName(err)});
             return;
         };
@@ -408,7 +408,7 @@ fn listStatus(allocator: std.mem.Allocator) !void {
     const fd = client.fd;
 
     // CLI handshake
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch |err| {
+    wire.sendCliHandshake(fd) catch |err| {
         print("Failed to send CLI handshake: {s}\n", .{@errorName(err)});
         return;
     };

@@ -71,6 +71,7 @@ pub const SesState = struct {
     pub const releaseSessionLock = api.releaseSessionLock;
     pub const releaseClientLocks = api.releaseClientLocks;
     pub const isSessionLocked = api.isSessionLocked;
+    pub const cancelPendingReattach = api.cancelPendingReattach;
     pub const deinit = api.deinit;
     pub const addClient = api.addClient;
     pub const removeClient = api.removeClient;

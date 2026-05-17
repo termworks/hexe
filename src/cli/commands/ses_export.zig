@@ -21,7 +21,7 @@ pub fn run(allocator: std.mem.Allocator, session_id: []const u8, output_path: []
     const fd = client.fd;
 
     // Send versioned CLI handshake
-    try wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI);
+    try wire.sendCliHandshake(fd);
 
     // Request list of detached sessions
     try wire.writeControl(fd, .list_sessions, &.{});

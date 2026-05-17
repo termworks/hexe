@@ -35,6 +35,15 @@ test "wire round-trip: empty payload (ping)" {
     try testing.expectEqual(@as(u32, 0), hdr.payload_len);
 }
 
+test "wire: server hello validates runtime epoch" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    try wire.sendServerHello(pair.a);
+    try wire.readAndValidateServerHello(pair.b);
+}
+
 test "wire round-trip: fixed-size struct (PaneUuid)" {
     const pair = try socketPair();
     defer posix.close(pair.a);

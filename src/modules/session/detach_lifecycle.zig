@@ -293,12 +293,62 @@ pub fn reattachSession(self: anytype, session_id: [16]u8, client_id: usize) !?Re
 
     if (self.getClient(client_id)) |client| {
         client.updateSessionSnapshot(try detached_state.session_snapshot.clone(self.allocator));
+        client.pending_reattach_session_id = session_id;
     }
 
     return .{
         .session_snapshot = &detached_state.session_snapshot,
         .pane_uuids = detached_state.pane_uuids,
     };
+}
+
+pub fn cancelPendingReattach(self: anytype, session_id: [16]u8, client_id: usize) bool {
+    const detached_state = self.store.detached_sessions.getPtr(session_id) orelse {
+        ses.debugLog("cancelPendingReattach: detached session missing", .{});
+        return false;
+    };
+
+    ses.debugLog("cancelPendingReattach: session={s} panes={d} client_id={d}", .{
+        std.fmt.bytesToHex(&session_id, .lower)[0..8],
+        detached_state.pane_uuids.len,
+        client_id,
+    });
+
+    for (detached_state.pane_uuids) |uuid| {
+        const pane = self.store.panes.getPtr(uuid) orelse continue;
+        if (pane.attached_to) |owner_id| {
+            if (owner_id != client_id) {
+                ses.debugLog("cancelPendingReattach: skip uuid={s}, owned by client_id={d}", .{ uuid[0..8], owner_id });
+                continue;
+            }
+        }
+
+        _ = pane.transitionState(.detached, "cancel pending reattach");
+        pane.session_id = session_id;
+        pane.attached_to = null;
+        pane.needs_backlog_replay = false;
+
+        if (pane.pod_vt_fd) |vt_fd| {
+            _ = self.store.pod_vt_to_pane_id.remove(vt_fd);
+            _ = self.store.pane_id_to_pod_vt.remove(pane.pane_id);
+            self.polling.pending_remove_poll_fds.append(self.allocator, vt_fd) catch |err| {
+                core.logging.logError("ses", "failed to queue canceled reattach POD VT fd removal", err);
+            };
+            posix.close(vt_fd);
+            pane.pod_vt_fd = null;
+        }
+    }
+
+    if (self.getClient(client_id)) |client| {
+        if (client.pending_reattach_session_id) |pending| {
+            if (std.mem.eql(u8, &pending, &session_id)) {
+                client.pending_reattach_session_id = null;
+            }
+        }
+    }
+
+    self.store.dirty = true;
+    return true;
 }
 
 pub fn forceDetachAttachedSession(self: anytype, session_id: [16]u8) bool {

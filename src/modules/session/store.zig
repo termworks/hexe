@@ -383,6 +383,7 @@ pub const Client = struct {
 
     keepalive: bool,
     session_id: ?[16]u8,
+    pending_reattach_session_id: ?[16]u8,
     session_name: ?[]const u8,
     session_snapshot: ?session_model.SessionSnapshot,
 
@@ -397,6 +398,7 @@ pub const Client = struct {
             .allocator = allocator,
             .keepalive = true,
             .session_id = null,
+            .pending_reattach_session_id = null,
             .session_name = null,
             .session_snapshot = null,
         };

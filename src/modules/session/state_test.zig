@@ -517,6 +517,96 @@ test "reattachSession: seeds live client snapshot from detached state" {
     try testing.expectEqualStrings("seeded", client.session_snapshot.?.session_name);
     try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.tabs.items.len);
     try testing.expectEqual(pane_uuid, client.session_snapshot.?.focused_pane_uuid.?);
+    try testing.expectEqual(session_id, client.pending_reattach_session_id.?);
+}
+
+test "cancelPendingReattach: restores adopted panes without replacing detached snapshot" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const session_id = [_]u8{8} ** 16;
+    const temp_session_id = [_]u8{9} ** 16;
+    const session_hex: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+    const pane_a = [_]u8{'a'} ** 32;
+    const pane_b = [_]u8{'b'} ** 32;
+    const live_pid: std.posix.pid_t = @intCast(std.c.getpid());
+
+    if (ses_state.getClient(client_id)) |client| {
+        client.session_id = temp_session_id;
+    }
+
+    var snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, session_hex, "restore");
+    errdefer snapshot.deinit();
+    try snapshot.panes.put(pane_a, .{ .uuid = pane_a, .kind = .split, .parent_tab = null });
+    try snapshot.panes.put(pane_b, .{ .uuid = pane_b, .kind = .split, .parent_tab = null });
+
+    const pane_uuids = try testing.allocator.alloc([32]u8, 2);
+    errdefer testing.allocator.free(pane_uuids);
+    pane_uuids[0] = pane_a;
+    pane_uuids[1] = pane_b;
+
+    try ses_state.store.panes.put(pane_a, .{
+        .uuid = pane_a,
+        .name = null,
+        .pod_pid = live_pid,
+        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/test-pane-a.sock"),
+        .child_pid = live_pid,
+        .state = .detached,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = null,
+        .session_id = session_id,
+        .created_at = std.time.timestamp(),
+        .orphaned_at = null,
+        .allocator = testing.allocator,
+    });
+    try ses_state.store.panes.put(pane_b, .{
+        .uuid = pane_b,
+        .name = null,
+        .pod_pid = live_pid,
+        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/test-pane-b.sock"),
+        .child_pid = live_pid,
+        .state = .detached,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = null,
+        .session_id = session_id,
+        .created_at = std.time.timestamp(),
+        .orphaned_at = null,
+        .allocator = testing.allocator,
+    });
+
+    try ses_state.store.detached_sessions.put(session_id, .{
+        .session_id = session_id,
+        .session_snapshot = snapshot,
+        .pane_uuids = pane_uuids,
+        .detached_at = std.time.timestamp(),
+        .allocator = testing.allocator,
+    });
+
+    _ = (try ses_state.reattachSession(session_id, client_id)) orelse return error.TestUnexpectedResult;
+    _ = try ses_state.attachPane(pane_a, client_id);
+
+    try testing.expect(ses_state.cancelPendingReattach(session_id, client_id));
+
+    const detached = ses_state.store.detached_sessions.getPtr(session_id) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), detached.pane_uuids.len);
+    try testing.expect(detached.session_snapshot.panes.contains(pane_a));
+    try testing.expect(detached.session_snapshot.panes.contains(pane_b));
+
+    const restored_a = ses_state.store.panes.get(pane_a) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(state.PaneState.detached, restored_a.state);
+    try testing.expect(restored_a.attached_to == null);
+    try testing.expectEqual(session_id, restored_a.session_id.?);
+
+    const restored_b = ses_state.store.panes.get(pane_b) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(state.PaneState.detached, restored_b.state);
+    try testing.expect(restored_b.attached_to == null);
+    try testing.expectEqual(session_id, restored_b.session_id.?);
+
+    const client = ses_state.getClient(client_id) orelse return error.TestUnexpectedResult;
+    try testing.expect(client.pending_reattach_session_id == null);
 }
 
 test "reattachSession: prunes stale detached pane uuids before returning" {
@@ -798,6 +888,34 @@ test "TxLog: readAll stops cleanly on truncated trailing entry" {
     // Only the first, fully-written entry should be recovered.
     try testing.expectEqual(@as(usize, 1), entries.items.len);
     try testing.expectEqual(txlog.TxType.detach_start, entries.items[0].tx_type);
+}
+
+test "TxLog: open resets legacy unversioned log" {
+    const tmp_path = "/tmp/hexe-test-txlog-legacy";
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    const session_id = [_]u8{9} ** 16;
+    const legacy_entry: txlog.TxEntry = .{
+        .tx_type = .detach_start,
+        .timestamp = 0,
+        .session_id = session_id,
+        .payload_len = 0,
+    };
+
+    {
+        var file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true, .mode = 0o600 });
+        defer file.close();
+        try file.writeAll(std.mem.asBytes(&legacy_entry));
+    }
+
+    var log = txlog.TxLog.init(testing.allocator, tmp_path);
+    defer log.deinit();
+    try log.open();
+
+    var entries = try log.readAll(testing.allocator);
+    defer entries.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), entries.items.len);
 }
 
 test "TxLog: readAll rejects per-entry payload_len over 1MB cap" {

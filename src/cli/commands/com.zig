@@ -640,7 +640,7 @@ pub fn connectSesCliChannel(allocator: std.mem.Allocator) ?std.posix.fd_t {
         print("Warning: failed to set ses CLI send timeout: {s}\n", .{@errorName(err)});
     };
 
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch |err| {
+    wire.sendCliHandshake(fd) catch |err| {
         print("Error: failed to handshake with ses daemon: {s}\n", .{@errorName(err)});
         client.close();
         return null;
@@ -954,7 +954,7 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
     };
 
     // Send versioned CLI handshake.
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
+    wire.sendCliHandshake(fd) catch {
         print("Error: handshake failed\n", .{});
         return;
     };
@@ -997,7 +997,7 @@ pub fn runExitIntent(allocator: std.mem.Allocator) !void {
     const fd = client.fd;
 
     // Send versioned CLI handshake.
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
+    wire.sendCliHandshake(fd) catch {
         std.process.exit(0);
     };
 

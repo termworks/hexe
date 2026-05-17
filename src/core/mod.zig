@@ -1,5 +1,6 @@
 // Core - built entirely on ghostty-vt
 const std = @import("std");
+pub const build_options = @import("build_options");
 const logging_mod = @import("logging.zig");
 
 pub const std_options: std.Options = .{

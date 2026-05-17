@@ -25,6 +25,8 @@ pub const TxLog = struct {
     log_fd: ?posix.fd_t,
     log_path: []const u8,
 
+    const FILE_HEADER = "HEXETX01";
+
     pub fn init(allocator: std.mem.Allocator, log_path: []const u8) TxLog {
         return TxLog{
             .allocator = allocator,
@@ -48,7 +50,35 @@ pub const TxLog = struct {
             .{ .ACCMODE = .RDWR, .CREAT = true, .APPEND = true },
             0o600,
         );
+        errdefer posix.close(fd);
+
+        try self.ensureCompatibleFile(fd);
         self.log_fd = fd;
+    }
+
+    fn ensureCompatibleFile(self: *TxLog, fd: posix.fd_t) !void {
+        _ = self;
+        try posix.lseek_SET(fd, 0);
+
+        var header: [FILE_HEADER.len]u8 = undefined;
+        var off: usize = 0;
+        while (off < header.len) {
+            const n = try posix.read(fd, header[off..]);
+            if (n == 0) break;
+            off += n;
+        }
+
+        if (off == header.len and std.mem.eql(u8, header[0..], FILE_HEADER)) {
+            try posix.lseek_END(fd, 0);
+            return;
+        }
+
+        // Old dev builds wrote raw TxEntry records with no file magic/version.
+        // They are intentionally not replayed into a newer daemon.
+        try posix.ftruncate(fd, 0);
+        try posix.lseek_SET(fd, 0);
+        try writeAll(fd, FILE_HEADER[0..]);
+        try posix.fsync(fd);
     }
 
     /// Write a transaction entry to the log (fsync for durability).
@@ -64,6 +94,7 @@ pub const TxLog = struct {
 
         const fd = self.log_fd.?;
 
+        try posix.lseek_END(fd, 0);
         const header_bytes = std.mem.asBytes(&entry);
         try writeAll(fd, header_bytes);
         try writeAll(fd, payload);
@@ -82,6 +113,18 @@ pub const TxLog = struct {
 
         const fd = self.log_fd.?;
         try posix.lseek_SET(fd, 0); // Rewind to start
+
+        var file_header: [FILE_HEADER.len]u8 = undefined;
+        var file_header_off: usize = 0;
+        while (file_header_off < file_header.len) {
+            const n = try posix.read(fd, file_header[file_header_off..]);
+            if (n == 0) break;
+            file_header_off += n;
+        }
+        if (file_header_off != file_header.len or !std.mem.eql(u8, file_header[0..], FILE_HEADER)) {
+            try self.truncate();
+            return .empty;
+        }
 
         var entries: std.ArrayList(TxLogEntry) = .empty;
         errdefer {
@@ -158,6 +201,7 @@ pub const TxLog = struct {
             .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true },
             0o600,
         );
+        try writeAll(fd, FILE_HEADER[0..]);
         posix.close(fd);
     }
 };

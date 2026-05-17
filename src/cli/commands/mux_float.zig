@@ -109,7 +109,7 @@ pub fn runMuxFloat(
     const fd = client.fd;
 
     // Send versioned CLI handshake.
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch |err| {
+    wire.sendCliHandshake(fd) catch |err| {
         print("Error: failed to handshake with ses: {s}\n", .{@errorName(err)});
         return;
     };

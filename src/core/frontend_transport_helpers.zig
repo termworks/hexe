@@ -50,7 +50,7 @@ pub fn sendNotify(
             var client = try ipc.Client.connect(socket_path);
             defer client.close();
 
-            try wire.sendHandshake(client.fd, wire.SES_HANDSHAKE_CLI);
+            try wire.sendCliHandshake(client.fd);
             const notify = wire.Notify{ .msg_len = @intCast(message.len) };
             try wire.writeControlWithTrail(client.fd, .notify, std.mem.asBytes(&notify), message);
         },

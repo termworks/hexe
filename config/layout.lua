@@ -1,6 +1,6 @@
 local hexe = require("hexe")
 
-return hexe.layout("default", {
+local layout = hexe.layout("default", {
   enabled = true,
   tabs = {
     hexe.tab("main", {
@@ -49,5 +49,24 @@ return hexe.layout("default", {
         cpu = "50000 100000",
       },
     }),
+  },
+})
+
+return hexe.setup({
+  keys = {
+    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.s }, hexe.action.layout.save()),
+    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.l }, hexe.action.layout.load()),
+
+    hexe.key({ hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1")),
+    hexe.key({ hexe.key.alt, hexe.key["2"] }, hexe.action.float.toggle("2")),
+    hexe.key({ hexe.key.alt, hexe.key["3"] }, hexe.action.float.toggle("3")),
+    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.p }, hexe.action.float.toggle("p")),
+    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["0"] }, hexe.action.float.toggle("0")),
+  },
+
+  ses = {
+    layouts = {
+      layout,
+    },
   },
 })

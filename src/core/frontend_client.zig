@@ -27,6 +27,18 @@ pub const Transport = union(enum) {
 /// Static buffer for synchronous CWD fetch (getPaneCwdSync).
 var sync_cwd_buf: [4096]u8 = undefined;
 
+const SYNC_RESPONSE_TIMEOUT_MS: i64 = 10_000;
+const REATTACH_RESPONSE_TIMEOUT_MS: i64 = 15_000;
+const COMMAND_ACK_TIMEOUT_MS: i64 = 5_000;
+
+fn deleteSocketPath(path: []const u8) void {
+    if (std.fs.path.isAbsolute(path)) {
+        std.fs.deleteFileAbsolute(path) catch {};
+    } else {
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+}
+
 /// Client for communicating with the ses daemon using binary protocol.
 /// Opens two channels:
 ///   - ctl_fd (handshake 0x01): binary control messages
@@ -58,6 +70,7 @@ pub const SesClient = struct {
     log_file: ?[]const u8,
     frontend_kind: wire.FrontendKind,
     transport: Transport,
+    stale_runtime_detected: bool,
     bridge: ?*liblink_transport.Bridge = null,
 
     // Registration info
@@ -113,6 +126,7 @@ pub const SesClient = struct {
             .log_file = log_file,
             .frontend_kind = frontend_kind,
             .transport = transport,
+            .stale_runtime_detected = false,
             .session_id = session_id,
             .session_name = session_name,
             .keepalive = keepalive,
@@ -312,6 +326,7 @@ pub const SesClient = struct {
             break :blk owned_socket_path.?;
         };
         self.debugLog("ses connect: transport=local_ipc socket_path={s}", .{socket_path});
+        self.stale_runtime_detected = false;
 
         // Try to connect to existing daemon first
         if (self.connectCtl(socket_path)) {
@@ -321,6 +336,11 @@ pub const SesClient = struct {
             if (!transport.autostart_ses) {
                 self.debugLog("ses connect: local_ipc autostart disabled", .{});
                 return error.ConnectionRefused;
+            }
+            if (self.stale_runtime_detected) {
+                self.debugLog("ses connect: removing stale runtime socket before daemon restart", .{});
+                deleteSocketPath(socket_path);
+                self.stale_runtime_detected = false;
             }
             // Daemon not running, start it
             self.debugLog("ses connect: daemon not running, starting...", .{});
@@ -373,6 +393,12 @@ pub const SesClient = struct {
         };
 
         wire.sendHandshake(ctl_fd, wire.SES_HANDSHAKE_FRONTEND_CTL) catch {
+            posix.close(ctl_fd);
+            return false;
+        };
+        wire.readAndValidateServerHello(ctl_fd) catch |err| {
+            self.debugLog("ses ctl runtime hello failed: {s}", .{@errorName(err)});
+            self.stale_runtime_detected = true;
             posix.close(ctl_fd);
             return false;
         };
@@ -1270,9 +1296,10 @@ pub const SesClient = struct {
         // We explicitly queue async `.ok`/`.get_pane_cwd`/`.pane_info`
         // replies here instead of dropping them.
         self.debugLog("reattachSession: waiting for response...", .{});
+        const deadline_ms = std.time.milliTimestamp() + REATTACH_RESPONSE_TIMEOUT_MS;
         const hdr = blk: {
             while (true) {
-                const h = self.readSyncResponse(fd) catch |e| {
+                const h = self.readSyncResponseUntil(fd, deadline_ms, "reattachSession") catch |e| {
                     self.debugLog("reattachSession: readSyncResponse failed: {s}", .{@errorName(e)});
                     return e;
                 };
@@ -1539,9 +1566,22 @@ pub const SesClient = struct {
         }
     }
 
+    fn remainingDeadlineMs(deadline_ms: i64) !i32 {
+        const remaining = deadline_ms - std.time.milliTimestamp();
+        if (remaining <= 0) return error.Timeout;
+        return @intCast(@min(remaining, @as(i64, std.math.maxInt(i32))));
+    }
+
     fn readSyncResponse(self: *SesClient, fd: posix.fd_t) !wire.ControlHeader {
+        return self.readSyncResponseUntil(fd, std.time.milliTimestamp() + SYNC_RESPONSE_TIMEOUT_MS, "sync response");
+    }
+
+    fn readSyncResponseUntil(self: *SesClient, fd: posix.fd_t, deadline_ms: i64, comptime context: []const u8) !wire.ControlHeader {
         while (true) {
-            const hdr = try wire.readControlHeader(fd);
+            const hdr = wire.readControlHeaderTimeout(fd, try remainingDeadlineMs(deadline_ms)) catch |err| {
+                self.debugLog("{s}: timed out/failed waiting for control header: {s}", .{ context, @errorName(err) });
+                return err;
+            };
             const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
             switch (msg_type) {
                 // Stale acks from older commands without dedicated responses.
@@ -1597,8 +1637,15 @@ pub const SesClient = struct {
     }
 
     fn readCommandAck(self: *SesClient, fd: posix.fd_t) !void {
+        return self.readCommandAckUntil(fd, std.time.milliTimestamp() + COMMAND_ACK_TIMEOUT_MS, "command ack");
+    }
+
+    fn readCommandAckUntil(self: *SesClient, fd: posix.fd_t, deadline_ms: i64, comptime context: []const u8) !void {
         while (true) {
-            const hdr = try wire.readControlHeader(fd);
+            const hdr = wire.readControlHeaderTimeout(fd, try remainingDeadlineMs(deadline_ms)) catch |err| {
+                self.debugLog("{s}: timed out/failed waiting for ack header: {s}", .{ context, @errorName(err) });
+                return err;
+            };
             const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
             switch (msg_type) {
                 .ok => {
