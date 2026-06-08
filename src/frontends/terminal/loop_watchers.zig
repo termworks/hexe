@@ -106,6 +106,38 @@ pub fn ensureStdinWatcherArmed(state: *State, watcher: *StdinWatcher, buffer: []
     watcher.armed = true;
 }
 
+/// Best-effort synchronous SES VT catch-up.
+///
+/// This is used before revealing a previously hidden float. Some TUIs (notably
+/// Codex-style redraw-heavy terminal apps) can generate a lot of viewport
+/// updates while the float is hidden. If the frontend reveals the float before
+/// draining those queued frames, the user sees stale history repaint/catch up
+/// from the beginning instead of the latest viewport. Draining here advances the
+/// pane VT models to the freshest available state before the first visible
+/// render.
+pub fn drainSesVtAvailable(state: *State, max_frames: usize, comptime context: []const u8) void {
+    const vt_fd = state.runtime.getVtFd() orelse return;
+    const buffer = state.allocator.alloc(u8, 1024 * 1024) catch |err| {
+        core.logging.logError("terminal", context ++ ": failed to allocate VT catch-up buffer", err);
+        return;
+    };
+    defer state.allocator.free(buffer);
+
+    frontend_core.drainMuxVtFrames(
+        vt_fd,
+        buffer,
+        max_frames,
+        SesVtDispatchContext{ .state = state },
+        dispatchSesVtFrame,
+        dispatchOversizedSesVtFrame,
+    ) catch |err| {
+        core.logging.logError("terminal", context ++ ": failed to catch up SES VT frames", err);
+        if (state.runtime.closeVtFdIf(vt_fd)) {
+            state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+        }
+    };
+}
+
 fn sesVtCallback(
     ctx: ?*SesVtSlot,
     _: *xev.Loop,

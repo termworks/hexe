@@ -15,6 +15,9 @@ const FrontendRuntime = core.FrontendRuntime;
 const helpers = @import("helpers.zig");
 const float_completion = @import("float_completion.zig");
 const loop_actions_focus = @import("loop_actions_focus.zig");
+const loop_watchers = @import("loop_watchers.zig");
+
+const FLOAT_REVEAL_VT_CATCHUP_FRAMES: usize = 8192;
 
 fn writeControlLogged(fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8, comptime context: []const u8) void {
     wire.writeControl(fd, msg_type, payload) catch |err| {
@@ -683,6 +686,45 @@ fn applyFloatExclusivity(state: *State, float_def: *const core.LayoutFloatDef) v
     }
 }
 
+fn catchUpVtBeforeFloatReveal(state: *State) void {
+    loop_watchers.drainSesVtAvailable(
+        state,
+        FLOAT_REVEAL_VT_CATCHUP_FRAMES,
+        "float reveal VT catch-up",
+    );
+}
+
+fn revealExistingFloatLocally(state: *State, pane: *Pane, existing_idx: usize, float_def: *const core.LayoutFloatDef, old_uuid: ?[32]u8) bool {
+    state.setPaneVisibleOnTab(pane, state.activeTabIndex(), true);
+
+    if (state.activeFloatingIndex()) |afi| {
+        if (afi < state.view.float_views.items.len and afi != existing_idx) {
+            state.syncPaneUnfocus(state.view.float_views.items[afi]);
+        }
+    } else if (state.currentLayout().getFocusedPane()) |tiled| {
+        state.syncPaneUnfocus(tiled);
+    }
+
+    state.setActiveFloatingIndex(existing_idx);
+    state.syncPaneFocus(pane, old_uuid);
+
+    if (!state.syncSessionFloatChecked(pane, true)) {
+        // The local pane is no longer owned by this mux. Leave the UI repair to
+        // the caller's ownership-handoff path; importantly, do not keep trying
+        // to reveal through session sync because SES will reject it.
+        state.setPaneVisibleOnTab(pane, state.activeTabIndex(), false);
+        state.setActiveFloatingIndex(null);
+        return false;
+    }
+
+    catchUpVtBeforeFloatReveal(state);
+    applyFloatExclusivity(state, float_def);
+    state.renderer.invalidate();
+    state.force_full_render = true;
+    state.needs_render = true;
+    return true;
+}
+
 pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) void {
     // Float/workspace toggles change the visible/focused pane surface just like
     // tab switches do. Any in-mux mouse selection is tied to the old pane
@@ -761,12 +803,19 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             const was_active = if (state.activeFloatingIndex()) |af| af == existing_idx else false;
 
             if ((state.paneSticky(pane) or state.paneIsPwd(pane)) and !was_visible_on_tab and !was_active) {
-                // Opening a hidden shared sticky/per-CWD float is an ownership
-                // handoff, not a local toggle. Go straight to find_sticky
-                // takeover instead of first issuing session_sync_float against
-                // a pane that may currently be owned by another mux. That old
-                // path could wait for sync timeouts before the real handoff.
-                if (createNamedFloat(state, float_def, current_dir, state.getCurrentFocusedUuid())) |_| {
+                // First try the cheap/local reveal. If this mux still owns the
+                // pane, SES accepts session_sync_float and there is no need to
+                // reconnect POD VT or replay the POD backlog.
+                //
+                // This matters for redraw-heavy TUIs (Codex is one): replaying
+                // backlog into an already-live local VT duplicates the visible
+                // scrollback. If SES rejects the sync, another mux owns the
+                // shared pane and we fall through to the explicit handoff path.
+                const old_uuid = state.getCurrentFocusedUuid();
+                if (revealExistingFloatLocally(state, pane, existing_idx, float_def, old_uuid)) return;
+
+                if (createNamedFloat(state, float_def, current_dir, old_uuid)) |_| {
+                    catchUpVtBeforeFloatReveal(state);
                     applyFloatExclusivity(state, float_def);
                 } else |err| {
                     terminal_main.debugLogUuid(
@@ -838,6 +887,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 state.syncPaneFocus(pane, old_uuid);
                 // If alone mode, hide all other floats on this tab.
                 applyFloatExclusivity(state, float_def);
+                catchUpVtBeforeFloatReveal(state);
             } else {
                 // Float was hidden. If it had focus, return focus to tiled pane.
                 if (state.activeFloatingIndex()) |afi| {
@@ -860,6 +910,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                     );
                     if (current_dir != null) {
                         if (createNamedFloat(state, float_def, current_dir, old_uuid)) |_| {
+                            catchUpVtBeforeFloatReveal(state);
                             applyFloatExclusivity(state, float_def);
                         } else |err| {
                             terminal_main.debugLogUuid(
@@ -906,6 +957,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
         state.needs_render = true;
         return;
     };
+    catchUpVtBeforeFloatReveal(state);
 
     // If alone mode, hide all other floats on this tab.
     applyFloatExclusivity(state, float_def);
@@ -1174,8 +1226,20 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     if (state.findPaneByUuid(result.uuid)) |existing| {
         // SES can return an already-attached sticky/per-CWD pane when the
         // frontend lost enough local pwd_dir metadata after reattach that the
-        // normal pre-create lookup missed it. Do not append a second Pane with
-        // the same UUID; repair the local float state and focus the existing one.
+        // normal pre-create lookup missed it, or when a shared float handoff
+        // returns a pane this frontend still has locally.
+        //
+        // Reused sticky/per-CWD results cause SES/POD to replay backlog. Reset
+        // the local VT before those replay frames are drained; otherwise the
+        // replay is appended to the old VT and scrollback visibly duplicates.
+        const vt_fd = state.runtime.getVtFd() orelse return error.SesUnavailable;
+        existing.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch |err| {
+            terminal_main.debugLogUuid(&result.uuid, "createNamedFloat: failed to reset reused local pane for backlog replay: {s}", .{@errorName(err)});
+            return error.SesUnavailable;
+        };
+
+        // Do not append a second Pane with the same UUID; repair the local
+        // float state and focus the existing one.
         pane_registered = true;
         state.allocator.destroy(pane);
 
