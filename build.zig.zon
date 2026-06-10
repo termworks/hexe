@@ -1,6 +1,6 @@
 .{
     .name = .hexa,
-    .version = "0.0.18",
+    .version = "0.0.19",
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -23,8 +23,8 @@
             .hash = "zlua-0.1.0-hGRpCww-BQCx3cX6zbKWfTgOx6B7Peo4P17RK2hm7-xV",
         },
         .libvoid = .{
-            .url = "git+https://github.com/libzig/libvoid#0.0.12",
-            .hash = "libvoid-0.0.12-gWw8RXaGBQBbIZ3cq9aTXUO1Hox72eROxl4JM5azndna",
+            .url = "git+https://github.com/libzig/libvoid?ref=0.0.13#8fc034c27194089852920cd2213218150b29f23c",
+            .hash = "libvoid-0.0.13-gWw8Rc-IBQAaqCGIifSHeh46mLUXoRrti-M6oAFNOqvE",
         },
         .libvaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis#67bbc1ee072aa390838c66caf4ed47edee282dc4",
