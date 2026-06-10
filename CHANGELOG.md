@@ -1,5 +1,160 @@
 # Changelog
 
+## [0.0.17] - 2026-06-10
+
+### <!-- 0 -->⛰️  Features
+
+- Improve float reveal fluidity and correctness
+- Improve mouse interaction and multiplexer queue handling
+- Introduce host adapter abstraction for frontends
+- Enhance shared float ownership and lifecycle
+- Support session base root for attach and list commands
+- Improve session reattach and persistence reliability
+- Migrate live config to single files
+- Redesign `hexe.setup` for a unified Lua configuration
+- Improve shell-death respawn logic and terminal performance
+- Add TabFocusKind and Floating UUID Preservation
+- 11h codex hardening
+- Reject session_* ops with unknown uuids
+- Reject cross-uid peers on ses socket
+- Enable custom border characters for floats
+- Implement structured logging with logly integration
+- Implement multiplexer VT write queue
+- Implement session renaming from layout config
+- Enhance layout save and session naming
+- Add functionality to load layouts from local config
+- Refactor session layout configuration
+- Implement layout saving with scope selection
+- Add interactive prompt for local config loading
+- Externalize layout and keybinding configuration
+- Introduce layout commands for session management
+- Cache status bar Lua evaluations
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Improve session float stability and reconciliation
+- Restrict pod metadata and asciicast to 0600
+- Enforce payload caps and load-time bounds
+- Memory-safety fixes in ipc and pty
+- Forward space via text fast path
+- Improve CLI argument parsing and help output
+- Improve float exit key handling and title rendering
+- Defer session snapshot application to avoid blocking
+- Improve float configuration and visual inheritance
+- Improve session config and layout handling
+- Improve float pane lifecycle and exec errors
+- Refactor and improve local layout loading logic
+
+### <!-- 2 -->🚜 Refactor
+
+- Prefer snapshot values in projection getters
+- Log and close on wire write errors
+
+### <!-- 3 -->📚 Documentation
+
+- Add hardening plan
+- Update terminology from "mux" to "terminal frontend"
+- Close frontend runtime rewrite
+
+### <!-- 6 -->🧪 Testing
+
+- Extract fast_path and cover space-key regression
+- Add wire round-trip and txlog corruption tests
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Prune stubs, dead msg types, unused args
+- Remove `--focus` flag for floats
+- Make view structs explicitly visual
+- Reconcile views from projection
+
+### Build
+
+- Drop leftover remote dependency wiring
+
+### Cli
+
+- Make terminal the frontend command
+
+### Core
+
+- Add liblink frontend transport
+- Move terminal transport selection into runtime
+- Add preconnected frontend transport
+- Route stop lifecycle through runtime
+- Rebuild projection during reattach
+- Move frontend exit lifecycle into runtime
+- Move startup attach into runtime
+- Route attach state through runtime
+- Route transport state through runtime
+- Route pane lifecycle through runtime
+- Remove frontend-authored detach snapshots
+- Move reattach results into runtime
+- Move snapshot parsing into runtime
+- Introduce shared session projection
+- Introduce frontend runtime ownership
+
+### Frontend
+
+- Stop mutating projection during rebuild
+- Apply parsed session snapshots
+- Rename multiplexer tree to terminal
+- Extract terminal view state
+- Drop navigation mirrors from state
+- Rename ses client boundary
+- Share local transport helpers
+- Parameterize mux transport startup
+- Share attach lifecycle helpers
+- Extract shared attach state
+- Move pane metadata into shared cache
+- Apply matching snapshots incrementally
+- Move navigation state into cache
+- Move tab metadata into session cache
+- Extract session cache from terminal state
+- Extract shared session client
+
+### Mux
+
+- Require ses-backed panes
+
+### Runtime
+
+- Hide projection behind frontend runtime
+- Own session identity and focus
+- Own tab projection helpers
+
+### Ses
+
+- Add canonical session snapshots
+
+### Session
+
+- Drop legacy tab layout sync
+- Command live split mutations
+- Publish snapshots after command mutations
+- Remove dead whole-state sync path
+- Apply layouts through ses snapshots
+- Drop legacy mux state cache
+- Command split layout mutations
+- Command tab and float mutations
+- Move focus authority into ses
+- Reattach from canonical snapshots
+
+### Terminal
+
+- Key split views by pane uuid
+- Move float ui state out of pane
+- Move pane float metadata into projection
+- Rename leftover mux terminology
+- Drop dead snapshot sync code
+- Route pane metadata queries through projection
+- Move pane cwd cache into projection
+- Move pane exit status into projection
+- Use runtime for list mode
+- Route projection through runtime
+- Drop raw client state references
+- Move layout pane creation into runtime
+
 ## [0.0.16] - 2026-03-04
 
 ### <!-- 0 -->⛰️  Features

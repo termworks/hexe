@@ -1,6 +1,6 @@
 .{
     .name = .hexa,
-    .version = "0.0.16",
+    .version = "0.0.17",
     .paths = .{
         "build.zig",
         "build.zig.zon",
