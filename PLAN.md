@@ -238,14 +238,23 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   dispatch + reattach/detach + 900 lines of status-JSON in one struct. Split into
   `ctl_handlers.zig`, `vt_routing.zig` (see 2.4), `watchers.zig`,
   `status_export.zig`; `Server` becomes a thin owner of maps + loop wiring.
-- `frontend_client.zig` (2631 → 2410 lines): ◑ STARTED. The response store
-  (pending-queue helpers) moved to `ses_client_responses.zig`, and the
-  session-mutation command senders (add/remove tab, sync/remove float, split/
-  replace/set-ratio, rename tab) moved to `ses_client_commands.zig` — both as
-  free functions taking `*SesClient`, re-exported via `pub const` aliases so all
-  call sites are unchanged, verified green (build + full suite + fmt). Remaining
-  command groups (pane lifecycle, sticky/orphan/adopt, sync readers) follow the
-  identical pattern; the two mixin files now exist to receive them.
+- `frontend_client.zig` (2631 → 1802 lines, −32%): ◑ MOSTLY DONE. Three mixin
+  siblings, all free functions taking `*SesClient` re-exported via `pub const`
+  aliases (call sites unchanged, compiler-enforced; green build + full suite +
+  fmt + ReleaseSafe):
+  - `ses_client_responses.zig` — the pending sync/async response store (queue
+    helpers). Zero helper promotions (Zig struct fields are cross-file
+    accessible).
+  - `ses_client_commands.zig` — session-mutation + pane-metadata fire-and-ack
+    CTL senders. Promoted the shared request/ack helpers to `pub`.
+  - `ses_client_reads.zig` — the ~570-line synchronous-response reader cluster
+    (the interleaved-push-tolerant machinery that is the home of the float-loss
+    bug class), moved VERBATIM (script-cut, `zig fmt`-normalized) so behavior is
+    provably unchanged. Promoted the reader helpers + `PaneInfoRead`/`PaneCwdRead`
+    (+ their methods) + the two timeout consts to `pub`.
+  Remaining in `frontend_client`: connection/transport lifecycle, register, the
+  query/reader *consumers* (getPaneInfoSnapshot, adoptPane, reattach/detach/
+  listSessions, etc.), and the result types — a coherent remaining core.
 - `statusbar.zig` (2717 lines): extract the frontend-neutral Lua-when/command
   eval + per-frame cache maps into `statusbar_eval.zig` (candidate for
   `frontend_core`), leaving the vaxis draw + hit-test surface.
