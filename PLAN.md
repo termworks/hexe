@@ -375,9 +375,8 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   The current match's exact cells are reverse-video highlighted (the viewport
   range is derived from the match's tracked start/end pins via
   `pages.pointFromPin(.viewport, …)` and unit-tested to span the needle
-  inclusively). Remaining follow-up: multibyte-aware prompt-bar rendering (the
-  `/query` bar draws byte-per-cell, so non-ASCII queries display as mojibake —
-  the search itself is fully utf8-correct).
+  inclusively), and the `/query` prompt bar renders one codepoint per cell so
+  multibyte queries show their glyph. No follow-ups outstanding.
 
 ### 3.4 — Table-stakes mux actions (each independent) · M each
 - **Pane zoom/maximize** — ✅ DONE. `pane.zoom` toggles the focused tiled pane
