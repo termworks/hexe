@@ -322,19 +322,19 @@ fn syncEnvIntoExistingFloat(state: *State, pane: *Pane, parent_uuid: [32]u8) voi
 
 fn paneExistsInSes(state: *State, uuid: [32]u8) bool {
     if (!state.runtime.isConnected()) return true;
-    if (state.runtime.getPaneInfoSnapshot(uuid)) |info| {
-        defer {
-            if (info.name) |s| state.allocator.free(s);
-            if (info.cwd) |s| state.allocator.free(s);
-            if (info.sticky_pwd) |s| state.allocator.free(s);
-            if (info.fg_name) |s| state.allocator.free(s);
-        }
-        if (info.pid) |pid| {
-            if (!isProcessAlive(pid)) return false;
-        }
-        return true;
+    const probe = state.runtime.probePaneExistence(uuid);
+    switch (probe.outcome) {
+        // Only a definitive pane_not_found reply from SES may report false:
+        // callers destroy the local float view and spawn a replacement on
+        // false, so a transient IPC failure must never be read as "gone".
+        .missing => return false,
+        .unknown => return true,
+        .exists => {},
     }
-    return false;
+    if (probe.pid) |pid| {
+        if (!isProcessAlive(pid)) return false;
+    }
+    return true;
 }
 
 fn isProcessAlive(pid: i32) bool {
@@ -350,7 +350,19 @@ fn isProcessAlive(pid: i32) bool {
         }
         return false;
     };
-    file.close();
+    defer file.close();
+
+    // A zombie keeps its /proc entry but the process is gone (same rule as
+    // SES's sticky-pane liveness check): reading it as alive makes a float
+    // toggle reuse a dying pane instead of respawning. The state char is the
+    // first non-space byte after the last ')' in the stat line.
+    var buf: [512]u8 = undefined;
+    const n = file.read(&buf) catch return true;
+    const data = buf[0..n];
+    const close_paren = std.mem.lastIndexOfScalar(u8, data, ')') orelse return true;
+    var i = close_paren + 1;
+    while (i < data.len and data[i] == ' ') i += 1;
+    if (i < data.len and (data[i] == 'Z' or data[i] == 'X')) return false;
     return true;
 }
 
@@ -495,16 +507,17 @@ pub fn performClose(state: *State) void {
             terminal_main.debugLogUuid(&pane.uuid, "performClose: sending killPane to SES", .{});
             state.runtime.killPane(pane.uuid) catch |e| {
                 terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane error: {s}", .{@errorName(e)});
-                // SES may have already reaped the pane (e.g. the app inside
-                // exited and pod teardown won the race). In that case the kill
-                // failure is expected — proceed with local cleanup instead of
-                // leaving a dead float view that blocks the next toggle.
+                // Two expected refusal shapes, both resolved by local-only
+                // cleanup: the pane is already gone in SES (pod teardown won
+                // the race), or SES refused because another live client owns
+                // it now (this view is stale after a float steal). Aborting
+                // here would leave a permanently unclosable dead float.
                 if (paneExistsInSes(state, pane.uuid)) {
-                    state.notifications.show("Close float failed: session rejected pane kill");
-                    state.needs_render = true;
-                    return;
+                    terminal_main.debugLogUuid(&pane.uuid, "performClose: SES refused kill (owned elsewhere), dropping local view", .{});
+                    state.notifications.show("Float is owned by another session; closed locally");
+                } else {
+                    terminal_main.debugLogUuid(&pane.uuid, "performClose: pane already gone in SES, cleaning up locally", .{});
                 }
-                terminal_main.debugLogUuid(&pane.uuid, "performClose: pane already gone in SES, cleaning up locally", .{});
             };
             terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
         }
@@ -1172,12 +1185,15 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         null;
 
     // Sticky metadata is what SES uses to decide sticky vs orphaned on disown.
-    // For sticky/per_cwd floats, carry cwd+key into SES on creation.
+    // For sticky/per_cwd floats, carry cwd+key into SES on creation. The two
+    // fields must be set together: every SES park path and sticky lookup
+    // requires both, so a key without a pwd (cwd resolution failed) would
+    // create a float that is never parked and never findable — set neither.
     const sticky_pwd: ?[]const u8 = if ((float_def.attributes.sticky or float_def.attributes.per_cwd) and current_dir != null)
         current_dir.?
     else
         null;
-    const sticky_key: ?u8 = if (float_def.attributes.sticky or float_def.attributes.per_cwd)
+    const sticky_key: ?u8 = if (sticky_pwd != null)
         float_def.key
     else
         null;

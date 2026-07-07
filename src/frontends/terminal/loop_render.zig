@@ -192,6 +192,11 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Draw splits into the cell buffer.
     var pane_it = state.currentLayout().splitIterator();
     while (pane_it.next()) |pane| {
+        // When a pane is zoomed, render only it (at full tab bounds) and skip
+        // the rest of the tiled layout.
+        if (state.zoomed_pane_uuid) |zu| {
+            if (!std.mem.eql(u8, &pane.*.uuid, &zu)) continue;
+        }
         const render_state = pane.*.getRenderState() catch |err| {
             core.logging.logError("terminal", "failed to get split pane render state", err);
             continue;
@@ -222,10 +227,26 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
     }
 
-    // Draw split borders when there are multiple splits.
-    if (state.currentLayout().splitCount() > 1) {
+    // Draw split borders when there are multiple splits (never while zoomed —
+    // only the zoomed pane is visible).
+    if (state.zoomed_pane_uuid == null and state.currentLayout().splitCount() > 1) {
         const content_height = state.term_height - state.status_height;
         borders.drawSplitBorders(renderer, state.currentLayout(), &state.config.splits, state.term_width, content_height);
+    }
+
+    // Copy-mode cursor: reverse-video the cell under the keyboard cursor.
+    if (state.copy_mode.active) {
+        if (state.currentLayout().getFocusedPane()) |fp| {
+            const max_x: u16 = if (fp.width > 0) fp.width - 1 else 0;
+            const max_y: u16 = if (fp.height > 0) fp.height - 1 else 0;
+            const cx = fp.x + @min(state.copy_mode.x, max_x);
+            const cy = fp.y + @min(state.copy_mode.y, max_y);
+            if (renderer.getVaxisCell(cx, cy)) |cell| {
+                var c = cell;
+                c.style.reverse = true;
+                renderer.setVaxisCell(cx, cy, c);
+            }
+        }
     }
 
     const now_ms: u64 = @intCast(std.time.milliTimestamp());

@@ -6,6 +6,7 @@ const layout_mod = @import("layout.zig");
 const actions = @import("loop_actions.zig");
 const focus_move = @import("focus_move.zig");
 const mouse_selection = @import("mouse_selection.zig");
+const statusbar = @import("statusbar.zig");
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
@@ -75,6 +76,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
+            state.dropZoom();
             const parent_pane = state.currentLayout().getFocusedPane() orelse {
                 core.logging.warn("terminal", "split_h skipped: no focused pane", .{});
                 return true;
@@ -113,6 +115,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
+            state.dropZoom();
             const parent_pane = state.currentLayout().getFocusedPane() orelse {
                 core.logging.warn("terminal", "split_v skipped: no focused pane", .{});
                 return true;
@@ -190,6 +193,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .pane_close => {
+            state.dropZoom();
             // Close float or split pane, but never the tab.
             if (state.activeFloatingIndex() != null) {
                 // Close the focused float.
@@ -282,6 +286,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .focus_move => |dir| {
+            state.clearZoom();
             return focus_move.perform(state, layoutDirectionFromCore(dir));
         },
         .layout_save => {
@@ -308,6 +313,33 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .invalid_direction => return true,
     }
+}
+
+/// Re-read the Lua config and hot-swap it into the running frontend.
+///
+/// Safe because: keybinds, segments and border styling all read `state.config`
+/// live each frame; the only long-lived holders of the old config's Lua runtime
+/// are the statusbar threadlocal caches (cleared here via `deinitThreadlocals`),
+/// and no pane/float caches a pointer into `config`. On a parse error we keep
+/// the current config rather than clobber a working one with defaults.
+fn performConfigReload(state: *State) void {
+    var new_config = core.Config.load(state.allocator);
+    if (new_config.status == .@"error") {
+        state.notifications.showFor("Config reload failed — kept current config", 1800);
+        new_config.deinit();
+        state.needs_render = true;
+        return;
+    }
+    // Drop every cache/threadlocal that holds a reference into the old runtime
+    // before we free it.
+    statusbar.deinitThreadlocals();
+    var old = state.config;
+    state.config = new_config;
+    old.deinit();
+    state.renderer.invalidate();
+    state.force_full_render = true;
+    state.needs_render = true;
+    state.notifications.showFor("Config reloaded", 1200);
 }
 
 fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAction) bool {
@@ -391,6 +423,28 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
         .keycast_toggle => {
             state.overlays.toggleKeycast();
             state.needs_render = true;
+            return true;
+        },
+        .sync_toggle => {
+            state.sync_input = !state.sync_input;
+            state.notifications.showFor(if (state.sync_input) "Input sync: ON" else "Input sync: OFF", 1200);
+            state.needs_render = true;
+            return true;
+        },
+        .tab_rename => {
+            state.beginTabRename();
+            return true;
+        },
+        .pane_zoom => {
+            state.toggleZoom();
+            return true;
+        },
+        .config_reload => {
+            performConfigReload(state);
+            return true;
+        },
+        .copy_enter => {
+            state.enterCopyMode();
             return true;
         },
         .sprite_toggle => {

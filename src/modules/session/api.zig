@@ -37,6 +37,10 @@ pub fn removeClientSessionTab(self: anytype, client_id: usize, tab_uuid: [32]u8,
     client_session_snapshot.removeTab(self, client_id, tab_uuid, active_tab_hint);
 }
 
+pub fn renameClientSessionTab(self: anytype, client_id: usize, tab_uuid: [32]u8, name: []const u8) void {
+    client_session_snapshot.renameTab(self, client_id, tab_uuid, name);
+}
+
 pub fn splitClientSessionPane(self: anytype, client_id: usize, tab_uuid: [32]u8, source_pane_uuid: [32]u8, new_pane_uuid: [32]u8, active_tab: u16, focused_pane_uuid: ?[32]u8, dir: session_model.SessionSplitDir) !void {
     return client_session_snapshot.splitPane(self, client_id, tab_uuid, source_pane_uuid, new_pane_uuid, active_tab, focused_pane_uuid, dir);
 }

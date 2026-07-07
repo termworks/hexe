@@ -46,16 +46,18 @@ pub const PaneProcInfo = struct {
 // frontend-local per-pane runtime state (shell/proc/name info) that is not
 // part of the canonical snapshot and therefore has no home in SES.
 //
-// `active_tab`, `active_float_uuid`, `focused_pane_uuid`, and the float list
-// all live on the attached snapshot. Getters read from it; setters write to
-// it. Pre-attach calls are no-ops (readers return defaults, writers drop
-// silently) — that matches the pre-refactor init defaults.
+// `active_float_uuid`, `focused_pane_uuid`, and the float list all live on the
+// attached snapshot. The active tab also mirrors into the attached snapshot,
+// but it needs a pre-snapshot fallback: startup layout creation selects tabs
+// before SES has pushed its first canonical snapshot, and dropping those writes
+// makes later tab creation target tab 0 again.
 pub const SessionProjection = struct {
     allocator: std.mem.Allocator,
     session_uuid: [32]u8,
     session_name_owned: []u8,
     base_root_owned: []u8,
     tab_counter: usize = 0,
+    active_tab: usize = 0,
     attached_snapshot: ?session_model.SessionSnapshot = null,
     tabs: std.ArrayList(TabMeta),
     pane_shell: std.AutoHashMap([32]u8, PaneShellInfo),
@@ -181,11 +183,12 @@ pub const SessionProjection = struct {
 
     pub fn activeTab(self: *const SessionProjection, tab_count: usize) usize {
         if (tab_count == 0) return 0;
-        const snapshot = if (self.attached_snapshot) |*s| s else return 0;
-        return @min(snapshot.active_tab, tab_count - 1);
+        const active = if (self.attached_snapshot) |*snapshot| snapshot.active_tab else self.active_tab;
+        return @min(active, tab_count - 1);
     }
 
     pub fn setActiveTab(self: *SessionProjection, active_tab: usize) void {
+        self.active_tab = active_tab;
         if (self.attached_snapshot) |*snapshot| {
             snapshot.active_tab = active_tab;
         }
@@ -239,6 +242,7 @@ pub const SessionProjection = struct {
         self.allocator.free(self.base_root_owned);
         self.base_root_owned = next_base_root;
         self.session_uuid = snapshot.uuid;
+        self.active_tab = snapshot.active_tab;
 
         self.clearTabMeta();
         self.tabs.deinit(self.allocator);
@@ -617,6 +621,23 @@ pub const SessionProjection = struct {
     pub fn tabName(self: *const SessionProjection, index: usize) ?[]const u8 {
         if (index >= self.tabs.items.len) return null;
         return self.tabs.items[index].name_owned;
+    }
+
+    /// Rename a tab locally (immediate display update). Persistence across
+    /// reattach requires the SES-side rename too; see State.renameTab.
+    pub fn setTabName(self: *SessionProjection, index: usize, name: []const u8) bool {
+        if (index >= self.tabs.items.len) return false;
+        const owned = self.allocator.dupe(u8, name) catch return false;
+        self.allocator.free(self.tabs.items[index].name_owned);
+        self.tabs.items[index].name_owned = owned;
+        if (self.attached_snapshot) |*snap| {
+            if (index < snap.tabs.items.len) {
+                const snap_owned = snap.allocator.dupe(u8, name) catch return true;
+                snap.allocator.free(snap.tabs.items[index].name);
+                snap.tabs.items[index].name = snap_owned;
+            }
+        }
+        return true;
     }
 
     pub fn setPaneShell(

@@ -131,6 +131,7 @@ pub const MsgType = enum(u16) {
     // live split close is represented by kill_pane, dead pane cleanup by SES.
     session_replace_split_pane = 0x013F,
     session_set_split_ratio = 0x0140,
+    session_rename_tab = 0x0141, // MUX → SES: rename a tab in the canonical snapshot
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -453,6 +454,13 @@ pub const Error = extern struct {
 /// Followed by: name bytes (name_len). name_len=0 means clear.
 pub const UpdatePaneName = extern struct {
     uuid: [32]u8 align(1),
+    name_len: u16 align(1),
+};
+
+/// SessionRenameTab: MUX renames a tab in the canonical session snapshot.
+/// Followed by: name bytes (name_len).
+pub const SessionRenameTab = extern struct {
+    tab_uuid: [32]u8 align(1),
     name_len: u16 align(1),
 };
 
@@ -1007,48 +1015,12 @@ pub fn waitReadableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {
 }
 
 pub fn waitWritableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {
-    _ = fd;
     if (timeout_ms <= 0) return error.Timeout;
-    try waitDelayTimeout(timeout_ms);
-}
-
-fn waitDelayTimeout(timeout_ms: i32) !void {
-    if (timeout_ms <= 0) return error.Timeout;
-
-    try xev.detect();
-    var loop = try xev.Loop.init(.{});
-    defer loop.deinit();
-    var timer = try xev.Timer.init();
-    defer timer.deinit();
-
-    const DelayContext = struct {
-        done: bool = false,
-    };
-    var ctx: DelayContext = .{};
-    var completion: xev.Completion = .{};
-
-    const cb = struct {
-        fn call(
-            cctx: ?*DelayContext,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            result: xev.Timer.RunError!void,
-        ) xev.CallbackAction {
-            const c = cctx orelse return .disarm;
-            _ = result catch |err| {
-                log.debug("waitDelayTimeout: timer error: {}", .{err});
-                c.done = true;
-                return .disarm;
-            };
-            c.done = true;
-            return .disarm;
-        }
-    }.call;
-
-    timer.run(&loop, &completion, @intCast(timeout_ms), DelayContext, &ctx, cb);
-    while (!ctx.done) {
-        try loop.run(.once);
-    }
+    var pfds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+    const n = try posix.poll(&pfds, timeout_ms);
+    if (n == 0) return error.Timeout;
+    const bad = posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL;
+    if (pfds[0].revents & bad != 0) return error.ConnectionClosed;
 }
 
 pub fn writeAll(fd: posix.fd_t, data: []const u8) !void {
@@ -1063,8 +1035,7 @@ pub fn writeAllTimeout(fd: posix.fd_t, data: []const u8, timeout_ms: i32) !void 
             error.WouldBlock => {
                 const remaining_ms = deadline_ms - std.time.milliTimestamp();
                 if (remaining_ms <= 0) return error.Timeout;
-                const backoff_ms: i32 = @intCast(@min(remaining_ms, 10));
-                waitWritableTimeout(fd, backoff_ms) catch |wait_err| return wait_err;
+                waitWritableTimeout(fd, @intCast(@min(remaining_ms, @as(i64, std.math.maxInt(i32))))) catch |wait_err| return wait_err;
                 continue;
             },
             else => return err,

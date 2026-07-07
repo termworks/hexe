@@ -51,6 +51,13 @@ pub fn applyDeferredSessionSnapshots(state: *State) void {
     _ = state.applySessionSnapshot();
 }
 
+/// Apply a session_stolen push that a synchronous reader consumed on behalf
+/// of the IPC loop — losing it would leave this mux writing into a session
+/// another client now owns.
+pub fn applyDeferredSessionStolen(state: *State) void {
+    _ = state.runtime.applyPendingSessionStolen();
+}
+
 pub fn applyRuntimeStopRequest(state: *State, hooks: HostHooks) bool {
     const reason = state.runtime.takeStopReason() orelse return false;
     if (frontend_core.stopRequestFromRuntime(reason)) |request| {

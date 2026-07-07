@@ -355,6 +355,8 @@ pub fn run(terminal_args: TerminalArgs) !void {
     session_id_z[32] = 0;
     _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
 
+    var restored_existing_target = false;
+
     // Handle --attach: try session first, then orphaned pane.
     if (terminal_args.attach) |uuid_prefix| {
         var resolved_attach = resolveDotAttachTarget(allocator, state.runtime, uuid_prefix) catch |err| {
@@ -370,6 +372,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
         if (state.reattachSession(resolved_attach.target)) {
             debugLog("attach: reattachSession succeeded", .{});
             state.notifications.show("Session reattached");
+            restored_existing_target = true;
             // Reattach may change state.uuid — update env for subsequent panes.
             const reattached_uuid = state.runtime.sessionUuid();
             @memcpy(session_id_z[0..32], &reattached_uuid);
@@ -377,6 +380,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
         } else if (state.attachOrphanedPane(resolved_attach.target)) {
             debugLog("attach: attachOrphanedPane succeeded", .{});
             state.notifications.show("Attached to orphaned pane");
+            restored_existing_target = true;
         } else {
             // Session/pane not found - EXIT with error, don't create new session
             debugLog("attach: both reattach methods failed, exiting", .{});
@@ -388,40 +392,69 @@ pub fn run(terminal_args: TerminalArgs) !void {
         // Launch from session config (.hexe.lua)
         debugLog("applying session config from: {s}", .{config_path});
         const session_config = core.session_config;
-        var config = session_config.parseSessionLua(allocator, config_path) catch |err| {
-            if (err == error.FileNotFound) {
-                std.debug.print("Session config not found: {s}\n", .{config_path});
-            } else {
-                std.debug.print("Error parsing session config: {s}\n", .{@errorName(err)});
-            }
-            // Fall back to default tab
-            try state.createTab();
-            state.adoptStickyPanes();
-            try terminal_host.run(&state);
-            return;
-        };
-        defer config.deinit(allocator);
+        var applied_canonical_layout = false;
+        if (terminal_args.session_tab_filter == null) {
+            if (session_config.parseSessionLayoutLua(allocator, config_path)) |layout_value| {
+                var layout = layout_value;
+                defer layout.deinit(allocator);
 
-        // Prefer layout-config name when provided.
-        if (config.name) |loaded_name| {
-            if (state.runtime.setSessionName(loaded_name)) {
-                const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
-                    core.logging.logError("terminal", "startup: failed to sync layout-config session identity", err);
-                    break :blk null;
-                };
-                if (identity_change) |change| {
-                    var owned_change = change;
-                    defer owned_change.deinit(allocator);
+                if (state.runtime.setSessionName(layout.name)) {
+                    const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
+                        core.logging.logError("terminal", "startup: failed to sync layout session identity", err);
+                        break :blk null;
+                    };
+                    if (identity_change) |change| {
+                        var owned_change = change;
+                        defer owned_change.deinit(allocator);
+                    }
                 }
+
+                state.applyLayoutDef(&layout) catch |err| {
+                    debugLog("applyLayoutDef from session config failed: {s}", .{@errorName(err)});
+                    std.debug.print("Error applying session layout: {s}\n", .{@errorName(err)});
+                    try state.createTab();
+                };
+                applied_canonical_layout = true;
+            } else |err| {
+                debugLog("parseSessionLayoutLua failed, falling back to legacy session parser: {s}", .{@errorName(err)});
             }
         }
+        if (!applied_canonical_layout) {
+            var config = session_config.parseSessionLua(allocator, config_path) catch |err| {
+                if (err == error.FileNotFound) {
+                    std.debug.print("Session config not found: {s}\n", .{config_path});
+                } else {
+                    std.debug.print("Error parsing session config: {s}\n", .{@errorName(err)});
+                }
+                // Fall back to default tab
+                try state.createTab();
+                state.adoptStickyPanes();
+                try terminal_host.run(&state);
+                return;
+            };
+            defer config.deinit(allocator);
 
-        state.applySessionConfig(config, terminal_args.session_tab_filter) catch |err| {
-            debugLog("applySessionConfig failed: {s}", .{@errorName(err)});
-            std.debug.print("Error applying session config: {s}\n", .{@errorName(err)});
-            // Fall back to default tab
-            try state.createTab();
-        };
+            // Prefer layout-config name when provided.
+            if (config.name) |loaded_name| {
+                if (state.runtime.setSessionName(loaded_name)) {
+                    const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
+                        core.logging.logError("terminal", "startup: failed to sync layout-config session identity", err);
+                        break :blk null;
+                    };
+                    if (identity_change) |change| {
+                        var owned_change = change;
+                        defer owned_change.deinit(allocator);
+                    }
+                }
+            }
+
+            state.applySessionConfig(config, terminal_args.session_tab_filter) catch |err| {
+                debugLog("applySessionConfig failed: {s}", .{@errorName(err)});
+                std.debug.print("Error applying session config: {s}\n", .{@errorName(err)});
+                // Fall back to default tab
+                try state.createTab();
+            };
+        }
     } else {
         // Apply the enabled SES layout on normal startup when present.
         var applied_layout = false;
@@ -441,8 +474,13 @@ pub fn run(terminal_args: TerminalArgs) !void {
         }
     }
 
-    // Auto-adopt sticky panes from ses for this directory.
-    state.adoptStickyPanes();
+    // Auto-adopt sticky panes only for new sessions. Explicit attach must be
+    // exact: if the detached session listed four floats, the attached session
+    // must not opportunistically pull in unrelated free sticky floats from the
+    // same CWD.
+    if (!restored_existing_target) {
+        state.adoptStickyPanes();
+    }
 
     // Continue with main loop.
     try terminal_host.run(&state);

@@ -3,6 +3,8 @@ const posix = std.posix;
 const lua_runtime = @import("lua_runtime.zig");
 const LuaRuntime = lua_runtime.LuaRuntime;
 const logging = @import("logging.zig");
+const config_mod = @import("config.zig");
+const session_model = @import("session_model.zig");
 
 /// Direction of a split in session config.
 pub const SplitDir = enum {
@@ -429,6 +431,42 @@ pub fn parseSessionLua(allocator: std.mem.Allocator, path: []const u8) !SessionC
     return config;
 }
 
+/// Parse a canonical `hexe.setup({ ses = { layouts = { hexe.layout(...) } } })`
+/// file into the same LayoutDef model used by normal local SES config loading.
+/// This keeps explicit `.hexe.lua` opens on the same parser/apply path as
+/// auto-loaded layouts, instead of drifting through the legacy SessionConfig
+/// split parser.
+pub fn parseSessionLayoutLua(allocator: std.mem.Allocator, path: []const u8) !config_mod.LayoutDef {
+    var runtime = try LuaRuntime.init(allocator);
+    defer runtime.deinit();
+
+    runtime.loadConfig(path) catch |err| {
+        if (err == error.FileNotFound) return err;
+        if (runtime.last_error) |msg| {
+            std.debug.print("Error loading {s}: {s}\n", .{ path, msg });
+        }
+        return error.LuaError;
+    };
+
+    const builder = runtime.getBuilder() orelse return error.InvalidConfig;
+    const ses_builder = builder.ses orelse return error.InvalidConfig;
+    var ses_config = try ses_builder.build();
+    errdefer ses_config.deinit(allocator);
+
+    if (ses_config.layouts.len == 0) return error.InvalidConfig;
+
+    const layout = ses_config.layouts[0];
+
+    for (ses_config.layouts[1..]) |*extra| {
+        extra.deinit(allocator);
+    }
+    allocator.free(ses_config.layouts);
+    ses_config.layouts = &[_]config_mod.LayoutDef{};
+    ses_config.isolation.deinit(allocator);
+
+    return layout;
+}
+
 fn parseStringArray(allocator: std.mem.Allocator, runtime: *LuaRuntime, table_idx: i32, key: [:0]const u8) ![][]const u8 {
     if (!runtime.pushTable(table_idx, key)) return &.{};
     defer runtime.pop();
@@ -501,7 +539,7 @@ fn parseSplitConfig(allocator: std.mem.Allocator, runtime: *LuaRuntime) !SplitCo
     // Check if this is a split node (has "dir" field) or a leaf.
     if (runtime.getString(-1, "dir")) |dir_str| {
         // It's a split node
-        const dir: SplitDir = if (std.mem.eql(u8, dir_str, "vertical")) .vertical else .horizontal;
+        const dir: SplitDir = if (session_model.isVerticalSplitDir(dir_str)) .vertical else .horizontal;
 
         // Read array children (1-based numeric keys)
         const len = runtime.getArrayLen(-1);
@@ -625,6 +663,53 @@ test "parseSessionLua reads canonical hexe.setup layout config" {
     try std.testing.expectEqual(@as(u8, '3'), cfg.floats[0].key);
     try std.testing.expectEqualStrings("codex", cfg.floats[0].cmd.?);
     try std.testing.expect(cfg.floats[0].global);
+}
+
+test "parseSessionLayoutLua preserves saved tabs and split panes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const code =
+        "local hexe = require('hexe')\n" ++
+        "return hexe.setup({ ses = { layouts = { hexe.layout('hexe', {\n" ++
+        "  root = '/tmp/unit',\n" ++
+        "  tabs = {\n" ++
+        "    hexe.tab('hexe-1', { root = hexe.split('horizontal', {\n" ++
+        "      hexe.pane({ size = 50 }),\n" ++
+        "      hexe.pane({ size = 50 }),\n" ++
+        "    }) }),\n" ++
+        "    hexe.tab('hexe-2', { root = hexe.pane() }),\n" ++
+        "  },\n" ++
+        "}) } } })\n";
+
+    try tmp.dir.writeFile(.{ .sub_path = "layout.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.lua");
+    defer std.testing.allocator.free(path);
+
+    var layout = try parseSessionLayoutLua(std.testing.allocator, path);
+    defer layout.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("hexe", layout.name);
+    try std.testing.expectEqual(@as(usize, 2), layout.tabs.len);
+    try std.testing.expectEqualStrings("hexe-1", layout.tabs[0].name);
+    try std.testing.expectEqualStrings("hexe-2", layout.tabs[1].name);
+
+    const root = layout.tabs[0].root orelse return error.TestUnexpectedResult;
+    switch (root) {
+        .split => |split| {
+            try std.testing.expectEqualStrings("h", split.dir);
+            try std.testing.expect(@abs(split.ratio - @as(f32, 0.5)) < 0.001);
+            switch (split.first.*) {
+                .pane => {},
+                .split => return error.TestUnexpectedResult,
+            }
+            switch (split.second.*) {
+                .pane => {},
+                .split => return error.TestUnexpectedResult,
+            }
+        },
+        .pane => return error.TestUnexpectedResult,
+    }
 }
 
 test "parseSessionLua rejects old top-level layout wrapper" {

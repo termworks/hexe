@@ -85,9 +85,43 @@ fn sessionStateBaseRoot(allocator: std.mem.Allocator, session_state: []const u8)
     return allocator.dupe(u8, str) catch null;
 }
 
-pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !void {
+/// Resolve a user-supplied directory filter (e.g. ".", "..", "src", an
+/// absolute path) to a canonical absolute path. Returns null (no filter) for
+/// an empty argument. Falls back to the raw argument when the path can't be
+/// canonicalized (e.g. it no longer exists) so a stale directory can still be
+/// matched by string.
+fn resolveDirFilter(allocator: std.mem.Allocator, arg: []const u8) ?[]u8 {
+    if (arg.len == 0) return null;
+    if (std.fs.cwd().realpathAlloc(allocator, arg)) |abs| {
+        return abs;
+    } else |_| {
+        return allocator.dupe(u8, arg) catch null;
+    }
+}
+
+/// Whether a session's base_root matches the directory filter. Compares the
+/// canonical form of both sides so "." , a relative path, and the stored
+/// absolute base_root all line up; falls back to a raw string compare when a
+/// path can't be canonicalized.
+fn dirFilterMatches(allocator: std.mem.Allocator, filter_abs: []const u8, base_root: []const u8) bool {
+    if (base_root.len == 0) return false;
+    if (std.mem.eql(u8, filter_abs, base_root)) return true;
+    if (std.fs.cwd().realpathAlloc(allocator, base_root)) |abs| {
+        defer allocator.free(abs);
+        return std.mem.eql(u8, filter_abs, abs);
+    } else |_| {
+        return false;
+    }
+}
+
+pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool, dir_filter: []const u8) !void {
     const wire = core.wire;
     const posix = std.posix;
+
+    // Optional directory filter: when set, only sessions whose base_root is
+    // this directory are listed. `.` and relative paths resolve against cwd.
+    const filter_abs: ?[]u8 = resolveDirFilter(allocator, dir_filter);
+    defer if (filter_abs) |f| allocator.free(f);
 
     if (!json_output) {
         const inst = posix.getenv("HEXE_INSTANCE");
@@ -100,13 +134,18 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         } else {
             print("Instance: default\n", .{});
         }
+        if (filter_abs) |f| print("Directory: {s}\n", .{f});
     }
 
     const fd = connectSesCliChannel(allocator) orelse return;
     defer posix.close(fd);
 
-    // Send status request with full_mode flag
-    const flag: [1]u8 = .{if (details) @as(u8, 1) else @as(u8, 0)};
+    // Send status request with full_mode flag. Full mode makes the daemon
+    // include each session's canonical state JSON, which is where base_root
+    // lives — required to filter by directory, so request it whenever a
+    // filter is active even if the caller didn't ask for --details.
+    const full_mode = details or (filter_abs != null);
+    const flag: [1]u8 = .{if (full_mode) @as(u8, 1) else @as(u8, 0)};
     wire.writeControl(fd, .status, &flag) catch |err| {
         print("Error: failed to request session status: {s}\n", .{@errorName(err)});
         return;
@@ -147,16 +186,20 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
 
     // JSON output mode - output raw structure
     if (json_output) {
-        outputListJson(allocator, payload, off, status_hdr) catch |err| {
+        outputListJson(allocator, payload, off, status_hdr, filter_abs) catch |err| {
             print("Error: failed to write JSON status: {s}\n", .{@errorName(err)});
         };
         return;
     }
 
-    // Connected clients
-    if (status_hdr.client_count > 0) {
+    const filtering = filter_abs != null;
+
+    // Connected clients. With a directory filter the total count would be
+    // misleading, so print the header lazily before the first match instead.
+    if (!filtering and status_hdr.client_count > 0) {
         print("Connected muxes: {d}\n", .{status_hdr.client_count});
     }
+    var shown_mux_header = false;
 
     var ci: u16 = 0;
     while (ci < status_hdr.client_count) : (ci += 1) {
@@ -173,19 +216,29 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         const session_state = if (sc.session_state_len > 0) payload[off .. off + sc.session_state_len] else "";
         off += sc.session_state_len;
 
+        const base_root_opt: ?[]u8 = if (filtering or details) sessionStateBaseRoot(allocator, session_state) else null;
+        defer if (base_root_opt) |b| allocator.free(b);
+
+        const show = !filtering or (base_root_opt != null and dirFilterMatches(allocator, filter_abs.?, base_root_opt.?));
+
         const is_last_client = (ci + 1 == status_hdr.client_count);
         const branch = if (is_last_client) "\xe2\x94\x94" else "\xe2\x94\x9c";
         const child_prefix = if (is_last_client) "   " else "\xe2\x94\x82  ";
 
         const sid8: []const u8 = if (sc.has_session_id != 0) sc.session_id[0..8] else "????????";
 
-        var mux_line: [256]u8 = undefined;
-        const prefix = std.fmt.bufPrint(&mux_line, "{s}\xe2\x94\x80 ", .{branch}) catch "";
-        printTreeNode(prefix, " ", ansi.MUX, "mux", name_str, sid8);
-        if (details) {
-            if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
-                defer allocator.free(base_root);
-                print("{s}root: {s}\n", .{ child_prefix, base_root });
+        if (show) {
+            if (filtering and !shown_mux_header) {
+                print("Connected muxes:\n", .{});
+                shown_mux_header = true;
+            }
+            var mux_line: [256]u8 = undefined;
+            const prefix = std.fmt.bufPrint(&mux_line, "{s}\xe2\x94\x80 ", .{branch}) catch "";
+            printTreeNode(prefix, " ", ansi.MUX, "mux", name_str, sid8);
+            if (details) {
+                if (base_root_opt) |base_root| {
+                    print("{s}root: {s}\n", .{ child_prefix, base_root });
+                }
             }
         }
 
@@ -213,15 +266,16 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
             }
         }
 
-        if (session_state.len > 0) {
+        if (show and session_state.len > 0) {
             printSessionTree(allocator, session_state, child_prefix, &pane_names);
         }
     }
 
-    // Detached sessions
-    if (status_hdr.detached_count > 0) {
+    // Detached sessions. Header printed lazily when filtering (see muxes).
+    if (!filtering and status_hdr.detached_count > 0) {
         print("\nDetached sessions: {d}\n", .{status_hdr.detached_count});
     }
+    var shown_detached_header = false;
 
     var di: u16 = 0;
     while (di < status_hdr.detached_count) : (di += 1) {
@@ -237,14 +291,26 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         const session_state = if (de.session_state_len > 0) payload[off .. off + de.session_state_len] else "";
         off += de.session_state_len;
 
+        const base_root_opt: ?[]u8 = sessionStateBaseRoot(allocator, session_state);
+        defer if (base_root_opt) |b| allocator.free(b);
+
+        if (filtering) {
+            const matches = base_root_opt != null and dirFilterMatches(allocator, filter_abs.?, base_root_opt.?);
+            if (!matches) continue;
+        }
+
         // Include --instance flag if not in default instance
         const uuid_prefix = de.session_id[0..8];
         const instance = std.posix.getenv("HEXE_INSTANCE");
 
+        if (filtering and !shown_detached_header) {
+            print("\nDetached sessions:\n", .{});
+            shown_detached_header = true;
+        }
+
         // Show UUID prominently as primary identifier
         print("  [{s}] {s:<12} ({d} panes)\n", .{ uuid_prefix, name_str, de.pane_count });
-        if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
-            defer allocator.free(base_root);
+        if (base_root_opt) |base_root| {
             print("    root: {s}\n", .{base_root});
         }
 
@@ -263,8 +329,10 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         }
     }
 
-    // Orphaned panes
-    if (status_hdr.orphaned_count > 0) {
+    // Orphaned and sticky panes are not directory-scoped sessions; with a
+    // directory filter active, list only sticky panes whose pwd matches and
+    // skip orphaned panes entirely.
+    if (!filtering and status_hdr.orphaned_count > 0) {
         print("\nOrphaned panes: {d}\n", .{status_hdr.orphaned_count});
     }
 
@@ -280,6 +348,8 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         if (off + pe.sticky_pwd_len > payload.len) return;
         off += pe.sticky_pwd_len;
 
+        if (filtering) continue; // orphaned panes carry no directory
+
         if (pname.len > 0) {
             print("  [{s}] {s} pid={d}\n", .{ pe.uuid[0..8], pname, pe.pid });
         } else {
@@ -287,10 +357,11 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         }
     }
 
-    // Sticky panes
-    if (status_hdr.sticky_count > 0) {
+    // Sticky panes. Header printed lazily when filtering (matched by pwd).
+    if (!filtering and status_hdr.sticky_count > 0) {
         print("\nSticky panes: {d}\n", .{status_hdr.sticky_count});
     }
+    var shown_sticky_header = false;
 
     var si: u16 = 0;
     while (si < status_hdr.sticky_count) : (si += 1) {
@@ -304,6 +375,14 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         if (off + se.pwd_len > payload.len) return;
         const pwd = if (se.pwd_len > 0) payload[off .. off + se.pwd_len] else "";
         off += se.pwd_len;
+
+        if (filtering) {
+            if (pwd.len == 0 or !dirFilterMatches(allocator, filter_abs.?, pwd)) continue;
+            if (!shown_sticky_header) {
+                print("\nSticky panes:\n", .{});
+                shown_sticky_header = true;
+            }
+        }
 
         print("  [{s}] pid={d}", .{ se.uuid[0..8], se.pid });
         if (pwd.len > 0) {
@@ -1111,11 +1190,12 @@ pub fn runShellEvent(
     };
 }
 
-fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: usize, status_hdr: core.wire.StatusResp) !void {
+fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: usize, status_hdr: core.wire.StatusResp, filter_abs: ?[]const u8) !void {
     const wire = core.wire;
     const stdout = std.fs.File.stdout();
     var off = start_off;
     var buf: [256]u8 = undefined;
+    const filtering = filter_abs != null;
 
     try stdout.writeAll("{");
 
@@ -1127,11 +1207,12 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
     } else try stdout.writeAll("default");
     try stdout.writeAll("\",");
 
-    // Connected muxes
+    // Connected muxes. When filtering, emit only entries whose base_root
+    // matches; a `first` flag keeps the comma separators valid across skips.
     try stdout.writeAll("\"connected\":[");
+    var conn_first = true;
     var ci: u16 = 0;
     while (ci < status_hdr.client_count) : (ci += 1) {
-        if (ci > 0) try stdout.writeAll(",");
         if (off + @sizeOf(wire.StatusClient) > payload.len) break;
         const sc = std.mem.bytesToValue(wire.StatusClient, payload[off..][0..@sizeOf(wire.StatusClient)]);
         off += @sizeOf(wire.StatusClient);
@@ -1144,23 +1225,7 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const session_state = if (sc.session_state_len > 0) payload[off .. off + sc.session_state_len] else "{}";
         off += sc.session_state_len;
 
-        try stdout.writeAll("{\"name\":\"");
-        try writeJsonStr(stdout, name_str);
-        try stdout.writeAll("\",\"session_id\":\"");
-        if (sc.has_session_id != 0) try stdout.writeAll(sc.session_id[0..]);
-        try stdout.writeAll("\",\"pane_count\":");
-        const pane_str = std.fmt.bufPrint(&buf, "{d}", .{sc.pane_count}) catch continue;
-        try stdout.writeAll(pane_str);
-        if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
-            defer allocator.free(base_root);
-            try stdout.writeAll(",\"base_root\":\"");
-            try writeJsonStr(stdout, base_root);
-            try stdout.writeAll("\"");
-        }
-        try stdout.writeAll(",\"state\":");
-        try stdout.writeAll(session_state);
-
-        // Skip pane entries
+        // Advance past pane entries regardless of whether we emit this mux.
         var pi: u16 = 0;
         while (pi < sc.pane_count) : (pi += 1) {
             if (off + @sizeOf(wire.StatusPaneEntry) > payload.len) break;
@@ -1169,15 +1234,36 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
             off += pe.name_len;
             off += pe.sticky_pwd_len;
         }
+
+        const base_root_opt: ?[]u8 = sessionStateBaseRoot(allocator, session_state);
+        defer if (base_root_opt) |b| allocator.free(b);
+        if (filtering and !(base_root_opt != null and dirFilterMatches(allocator, filter_abs.?, base_root_opt.?))) continue;
+
+        if (!conn_first) try stdout.writeAll(",");
+        conn_first = false;
+        try stdout.writeAll("{\"name\":\"");
+        try writeJsonStr(stdout, name_str);
+        try stdout.writeAll("\",\"session_id\":\"");
+        if (sc.has_session_id != 0) try stdout.writeAll(sc.session_id[0..]);
+        try stdout.writeAll("\",\"pane_count\":");
+        const pane_str = std.fmt.bufPrint(&buf, "{d}", .{sc.pane_count}) catch continue;
+        try stdout.writeAll(pane_str);
+        if (base_root_opt) |base_root| {
+            try stdout.writeAll(",\"base_root\":\"");
+            try writeJsonStr(stdout, base_root);
+            try stdout.writeAll("\"");
+        }
+        try stdout.writeAll(",\"state\":");
+        try stdout.writeAll(session_state);
         try stdout.writeAll("}");
     }
     try stdout.writeAll("],");
 
     // Detached sessions
     try stdout.writeAll("\"detached\":[");
+    var det_first = true;
     var di: u16 = 0;
     while (di < status_hdr.detached_count) : (di += 1) {
-        if (di > 0) try stdout.writeAll(",");
         if (off + @sizeOf(wire.DetachedSessionEntry) > payload.len) break;
         const de = std.mem.bytesToValue(wire.DetachedSessionEntry, payload[off..][0..@sizeOf(wire.DetachedSessionEntry)]);
         off += @sizeOf(wire.DetachedSessionEntry);
@@ -1190,6 +1276,12 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const session_state = if (de.session_state_len > 0) payload[off .. off + de.session_state_len] else "{}";
         off += de.session_state_len;
 
+        const base_root_opt: ?[]u8 = sessionStateBaseRoot(allocator, session_state);
+        defer if (base_root_opt) |b| allocator.free(b);
+        if (filtering and !(base_root_opt != null and dirFilterMatches(allocator, filter_abs.?, base_root_opt.?))) continue;
+
+        if (!det_first) try stdout.writeAll(",");
+        det_first = false;
         try stdout.writeAll("{\"name\":\"");
         try writeJsonStr(stdout, name_str);
         try stdout.writeAll("\",\"session_id\":\"");
@@ -1197,8 +1289,7 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         try stdout.writeAll("\",\"pane_count\":");
         const pane_str = std.fmt.bufPrint(&buf, "{d}", .{de.pane_count}) catch continue;
         try stdout.writeAll(pane_str);
-        if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
-            defer allocator.free(base_root);
+        if (base_root_opt) |base_root| {
             try stdout.writeAll(",\"base_root\":\"");
             try writeJsonStr(stdout, base_root);
             try stdout.writeAll("\"");
@@ -1209,11 +1300,11 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
     }
     try stdout.writeAll("],");
 
-    // Orphaned panes
+    // Orphaned panes (carry no directory: omitted entirely when filtering).
     try stdout.writeAll("\"orphaned\":[");
+    var orph_first = true;
     var oi: u16 = 0;
     while (oi < status_hdr.orphaned_count) : (oi += 1) {
-        if (oi > 0) try stdout.writeAll(",");
         if (off + @sizeOf(wire.StatusPaneEntry) > payload.len) break;
         const pe = std.mem.bytesToValue(wire.StatusPaneEntry, payload[off..][0..@sizeOf(wire.StatusPaneEntry)]);
         off += @sizeOf(wire.StatusPaneEntry);
@@ -1223,6 +1314,9 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         off += pe.name_len;
         off += pe.sticky_pwd_len;
 
+        if (filtering) continue;
+        if (!orph_first) try stdout.writeAll(",");
+        orph_first = false;
         try stdout.writeAll("{\"uuid\":\"");
         try stdout.writeAll(pe.uuid[0..]);
         try stdout.writeAll("\",\"name\":\"");
@@ -1234,11 +1328,11 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
     }
     try stdout.writeAll("],");
 
-    // Sticky panes
+    // Sticky panes (matched by pwd when filtering).
     try stdout.writeAll("\"sticky\":[");
+    var sticky_first = true;
     var si: u16 = 0;
     while (si < status_hdr.sticky_count) : (si += 1) {
-        if (si > 0) try stdout.writeAll(",");
         if (off + @sizeOf(wire.StickyPaneEntry) > payload.len) break;
         const se = std.mem.bytesToValue(wire.StickyPaneEntry, payload[off..][0..@sizeOf(wire.StickyPaneEntry)]);
         off += @sizeOf(wire.StickyPaneEntry);
@@ -1248,6 +1342,9 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const pwd = if (se.pwd_len > 0) payload[off .. off + se.pwd_len] else "";
         off += se.pwd_len;
 
+        if (filtering and !(pwd.len > 0 and dirFilterMatches(allocator, filter_abs.?, pwd))) continue;
+        if (!sticky_first) try stdout.writeAll(",");
+        sticky_first = false;
         try stdout.writeAll("{\"uuid\":\"");
         try stdout.writeAll(se.uuid[0..]);
         try stdout.writeAll("\",\"pid\":");

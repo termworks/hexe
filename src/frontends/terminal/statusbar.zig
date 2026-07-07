@@ -118,6 +118,8 @@ threadlocal var click_command_buf: [1024]u8 = [_]u8{0} ** 1024;
 threadlocal var eval_cache_ctx_ptr: usize = 0;
 threadlocal var eval_cache_frame_ms: u64 = 0;
 threadlocal var eval_cache_ready: bool = false;
+threadlocal var lua_ctx_cache_rt: usize = 0;
+threadlocal var lua_ctx_cache_instance: u64 = 0;
 
 fn tabTitleForDisplay(state: *State, tab_idx: usize, tab: anytype, use_basename: bool) []const u8 {
     if (use_basename) {
@@ -245,6 +247,9 @@ pub fn deinitThreadlocals() void {
         rt.deinit();
         when_lua_rt = null;
     }
+
+    lua_ctx_cache_rt = 0;
+    lua_ctx_cache_instance = 0;
 
     // Deinit randomdo_state if it was initialized
     if (randomdo_state) |*state| {
@@ -603,6 +608,17 @@ fn appendPaneApiEntry(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: b
 }
 
 fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
+    // A Context's fields are fixed once built (same invariant the eval
+    // caches in resetFrameEvalCachesIfNeeded rely on), so rebuilding the
+    // Lua-side ctx — env copy, per-pane tables, pane API chunk — once per
+    // Context instance is enough no matter how many segments evaluate Lua.
+    // Keyed on instance_id, not the pointer: loop-local contexts (e.g. one
+    // per float title) reuse the same stack slot and would alias by address.
+    const rt_key = @intFromPtr(rt);
+    if (ctx.instance_id != 0 and lua_ctx_cache_rt == rt_key and lua_ctx_cache_instance == ctx.instance_id) return;
+    lua_ctx_cache_rt = rt_key;
+    lua_ctx_cache_instance = ctx.instance_id;
+
     rt.lua.createTable(0, 20);
 
     rt.lua.pushBoolean(ctx.shell_running);
@@ -1384,7 +1400,12 @@ fn passesWhenClause(ctx: *shp.Context, query: *const core.PaneQuery, w: core.Whe
 }
 
 pub const RenderedSegment = struct {
-    text: []const u8,
+    // Length of this segment's text inside the sibling `buffers[i]`. We store
+    // a length, NOT a slice: RenderedSegments is returned by value, and a
+    // slice pointing into `buffers` would dangle into the moved-from copy
+    // after return (use-after-return → intermittent segfault in grapheme
+    // width iteration). Resolve the bytes via `RenderedSegments.text(i)`.
+    text_len: usize,
     fg: Color,
     bg: Color,
     bold: bool,
@@ -1396,6 +1417,13 @@ pub const RenderedSegments = struct {
     buffers: [16][64]u8,
     count: usize,
     total_len: usize,
+
+    /// Bytes of segment `i`, resliced from the stable local `buffers` array.
+    /// Always call this on the caller's own copy so the slice points into
+    /// live storage.
+    pub fn text(self: *const RenderedSegments, i: usize) []const u8 {
+        return self.buffers[i][0..self.items[i].text_len];
+    }
 };
 
 pub fn renderSegmentOutput(module: *const core.Segment, output: []const u8) RenderedSegments {
@@ -1431,13 +1459,13 @@ pub fn renderSegmentOutput(module: *const core.Segment, output: []const u8) Rend
         const style = shp.Style.parse(out.style);
 
         result.items[result.count] = .{
-            .text = result.buffers[result.count][0..text_len],
+            .text_len = text_len,
             .fg = if (style.fg != .none) styleColorToRender(style.fg) else .none,
             .bg = if (style.bg != .none) styleColorToRender(style.bg) else .none,
             .bold = style.bold,
             .italic = style.italic,
         };
-        result.total_len += measureText(result.items[result.count].text);
+        result.total_len += measureText(result.buffers[result.count][0..text_len]);
         result.count += 1;
     }
 

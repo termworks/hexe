@@ -20,6 +20,17 @@ fn setCloexec(fd: posix.fd_t) void {
     };
 }
 
+/// Linux O_NONBLOCK. Kept in one place so the octal literal doesn't drift
+/// across the several fd-setup sites that need it.
+pub const O_NONBLOCK: usize = 0o4000;
+
+/// Set a file descriptor non-blocking. Canonical helper; callers that prefer
+/// log-and-continue wrap it with `catch`.
+pub fn setNonBlocking(fd: posix.fd_t) !void {
+    const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+    _ = try posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK);
+}
+
 /// Unix peer credentials returned by SO_PEERCRED.
 pub const PeerCredentials = extern struct {
     pid: i32,
@@ -175,7 +186,6 @@ pub const Server = struct {
     /// Non-blocking accept, returns null if no connection pending
     pub fn tryAccept(self: *Server) !?Connection {
         // Set server socket to non-blocking temporarily for the accept check.
-        const O_NONBLOCK: usize = 0o4000;
         const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch |err| {
             log.warn("failed to read server fd flags for fd={d}: {}", .{ self.fd, err });
             return null;

@@ -174,6 +174,9 @@ pub const SesClient = struct {
     pending_pane_exits: std.ArrayList([32]u8),
     pending_control_responses: std.ArrayList(PendingControlResponse),
     pending_session_state: ?[]u8 = null,
+    /// Set when a session_stolen push is consumed by a synchronous reader
+    /// instead of the IPC loop; the loop drains it so the steal is never lost.
+    pending_session_stolen: bool = false,
     next_ctl_request_id: u32 = 1,
 
     pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, log_level: ?logging.Level, log_file: ?[]const u8) SesClient {
@@ -389,6 +392,14 @@ pub const SesClient = struct {
             self.allocator.free(json);
             self.pending_session_state = null;
         }
+        self.pending_session_stolen = false;
+    }
+
+    /// Returns true once per consumed session_stolen push (see field docs).
+    pub fn drainPendingSessionStolen(self: *SesClient) bool {
+        const stolen = self.pending_session_stolen;
+        self.pending_session_stolen = false;
+        return stolen;
     }
 
     /// Connect to the ses daemon, starting it if necessary.
@@ -1093,6 +1104,18 @@ pub const SesClient = struct {
         try self.readCommandAckForRequest(fd, request_id);
     }
 
+    /// Rename a tab in the canonical session snapshot (MUX → SES).
+    pub fn sessionRenameTab(self: *SesClient, tab_uuid: [32]u8, name: []const u8) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionRenameTab = .{
+            .tab_uuid = tab_uuid,
+            .name_len = @intCast(name.len),
+        };
+        self.drainQueuedControlResponses(fd);
+        const request_id = try self.writeControlTrailRequest(fd, .session_rename_tab, std.mem.asBytes(&msg), name);
+        try self.readCommandAckForRequest(fd, request_id);
+    }
+
     /// Update shell-provided pane metadata and consume its acknowledgement.
     pub fn updatePaneShell(self: *SesClient, uuid: [32]u8, cmd: ?[]const u8, cwd: ?[]const u8, status: ?i32, duration_ms: ?u64, jobs: ?u16) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
@@ -1293,6 +1316,42 @@ pub const SesClient = struct {
 
     /// Best-effort synchronous pane metadata snapshot.
     /// Returns owned strings that caller must free.
+    pub const PaneExistence = enum { exists, missing, unknown };
+
+    pub const PaneExistenceProbe = struct {
+        outcome: PaneExistence,
+        pid: ?posix.pid_t = null,
+    };
+
+    /// Tri-state existence probe. `missing` is returned only when SES
+    /// definitively replied pane_not_found; every transport/protocol failure
+    /// is `unknown`, so callers can avoid destroying local state on a
+    /// transient hiccup.
+    pub fn probePaneExistence(self: *SesClient, uuid: [32]u8) PaneExistenceProbe {
+        const fd = self.ctl_fd orelse return .{ .outcome = .unknown };
+        var msg: wire.PaneUuid = .{ .uuid = uuid };
+        const request_id = self.writeControlRequest(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
+            logging.logError("frontend-client", "failed to send pane existence probe", err);
+            if (self.ctl_fd == fd) self.ctl_fd = null;
+            return .{ .outcome = .unknown };
+        };
+
+        var read = self.readExpectedPaneInfoResponse(fd, uuid, request_id) catch |err| {
+            if (err == error.PaneMissing) return .{ .outcome = .missing };
+            logging.logError("frontend-client", "pane existence probe failed", err);
+            return .{ .outcome = .unknown };
+        };
+        const resp = read.resp;
+        const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
+            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
+            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
+            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
+            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
+        read.skip(self, fd, trail_total);
+        read.deinit(self.allocator);
+        return .{ .outcome = .exists, .pid = resp.pid };
+    }
+
     pub fn getPaneInfoSnapshot(self: *SesClient, uuid: [32]u8) ?PaneInfoSnapshot {
         const fd = self.ctl_fd orelse return null;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
@@ -1785,6 +1844,7 @@ pub const SesClient = struct {
         if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
             var pending = pending_response;
             defer pending.deinit(self.allocator);
+            if (pending.msg_type == .pane_not_found) return error.PaneMissing;
             if (pending.msg_type != .pane_info) return error.UnexpectedResponse;
             const read = try self.readPaneInfoPendingPayload(pending.payload);
             if (!std.mem.eql(u8, &read.resp.uuid, &expected_uuid)) {
@@ -1801,8 +1861,8 @@ pub const SesClient = struct {
             switch (msg_type) {
                 .ok, .pane_exited, .session_state => {
                     if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
-                        self.skipPayload(fd, hdr.payload_len);
-                        return error.UnexpectedResponse;
+                        try self.queuePendingControlResponseBody(fd, hdr);
+                        continue;
                     }
                     self.consumeQueuedControlResponse(fd, hdr);
                     continue;
@@ -1839,9 +1899,33 @@ pub const SesClient = struct {
                     self.queuePaneInfoResponseBody(fd, resp);
                     continue;
                 },
-                else => {
+                .pane_not_found => {
                     self.skipPayload(fd, hdr.payload_len);
-                    return error.UnexpectedResponse;
+                    // Only trust a reply correlated to OUR request: the
+                    // payload carries no UUID, so an uncorrelated
+                    // pane_not_found could belong to any other query and
+                    // must not condemn this pane.
+                    if (hdr.request_id == expected_request_id) {
+                        // Definitive: SES does not know this pane.
+                        return error.PaneMissing;
+                    }
+                    continue;
+                },
+                else => {
+                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
+                        try self.queuePendingControlResponseBody(fd, hdr);
+                        continue;
+                    }
+                    if (hdr.request_id == expected_request_id) {
+                        // Some other definitive reply to our request.
+                        self.skipPayload(fd, hdr.payload_len);
+                        return error.UnexpectedResponse;
+                    }
+                    // Interleaved async push — consume without failing the
+                    // query; a spurious failure here gets interpreted as
+                    // "pane gone" and destroys live floats downstream.
+                    self.consumeQueuedControlResponse(fd, hdr);
+                    continue;
                 },
             }
         }
@@ -1971,8 +2055,13 @@ pub const SesClient = struct {
                             try self.queuePendingControlResponseBody(fd, hdr);
                             continue;
                         }
-                        self.skipPayload(fd, hdr.payload_len);
-                        return error.UnexpectedResponse;
+                        // Interleaved async push (shell_event, notify,
+                        // session_stolen, ...). It is not our response, so it
+                        // must never fail this operation: consume it (types
+                        // with preserve machinery are queued for the IPC
+                        // loop) and keep waiting.
+                        self.consumeQueuedControlResponse(fd, hdr);
+                        continue;
                     }
                     return .{ .hdr = hdr };
                 },
@@ -2053,6 +2142,17 @@ pub const SesClient = struct {
                     continue;
                 },
                 else => {
+                    if (!matches_request) {
+                        if (hdr.request_id != 0) {
+                            try self.queuePendingControlResponseBody(fd, hdr);
+                            continue;
+                        }
+                        // Async push interleaved with the ack — consume it
+                        // instead of failing the command (see
+                        // readSyncResponseUntilForRequest).
+                        self.consumeQueuedControlResponse(fd, hdr);
+                        continue;
+                    }
                     self.skipPayload(fd, hdr.payload_len);
                     return error.UnexpectedResponse;
                 },
@@ -2135,6 +2235,12 @@ pub const SesClient = struct {
                     return;
                 };
                 self.queuePaneInfoResponseBody(fd, resp);
+            },
+            .session_stolen => {
+                // Must never be dropped: without it this mux keeps writing
+                // into a session another client now owns.
+                self.skipPayload(fd, hdr.payload_len);
+                self.pending_session_stolen = true;
             },
             else => self.skipPayload(fd, hdr.payload_len),
         }
@@ -2438,8 +2544,7 @@ test "SesClient: pending control responses are retrieved by request id" {
 }
 
 test "SesClient: command ack reader queues out-of-order request ids" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -2458,8 +2563,7 @@ test "SesClient: command ack reader queues out-of-order request ids" {
 }
 
 test "SesClient: sync response reader queues and replays out-of-order direct payloads" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -2499,8 +2603,7 @@ test "SesClient: sync response reader queues and replays out-of-order direct pay
 }
 
 test "SesClient: sync pane cwd reader replays queued payload-bearing response" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 

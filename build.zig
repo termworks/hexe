@@ -347,7 +347,30 @@ pub fn build(b: *std.Build) void {
     });
     const run_syslink_host_tests = b.addRunArtifact(syslink_host_tests);
 
+    // Core library tests (Lua config parsing, api_bridge, session_config,
+    // wire, config_v2, etc.). Reuse `core_module` — it already carries every
+    // dependency import — as the test root; the refAllDeclsRecursive shim in
+    // src/core/mod.zig collects the submodule test blocks.
+    const core_tests = b.addTest(.{
+        .root_module = core_module,
+    });
+    const run_core_tests = b.addRunArtifact(core_tests);
+
+    // POD output-buffering tests (ring buffer + OSC7 cwd scanner). Self-
+    // contained (std only), so it roots directly at the module file.
+    const pod_buffering_test_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/pod/buffering.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const pod_buffering_tests = b.addTest(.{
+        .root_module = pod_buffering_test_module,
+    });
+    const run_pod_buffering_tests = b.addRunArtifact(pod_buffering_tests);
+
     const test_step = b.step("test", "Run hexe test suites");
+    test_step.dependOn(&run_core_tests.step);
+    test_step.dependOn(&run_pod_buffering_tests.step);
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);

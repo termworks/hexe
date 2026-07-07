@@ -384,6 +384,12 @@ pub const Client = struct {
     keepalive: bool,
     session_id: ?[16]u8,
     pending_reattach_session_id: ?[16]u8,
+    /// When pending_reattach_session_id was set. The reattach float-steal
+    /// privilege is time-boxed on this: the flag itself must survive until
+    /// commit (client removal uses it to restore panes to the detached
+    /// session), but the right to rip floats out of live muxes must not
+    /// outlive the reattach flow if the commit register never arrives.
+    pending_reattach_started_at: i64 = 0,
     session_name: ?[]const u8,
     base_root: ?[]const u8,
     session_snapshot: ?session_model.SessionSnapshot,
@@ -451,16 +457,18 @@ fn closeUniqueFd(fd: posix.fd_t, closed: *[3]posix.fd_t, closed_count: *usize) v
     closed_count.* += 1;
 }
 
-pub fn closeClientFds(client: *Client) void {
+pub fn closeClientFds(store: *SessionStore, client: *Client) void {
     var closed: [3]posix.fd_t = undefined;
     var closed_count: usize = 0;
 
     if (client.mux_ctl_fd) |fd| {
         closeUniqueFd(fd, &closed, &closed_count);
+        store.noteClosedFd(fd);
         client.mux_ctl_fd = null;
     }
     if (client.mux_vt_fd) |fd| {
         closeUniqueFd(fd, &closed, &closed_count);
+        store.noteClosedFd(fd);
         client.mux_vt_fd = null;
     }
 }
@@ -501,6 +509,16 @@ pub const SessionStore = struct {
     next_pane_id: u16 = 1,
     pane_id_to_pod_vt: std.AutoHashMap(u16, posix.fd_t),
     pod_vt_to_pane_id: std.AutoHashMap(posix.fd_t, u16),
+    pane_id_to_uuid: std.AutoHashMap(u16, [32]u8),
+    /// fds closed directly (client removal, killPane, detach) in the last two
+    /// event-loop iterations. The server's pending-close queues consult this
+    /// before their own posix.close: an fd number already released here may
+    /// have been reused by a brand-new connection, and closing it again would
+    /// tear that connection down (or trip the EBADF safety check). Two
+    /// generations because a watcher error CQE for a directly-closed fd can
+    /// surface one full loop iteration after the close.
+    closed_fds_cur: std.AutoHashMap(posix.fd_t, void),
+    closed_fds_prev: std.AutoHashMap(posix.fd_t, void),
 
     pub fn init(allocator: std.mem.Allocator) SessionStore {
         return .{
@@ -510,7 +528,27 @@ pub const SessionStore = struct {
             .detached_sessions = std.AutoHashMap([16]u8, DetachedSessionState).init(allocator),
             .pane_id_to_pod_vt = std.AutoHashMap(u16, posix.fd_t).init(allocator),
             .pod_vt_to_pane_id = std.AutoHashMap(posix.fd_t, u16).init(allocator),
+            .pane_id_to_uuid = std.AutoHashMap(u16, [32]u8).init(allocator),
+            .closed_fds_cur = std.AutoHashMap(posix.fd_t, void).init(allocator),
+            .closed_fds_prev = std.AutoHashMap(posix.fd_t, void).init(allocator),
         };
+    }
+
+    pub fn noteClosedFd(self: *SessionStore, fd: posix.fd_t) void {
+        self.closed_fds_cur.put(fd, {}) catch |err| {
+            core.logging.logError("ses", "failed to record closed fd", err);
+        };
+    }
+
+    pub fn closedFdNoted(self: *const SessionStore, fd: posix.fd_t) bool {
+        return self.closed_fds_cur.contains(fd) or self.closed_fds_prev.contains(fd);
+    }
+
+    /// Age the log by one event-loop iteration: notes survive exactly two
+    /// pending-close processing rounds, then stop shielding the fd number.
+    pub fn rotateClosedFdLog(self: *SessionStore) void {
+        std.mem.swap(std.AutoHashMap(posix.fd_t, void), &self.closed_fds_cur, &self.closed_fds_prev);
+        self.closed_fds_cur.clearRetainingCapacity();
     }
 
     pub fn deinit(self: *SessionStore) void {
@@ -531,13 +569,16 @@ pub const SessionStore = struct {
         self.detached_sessions.deinit();
 
         for (self.clients.items) |*client| {
-            closeClientFds(client);
+            closeClientFds(self, client);
             client.deinit();
         }
         self.clients.deinit(self.allocator);
 
         self.pane_id_to_pod_vt.deinit();
         self.pod_vt_to_pane_id.deinit();
+        self.pane_id_to_uuid.deinit();
+        self.closed_fds_cur.deinit();
+        self.closed_fds_prev.deinit();
     }
 
     pub fn allocPaneId(self: *SessionStore) u16 {

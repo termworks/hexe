@@ -121,8 +121,7 @@ test "enqueueFrame encodes mux vt header and payload" {
 test "flushToFd drains queued bytes" {
     const testing = std.testing;
 
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 

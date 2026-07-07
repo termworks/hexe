@@ -86,3 +86,25 @@ pub const SpinnerDef = config.SpinnerDef;
 pub const NotificationStyleConfig = config.NotificationStyleConfig;
 pub const NotificationConfig = config.NotificationConfig;
 pub const PaneQuery = query.PaneQuery;
+
+test {
+    // Collect the inline tests from each core submodule. We reference the
+    // files explicitly rather than refAllDeclsRecursive(@This()): the latter
+    // recurses through vt.zig into the ghostty-vt module's internal decls and
+    // tries to compile them standalone (dcimgui/oniguruma), which fails in a
+    // test build. `_ = @import(f)` forces analysis of f's own test blocks
+    // without deep-walking third-party module internals.
+    _ = @import("strings.zig");
+    _ = @import("uuid.zig");
+    _ = @import("config.zig");
+    _ = @import("config_v2.zig");
+    _ = @import("session_config.zig");
+    _ = @import("lua_runtime.zig");
+    _ = @import("lua_api_exec.zig");
+    _ = @import("api_bridge.zig");
+    _ = @import("frontend_client.zig");
+    _ = @import("frontend_liblink_transport.zig");
+    _ = @import("recording/asciicast.zig");
+    _ = @import("pod_protocol.zig");
+    _ = @import("resource_limits.zig");
+}

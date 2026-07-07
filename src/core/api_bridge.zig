@@ -3,6 +3,7 @@ const zlua = @import("zlua");
 const Lua = zlua.Lua;
 const LuaState = zlua.LuaState;
 const config_builder = @import("config_builder.zig");
+const session_model = @import("session_model.zig");
 const ConfigBuilder = config_builder.ConfigBuilder;
 const config = @import("config.zig");
 const log = std.log.scoped(.api_bridge);
@@ -345,84 +346,171 @@ fn parseLayoutPane(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.La
     return pane;
 }
 
+fn canonicalLayoutDir(lua: *Lua, idx: i32) []const u8 {
+    _ = lua.getField(idx, "dir");
+    defer lua.pop(1);
+
+    const dir_str = lua.toString(-1) catch return "h";
+    return if (session_model.isVerticalSplitDir(dir_str)) "v" else "h";
+}
+
+fn layoutNodeSize(lua: *Lua, idx: i32) ?u8 {
+    _ = lua.getField(idx, "size");
+    defer lua.pop(1);
+
+    if (lua.typeOf(-1) != .number) return null;
+    const raw = lua.toNumber(-1) catch return null;
+    if (!std.math.isFinite(raw)) return null;
+    return @intFromFloat(std.math.clamp(raw, 0, 100));
+}
+
+/// Ratio of the first child in [start..end] relative to the whole range.
+/// Unspecified sizes share the remainder up to 100 equally, using one rule
+/// for both the total and the first child so mixed specified/unspecified
+/// layouts keep their proportions at every recursion depth.
+fn layoutRatioFromChildSizes(lua: *Lua, idx: i32, start: i32, end: i32) f32 {
+    const child_count: u32 = @intCast(end - start + 1);
+    var specified_total: u32 = 0;
+    var unspecified: u32 = 0;
+    var first_size: ?u32 = null;
+
+    var i = start;
+    while (i <= end) : (i += 1) {
+        _ = lua.rawGetIndex(idx, i);
+        const size = layoutNodeSize(lua, -1);
+        lua.pop(1);
+        if (size) |s| {
+            specified_total += s;
+            if (i == start) first_size = s;
+        } else {
+            unspecified += 1;
+        }
+    }
+
+    const unspec_share: u32 = if (unspecified > 0 and specified_total < 100)
+        (100 - specified_total) / unspecified
+    else
+        0;
+    const total = specified_total + unspec_share * unspecified;
+    const equal_split = 1.0 / @as(f32, @floatFromInt(child_count));
+    if (total == 0) return equal_split;
+
+    const first = first_size orelse unspec_share;
+    const ratio = @as(f32, @floatFromInt(first)) / @as(f32, @floatFromInt(total));
+    // A zero-size or full-size first child would collapse a sibling to
+    // nothing; fall back to an equal share instead of an invisible pane.
+    if (ratio <= 0.0) return equal_split;
+    if (ratio >= 1.0) return 1.0 - equal_split;
+    return ratio;
+}
+
+fn explicitLayoutRatio(lua: *Lua, idx: i32) ?f32 {
+    _ = lua.getField(idx, "ratio");
+    defer lua.pop(1);
+
+    if (lua.typeOf(-1) != .number) return null;
+    const raw = lua.toNumber(-1) catch return null;
+    if (!std.math.isFinite(raw)) return null;
+    return @floatCast(std.math.clamp(raw, 0, 1));
+}
+
+fn parseLayoutSplitChildren(
+    lua: *Lua,
+    idx: i32,
+    allocator: std.mem.Allocator,
+    dir_tag: []const u8,
+    start: i32,
+    end: i32,
+    ratio_override: ?f32,
+) ?*config.LayoutSplitDef {
+    if (start > end) return null;
+    if (start == end) {
+        _ = lua.rawGetIndex(idx, start);
+        defer lua.pop(1);
+        return parseLayoutSplit(lua, -1, allocator);
+    }
+
+    _ = lua.rawGetIndex(idx, start);
+    const first_child = parseLayoutSplit(lua, -1, allocator) orelse {
+        lua.pop(1);
+        return null;
+    };
+    lua.pop(1);
+
+    const second_child = if (start + 1 == end) blk: {
+        _ = lua.rawGetIndex(idx, end);
+        const child = parseLayoutSplit(lua, -1, allocator) orelse {
+            lua.pop(1);
+            first_child.deinit(allocator);
+            allocator.destroy(first_child);
+            return null;
+        };
+        lua.pop(1);
+        break :blk child;
+    } else parseLayoutSplitChildren(lua, idx, allocator, dir_tag, start + 1, end, null) orelse {
+        first_child.deinit(allocator);
+        allocator.destroy(first_child);
+        return null;
+    };
+
+    const dir = dupeBridgeString(allocator, dir_tag, "failed to allocate layout split direction") orelse {
+        first_child.deinit(allocator);
+        allocator.destroy(first_child);
+        second_child.deinit(allocator);
+        allocator.destroy(second_child);
+        return null;
+    };
+
+    const split = allocator.create(config.LayoutSplitDef) catch |err| {
+        log.warn("failed to allocate layout split node: {}", .{err});
+        allocator.free(dir);
+        first_child.deinit(allocator);
+        allocator.destroy(first_child);
+        second_child.deinit(allocator);
+        allocator.destroy(second_child);
+        return null;
+    };
+
+    split.* = .{
+        .split = .{
+            .dir = dir,
+            .ratio = ratio_override orelse layoutRatioFromChildSizes(lua, idx, start, end),
+            .first = first_child,
+            .second = second_child,
+        },
+    };
+
+    return split;
+}
+
 /// Parse a layout split recursively from Lua table
 fn parseLayoutSplit(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?*config.LayoutSplitDef {
-    // Check if this is a split (has array elements) or a pane
+    // Check if this is a split (has array elements) or a pane.
     const array_len = lua.rawLen(idx);
 
     if (array_len >= 2) {
-        // This is a split with children
-        // Parse dir
-        _ = lua.getField(idx, "dir");
-        const dir_str = lua.toString(-1) catch "h";
-        const dir = dupeBridgeString(allocator, dir_str, "failed to allocate layout split direction") orelse {
-            lua.pop(1);
-            return null;
-        };
-        lua.pop(1);
-
-        // Parse ratio
-        _ = lua.getField(idx, "ratio");
-        const ratio_f64 = if (lua.typeOf(-1) == .number)
-            lua.toNumber(-1) catch 0.5
-        else
-            0.5;
-        const ratio: f32 = @floatCast(ratio_f64);
-        lua.pop(1);
-
-        // Parse first child
-        _ = lua.rawGetIndex(idx, 1);
-        const first_child = parseLayoutSplit(lua, -1, allocator) orelse {
-            lua.pop(1);
-            allocator.free(dir);
-            return null;
-        };
-        lua.pop(1);
-
-        // Parse second child
-        _ = lua.rawGetIndex(idx, 2);
-        const second_child = parseLayoutSplit(lua, -1, allocator) orelse {
-            lua.pop(1);
-            first_child.deinit(allocator);
-            allocator.destroy(first_child);
-            allocator.free(dir);
-            return null;
-        };
-        lua.pop(1);
-
-        // Create split
-        const split = allocator.create(config.LayoutSplitDef) catch |err| {
-            log.warn("failed to allocate layout split node: {}", .{err});
-            first_child.deinit(allocator);
-            allocator.destroy(first_child);
-            second_child.deinit(allocator);
-            allocator.destroy(second_child);
-            allocator.free(dir);
-            return null;
-        };
-
-        split.* = .{
-            .split = .{
-                .dir = dir,
-                .ratio = ratio,
-                .first = first_child,
-                .second = second_child,
-            },
-        };
-
-        return split;
-    } else {
-        // This is a pane
-        const pane = parseLayoutPane(lua, idx, allocator) orelse return null;
-        const split = allocator.create(config.LayoutSplitDef) catch |err| {
-            log.warn("failed to allocate layout pane node: {}", .{err});
-            var owned_pane = pane;
-            owned_pane.deinit(allocator);
-            return null;
-        };
-        split.* = .{ .pane = pane };
-        return split;
+        const dir_tag = canonicalLayoutDir(lua, idx);
+        return parseLayoutSplitChildren(
+            lua,
+            idx,
+            allocator,
+            dir_tag,
+            1,
+            @intCast(array_len),
+            explicitLayoutRatio(lua, idx),
+        );
     }
+
+    // This is a pane.
+    const pane = parseLayoutPane(lua, idx, allocator) orelse return null;
+    const split = allocator.create(config.LayoutSplitDef) catch |err| {
+        log.warn("failed to allocate layout pane node: {}", .{err});
+        var owned_pane = pane;
+        owned_pane.deinit(allocator);
+        return null;
+    };
+    split.* = .{ .pane = pane };
+    return split;
 }
 
 /// Parse action string into BindAction
@@ -434,6 +522,11 @@ fn parseSimpleAction(action_str: []const u8) ?config.Config.BindAction {
     if (std.mem.eql(u8, action_str, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action_str, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action_str, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action_str, "pane.sync_toggle")) return .sync_toggle;
+    if (std.mem.eql(u8, action_str, "tab.rename")) return .tab_rename;
+    if (std.mem.eql(u8, action_str, "pane.zoom")) return .pane_zoom;
+    if (std.mem.eql(u8, action_str, "config.reload")) return .config_reload;
+    if (std.mem.eql(u8, action_str, "copy.enter")) return .copy_enter;
     if (std.mem.eql(u8, action_str, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action_str, "clipboard.request")) return .clipboard_request;
     if (std.mem.eql(u8, action_str, "system.notify")) return .system_notify;
@@ -1763,7 +1856,8 @@ pub fn parseLayoutDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) !config
     _ = lua.getField(idx, "enabled");
     const enabled = if (lua.typeOf(-1) == .boolean)
         lua.toBoolean(-1)
-    else true;
+    else
+        true;
     lua.pop(1);
 
     // Parse tabs array
@@ -2384,6 +2478,13 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
 
 fn freeParsedSegment(seg: *config.Segment, allocator: std.mem.Allocator) void {
     allocator.free(seg.name);
+    if (seg.outputs.len > 0) {
+        for (seg.outputs) |*out| {
+            allocator.free(@constCast(out.style));
+            allocator.free(@constCast(out.format));
+        }
+        allocator.free(seg.outputs);
+    }
     if (seg.command) |v| allocator.free(v);
     if (seg.builtin) |v| allocator.free(v);
     if (seg.progress_show_when) |v| allocator.free(v);
@@ -2394,6 +2495,14 @@ fn freeParsedSegment(seg: *config.Segment, allocator: std.mem.Allocator) void {
     if (seg.button_left_style) |v| allocator.free(v);
     if (seg.button_middle_style) |v| allocator.free(v);
     if (seg.button_right_style) |v| allocator.free(v);
+    // Default strings duped by ownSegmentDefaultStrings.
+    allocator.free(@constCast(seg.active_style));
+    allocator.free(@constCast(seg.inactive_style));
+    allocator.free(@constCast(seg.separator));
+    allocator.free(@constCast(seg.separator_style));
+    allocator.free(@constCast(seg.tab_title));
+    allocator.free(@constCast(seg.left_arrow));
+    allocator.free(@constCast(seg.right_arrow));
     if (seg.when) |*w| {
         var when = w.*;
         when.deinit(allocator);
@@ -2422,7 +2531,7 @@ test "parseSegmentAtPath accepts callback active_when in button table" {
     _ = try lua.getGlobal("seg");
     defer lua.pop(1);
 
-    var seg = parseSegmentAtPath(&lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
+    var seg = parseSegmentAtPath(lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
     defer freeParsedSegment(&seg, std.testing.allocator);
 
     try std.testing.expect(seg.button_active_bash != null);
@@ -2447,7 +2556,7 @@ test "parseSegmentAtPath accepts callback active_when at segment level" {
     _ = try lua.getGlobal("seg");
     defer lua.pop(1);
 
-    var seg = parseSegmentAtPath(&lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
+    var seg = parseSegmentAtPath(lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
     defer freeParsedSegment(&seg, std.testing.allocator);
 
     try std.testing.expect(seg.button_active_bash != null);
@@ -2472,7 +2581,7 @@ test "parseLayoutFloat reads canonical attrs table" {
     _ = try lua.getGlobal("float");
     defer lua.pop(1);
 
-    var float = parseLayoutFloat(&lua, -1, std.testing.allocator) orelse return error.TestUnexpectedResult;
+    var float = parseLayoutFloat(lua, -1, std.testing.allocator) orelse return error.TestUnexpectedResult;
     defer float.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u8, 'g'), float.key);
@@ -2480,4 +2589,78 @@ test "parseLayoutFloat reads canonical attrs table" {
     try std.testing.expect(float.attributes.global);
     try std.testing.expect(float.attributes.per_cwd);
     try std.testing.expect(float.attributes.inherit_env);
+}
+
+test "parseLayoutDef canonicalizes split directions and child sizes" {
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    const chunk =
+        "layout = {" ++
+        "name='unit'," ++
+        "tabs={ {" ++
+        "name='main'," ++
+        "root={ dir='horizontal', { size=30 }, { size=70 } }" ++
+        "} }" ++
+        "}";
+    const z = try std.testing.allocator.dupeZ(u8, chunk);
+    defer std.testing.allocator.free(z);
+    try lua.loadString(z);
+    try lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try lua.getGlobal("layout");
+    defer lua.pop(1);
+
+    var layout = try parseLayoutDef(lua, -1, std.testing.allocator);
+    defer layout.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), layout.tabs.len);
+    const root = layout.tabs[0].root orelse return error.TestUnexpectedResult;
+    switch (root) {
+        .split => |split| {
+            try std.testing.expectEqualStrings("h", split.dir);
+            try std.testing.expect(@abs(split.ratio - @as(f32, 0.3)) < 0.001);
+        },
+        .pane => return error.TestUnexpectedResult,
+    }
+}
+
+test "parseLayoutDef preserves n-ary split children" {
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    const chunk =
+        "layout = {" ++
+        "name='unit'," ++
+        "tabs={ {" ++
+        "name='main'," ++
+        "root={ dir='vertical', { size=20 }, { size=30 }, { size=50 } }" ++
+        "} }" ++
+        "}";
+    const z = try std.testing.allocator.dupeZ(u8, chunk);
+    defer std.testing.allocator.free(z);
+    try lua.loadString(z);
+    try lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try lua.getGlobal("layout");
+    defer lua.pop(1);
+
+    var layout = try parseLayoutDef(lua, -1, std.testing.allocator);
+    defer layout.deinit(std.testing.allocator);
+
+    const root = layout.tabs[0].root orelse return error.TestUnexpectedResult;
+    switch (root) {
+        .split => |split| {
+            try std.testing.expectEqualStrings("v", split.dir);
+            try std.testing.expect(@abs(split.ratio - @as(f32, 0.2)) < 0.001);
+            switch (split.second.*) {
+                .split => |nested| {
+                    try std.testing.expectEqualStrings("v", nested.dir);
+                    try std.testing.expect(@abs(nested.ratio - @as(f32, 0.375)) < 0.001);
+                },
+                .pane => return error.TestUnexpectedResult,
+            }
+        },
+        .pane => return error.TestUnexpectedResult,
+    }
 }

@@ -32,10 +32,12 @@ pub const VT = struct {
     kitty_image_cache: std.AutoHashMap(u32, KittyImageCache) = undefined,
     width: u16 = 0,
     height: u16 = 0,
-    // NOTE: Do NOT cache RenderState across calls.
-    // Ghostty's "visible viewport" for main-screen scrollback can change due to
-    // viewport movement even when no new output is fed. Caching at this layer can
-    // cause panes to appear visually frozen while scrolling.
+    // RenderState cache validity. Every terminal mutation must mark this:
+    // feed() and resize() do it internally; viewport movement without new
+    // output (scrollViewport) happens only via the Pane scroll methods, which
+    // call invalidateRenderState(). Without complete invalidation coverage a
+    // cached snapshot makes panes appear frozen — the historical bug here.
+    render_state_dirty: bool = true,
 
     /// Initialize the VT in-place.
     ///
@@ -82,17 +84,19 @@ pub const VT = struct {
     /// We must reuse the same stream across calls so the parser can maintain
     /// state for sequences that arrive split across PTY reads.
     pub fn feed(self: *VT, data: []const u8) !void {
+        self.render_state_dirty = true;
         try self.stream.nextSlice(data);
     }
 
     /// Mark the VT as needing a fresh render snapshot.
     pub fn invalidateRenderState(self: *VT) void {
-        _ = self;
+        self.render_state_dirty = true;
     }
 
     /// Resize the virtual terminal
     pub fn resize(self: *VT, width: u16, height: u16) !void {
         if (width == self.width and height == self.height) return;
+        self.render_state_dirty = true;
         try self.terminal.resize(self.allocator, width, height);
         self.width = width;
         self.height = height;
@@ -142,6 +146,11 @@ pub const VT = struct {
     /// SAFETY: When scrollback is very large, this can fail or return invalid data.
     /// Callers should check the returned RenderState's rows/cols are reasonable.
     pub fn getRenderState(self: *VT) !*const ghostty.RenderState {
+        // Reuse the previous snapshot while the terminal is unchanged; the
+        // idle render loop redraws every pane at a fixed cadence and the
+        // snapshot rebuild (full viewport duplication) dominates that cost.
+        if (!self.render_state_dirty) return &self.render_state;
+
         // Clear previous state before updating to free memory from previous large scrollback
         self.render_state.deinit(self.allocator);
         self.render_state = .empty;
@@ -158,11 +167,15 @@ pub const VT = struct {
             self.render_state.cols > MAX_REASONABLE_COLS)
         {
             // RenderState has invalid dimensions - likely due to corrupted scrollback
-            // Return empty state to prevent rendering corruption
+            // Return empty state to prevent rendering corruption.
+            // Stay dirty so the next frame retries instead of caching the
+            // empty fallback.
             self.render_state.deinit(self.allocator);
             self.render_state = .empty;
+            return &self.render_state;
         }
 
+        self.render_state_dirty = false;
         return &self.render_state;
     }
 };

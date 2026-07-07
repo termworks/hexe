@@ -78,6 +78,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         runtime_events.applyDeferredCwdResponse(state);
         runtime_events.applyDeferredPaneInfoResponse(state);
         runtime_events.applyDeferredSessionSnapshots(state);
+        runtime_events.applyDeferredSessionStolen(state);
         state.flushPendingMuxVtWrites();
         loop_watchers.ensureSesVtWatcherArmed(state, &resources.ses_vt_watcher, &resources.ses_vt_buffer);
         loop_watchers.ensureSesCtlWatcherArmed(state, &resources.ses_ctl_watcher, &resources.ses_ctl_buffer);
@@ -89,6 +90,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         runtime_events.applyDeferredCwdResponse(state);
         runtime_events.applyDeferredPaneInfoResponse(state);
         runtime_events.applyDeferredSessionSnapshots(state);
+        runtime_events.applyDeferredSessionStolen(state);
         if (state.view.tab_views.items.len == 0) {
             dead_panes.handleDeferredRespawn(state);
             if (state.view.tab_views.items.len == 0) {

@@ -6,6 +6,26 @@ pub const SessionSplitDir = enum {
     vertical,
 };
 
+/// Canonical split-direction rule shared by every parser (Lua config, session
+/// snapshot JSON, layout templates, terminal apply). Accepts both the short
+/// ("v"/"h") and long ("vertical"/"horizontal") forms; anything else — including
+/// malformed input — is horizontal. Previously each site rolled its own check
+/// and they disagreed (some defaulted to vertical and rejected the short form,
+/// so `dir="h"` decoded as vertical in snapshot JSON), flipping a layout's
+/// orientation depending on which component parsed it.
+pub fn isVerticalSplitDir(s: []const u8) bool {
+    return std.mem.eql(u8, s, "v") or std.mem.eql(u8, s, "vertical");
+}
+
+test "isVerticalSplitDir accepts short and long forms with a horizontal default" {
+    try std.testing.expect(isVerticalSplitDir("v"));
+    try std.testing.expect(isVerticalSplitDir("vertical"));
+    try std.testing.expect(!isVerticalSplitDir("h"));
+    try std.testing.expect(!isVerticalSplitDir("horizontal"));
+    try std.testing.expect(!isVerticalSplitDir("")); // malformed -> horizontal
+    try std.testing.expect(!isVerticalSplitDir("nonsense"));
+}
+
 pub const SessionPaneKind = enum {
     split,
     float,
@@ -822,7 +842,7 @@ fn parseLayoutNode(
 
         node.* = .{
             .split = .{
-                .dir = if (std.mem.eql(u8, dir_str, "horizontal")) .horizontal else .vertical,
+                .dir = if (isVerticalSplitDir(dir_str)) .vertical else .horizontal,
                 .ratio = floatField(obj, "ratio") orelse 0.5,
                 .first = first,
                 .second = second,

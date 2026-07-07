@@ -6,6 +6,15 @@ const frontend_client = @import("frontend_client.zig");
 pub const ConnectOptions = struct {
     socket_path: ?[]const u8 = null,
     autostart_ses: bool = true,
+    // Remote (liblink) attach. When remote_host is set, resolveTransport
+    // builds a liblink transport instead of local IPC. The referenced strings
+    // must outlive the connection (they do — CLI arg values / env slices live
+    // for the whole session).
+    remote_host: ?[]const u8 = null,
+    remote_port: u16 = 0, // 0 = liblink default
+    remote_user: ?[]const u8 = null,
+    remote_identity: ?[]const u8 = null,
+    remote_ses_socket: ?[]const u8 = null,
 };
 
 pub fn localIpcTransport(socket_path: ?[]const u8, autostart_ses: bool) frontend_client.Transport {
@@ -16,6 +25,16 @@ pub fn localIpcTransport(socket_path: ?[]const u8, autostart_ses: bool) frontend
 }
 
 pub fn resolveTransport(options: ConnectOptions) frontend_client.Transport {
+    if (options.remote_host) |host| {
+        var cfg: frontend_client.LiblinkTransport = .{
+            .host = host,
+            .user = options.remote_user orelse "",
+            .identity_path = options.remote_identity orelse "",
+            .remote_ses_socket = options.remote_ses_socket,
+        };
+        if (options.remote_port != 0) cfg.port = options.remote_port;
+        return .{ .liblink = cfg };
+    }
     return localIpcTransport(options.socket_path, options.autostart_ses);
 }
 

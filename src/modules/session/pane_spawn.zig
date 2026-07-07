@@ -193,8 +193,16 @@ pub fn spawnPod(
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
     defer parsed.deinit();
 
+    // Validate the shape: anything writing to the pod's stdout before the
+    // handshake (shell profile noise, wrapper output) can produce valid JSON
+    // of the wrong type, and unchecked union accesses would be safety-checked
+    // illegal behavior in the daemon.
+    if (parsed.value != .object) return error.PodBadHandshake;
     const root = parsed.value.object;
-    const pid_val = (root.get("pid") orelse return error.PodBadHandshake).integer;
+    const pid_node = root.get("pid") orelse return error.PodBadHandshake;
+    if (pid_node != .integer) return error.PodBadHandshake;
+    const pid_val = pid_node.integer;
+    if (pid_val <= 0 or pid_val > std.math.maxInt(posix.pid_t)) return error.PodBadHandshake;
     const child_pid: posix.pid_t = @intCast(pid_val);
 
     return .{ .pod_pid = pod_pid, .child_pid = child_pid };

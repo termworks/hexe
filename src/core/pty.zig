@@ -121,12 +121,13 @@ pub const Pty = struct {
                     .done_fd = done_pipe[0],
                 };
                 voidbox.applyIsolationInChildSync(cfg, std.heap.c_allocator, sync) catch |err| {
-                    if (std.fs.createFileAbsolute("/tmp/hexe-isolation-error.log", .{ .mode = 0o600 })) |f| {
-                        var errbuf: [256]u8 = undefined;
-                        const msg = std.fmt.bufPrint(&errbuf, "applyInChild failed: {}\n", .{err}) catch "unknown\n";
-                        _ = f.write(msg) catch 0;
-                        f.close();
-                    } else |_| {}
+                    // Report to the pane's stderr (the pty slave, already
+                    // dup2'd above) instead of a fixed, world-shared /tmp path
+                    // that follows symlinks and truncates (CWE-59/CWE-377). The
+                    // child is about to exit; the message surfaces in the pane.
+                    var errbuf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&errbuf, "hexe: pane isolation failed: {}\r\n", .{err}) catch "hexe: pane isolation failed\r\n";
+                    _ = posix.write(posix.STDERR_FILENO, msg) catch {};
                     posix.exit(1);
                 };
             }

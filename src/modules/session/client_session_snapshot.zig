@@ -131,6 +131,34 @@ pub fn addTab(
     snapshot.focused_pane_uuid = pane_uuid;
 }
 
+pub fn renameTab(
+    self: anytype,
+    client_id: usize,
+    tab_uuid: [32]u8,
+    name: []const u8,
+) void {
+    const client = self.getClient(client_id) orelse {
+        core.logging.warn("ses", "client snapshot tab rename skipped: client {d} is not registered", .{client_id});
+        return;
+    };
+    const snapshot = ensureClientSessionSnapshot(self.allocator, client) catch |err| {
+        core.logging.logError("ses", "failed to ensure client session snapshot for tab rename", err);
+        return;
+    };
+    for (snapshot.tabs.items) |*tab| {
+        if (std.mem.eql(u8, &tab.uuid, &tab_uuid)) {
+            const owned = snapshot.allocator.dupe(u8, name) catch |err| {
+                core.logging.logError("ses", "failed to allocate renamed tab name", err);
+                return;
+            };
+            snapshot.allocator.free(tab.name);
+            tab.name = owned;
+            return;
+        }
+    }
+    core.logging.warn("ses", "client snapshot tab rename skipped: tab UUID is not in snapshot", .{});
+}
+
 pub fn removeTab(
     self: anytype,
     client_id: usize,

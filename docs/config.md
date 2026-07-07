@@ -156,3 +156,21 @@ Build/test gates:
 make test
 make build
 ```
+
+## Security: project config trust
+
+Hexe auto-loads a `./.hexe.lua` from the current directory. The general config
+is parsed in a sandboxed Lua runtime (no `io`/`os`/`package`), so pure config
+cannot shell out. However, a session config can define pane/float `command=`
+strings and `on_start` / `on_stop` hooks that **are** executed as shell
+commands. Opening a session from a directory that ships a malicious `.hexe.lua`
+therefore runs its commands — the same auto-trust exposure as `direnv`.
+
+Controls:
+
+- `HEXE_SKIP_LOCAL_CONFIG=1` — do not load `./.hexe.lua` at all.
+- `HEXE_NO_PROJECT_COMMANDS=1` — load the layout but skip project-sourced
+  `on_start` / `on_stop` command execution.
+
+A per-directory trust ledger (approve a config's hash once, prompt on change)
+is the intended long-term fix.

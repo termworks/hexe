@@ -58,6 +58,7 @@ pub const SesState = struct {
     pub const updateClientSessionFocus = api.updateClientSessionFocus;
     pub const addClientSessionTab = api.addClientSessionTab;
     pub const removeClientSessionTab = api.removeClientSessionTab;
+    pub const renameClientSessionTab = api.renameClientSessionTab;
     pub const splitClientSessionPane = api.splitClientSessionPane;
     pub const replaceClientSessionSplitPane = api.replaceClientSessionSplitPane;
     pub const setClientSessionSplitRatio = api.setClientSessionSplitRatio;

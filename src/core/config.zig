@@ -702,6 +702,11 @@ pub const Config = struct {
         focus_move,
         layout_save,
         layout_load,
+        sync_toggle,
+        tab_rename,
+        pane_zoom,
+        config_reload,
+        copy_enter,
     };
 
     pub const BindAction = union(BindActionTag) {
@@ -728,6 +733,11 @@ pub const Config = struct {
         focus_move: BindKeyKind, // up/down/left/right
         layout_save,
         layout_load,
+        sync_toggle, // toggle broadcasting input to all panes in the tab
+        tab_rename, // inline-rename the active tab
+        pane_zoom, // toggle zoom/maximize of the focused tiled pane
+        config_reload, // re-read the Lua config and hot-swap it
+        copy_enter, // enter keyboard copy-mode
     };
 
     pub const Bind = struct {
@@ -978,6 +988,11 @@ pub const Config = struct {
                 config.status = .@"error";
                 config.status_message = msg;
                 PARSE_ERROR = null;
+                // parseFromLua returns error.ConfigError, so the caller never
+                // receives `config` and cannot deinit it. Free everything the
+                // partially-built config owns (status_message + any parsed
+                // fields) here rather than leaking it.
+                config.deinit();
                 return error.ConfigError;
             }
         }
@@ -1357,6 +1372,11 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "pane.disown")) return .pane_disown;
     if (std.mem.eql(u8, action_type, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action_type, "pane.close")) return .pane_close;
+    if (std.mem.eql(u8, action_type, "pane.sync_toggle")) return .sync_toggle;
+    if (std.mem.eql(u8, action_type, "tab.rename")) return .tab_rename;
+    if (std.mem.eql(u8, action_type, "pane.zoom")) return .pane_zoom;
+    if (std.mem.eql(u8, action_type, "config.reload")) return .config_reload;
+    if (std.mem.eql(u8, action_type, "copy.enter")) return .copy_enter;
     if (std.mem.eql(u8, action_type, "pane.select_mode")) return .pane_select_mode;
     if (std.mem.eql(u8, action_type, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action_type, "clipboard.request")) return .clipboard_request;
@@ -1405,6 +1425,11 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "pane.disown")) return .pane_disown;
     if (std.mem.eql(u8, action, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action, "pane.close")) return .pane_close;
+    if (std.mem.eql(u8, action, "pane.sync_toggle")) return .sync_toggle;
+    if (std.mem.eql(u8, action, "tab.rename")) return .tab_rename;
+    if (std.mem.eql(u8, action, "pane.zoom")) return .pane_zoom;
+    if (std.mem.eql(u8, action, "config.reload")) return .config_reload;
+    if (std.mem.eql(u8, action, "copy.enter")) return .copy_enter;
     if (std.mem.eql(u8, action, "pane.select_mode")) return .pane_select_mode;
     if (std.mem.eql(u8, action, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action, "clipboard.request")) return .clipboard_request;

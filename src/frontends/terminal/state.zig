@@ -113,6 +113,23 @@ const adhoc_title_style = core.FloatStyle{
     .module = adhoc_title_segment,
 };
 
+/// Keyboard copy-mode cursor state. Coordinates are local to the focused pane
+/// (same convention mouse_selection.begin/update expect), so selection reuses
+/// the exact scroll-aware machinery the mouse path uses.
+pub const CopyMode = struct {
+    active: bool = false,
+    x: u16 = 0,
+    y: u16 = 0,
+    selecting: bool = false,
+};
+
+fn clampAdd(cur: u16, delta: i16, max: u16) u16 {
+    const signed = @as(i32, cur) + delta;
+    if (signed < 0) return 0;
+    const val: u16 = @intCast(@min(signed, @as(i32, max)));
+    return val;
+}
+
 pub const State = struct {
     fn floatStyleShowsTitle(style: ?*const core.FloatStyle) bool {
         const value = style orelse return false;
@@ -243,6 +260,17 @@ pub const State = struct {
     running: bool,
     needs_render: bool,
     force_full_render: bool,
+    /// When true, keyboard input is broadcast to every split pane in the
+    /// active tab (tmux `synchronize-panes`). Toggled by pane.sync_toggle.
+    sync_input: bool = false,
+    /// When set, the tiled pane with this uuid is zoomed to full tab bounds
+    /// (tmux `resize-pane -Z`). Local view state — resets on reattach. Toggled
+    /// by pane.zoom; auto-cleared by any layout-mutating operation.
+    zoomed_pane_uuid: ?[32]u8 = null,
+    /// Keyboard copy-mode (tmux copy-mode): a cursor over the focused pane that
+    /// drives the shared mouse_selection machinery. When active, input is
+    /// captured for navigation/selection instead of forwarded to the pane.
+    copy_mode: CopyMode = .{},
     /// When true, force cursor visible on next render (set after float death)
     cursor_needs_restore: bool,
     /// One-shot cursor snapshot restored after transient CLI float exits.
@@ -315,6 +343,13 @@ pub const State = struct {
     // Float title rename (inline editing)
     float_rename_uuid: ?[32]u8,
     float_rename_buf: std.ArrayList(u8),
+
+    // Tab rename (inline editing). While active, keystrokes edit the tab name
+    // live in the projection (so the tab bar reflects them with no special
+    // render path); Enter persists to SES, Esc restores the original.
+    tab_rename_index: ?usize = null,
+    tab_rename_buf: std.ArrayList(u8) = .empty,
+    tab_rename_original: std.ArrayList(u8) = .empty,
 
     // Title click counter (for double-click rename)
     mouse_title_last_ms: i64,
@@ -497,6 +532,188 @@ pub const State = struct {
         self.float_rename_uuid = null;
         self.float_rename_buf.clearRetainingCapacity();
         self.needs_render = true;
+    }
+
+    pub fn beginTabRename(self: *State) void {
+        const idx = self.activeTabIndex();
+        const current = self.runtime.tabName(idx) orelse "";
+        self.tab_rename_buf.clearRetainingCapacity();
+        self.tab_rename_original.clearRetainingCapacity();
+        const cap: usize = 64;
+        const slice = current[0..@min(current.len, cap)];
+        self.tab_rename_buf.appendSlice(self.allocator, slice) catch {
+            self.notifications.show("Rename failed");
+            self.needs_render = true;
+            return;
+        };
+        self.tab_rename_original.appendSlice(self.allocator, current) catch {};
+        self.tab_rename_index = idx;
+        self.needs_render = true;
+    }
+
+    /// Append typed text to the tab rename buffer and reflect it live.
+    pub fn appendTabRenameText(self: *State, text: []const u8) void {
+        const idx = self.tab_rename_index orelse return;
+        const max_len: usize = 64;
+        if (self.tab_rename_buf.items.len >= max_len) return;
+        const remaining = max_len - self.tab_rename_buf.items.len;
+        const n = @min(text.len, remaining);
+        self.tab_rename_buf.appendSlice(self.allocator, text[0..n]) catch return;
+        _ = self.runtime.setTabName(idx, self.tab_rename_buf.items);
+        self.needs_render = true;
+    }
+
+    pub fn backspaceTabRename(self: *State) void {
+        const idx = self.tab_rename_index orelse return;
+        if (self.tab_rename_buf.items.len > 0) {
+            _ = self.tab_rename_buf.pop();
+            _ = self.runtime.setTabName(idx, self.tab_rename_buf.items);
+            self.needs_render = true;
+        }
+    }
+
+    pub fn commitTabRename(self: *State) void {
+        const idx = self.tab_rename_index orelse return;
+        const new_name = std.mem.trim(u8, self.tab_rename_buf.items, " \t\r\n");
+        if (new_name.len > 0) {
+            _ = self.runtime.setTabName(idx, new_name);
+            if (self.runtime.tabUuid(idx)) |tab_uuid| {
+                self.runtime.sessionRenameTab(tab_uuid, new_name) catch |err| {
+                    core.logging.logError("terminal", "tab rename SES sync failed", err);
+                };
+            }
+        } else {
+            // Empty name — restore the original.
+            _ = self.runtime.setTabName(idx, self.tab_rename_original.items);
+        }
+        self.tab_rename_index = null;
+        self.renderer.invalidate();
+        self.force_full_render = true;
+        self.needs_render = true;
+    }
+
+    pub fn cancelTabRename(self: *State) void {
+        const idx = self.tab_rename_index orelse return;
+        _ = self.runtime.setTabName(idx, self.tab_rename_original.items);
+        self.tab_rename_index = null;
+        self.needs_render = true;
+    }
+
+    pub fn isTabRenameActive(self: *const State) bool {
+        return self.tab_rename_index != null;
+    }
+
+    /// Toggle zoom (maximize) of the focused tiled pane to full tab bounds.
+    pub fn toggleZoom(self: *State) void {
+        if (self.zoomed_pane_uuid != null) {
+            self.clearZoom();
+            return;
+        }
+        // Only tiled panes zoom; ignore when a float is focused or there is
+        // nothing to maximize over.
+        if (self.activeFloatingIndex() != null) return;
+        const layout = self.currentLayout();
+        if (layout.splitCount() <= 1) return;
+        const pane = layout.getFocusedPane() orelse return;
+        pane.resize(0, 0, self.layout_width, self.layout_height) catch |err| {
+            core.logging.logError("terminal", "zoom resize failed", err);
+            return;
+        };
+        self.zoomed_pane_uuid = pane.uuid;
+        self.renderer.invalidate();
+        self.force_full_render = true;
+        self.needs_render = true;
+        self.notifications.showFor("Zoom: ON", 900);
+    }
+
+    /// Restore normal tiled geometry if a pane is currently zoomed.
+    pub fn clearZoom(self: *State) void {
+        if (self.zoomed_pane_uuid == null) return;
+        self.zoomed_pane_uuid = null;
+        // Recompute the split tree geometry, resizing every pane back.
+        self.currentLayout().resize(self.layout_width, self.layout_height);
+        self.renderer.invalidate();
+        self.force_full_render = true;
+        self.needs_render = true;
+        self.notifications.showFor("Zoom: OFF", 900);
+    }
+
+    /// Silently drop zoom state without a notification or recalc — used by
+    /// layout-mutating operations that will recompute geometry themselves.
+    pub fn dropZoom(self: *State) void {
+        self.zoomed_pane_uuid = null;
+    }
+
+    pub fn isZoomed(self: *const State) bool {
+        return self.zoomed_pane_uuid != null;
+    }
+
+    /// Enter keyboard copy-mode over the focused tiled pane.
+    pub fn enterCopyMode(self: *State) void {
+        if (self.activeFloatingIndex() != null) return; // tiled panes only (v1)
+        if (self.currentLayout().getFocusedPane() == null) return;
+        self.copy_mode = .{ .active = true, .x = 0, .y = 0, .selecting = false };
+        self.notifications.showFor("Copy mode: hjkl/arrows move · v select · y yank · Esc exit", 2500);
+        self.needs_render = true;
+    }
+
+    /// Move the copy-mode cursor, extending the selection if one is active.
+    pub fn copyMove(self: *State, dx: i16, dy: i16) void {
+        if (!self.copy_mode.active) return;
+        const pane = self.currentLayout().getFocusedPane() orelse return;
+        const max_x = if (pane.width > 0) pane.width - 1 else 0;
+        const max_y = if (pane.height > 0) pane.height - 1 else 0;
+        self.copy_mode.x = clampAdd(self.copy_mode.x, dx, max_x);
+        self.copy_mode.y = clampAdd(self.copy_mode.y, dy, max_y);
+        if (self.copy_mode.selecting) {
+            self.mouse_selection.update(pane, self.copy_mode.x, self.copy_mode.y);
+        }
+        self.needs_render = true;
+    }
+
+    /// Start (or restart) a selection anchored at the current cursor.
+    pub fn copyToggleSelect(self: *State) void {
+        if (!self.copy_mode.active) return;
+        const pane = self.currentLayout().getFocusedPane() orelse return;
+        if (self.copy_mode.selecting) {
+            self.mouse_selection.clear();
+            self.copy_mode.selecting = false;
+        } else {
+            self.mouse_selection.begin(self.activeTabIndex(), pane.uuid, pane, self.copy_mode.x, self.copy_mode.y);
+            self.copy_mode.selecting = true;
+        }
+        self.needs_render = true;
+    }
+
+    /// Yank the current selection to the system clipboard and exit copy-mode.
+    pub fn copyYank(self: *State) void {
+        if (!self.copy_mode.active) return;
+        defer self.exitCopyMode();
+        if (!self.copy_mode.selecting) return;
+        const pane = self.currentLayout().getFocusedPane() orelse return;
+        self.mouse_selection.update(pane, self.copy_mode.x, self.copy_mode.y);
+        self.mouse_selection.finish();
+        const range = self.mouse_selection.bufRangeForPane(self.activeTabIndex(), pane) orelse return;
+        const bytes = mouse_selection.extractText(self.allocator, pane, range) catch return;
+        defer self.allocator.free(bytes);
+        if (bytes.len == 0) return;
+        const stdout = std.fs.File.stdout();
+        var io_buf: [256]u8 = undefined;
+        var writer = stdout.writer(&io_buf);
+        self.renderer.vx.copyToSystemClipboard(&writer.interface, bytes, self.allocator) catch return;
+        self.notifications.showFor("Copied selection", 1200);
+    }
+
+    pub fn exitCopyMode(self: *State) void {
+        self.copy_mode = .{};
+        self.mouse_selection.clear();
+        self.renderer.invalidate();
+        self.force_full_render = true;
+        self.needs_render = true;
+    }
+
+    pub fn isCopyModeActive(self: *const State) bool {
+        return self.copy_mode.active;
     }
 
     fn removeQueuedPaneReplyTargets(
@@ -704,6 +921,8 @@ pub const State = struct {
         self.pending_float_requests.deinit();
 
         self.float_rename_buf.deinit(self.allocator);
+        self.tab_rename_buf.deinit(self.allocator);
+        self.tab_rename_original.deinit(self.allocator);
         self.runtime.destroy();
     }
 
@@ -871,6 +1090,9 @@ pub const State = struct {
     }
 
     pub fn setActiveTabIndex(self: *State, idx: usize) void {
+        // Zoom is per-tab and would blank a tab whose panes don't match the
+        // zoomed uuid — drop it on any tab change.
+        self.zoomed_pane_uuid = null;
         const clamped = if (self.view.tab_views.items.len == 0) 0 else @min(idx, self.view.tab_views.items.len - 1);
         self.runtime.setActiveTab(clamped);
         if (self.frontend_view) |*view| {
@@ -1002,14 +1224,17 @@ pub const State = struct {
         return applied;
     }
 
+    /// PARKED (PLAN.md 2.2): `frontend_view` is a `SessionView` mirror of the
+    /// runtime that nothing renders from — `state.view` + `runtime` are the
+    /// source of truth, and the only readers (switchToNextTab/Prev) fall back to
+    /// them when it is null. Rather than pay to rebuild the mirror on every
+    /// refresh for a consumer that doesn't exist yet, we leave it permanently
+    /// null: every mutation site is already null-guarded and inert, and the
+    /// `SessionView` machinery stays in the tree dormant for when a real second
+    /// frontend needs it (at which point this becomes a populate + a renderer
+    /// that reads it — the "commit" path). Do not repopulate it piecemeal.
     pub fn refreshFrontendView(self: *State) void {
-        var next = frontend_core.SessionView.fromRuntime(self.allocator, self.runtime) catch |err| {
-            core.logging.logError("terminal", "failed to refresh shared frontend view", err);
-            return;
-        };
-        errdefer next.deinit();
-        if (self.frontend_view) |*old| old.deinit();
-        self.frontend_view = next;
+        _ = self;
     }
 
     pub fn applyFrontendPaneCwd(self: *State, uuid: [32]u8, cwd: []const u8) void {
@@ -1271,6 +1496,10 @@ pub const State = struct {
 
     pub fn replaceWithSessionConfig(self: *State, config: core.SessionConfig, tab_filter: ?[]const u8) !void {
         return state_session.replaceWithSessionConfig(self, config, tab_filter);
+    }
+
+    pub fn replaceWithLayoutDef(self: *State, layout: *const core.LayoutDef) !void {
+        return state_session.replaceWithLayoutDef(self, layout);
     }
 
     pub fn syncSessionTabAddedChecked(self: *State, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) bool {

@@ -153,6 +153,14 @@ pub const TxLog = struct {
             if (h_off == 0) break; // EOF at start
             if (h_off < header_bytes.len) break; // Incomplete header (corrupted)
 
+            // Validate the enum tag before it is ever switched on: a corrupt
+            // byte here would otherwise be safety-checked illegal behavior
+            // during recovery, crash-looping the daemon at startup.
+            const tx_type = std.meta.intToEnum(
+                TxType,
+                header_bytes[@offsetOf(TxEntry, "tx_type")],
+            ) catch break; // Corrupt record: stop replay at the bad tail.
+
             // Read payload with loop to handle partial reads
             var payload: []u8 = &.{};
             if (header.payload_len > 0) {
@@ -175,7 +183,7 @@ pub const TxLog = struct {
             }
 
             try entries.append(allocator, .{
-                .tx_type = header.tx_type,
+                .tx_type = tx_type,
                 .timestamp = header.timestamp,
                 .session_id = header.session_id,
                 .payload = payload,

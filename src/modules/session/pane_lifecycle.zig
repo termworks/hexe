@@ -28,6 +28,33 @@ fn removePaneFromClientList(client: *store_mod.Client, uuid: [32]u8) void {
     }
 }
 
+fn clientSnapshotHasFloat(client: *const store_mod.Client, uuid: [32]u8) bool {
+    const snapshot = client.session_snapshot orelse return false;
+    if (snapshot.panes.get(uuid)) |pane_state| {
+        if (pane_state.kind == .float) return true;
+    }
+    for (snapshot.floats.items) |float_state| {
+        if (std.mem.eql(u8, &float_state.pane_uuid, &uuid)) return true;
+    }
+    return false;
+}
+
+/// The reattach flow (restore + commit register) completes within seconds;
+/// well past that, a still-set pending flag means the commit never arrived.
+const REATTACH_STEAL_WINDOW_SECS: i64 = 30;
+
+/// Whether an explicit session reattach may reclaim this float from a live
+/// owner. Time-boxed: the pending flag survives until commit so that client
+/// death can restore panes to the detached session, but the steal privilege
+/// must not outlive the reattach flow itself — otherwise a client whose
+/// commit register failed keeps a lifetime license to rip floats out of
+/// other muxes via its stale snapshot.
+fn reattachStealAllowed(client: *const store_mod.Client, uuid: [32]u8) bool {
+    if (client.pending_reattach_session_id == null) return false;
+    if (std.time.timestamp() - client.pending_reattach_started_at > REATTACH_STEAL_WINDOW_SECS) return false;
+    return clientSnapshotHasFloat(client, uuid);
+}
+
 fn notifyPaneExitedBestEffort(fd: posix.fd_t, uuid: [32]u8) void {
     var msg: wire.PaneUuid = .{ .uuid = uuid };
     var hdr: wire.ControlHeader = .{
@@ -137,7 +164,8 @@ pub fn stealAttachedPane(self: anytype, uuid: [32]u8, new_client_id: usize) bool
 }
 
 pub fn attachPane(self: anytype, uuid: [32]u8, client_id: usize) !*store_mod.Pane {
-    const pane = self.store.panes.getPtr(uuid) orelse return error.PaneNotFound;
+    var pane = self.store.panes.getPtr(uuid) orelse return error.PaneNotFound;
+    const client = self.getClient(client_id) orelse return error.ClientNotFound;
 
     ses.debugLog("attachPane: uuid={s} state={s} client_id={d}", .{
         uuid[0..8],
@@ -147,9 +175,22 @@ pub fn attachPane(self: anytype, uuid: [32]u8, client_id: usize) !*store_mod.Pan
 
     if (pane.state == .attached) {
         if (pane.attached_to) |owner_id| {
-            // Defensive: if ownership is still set, do not steal silently.
-            if (owner_id != client_id) return error.PaneAlreadyAttached;
-            return pane;
+            // During explicit session reattach, the detached snapshot is the
+            // user's requested restore set. If a float from that exact snapshot
+            // is still owned by another live frontend, reclaim that UUID
+            // instead of silently dropping the float from the restored session.
+            // This is intentionally UUID/snapshot-scoped; generic sticky CWD
+            // discovery still goes through find_sticky.
+            if (owner_id != client_id) {
+                if (reattachStealAllowed(client, uuid)) {
+                    if (!stealAttachedPane(self, uuid, client_id)) return error.PaneAlreadyAttached;
+                    pane = self.store.panes.getPtr(uuid) orelse return error.PaneNotFound;
+                } else {
+                    return error.PaneAlreadyAttached;
+                }
+            } else {
+                return pane;
+            }
         }
 
         // Persisted state deliberately does not store clients, so after a SES
@@ -160,13 +201,17 @@ pub fn attachPane(self: anytype, uuid: [32]u8, client_id: usize) !*store_mod.Pan
         // converted to `.sticky` before persistence.
         ses.debugLog("attachPane: recovering no-owner attached pane uuid={s}", .{uuid[0..8]});
     } else if (pane.attached_to != null and pane.attached_to.? != client_id) {
-        // Defensive: if ownership is still set, do not steal silently.
-        return error.PaneAlreadyAttached;
+        if (reattachStealAllowed(client, uuid)) {
+            if (!stealAttachedPane(self, uuid, client_id)) return error.PaneAlreadyAttached;
+            pane = self.store.panes.getPtr(uuid) orelse return error.PaneNotFound;
+        } else {
+            // Defensive: if ownership is still set, do not steal silently.
+            return error.PaneAlreadyAttached;
+        }
     }
 
     // Add to the client's pane list before mutating pane ownership. If the
     // client is gone, the pane must remain adoptable/orphaned.
-    const client = self.getClient(client_id) orelse return error.ClientNotFound;
 
     // A pane parked inside a detached session's adoptable pane set belongs to
     // that session: only a client reattaching (or attached to) that exact
@@ -269,6 +314,17 @@ pub fn processBacklogReplays(self: anytype) void {
     }
 
     for (stale_panes.items) |pane_uuid| {
+        // The owning mux only learns about pane death from an explicit
+        // pane_exited; pruning silently would leave it rendering a frozen
+        // pane forever (this path runs when a pod dies between a VT drop
+        // classified as transient and the reconnect attempt).
+        if (self.store.panes.getPtr(pane_uuid)) |pane| {
+            if (pane.attached_to) |owner_id| {
+                if (self.getClient(owner_id)) |owner| {
+                    if (owner.mux_ctl_fd) |ctl_fd| notifyPaneExitedBestEffort(ctl_fd, pane_uuid);
+                }
+            }
+        }
         self.killPane(pane_uuid) catch |err| {
             core.logging.logError("ses", "killPane failed in processBacklogReplays", err);
         };
@@ -327,9 +383,11 @@ pub fn killPane(self: anytype, uuid: [32]u8) !void {
         ses.debugLog("killPane: {s} closing pod_vt_fd={d}, removing from routing tables", .{ hex_uuid[0..8], vt_fd });
         _ = self.store.pod_vt_to_pane_id.remove(vt_fd);
         _ = self.store.pane_id_to_pod_vt.remove(pane.value.pane_id);
+        _ = self.store.pane_id_to_uuid.remove(pane.value.pane_id);
         self.polling.pending_remove_poll_fds.append(self.allocator, vt_fd) catch |err| {
             core.logging.logError("ses", "failed to queue killed POD VT fd removal", err);
         };
+        self.store.noteClosedFd(vt_fd);
         posix.close(vt_fd);
     } else {
         ses.debugLog("killPane: {s} pod_vt_fd=null, removing pane_id from routing", .{hex_uuid[0..8]});

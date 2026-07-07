@@ -26,9 +26,18 @@ pub const PodUplink = struct {
         self.* = undefined;
     }
 
-    pub fn tick(self: *PodUplink, child_pid: posix.pid_t) void {
+    /// Force the next tick() to re-read /proc immediately, bypassing the
+    /// poll interval. Call when a client attaches so cwd/fg info is fresh.
+    pub fn forceRefresh(self: *PodUplink) void {
+        self.last_sent_ms = 0;
+    }
+
+    pub fn tick(self: *PodUplink, child_pid: posix.pid_t, attached: bool) void {
+        // /proc reads cost ~6 syscalls per tick; while nobody is attached the
+        // info is only consumed on (re)attach, so poll much less often.
+        const interval_ms: i64 = if (attached) 100 else 2000;
         const now_ms: i64 = std.time.milliTimestamp();
-        if (now_ms - self.last_sent_ms < 100) return;
+        if (now_ms - self.last_sent_ms < interval_ms) return;
         self.last_sent_ms = now_ms;
 
         const proc_cwd = readProcCwd(self.allocator, child_pid) catch |err| blk: {

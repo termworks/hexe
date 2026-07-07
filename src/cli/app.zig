@@ -288,7 +288,6 @@ fn runSyslinkServe(allocator: std.mem.Allocator, socket_path: []const u8, no_aut
     );
 }
 
-
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
     if (std.mem.eql(u8, command, "ses")) return "session";
     if (std.mem.eql(u8, command, "lay")) return "layout";
@@ -367,7 +366,8 @@ pub fn main() !void {
     var ses_status_cmd = app.createCommand("status", "Show daemon info");
     try ses_status_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
 
-    var ses_list = app.createCommand("list", "List all sessions and panes");
+    var ses_list = app.createCommand("list", "List sessions and panes (optionally filtered to a directory)");
+    try ses_list.addArg(Arg.positional("dir", null, null));
     try ses_list.addArg(Arg.booleanOption("details", 'd', null));
     try ses_list.addArg(Arg.singleValueOption("instance", 'I', null));
     try ses_list.addArg(Arg.booleanOption("json", 'j', null));
@@ -494,6 +494,9 @@ pub fn main() !void {
     try mux_new.addArg(Arg.booleanOption("no-autostart-ses", null, null));
     try mux_new.addArg(Arg.singleValueOption("instance", 'I', null));
     try mux_new.addArg(Arg.booleanOption("test-only", 'T', null));
+    try mux_new.addArg(Arg.singleValueOption("remote", null, null));
+    try mux_new.addArg(Arg.singleValueOption("user", 'u', null));
+    try mux_new.addArg(Arg.singleValueOption("identity", 'i', null));
 
     var mux_attach = app.createCommand("attach", "Attach to existing session");
     try mux_attach.addArg(Arg.positional("name", null, null));
@@ -502,6 +505,9 @@ pub fn main() !void {
     try mux_attach.addArg(Arg.singleValueOption("ses-socket", null, null));
     try mux_attach.addArg(Arg.booleanOption("no-autostart-ses", null, null));
     try mux_attach.addArg(Arg.singleValueOption("instance", 'I', null));
+    try mux_attach.addArg(Arg.singleValueOption("remote", null, null));
+    try mux_attach.addArg(Arg.singleValueOption("user", 'u', null));
+    try mux_attach.addArg(Arg.singleValueOption("identity", 'i', null));
 
     var mux_record = app.createCommand("record", "Attach to terminal frontend and record asciicast");
     try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
@@ -706,7 +712,7 @@ pub fn main() !void {
             }
         }
 
-        try runTerminalNew("", null, "", "", false);
+        try runTerminalNew("", null, "", "", false, .{});
         return;
     }
 
@@ -734,7 +740,7 @@ pub fn main() !void {
         if (ses_matches.subcommandMatches("list")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            try cli_cmds.runList(allocator, m.containsArg("details"), m.containsArg("json"));
+            try cli_cmds.runList(allocator, m.containsArg("details"), m.containsArg("json"), m.getSingleValue("dir") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("kill")) |m| {
@@ -921,6 +927,11 @@ pub fn main() !void {
                 m.getSingleValue("logfile") orelse "",
                 m.getSingleValue("ses-socket") orelse "",
                 m.containsArg("no-autostart-ses"),
+                .{
+                    .remote = m.getSingleValue("remote") orelse "",
+                    .user = m.getSingleValue("user") orelse "",
+                    .identity = m.getSingleValue("identity") orelse "",
+                },
             );
             return;
         }
@@ -934,6 +945,11 @@ pub fn main() !void {
                 m.getSingleValue("logfile") orelse "",
                 m.getSingleValue("ses-socket") orelse "",
                 m.containsArg("no-autostart-ses"),
+                .{
+                    .remote = m.getSingleValue("remote") orelse "",
+                    .user = m.getSingleValue("user") orelse "",
+                    .identity = m.getSingleValue("identity") orelse "",
+                },
             );
             return;
         }
@@ -1297,14 +1313,43 @@ fn askUseLocalLayout() bool {
     return false;
 }
 
-fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool) core.FrontendConnectOptions {
-    return .{
+/// Raw `--remote`/`--user`/`--identity` CLI values (empty = unset).
+const RemoteConnectArgs = struct {
+    remote: []const u8 = "",
+    user: []const u8 = "",
+    identity: []const u8 = "",
+};
+
+// Stable storage for the defaulted identity path (process-lifetime; the CLI
+// runs a single session).
+var remote_identity_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool, remote: RemoteConnectArgs) core.FrontendConnectOptions {
+    var opts: core.FrontendConnectOptions = .{
         .socket_path = if (socket_path.len > 0) socket_path else null,
         .autostart_ses = !no_autostart_ses,
     };
+    if (remote.remote.len > 0) {
+        // Parse host[:port].
+        if (std.mem.lastIndexOfScalar(u8, remote.remote, ':')) |ci| {
+            opts.remote_host = remote.remote[0..ci];
+            opts.remote_port = std.fmt.parseInt(u16, remote.remote[ci + 1 ..], 10) catch 0;
+        } else {
+            opts.remote_host = remote.remote;
+        }
+        // user: flag, else $USER (env slices persist for the process).
+        opts.remote_user = if (remote.user.len > 0) remote.user else std.posix.getenv("USER");
+        // identity: flag, else ~/.ssh/id_ed25519 built into stable storage.
+        if (remote.identity.len > 0) {
+            opts.remote_identity = remote.identity;
+        } else if (std.posix.getenv("HOME")) |home| {
+            opts.remote_identity = std.fmt.bufPrint(&remote_identity_buf, "{s}/.ssh/id_ed25519", .{home}) catch null;
+        }
+    }
+    return opts;
 }
 
-fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
+fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool, remote: RemoteConnectArgs) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
             if (!try showNestedMuxConfirmation(pane_uuid)) {
@@ -1317,17 +1362,17 @@ fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []
         .name = if (name.len > 0) name else null,
         .log_level = log_level,
         .log_file = if (log_file.len > 0) log_file else null,
-        .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
+        .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses, remote),
     });
 }
 
-fn runTerminalAttach(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
+fn runTerminalAttach(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool, remote: RemoteConnectArgs) !void {
     if (name.len > 0) {
         try terminal.run(.{
             .attach = name,
             .log_level = log_level,
             .log_file = if (log_file.len > 0) log_file else null,
-            .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
+            .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses, remote),
         });
     } else {
         print("Error: session name required\n", .{});

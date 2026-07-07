@@ -1,0 +1,42 @@
+name: CI
+
+# Verify every push and PR to the mainline branches. The release workflow only
+# builds + smoke-tests on tags, so this is the gate that actually runs the test
+# suite and the formatter before code lands.
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: fmt + test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Check formatting
+        run: zig fmt --check src build.zig
+
+      - name: Run tests
+        env:
+          GIT_CEILING_DIRECTORIES: ${{ github.workspace }}/.zig-cache
+        run: zig build test

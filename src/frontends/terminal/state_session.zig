@@ -143,6 +143,36 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
     try applySessionConfig(self, config, tab_filter);
 }
 
+/// Replace current runtime tabs/floats with a canonical layout definition.
+pub fn replaceWithLayoutDef(self: anytype, layout: *const LayoutDef) !void {
+    // Remove floating panes.
+    for (self.view.float_views.items) |pane| {
+        self.clearTransientPaneState(pane);
+        self.clearFloatUi(pane.uuid);
+        pane.deinit();
+        self.allocator.destroy(pane);
+    }
+    self.view.float_views.clearRetainingCapacity();
+    self.setActiveFloatingIndex(null);
+    self.runtime.setFocusedPaneUuid(null);
+
+    // Remove all tabs.
+    for (self.view.tab_views.items) |*tab| {
+        var split_it = tab.layout.splits.valueIterator();
+        while (split_it.next()) |pane_ptr| {
+            self.clearTransientPaneState(pane_ptr.*);
+        }
+        tab.deinit();
+    }
+    self.view.tab_views.clearRetainingCapacity();
+    self.runtime.clearTabMeta();
+    self.runtime.clearTabFocusMemory();
+    self.setActiveTabIndex(0);
+    self.runtime.setFocusedPaneUuid(null);
+
+    try applyLayoutDef(self, layout);
+}
+
 fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     // Generate tab name
     const name_owned = self.allocator.dupe(u8, tab_config.name) catch blk: {
@@ -380,7 +410,7 @@ fn buildLayoutTree(self: anytype, layout: *Layout, split_def: LayoutSplitDef) !*
             node.* = .{ .pane = pane.uuid };
         },
         .split => |split| {
-            const dir: SplitDir = if (std.mem.eql(u8, split.dir, "h")) .horizontal else .vertical;
+            const dir = layoutSplitDir(split.dir);
             const first = try buildLayoutTree(self, layout, split.first.*);
             errdefer {
                 destroyLayoutTreeNodes(self.allocator, first);
@@ -399,6 +429,11 @@ fn buildLayoutTree(self: anytype, layout: *Layout, split_def: LayoutSplitDef) !*
     }
 
     return node;
+}
+
+fn layoutSplitDir(dir: []const u8) SplitDir {
+    if (core.session_model.isVerticalSplitDir(dir)) return .vertical;
+    return .horizontal;
 }
 
 fn destroyLayoutTreeNodes(allocator: std.mem.Allocator, node: *LayoutNode) void {
@@ -600,6 +635,19 @@ fn writePaneCommand(self: anytype, pane: *Pane, cmd: []const u8) void {
 
 fn runShellCommand(cmd: []const u8) void {
     if (cmd.len == 0) return;
+
+    // These commands come from a project-local `.hexe.lua` (on_start/on_stop),
+    // so opening a session in an untrusted repo runs its shell hooks — the
+    // direnv auto-trust problem. Default behavior is preserved (they run), but
+    // HEXE_NO_PROJECT_COMMANDS=1 disables project-sourced command execution for
+    // untrusted-directory workflows. A full per-directory trust ledger is the
+    // proper long-term fix (see PLAN.md 1.9).
+    if (std.posix.getenv("HEXE_NO_PROJECT_COMMANDS")) |v| {
+        if (v.len > 0 and !std.mem.eql(u8, v, "0")) {
+            core.logging.warn("terminal", "skipping project on_start/on_stop command (HEXE_NO_PROJECT_COMMANDS set)", .{});
+            return;
+        }
+    }
 
     // Use page_allocator for a null-terminated copy since this is fire-and-forget
     const allocator = std.heap.page_allocator;

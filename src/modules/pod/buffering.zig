@@ -89,6 +89,11 @@ pub const Osc7Scanner = struct {
     state: State = .normal,
     buf: [4096]u8 = undefined,
     len: usize = 0,
+    // Owned storage for the last extracted path. extractPath copies into this
+    // rather than handing back a slice into `buf`, which a second OSC7 in the
+    // same feed() overwrites before the caller reads it.
+    cwd_buf: [4096]u8 = undefined,
+    cwd_len: usize = 0,
 
     const State = enum {
         normal,
@@ -157,7 +162,13 @@ pub const Osc7Scanner = struct {
         if (std.mem.startsWith(u8, content, "file://")) {
             const after_scheme = content[7..];
             if (std.mem.indexOfScalar(u8, after_scheme, '/')) |slash_idx| {
-                out_cwd.* = after_scheme[slash_idx..];
+                const path = after_scheme[slash_idx..];
+                // Copy into owned storage so the returned slice stays valid
+                // even if a later OSC7 in this same feed() rewrites `buf`.
+                const n = @min(path.len, self.cwd_buf.len);
+                @memcpy(self.cwd_buf[0..n], path[0..n]);
+                self.cwd_len = n;
+                out_cwd.* = self.cwd_buf[0..n];
             }
         }
     }
@@ -166,4 +177,116 @@ pub const Osc7Scanner = struct {
 pub fn containsClearSeq(data: []const u8) bool {
     if (std.mem.indexOfScalar(u8, data, 0x0c) != null) return true;
     return std.mem.indexOf(u8, data, "\x1b[3J") != null;
+}
+
+const testing = std.testing;
+
+test "RingBuffer: append and copyOut round-trip" {
+    var rb = try RingBuffer.init(testing.allocator, 8);
+    defer rb.deinit(testing.allocator);
+
+    rb.append("abc");
+    try testing.expectEqual(@as(usize, 3), rb.len);
+    var out: [8]u8 = undefined;
+    try testing.expectEqual(@as(usize, 3), rb.copyOut(&out));
+    try testing.expectEqualStrings("abc", out[0..3]);
+}
+
+test "RingBuffer: append drops oldest bytes when over capacity" {
+    var rb = try RingBuffer.init(testing.allocator, 4);
+    defer rb.deinit(testing.allocator);
+
+    rb.append("abcd"); // full: abcd
+    rb.append("ef"); // drops ab -> cdef
+    try testing.expectEqual(@as(usize, 4), rb.len);
+    var out: [4]u8 = undefined;
+    _ = rb.copyOut(&out);
+    try testing.expectEqualStrings("cdef", &out);
+}
+
+test "RingBuffer: oversized append keeps only the trailing capacity bytes" {
+    var rb = try RingBuffer.init(testing.allocator, 4);
+    defer rb.deinit(testing.allocator);
+
+    rb.append("abcdefgh"); // keeps last 4: efgh
+    try testing.expectEqual(@as(usize, 4), rb.len);
+    var out: [4]u8 = undefined;
+    _ = rb.copyOut(&out);
+    try testing.expectEqualStrings("efgh", &out);
+}
+
+test "RingBuffer: append wraps around the physical buffer correctly" {
+    var rb = try RingBuffer.init(testing.allocator, 4);
+    defer rb.deinit(testing.allocator);
+
+    rb.append("abc"); // start=0 len=3
+    rb.append("de"); // total 5 > 4 -> drop 1 (a), wrap: bcde
+    try testing.expectEqual(@as(usize, 4), rb.len);
+    var out: [4]u8 = undefined;
+    _ = rb.copyOut(&out);
+    try testing.expectEqualStrings("bcde", &out);
+}
+
+test "RingBuffer: appendNoDrop refuses when it would overflow" {
+    var rb = try RingBuffer.init(testing.allocator, 4);
+    defer rb.deinit(testing.allocator);
+
+    try testing.expect(rb.appendNoDrop("abc"));
+    try testing.expect(!rb.appendNoDrop("de")); // 3+2 > 4 -> refused, unchanged
+    try testing.expectEqual(@as(usize, 3), rb.len);
+    try testing.expect(rb.appendNoDrop("d")); // exactly fills
+    try testing.expect(rb.isFull());
+}
+
+test "RingBuffer: clear resets state" {
+    var rb = try RingBuffer.init(testing.allocator, 4);
+    defer rb.deinit(testing.allocator);
+    rb.append("abcd");
+    rb.clear();
+    try testing.expectEqual(@as(usize, 0), rb.len);
+    try testing.expect(!rb.isFull());
+}
+
+fn scanOnce(data: []const u8) ?[]const u8 {
+    var scanner = Osc7Scanner{};
+    var out: ?[]const u8 = null;
+    scanner.feed(data, &out);
+    return out;
+}
+
+test "Osc7Scanner: extracts cwd from a BEL-terminated OSC7" {
+    const cwd = scanOnce("\x1b]7;file://host/home/user\x07") orelse return error.NoCwd;
+    try testing.expectEqualStrings("/home/user", cwd);
+}
+
+test "Osc7Scanner: extracts cwd from an ST-terminated OSC7" {
+    const cwd = scanOnce("\x1b]7;file://host/tmp/x\x1b\\") orelse return error.NoCwd;
+    try testing.expectEqualStrings("/tmp/x", cwd);
+}
+
+test "Osc7Scanner: ignores non-file URIs" {
+    try testing.expect(scanOnce("\x1b]7;http://host/nope\x07") == null);
+}
+
+test "Osc7Scanner: two OSC7s in one feed yield the LAST path intact (dangling-slice regression)" {
+    // Before the fix, extractPath returned a slice into the reused scan buffer;
+    // the second sequence overwrote it, so the returned cwd was garbage. Now
+    // the scanner copies into owned storage and the last completed path wins.
+    const cwd = scanOnce("\x1b]7;file://h/first/aaa\x07\x1b]7;file://h/second/bbb\x07") orelse return error.NoCwd;
+    try testing.expectEqualStrings("/second/bbb", cwd);
+}
+
+test "Osc7Scanner: sequence split across two feeds still parses" {
+    var scanner = Osc7Scanner{};
+    var out: ?[]const u8 = null;
+    scanner.feed("\x1b]7;file://host/ho", &out);
+    try testing.expect(out == null);
+    scanner.feed("me/user\x07", &out);
+    try testing.expectEqualStrings("/home/user", out.?);
+}
+
+test "containsClearSeq detects FF and CSI 3J" {
+    try testing.expect(containsClearSeq("abc\x0cdef"));
+    try testing.expect(containsClearSeq("x\x1b[3Jy"));
+    try testing.expect(!containsClearSeq("plain text"));
 }

@@ -65,17 +65,31 @@ pub const ResourceLimits = struct {
         }
 
         if (std.posix.getenv("HEXE_MAX_CONNECTIONS_PER_MINUTE")) |val| {
-            limits.max_connections_per_minute = std.fmt.parseInt(usize, val, 10) catch limits.max_connections_per_minute;
+            const parsed = std.fmt.parseInt(usize, val, 10) catch limits.max_connections_per_minute;
+            // The rate limiter counts at most RATE_LIMIT_CAPACITY timestamps in
+            // the window; a higher configured limit could never be reached, so
+            // clamp it (an unenforceable limit is worse than a lower real one).
+            if (parsed > RATE_LIMIT_CAPACITY) {
+                std.log.scoped(.ses).warn("HEXE_MAX_CONNECTIONS_PER_MINUTE={d} exceeds rate-limiter capacity {d}; clamping", .{ parsed, RATE_LIMIT_CAPACITY });
+                limits.max_connections_per_minute = RATE_LIMIT_CAPACITY;
+            } else {
+                limits.max_connections_per_minute = parsed;
+            }
         }
 
         return limits;
     }
 };
 
+/// Circular-buffer capacity for the rate limiter. The window count can never
+/// exceed this, so a configured max_connections_per_minute above it would never
+/// trigger — callers clamp the configured limit to this value.
+pub const RATE_LIMIT_CAPACITY: usize = 256;
+
 /// Connection rate limiter for preventing DoS
 pub const RateLimiter = struct {
     /// Timestamps of recent connections (circular buffer)
-    connection_times: [100]i64 = [_]i64{0} ** 100,
+    connection_times: [RATE_LIMIT_CAPACITY]i64 = [_]i64{0} ** RATE_LIMIT_CAPACITY,
     /// Current write position in circular buffer
     write_pos: usize = 0,
     /// Window size in milliseconds (default: 60 seconds)
@@ -171,3 +185,26 @@ pub const ResourceMonitor = struct {
         return self.stats;
     }
 };
+
+test "RateLimiter: enforces the window limit and counts within capacity" {
+    var rl = RateLimiter{};
+    const now: i64 = 1_000_000;
+    // 50 connections in the window.
+    var i: usize = 0;
+    while (i < 50) : (i += 1) rl.recordConnection(now);
+    try std.testing.expectEqual(@as(usize, 50), rl.getRecentConnections(now));
+    try std.testing.expect(rl.isRateLimited(now, 50));
+    try std.testing.expect(!rl.isRateLimited(now, 51));
+    // Old connections outside the window are not counted.
+    try std.testing.expectEqual(@as(usize, 0), rl.getRecentConnections(now + rl.window_ms + 1));
+}
+
+test "RateLimiter: capacity bounds the observable count" {
+    var rl = RateLimiter{};
+    const now: i64 = 2_000_000;
+    var i: usize = 0;
+    while (i < RATE_LIMIT_CAPACITY + 100) : (i += 1) rl.recordConnection(now);
+    // Count saturates at capacity — which is why a configured limit above
+    // RATE_LIMIT_CAPACITY is clamped at parse time.
+    try std.testing.expectEqual(RATE_LIMIT_CAPACITY, rl.getRecentConnections(now));
+}

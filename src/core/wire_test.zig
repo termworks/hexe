@@ -17,11 +17,7 @@ fn socketPair() !struct { a: posix.fd_t, b: posix.fd_t } {
     return .{ .a = fds[0], .b = fds[1] };
 }
 
-fn setNonBlocking(fd: posix.fd_t) !void {
-    const O_NONBLOCK: usize = 0o4000;
-    const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
-    _ = try posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK);
-}
+const setNonBlocking = core.ipc.setNonBlocking;
 
 test "wire round-trip: empty payload (ping)" {
     const pair = try socketPair();

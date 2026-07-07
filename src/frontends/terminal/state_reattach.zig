@@ -1110,13 +1110,10 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         terminal_main.debugLog("reattachSession: completeReattach FAILED: {s}", .{@errorName(e)});
     }
 
-    // Snapshot restore is only the session's last known view. Per-CWD sticky
-    // floats are stronger than that: they are global process identities keyed
-    // by cwd+key. Another session can touch/steal them and make them disappear
-    // from this session snapshot, so reconcile the restored view against all
-    // CWDs present in the restored panes before the user toggles a missing key
-    // and accidentally spawns a duplicate.
-    self.adoptStickyPanes();
+    // Do not run broad sticky reconciliation during explicit reattach. Attach
+    // must restore exactly the detached session snapshot: every remembered
+    // sticky/per-CWD float is restored above by UUID, while unrelated free
+    // sticky panes in the same CWD must not be pulled into this session.
 
     // Sync-phase reads can consume async pane_exited messages before the IPC
     // loop starts. Apply those exits now so dead panes/floats are not kept
