@@ -359,8 +359,21 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   yanks via `renderer.vx.copyToSystemClipboard`, so text extraction is the same
   correct code. A reverse-video cell renders the cursor. Input is captured in
   `loop_input` like the tab-rename editor. Config validates; action-mapping test.
-- **Scrollback text search** over the ghostty `PageList` (with match navigation)
-  remains a follow-up — a self-contained addition on top of the copy-mode cursor.
+- **Scrollback text search** ✅ DONE. `search.enter` action opens a modal query
+  over the focused pane's full scrollback via ghostty's `search.Screen`
+  (ScreenSearch): type the needle (a vim-style `/query` bar renders on the bottom
+  row), `Enter` runs `searchAll` and jumps to the first match, `n`/`N` navigate
+  (each scrolls the viewport to the match's tracked pin, showing `[i/N]`), `Esc`
+  exits. Implemented as a self-contained `pane_search.zig` state machine so its
+  lifetime surface (it holds a `*Screen` + tracked pins while in the results
+  phase) is isolated; it is torn down before any pane-screen free (pane_exited
+  and reattach guards, plus `State.deinit` ordered before `view.deinit`), and
+  local closes can't fire because search captures all input. The search CORE is
+  unit-tested headlessly against a real constructed `core.VT` screen (match
+  count + navigation + utf8 query editing). Config validates; a HostSurfaceAction
+  mapping test was added; exposed as `hexe.action.search.enter()`.
+  Follow-ups: highlight the exact matched cells (currently the match line is only
+  scrolled into view), and multibyte-aware prompt rendering.
 
 ### 3.4 — Table-stakes mux actions (each independent) · M each
 - **Pane zoom/maximize** — ✅ DONE. `pane.zoom` toggles the focused tiled pane
