@@ -22,6 +22,11 @@ const xev = @import("xev").Dynamic;
 const VT_ROUTE_IO_TIMEOUT_MS: i32 = 2000;
 const CTL_FRAME_IO_TIMEOUT_MS: i32 = 2000;
 const MUX_VT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+// Symmetric cap for the MUX→POD (input) direction. A frame is always accepted
+// onto an empty queue (so a single large paste is never undeliverable);
+// overflow only trips once backlog already exists, at which point the wedged
+// POD connection is dropped rather than blocking the loop.
+const POD_VT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
 const VT_FRAME_TYPE_BACKLOG_END: u8 = @intFromEnum(core.pod_protocol.FrameType.backlog_end);
 const VT_FRAME_TYPE_PASSWORD_MODE: u8 = @intFromEnum(core.pod_protocol.FrameType.password_mode);
 
@@ -525,6 +530,60 @@ test "MuxVtQueue compacts consumed frames without freeing active frames" {
     try std.testing.expectEqual(@as(u16, 71), MuxVtQueue.frameHeader(queue.frames.items[0]).?.pane_id);
 }
 
+test "enqueuePodVtFrame + flushPodVtQueue delivers pod_protocol frames in order" {
+    const allocator = std.testing.allocator;
+    const pair = try testSocketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+    // pair.a is the SES→POD write side; non-blocking as connectPodVt sets it.
+    try core.ipc.setNonBlocking(pair.a);
+
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    var server = testServerWithState(allocator, &ses_state);
+    defer deinitTestServer(&server);
+
+    try server.enqueuePodVtFrame(pair.a, 1, "hello");
+    try server.enqueuePodVtFrame(pair.a, 2, "world");
+    try std.testing.expect(server.flushPodVtQueue(pair.a));
+
+    // Queue fully drained.
+    const q = ses_state.store.pod_vt_queues.getPtr(pair.a).?;
+    try std.testing.expectEqual(@as(usize, 0), q.pendingLen());
+
+    // POD side sees two well-formed pod_protocol frames, in order.
+    var buf: [24]u8 = undefined;
+    try wire.readExact(pair.b, buf[0..20]);
+    const expected = [_]u8{ 1, 0, 0, 0, 5 } ++ "hello".* ++ [_]u8{ 2, 0, 0, 0, 5 } ++ "world".*;
+    try std.testing.expectEqualSlices(u8, &expected, buf[0..20]);
+}
+
+test "enqueuePodVtFrame backpressures only once backlog exists" {
+    const allocator = std.testing.allocator;
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    var server = testServerWithState(allocator, &ses_state);
+    defer deinitTestServer(&server);
+
+    const fd: posix.fd_t = 4242; // key only — never written (no flush).
+    const big = try allocator.alloc(u8, POD_VT_QUEUE_MAX_BYTES);
+    defer allocator.free(big);
+    @memset(big, 'x');
+
+    // First frame is accepted even though it fills the cap (empty-queue rule),
+    // so a single large paste is never undeliverable.
+    try server.enqueuePodVtFrame(fd, 0, big);
+    // A second frame now overflows and must be rejected, not silently dropped.
+    try std.testing.expectError(error.QueueFull, server.enqueuePodVtFrame(fd, 0, "!"));
+
+    // Closing the fd frees the queue (fd-reuse safety); testing.allocator would
+    // flag a leak if noteClosedFd missed it.
+    ses_state.store.noteClosedFd(fd);
+    try std.testing.expect(!ses_state.store.pod_vt_queues.contains(fd));
+}
+
 /// Server that handles mux connections
 /// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
 pub const Server = struct {
@@ -813,6 +872,12 @@ pub const Server = struct {
             if (self.mux_vt_queues.fetchRemove(pending.fd)) |entry| {
                 var queue = entry.value;
                 queue.deinit(self.allocator);
+            }
+            // This close path does not route through store.noteClosedFd, so free
+            // the MUX→POD input queue explicitly before the fd number is reused.
+            if (self.ses_state.store.pod_vt_queues.fetchRemove(pending.fd)) |entry| {
+                var queue = entry.value;
+                queue.deinit(self.ses_state.store.allocator);
             }
 
             posix.close(pending.fd);
@@ -1182,6 +1247,7 @@ pub const Server = struct {
         const now_ms = std.time.milliTimestamp();
 
         periodic.server.flushMuxVtQueues();
+        periodic.server.flushPodVtQueues();
 
         if (periodic.server.ses_state.store.dirty and now_ms - periodic.last_save >= 1000) {
             // Keep the store dirty when the save fails (disk full, EIO) so
@@ -1523,6 +1589,74 @@ pub const Server = struct {
         }
     }
 
+    /// Queue a MUX→POD input frame (pod_protocol header + payload) for
+    /// non-blocking delivery to a POD VT socket. Returns error.QueueFull when
+    /// backlog already exists and adding this frame would exceed the cap — the
+    /// caller then drops the wedged POD connection. Allocated with the store's
+    /// allocator so the store can free the queue at any fd-close site.
+    fn enqueuePodVtFrame(self: *Server, pod_vt_fd: posix.fd_t, frame_type: u8, payload: []const u8) !void {
+        const store = &self.ses_state.store;
+        const frame_len = 5 + payload.len;
+        var entry = try store.pod_vt_queues.getOrPut(pod_vt_fd);
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        // Always accept onto an empty queue; only backpressure once backlog
+        // exists, so a single ≤MAX_PAYLOAD_LEN frame is never undeliverable.
+        if (entry.value_ptr.pendingLen() > 0 and entry.value_ptr.bytes + frame_len > POD_VT_QUEUE_MAX_BYTES) {
+            return error.QueueFull;
+        }
+
+        const frame = try store.allocator.alloc(u8, frame_len);
+        errdefer store.allocator.free(frame);
+        frame[0] = frame_type;
+        std.mem.writeInt(u32, frame[1..5], @intCast(payload.len), .big);
+        if (payload.len > 0) {
+            @memcpy(frame[5..], payload);
+        }
+        try entry.value_ptr.frames.append(store.allocator, .{ .bytes = frame });
+        entry.value_ptr.bytes += frame_len;
+    }
+
+    /// Drain a POD VT queue with non-blocking writes. Returns false if the
+    /// connection should be removed (fatal write error).
+    fn flushPodVtQueue(self: *Server, pod_vt_fd: posix.fd_t) bool {
+        const store = &self.ses_state.store;
+        var queue = store.pod_vt_queues.getPtr(pod_vt_fd) orelse return true;
+        defer queue.compactConsumed();
+
+        while (queue.pendingLen() > 0) {
+            var frame = &queue.frames.items[queue.head];
+            const n = posix.write(pod_vt_fd, frame.bytes[frame.written..]) catch |err| {
+                switch (err) {
+                    error.WouldBlock => {},
+                    else => {
+                        ses.debugLog("vt mux->pod: queued write failed fd={d}: {s}", .{ pod_vt_fd, @errorName(err) });
+                        return false;
+                    },
+                }
+                break;
+            };
+            if (n == 0) return false;
+            frame.written += n;
+            if (frame.written < frame.bytes.len) break;
+
+            queue.bytes -= frame.bytes.len;
+            store.allocator.free(frame.bytes);
+            queue.head += 1;
+        }
+        return true;
+    }
+
+    fn flushPodVtQueues(self: *Server) void {
+        // queueVtClose only appends to the pending-close list (no map mutation),
+        // so closing a wedged connection mid-iteration is safe.
+        var it = self.ses_state.store.pod_vt_queues.iterator();
+        while (it.next()) |entry| {
+            if (!self.flushPodVtQueue(entry.key_ptr.*)) {
+                self.queueVtClose(entry.key_ptr.*, null);
+            }
+        }
+    }
+
     fn routePodToMux(self: *Server, pod_vt_fd: posix.fd_t) bool {
         // Read 5-byte pod_protocol header (type:u8 + len:u32 big-endian).
         var hdr: [5]u8 = undefined;
@@ -1619,24 +1753,35 @@ pub const Server = struct {
             return true;
         }
 
-        // Write 5-byte pod_protocol header to POD.
-        var pod_hdr: [5]u8 = undefined;
-        pod_hdr[0] = mux_hdr.frame_type;
-        std.mem.writeInt(u32, pod_hdr[1..5], mux_hdr.len, .big);
-        wire.writeAll(pod_vt_fd, &pod_hdr) catch |err| {
-            core.logging.logError("ses", "failed to write POD VT frame header", err);
-            ses.debugLog("vt mux->pod: pod_vt_fd write failed, queuing close", .{});
+        // Read the full payload from the MUX first, so a POD that exits
+        // mid-frame never receives a header without its payload. Reuse the
+        // shared route buffer — the event loop is single-threaded, so this is
+        // never reentrant with the POD→MUX path that also uses it.
+        if (mux_hdr.len > self.vt_route_buf.len) {
+            core.logging.warn("ses", "MUX VT frame exceeds route buffer: fd={d} len={d}", .{ mux_vt_fd, mux_hdr.len });
             self.skipBytes(mux_vt_fd, mux_hdr.len);
-            self.queueVtClose(pod_vt_fd, null);
             return true;
+        }
+        const payload = self.vt_route_buf[0..mux_hdr.len];
+        wire.readExactTimeout(mux_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
+            ses.debugLog("vt mux->pod: failed to read payload from mux: {s}", .{@errorName(err)});
+            return false;
         };
 
-        // Splice payload: read from mux, write to pod.
-        self.spliceData(mux_vt_fd, pod_vt_fd, mux_hdr.len) catch |err| {
-            core.logging.logError("ses", "failed to splice MUX VT payload to POD", err);
+        // Enqueue for non-blocking delivery. A wedged POD (child not draining
+        // its VT input) must never block the SES event loop on a synchronous
+        // write, so writes go through a bounded per-POD queue drained by the
+        // periodic tick — symmetric with the POD→MUX path. On overflow drop the
+        // whole POD VT connection (reconnected by backlog-replay if the pod is
+        // still alive) rather than silently losing keystrokes.
+        self.enqueuePodVtFrame(pod_vt_fd, mux_hdr.frame_type, payload) catch |err| {
+            ses.debugLog("vt mux->pod: pod queue overflow fd={d}: {s}, dropping", .{ pod_vt_fd, @errorName(err) });
             self.queueVtClose(pod_vt_fd, null);
             return true;
         };
+        if (!self.flushPodVtQueue(pod_vt_fd)) {
+            self.queueVtClose(pod_vt_fd, null);
+        }
         return true;
     }
 
@@ -1762,24 +1907,6 @@ pub const Server = struct {
                     return;
                 }
             }
-        }
-    }
-
-    /// Read from src and write to dst, `len` bytes total.
-    fn spliceData(_: *Server, src: posix.fd_t, dst: posix.fd_t, len: u32) !void {
-        var remaining: usize = len;
-        var buf: [16 * 1024]u8 = undefined;
-        while (remaining > 0) {
-            const chunk = @min(remaining, buf.len);
-            wire.readExactTimeout(src, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-                core.logging.logError("ses", "failed to read VT splice payload", err);
-                return error.ConnectionClosed;
-            };
-            wire.writeAllTimeout(dst, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-                core.logging.logError("ses", "failed to write VT splice payload", err);
-                return error.ConnectionClosed;
-            };
-            remaining -= chunk;
         }
     }
 

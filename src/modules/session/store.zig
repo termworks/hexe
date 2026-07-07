@@ -448,6 +448,62 @@ pub const Client = struct {
     }
 };
 
+/// One owned outbound frame (pod_protocol header + payload) awaiting delivery
+/// to a POD VT socket. `written` tracks partial non-blocking writes.
+pub const PodVtFrame = struct {
+    bytes: []u8,
+    written: usize = 0,
+};
+
+/// Bounded outbound queue for the MUX→POD (input) VT direction, keyed by
+/// pod_vt_fd. Mirrors the POD→MUX `MuxVtQueue` in server.zig so a wedged POD
+/// (child not draining its VT input) can never block the SES event loop on a
+/// synchronous write. Input frames are lossless — never coalesced or dropped
+/// individually; on overflow the whole POD VT connection is dropped instead.
+/// Owned by the store (not the server) so it can be freed at every fd-close
+/// site through `noteClosedFd`, which prevents a reused fd number from
+/// inheriting a previous connection's stale input bytes.
+pub const PodVtQueue = struct {
+    frames: std.ArrayList(PodVtFrame) = .empty,
+    bytes: usize = 0,
+    head: usize = 0,
+
+    pub fn pendingLen(self: *const PodVtQueue) usize {
+        if (self.head >= self.frames.items.len) return 0;
+        return self.frames.items.len - self.head;
+    }
+
+    pub fn compactConsumed(self: *PodVtQueue) void {
+        if (self.head == 0) return;
+        if (self.head >= self.frames.items.len) {
+            self.frames.clearRetainingCapacity();
+            self.head = 0;
+            return;
+        }
+        if (self.head < 64 and self.head * 2 < self.frames.items.len) return;
+
+        const remaining = self.frames.items.len - self.head;
+        std.mem.copyForwards(
+            PodVtFrame,
+            self.frames.items[0..remaining],
+            self.frames.items[self.head..],
+        );
+        self.frames.shrinkRetainingCapacity(remaining);
+        self.head = 0;
+    }
+
+    pub fn deinit(self: *PodVtQueue, allocator: std.mem.Allocator) void {
+        // Frames before `head` were freed as they finished writing; only
+        // `head..len` still own their bytes.
+        var i: usize = self.head;
+        while (i < self.frames.items.len) : (i += 1) {
+            allocator.free(self.frames.items[i].bytes);
+        }
+        self.frames.deinit(allocator);
+        self.* = .{};
+    }
+};
+
 fn closeUniqueFd(fd: posix.fd_t, closed: *[3]posix.fd_t, closed_count: *usize) void {
     for (closed[0..closed_count.*]) |existing| {
         if (existing == fd) return;
@@ -510,6 +566,10 @@ pub const SessionStore = struct {
     pane_id_to_pod_vt: std.AutoHashMap(u16, posix.fd_t),
     pod_vt_to_pane_id: std.AutoHashMap(posix.fd_t, u16),
     pane_id_to_uuid: std.AutoHashMap(u16, [32]u8),
+    /// MUX→POD (input) outbound write queues, keyed by pod_vt_fd. Populated by
+    /// the server's VT router; freed here at every fd-close site via
+    /// `noteClosedFd`. See `PodVtQueue`.
+    pod_vt_queues: std.AutoHashMap(posix.fd_t, PodVtQueue),
     /// fds closed directly (client removal, killPane, detach) in the last two
     /// event-loop iterations. The server's pending-close queues consult this
     /// before their own posix.close: an fd number already released here may
@@ -529,6 +589,7 @@ pub const SessionStore = struct {
             .pane_id_to_pod_vt = std.AutoHashMap(u16, posix.fd_t).init(allocator),
             .pod_vt_to_pane_id = std.AutoHashMap(posix.fd_t, u16).init(allocator),
             .pane_id_to_uuid = std.AutoHashMap(u16, [32]u8).init(allocator),
+            .pod_vt_queues = std.AutoHashMap(posix.fd_t, PodVtQueue).init(allocator),
             .closed_fds_cur = std.AutoHashMap(posix.fd_t, void).init(allocator),
             .closed_fds_prev = std.AutoHashMap(posix.fd_t, void).init(allocator),
         };
@@ -538,6 +599,13 @@ pub const SessionStore = struct {
         self.closed_fds_cur.put(fd, {}) catch |err| {
             core.logging.logError("ses", "failed to record closed fd", err);
         };
+        // Free any pending MUX→POD input queue for this fd before its number can
+        // be reused by a new connection (which would otherwise inherit stale
+        // input bytes). Harmless no-op for non-pod-vt fds.
+        if (self.pod_vt_queues.fetchRemove(fd)) |entry| {
+            var queue = entry.value;
+            queue.deinit(self.allocator);
+        }
     }
 
     pub fn closedFdNoted(self: *const SessionStore, fd: posix.fd_t) bool {
@@ -577,6 +645,9 @@ pub const SessionStore = struct {
         self.pane_id_to_pod_vt.deinit();
         self.pod_vt_to_pane_id.deinit();
         self.pane_id_to_uuid.deinit();
+        var pod_queue_it = self.pod_vt_queues.valueIterator();
+        while (pod_queue_it.next()) |queue| queue.deinit(self.allocator);
+        self.pod_vt_queues.deinit();
         self.closed_fds_cur.deinit();
         self.closed_fds_prev.deinit();
     }
