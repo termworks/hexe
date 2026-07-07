@@ -245,13 +245,28 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   eval + per-frame cache maps into `statusbar_eval.zig` (candidate for
   `frontend_core`), leaving the vaxis draw + hit-test surface.
 
-### 2.4 — `vt_routing.zig` decoy + mux→pod backpressure · M · HIGH
-- The module named for routing exports only `connectPodVt`; the real
-  `routePodToMux`/`routeMuxToPod`/`spliceData`/`MuxVtQueue` live in `server.zig`,
-  which does not import it. Moving them here also surfaces the real gap:
-  **pod→mux is queued/byte-capped, but mux→pod writes synchronously with no
-  backpressure.** Move the splice logic into `vt_routing.zig` and add mux→pod
-  queueing symmetric with the pod→mux path.
+### 2.4 — `vt_routing.zig` decoy + mux→pod backpressure · M · HIGH · ✅ BACKPRESSURE LANDED (move deferred)
+- **Fix (landed):** the real gap — **mux→pod wrote synchronously with no
+  backpressure** (`wire.writeAll` + `spliceData` both blocked the whole SES
+  event loop on `waitWritableTimeout` when a wedged POD stopped draining its VT
+  input) — is closed. `routeMuxToPod` now reads the full frame from the mux, then
+  hands it to a bounded per-POD write queue (`store.PodVtQueue`, keyed by
+  pod_vt_fd) drained by non-blocking writes on the periodic tick, symmetric with
+  the existing pod→mux `MuxVtQueue`. Input is lossless: a frame is always
+  accepted onto an empty queue (a single large paste is never undeliverable) and
+  overflow drops the whole POD connection (reconnected via backlog-replay if the
+  pod is alive) rather than dropping keystrokes or blocking. The queue is
+  **store-owned** so it is freed at every fd-close site through `noteClosedFd`
+  (plus an explicit free on the routing-drop path), preventing a reused fd number
+  from inheriting stale input bytes. `spliceData` (now dead) removed. New
+  characterization tests: in-order delivery + backlog-only backpressure + close
+  frees the queue. Green in Debug + ReleaseSafe + fmt.
+- **Remaining (deferred, presentation only):** physically relocating
+  `routePodToMux`/`routeMuxToPod`/`MuxVtQueue` out of `server.zig` into
+  `vt_routing.zig` would require promoting ~10 private helpers + the queue type
+  to `pub` and moving the hottest concurrency code for zero behavioral payoff —
+  the same "presentation only" tail deferred in 2.5. The backpressure asymmetry
+  the move was meant to surface is already fixed.
 
 ### 2.5 — Unify CTL/VT watcher lifecycle · M · HIGH · ✅ DESTRUCTION STRATEGY UNIFIED (+ latent UAF fixed)
 - Original state: `disarmCtlWatcher` defers destruction to `deferred_destroy_ctl`
