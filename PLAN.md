@@ -238,9 +238,14 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   dispatch + reattach/detach + 900 lines of status-JSON in one struct. Split into
   `ctl_handlers.zig`, `vt_routing.zig` (see 2.4), `watchers.zig`,
   `status_export.zig`; `Server` becomes a thin owner of maps + loop wiring.
-- `frontend_client.zig` (2631 lines): extract the sync/async response store into
-  `ses_client_responses.zig` and the per-command send helpers into a
-  `ses_client_commands.zig` mixin.
+- `frontend_client.zig` (2631 → 2410 lines): ◑ STARTED. The response store
+  (pending-queue helpers) moved to `ses_client_responses.zig`, and the
+  session-mutation command senders (add/remove tab, sync/remove float, split/
+  replace/set-ratio, rename tab) moved to `ses_client_commands.zig` — both as
+  free functions taking `*SesClient`, re-exported via `pub const` aliases so all
+  call sites are unchanged, verified green (build + full suite + fmt). Remaining
+  command groups (pane lifecycle, sticky/orphan/adopt, sync readers) follow the
+  identical pattern; the two mixin files now exist to receive them.
 - `statusbar.zig` (2717 lines): extract the frontend-neutral Lua-when/command
   eval + per-frame cache maps into `statusbar_eval.zig` (candidate for
   `frontend_core`), leaving the vaxis draw + hit-test surface.

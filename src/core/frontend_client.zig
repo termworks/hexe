@@ -256,7 +256,7 @@ pub const SesClient = struct {
         logging.debugWithSource("frontend-client", fmt, args, @src());
     }
 
-    fn debugLogUuid(self: *const SesClient, uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
+    pub fn debugLogUuid(self: *const SesClient, uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
         if (!self.debug) return;
         const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
         logging.debugWithSource("frontend-client", "[{s}] " ++ fmt, .{short_uuid} ++ args, @src());
@@ -354,7 +354,7 @@ pub const SesClient = struct {
         return request_id;
     }
 
-    fn writeControlMsgRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, fixed: []const u8, trails: []const []const u8) !u32 {
+    pub fn writeControlMsgRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, fixed: []const u8, trails: []const []const u8) !u32 {
         const request_id = self.allocateCtlRequestId();
         try wire.writeControlMsgWithRequestId(fd, msg_type, request_id, fixed, trails);
         return request_id;
@@ -788,38 +788,12 @@ pub const SesClient = struct {
         return .{ .uuid = resp.uuid, .pane_id = resp.pane_id, .pid = resp.pid };
     }
 
-    /// Orphan a pane (manual suspend).
-    pub fn orphanPane(self: *SesClient, uuid: [32]u8) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        self.drainQueuedControlResponses(fd);
-        var msg: wire.PaneUuid = .{ .uuid = uuid };
-        const request_id = try self.writeControlRequest(fd, .orphan_pane, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    /// Set sticky info on a pane.
-    pub fn setSticky(self: *SesClient, uuid: [32]u8, pwd: []const u8, key: u8) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SetSticky = .{
-            .uuid = uuid,
-            .key = key,
-            .pwd_len = @intCast(pwd.len),
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlTrailRequest(fd, .set_sticky, std.mem.asBytes(&msg), pwd);
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    /// Kill a pane.
-    pub fn killPane(self: *SesClient, uuid: [32]u8) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        self.debugLogUuid(&uuid, "killPane: sending to SES ctl_fd={d} vt_fd={?d}", .{ fd, self.vt_fd });
-        self.drainQueuedControlResponses(fd);
-        var msg: wire.PaneUuid = .{ .uuid = uuid };
-        const request_id = try self.writeControlRequest(fd, .kill_pane, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-        self.debugLogUuid(&uuid, "killPane: acknowledged by SES", .{});
-    }
+    // Pane metadata/lifecycle commands: bodies in `ses_client_commands`.
+    pub const orphanPane = commands.orphanPane;
+    pub const setSticky = commands.setSticky;
+    pub const killPane = commands.killPane;
+    pub const updatePaneName = commands.updatePaneName;
+    pub const updatePaneShell = commands.updatePaneShell;
 
     /// Request pane CWD from ses (fire-and-forget; response handled in handleSesMessage).
     pub fn requestPaneCwd(self: *SesClient, uuid: [32]u8) void {
@@ -870,42 +844,6 @@ pub const SesClient = struct {
         read.skipRemaining(self, fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         return resp_type == .pong;
-    }
-
-    /// Update pane name in ses and consume its acknowledgement.
-    pub fn updatePaneName(self: *SesClient, uuid: [32]u8, name: ?[]const u8) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        const name_bytes = name orelse "";
-        var msg: wire.UpdatePaneName = .{
-            .uuid = uuid,
-            .name_len = @intCast(name_bytes.len),
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlTrailRequest(fd, .update_pane_name, std.mem.asBytes(&msg), name_bytes);
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    /// Rename a tab in the canonical session snapshot (MUX → SES).
-    /// Update shell-provided pane metadata and consume its acknowledgement.
-    pub fn updatePaneShell(self: *SesClient, uuid: [32]u8, cmd: ?[]const u8, cwd: ?[]const u8, status: ?i32, duration_ms: ?u64, jobs: ?u16) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        const cmd_bytes = cmd orelse "";
-        const cwd_bytes = cwd orelse "";
-        var msg: wire.UpdatePaneShell = .{
-            .uuid = uuid,
-            .status = status orelse 0,
-            .has_status = if (status != null) 1 else 0,
-            .duration_ms = if (duration_ms) |d| @intCast(d) else 0,
-            .has_duration = if (duration_ms != null) 1 else 0,
-            .jobs = jobs orelse 0,
-            .has_jobs = if (jobs != null) 1 else 0,
-            .cmd_len = @intCast(cmd_bytes.len),
-            .cwd_len = @intCast(cwd_bytes.len),
-        };
-        const trails: []const []const u8 = &.{ cmd_bytes, cwd_bytes };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlMsgRequest(fd, .update_pane_shell, std.mem.asBytes(&msg), trails);
-        try self.readCommandAckForRequest(fd, request_id);
     }
 
     /// Pane type enum for auxiliary info.
