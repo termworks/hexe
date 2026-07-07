@@ -37,17 +37,27 @@ fn renderSearchPrompt(state: *State, renderer: anytype) void {
     };
 
     const bar_style: vaxis.Style = .{ .bg = .{ .index = 4 }, .fg = .{ .index = 15 } };
-    // Fill the row, then overlay the prompt text (ASCII/byte cells; multibyte
-    // display polish is a follow-up — search queries are typically ASCII).
+    // Fill the row, then overlay the prompt text one codepoint per cell so
+    // multibyte queries render as their glyph rather than mojibake.
     var x: u16 = 0;
     while (x < w) : (x += 1) {
         renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = " ", .width = 1 }, .style = bar_style });
     }
     x = 0;
-    for (text) |b| {
-        if (x >= w) break;
-        renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = &[_]u8{b}, .width = 1 }, .style = bar_style });
-        x += 1;
+    if (std.unicode.Utf8View.init(text)) |view| {
+        var it = view.iterator();
+        while (it.nextCodepointSlice()) |cp_bytes| {
+            if (x >= w) break;
+            renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = cp_bytes, .width = 1 }, .style = bar_style });
+            x += 1;
+        }
+    } else |_| {
+        // Invalid UTF-8 (shouldn't happen for typed input) — draw raw bytes.
+        for (text) |b| {
+            if (x >= w) break;
+            renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = &[_]u8{b}, .width = 1 }, .style = bar_style });
+            x += 1;
+        }
     }
 }
 
