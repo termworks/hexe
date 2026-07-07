@@ -258,9 +258,17 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   Remaining in `frontend_client`: connection/transport lifecycle, register, the
   query/reader *consumers* (getPaneInfoSnapshot, adoptPane, reattach/detach/
   listSessions, etc.), and the result types — a coherent remaining core.
-- `statusbar.zig` (2717 lines): extract the frontend-neutral Lua-when/command
-  eval + per-frame cache maps into `statusbar_eval.zig` (candidate for
-  `frontend_core`), leaving the vaxis draw + hit-test surface.
+- `statusbar.zig` (2717 → 2654 lines): ◑ the frontend-neutral Lua-eval
+  primitives (`beginLuaEval`/`endLuaEval`/`callbackIdFromCode` + `HEXE_LUA_TRACE`)
+  moved to `statusbar_eval.zig`. The when/command eval ENGINE + per-frame caches
+  stay: they are anchored to `populateLuaContext` (deeply `State`/`Pane`-coupled),
+  so extracting them needs a design change (inject context-population as a
+  callback), not a mechanical move.
+- Extended the split to two more god objects along the module's own patterns:
+  `com.zig` (1944 → 1476) — layout save/load/list → `com_layout.zig` (the
+  command-per-file re-export pattern com.zig already uses); `api_bridge.zig`
+  (2666 → 2419) — the self-contained record C-API glue → `api_bridge_record.zig`,
+  re-exported so lua_runtime registration is unchanged.
 
 ### 2.4 — `vt_routing.zig` decoy + mux→pod backpressure · M · HIGH · ✅ BACKPRESSURE LANDED (move deferred)
 - **Fix (landed):** the real gap — **mux→pod wrote synchronously with no
