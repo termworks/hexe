@@ -238,10 +238,13 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   dispatch + reattach/detach + 900 lines of status-JSON in one struct. Split into
   `ctl_handlers.zig`, `vt_routing.zig` (see 2.4), `watchers.zig`,
   `status_export.zig`; `Server` becomes a thin owner of maps + loop wiring.
-- `frontend_client.zig` (2631 → 1802 lines, −32%): ◑ MOSTLY DONE. Three mixin
+- `frontend_client.zig` (2631 → 1550 lines, −41%): ✅ SPLIT DONE. Four mixin
   siblings, all free functions taking `*SesClient` re-exported via `pub const`
   aliases (call sites unchanged, compiler-enforced; green build + full suite +
-  fmt + ReleaseSafe):
+  fmt + ReleaseSafe). `ses_client_queries.zig` (pane_info read-queries: aux/
+  name/existence-probe/snapshot) joined the three below. What remains in
+  `frontend_client` is connection/transport lifecycle, register, reattach/detach/
+  listSessions, adopt/sticky, and the result types — a coherent connection core.
   - `ses_client_responses.zig` — the pending sync/async response store (queue
     helpers). Zero helper promotions (Zig struct fields are cross-file
     accessible).
