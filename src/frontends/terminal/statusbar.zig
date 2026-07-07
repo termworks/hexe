@@ -15,76 +15,13 @@ const Color = core.style.Color;
 const Pane = @import("pane.zig").Pane;
 const segment_render = core.segment_render;
 const DEFAULT_OUTPUTS = [_]core.config.OutputDef{.{ .style = "", .format = "$output" }};
-const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
-
-const LuaTraceMode = enum { off, all, slow };
-
-fn parseLuaTraceMode() LuaTraceMode {
-    const v = std.posix.getenv("HEXE_LUA_TRACE") orelse return .off;
-    if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "all")) return .all;
-    if (std.mem.eql(u8, v, "slow")) return .slow;
-    return .off;
-}
-
-fn luaTraceSlowMs() i64 {
-    const raw = std.posix.getenv("HEXE_LUA_TRACE_SLOW_MS") orelse return 8;
-    return std.fmt.parseInt(i64, raw, 10) catch 8;
-}
-
-fn traceLuaEval(scope: []const u8, code: []const u8, ok: bool, start_ms: i64) void {
-    const mode = parseLuaTraceMode();
-    if (mode == .off) return;
-    const elapsed = std.time.milliTimestamp() - start_ms;
-    if (mode == .slow and elapsed < luaTraceSlowMs()) return;
-    const code_hint = if (callbackIdFromCode(code) != null) code else "<chunk>";
-    std.debug.print("[hexe-lua:{s}] ok={s} elapsed_ms={d} code={s}\n", .{ scope, if (ok) "true" else "false", elapsed, code_hint });
-}
-
-fn callbackIdFromCode(code: []const u8) ?i32 {
-    if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
-    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch |err| {
-        log.warn("failed to parse statusbar callback id: {}", .{err});
-        return null;
-    };
-}
-
-const LuaEvalMode = enum { chunk, callback };
-
-fn beginLuaEval(rt: *LuaRuntime, code: []const u8) ?LuaEvalMode {
-    if (callbackIdFromCode(code)) |cid| {
-        if (!core.lua_runtime.pushRegisteredCallback(rt, cid)) return null;
-        _ = rt.lua.getGlobal("ctx") catch {
-            rt.lua.pop(2);
-            return null;
-        };
-        rt.lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
-            rt.lua.pop(2);
-            return null;
-        };
-        return .callback;
-    }
-
-    const code_z = rt.allocator.dupeZ(u8, code) catch |err| {
-        core.logging.logError("terminal", "failed to allocate statusbar Lua snippet", err);
-        return null;
-    };
-    defer rt.allocator.free(code_z);
-
-    rt.lua.loadString(code_z) catch |err| {
-        core.logging.logError("terminal", "failed to load statusbar Lua snippet", err);
-        return null;
-    };
-    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        rt.lua.pop(1);
-        return null;
-    };
-    return .chunk;
-}
-
-fn endLuaEval(rt: *LuaRuntime, mode: LuaEvalMode) void {
-    rt.lua.pop(1);
-    if (mode == .callback) rt.lua.pop(1);
-}
+// Frontend-neutral Lua-eval primitives live in `statusbar_eval`; aliased here
+// so the bare call sites below are unchanged (PLAN 2.3).
+const luaeval = @import("statusbar_eval.zig");
+const callbackIdFromCode = luaeval.callbackIdFromCode;
+const beginLuaEval = luaeval.beginLuaEval;
+const endLuaEval = luaeval.endLuaEval;
+const traceLuaEval = luaeval.traceLuaEval;
 
 const WhenCacheEntry = struct {
     last_eval_ms: u64,
