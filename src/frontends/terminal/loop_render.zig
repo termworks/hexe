@@ -13,9 +13,42 @@ const float_title = @import("float_title.zig");
 const overlay_render = @import("overlay_render.zig");
 const notification = @import("notification.zig");
 const render_vx = @import("render_vx.zig");
+const vaxis = @import("vaxis");
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
 const Pane = @import("pane.zig").Pane;
+
+/// Draw the scrollback-search prompt on the bottom terminal row:
+/// `/<query>` while typing, `/<query>  [i/N]` (or `[no matches]`) after running.
+fn renderSearchPrompt(state: *State, renderer: anytype) void {
+    const w = state.term_width;
+    if (w == 0 or state.term_height == 0) return;
+    const row: u16 = state.term_height - 1;
+    const sm = &state.search_mode;
+
+    var buf: [576]u8 = undefined;
+    const text: []const u8 = switch (sm.phase) {
+        .typing => std.fmt.bufPrint(&buf, "/{s}", .{sm.query.items}) catch "/",
+        .results => if (sm.match_count == 0)
+            std.fmt.bufPrint(&buf, "/{s}  [no matches]", .{sm.query.items}) catch "/"
+        else
+            std.fmt.bufPrint(&buf, "/{s}  [{d}/{d}]", .{ sm.query.items, sm.current, sm.match_count }) catch "/",
+    };
+
+    const bar_style: vaxis.Style = .{ .bg = .{ .index = 4 }, .fg = .{ .index = 15 } };
+    // Fill the row, then overlay the prompt text (ASCII/byte cells; multibyte
+    // display polish is a follow-up — search queries are typically ASCII).
+    var x: u16 = 0;
+    while (x < w) : (x += 1) {
+        renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = " ", .width = 1 }, .style = bar_style });
+    }
+    x = 0;
+    for (text) |b| {
+        if (x >= w) break;
+        renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = &[_]u8{b}, .width = 1 }, .style = bar_style });
+        x += 1;
+    }
+}
 
 fn drawPaneRenderState(renderer: anytype, pane: *Pane, state: anytype, x: u16, y: u16, width: u16, height: u16, stdout: std.fs.File) void {
     const root = renderer.vx.window();
@@ -247,6 +280,12 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
                 renderer.setVaxisCell(cx, cy, c);
             }
         }
+    }
+
+    // Scrollback search prompt (PLAN 3.3): a vim-style `/query [i/N]` bar on the
+    // bottom row while search is active.
+    if (state.search_mode.active) {
+        renderSearchPrompt(state, renderer);
     }
 
     const now_ms: u64 = @intCast(std.time.milliTimestamp());

@@ -667,6 +667,63 @@ fn handleTabRenameParsedEvent(state: *State, parsed: ParsedEventHead) bool {
     };
 }
 
+fn handleSearchModeParsedEvent(state: *State, parsed: ParsedEventHead) bool {
+    if (!state.isSearchActive()) return false;
+
+    const event = parsed.event orelse return true;
+    return switch (event) {
+        .mouse => false,
+        .paste => |txt| blk: {
+            defer state.allocator.free(txt);
+            if (state.search_mode.phase == .typing) state.searchAppend(txt);
+            break :blk true;
+        },
+        .key_release => true,
+        .key_press => |k| blk: {
+            // After the query is run, keys navigate matches instead of editing.
+            if (state.search_mode.phase == .results) {
+                switch (k.codepoint) {
+                    vaxis.Key.escape, 'q' => state.exitSearchMode(),
+                    'n', vaxis.Key.enter => state.searchNext(),
+                    'N', 'p' => state.searchPrev(),
+                    else => {},
+                }
+                break :blk true;
+            }
+
+            // Typing phase: edit the query.
+            switch (k.codepoint) {
+                vaxis.Key.escape => {
+                    state.exitSearchMode();
+                    break :blk true;
+                },
+                vaxis.Key.enter => {
+                    state.searchRun();
+                    break :blk true;
+                },
+                vaxis.Key.backspace => {
+                    state.searchBackspace();
+                    break :blk true;
+                },
+                else => {},
+            }
+
+            if (k.text) |txt| {
+                state.searchAppend(txt);
+                break :blk true;
+            }
+
+            const cp = k.base_layout_codepoint orelse k.codepoint;
+            if (cp >= 32 and cp < 127) {
+                const b: u8 = @intCast(cp);
+                state.searchAppend(&.{b});
+            }
+            break :blk true;
+        },
+        else => true,
+    };
+}
+
 fn handleFloatRenameParsedEvent(state: *State, parsed: ParsedEventHead) bool {
     if (state.float_rename_uuid == null) return false;
 
@@ -886,6 +943,11 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
             }
 
             if (handleCopyModeParsedEvent(state, res)) {
+                i += res.n;
+                continue;
+            }
+
+            if (handleSearchModeParsedEvent(state, res)) {
                 i += res.n;
                 continue;
             }

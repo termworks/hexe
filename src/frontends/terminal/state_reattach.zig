@@ -782,6 +782,10 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
 pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     terminal_main.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
 
+    // Reattach rebuilds panes (freeing their screens); tear down any active
+    // scrollback search first so it can't hold a dangling screen (PLAN 3.3).
+    if (self.isSearchActive()) self.exitSearchMode();
+
     // Set flag to prevent SIGHUP from interrupting reattach
     self.runtime.beginReattach();
     defer self.runtime.endReattach();

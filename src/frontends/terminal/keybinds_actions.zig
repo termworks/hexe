@@ -447,6 +447,10 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
             state.enterCopyMode();
             return true;
         },
+        .search_enter => {
+            state.enterSearchMode();
+            return true;
+        },
         .sprite_toggle => {
             // Toggle sprite on the focused pane - use the pane's actual Pokemon name!
             if (state.activeFloatingIndex()) |idx| {

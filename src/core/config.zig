@@ -707,6 +707,7 @@ pub const Config = struct {
         pane_zoom,
         config_reload,
         copy_enter,
+        search_enter,
     };
 
     pub const BindAction = union(BindActionTag) {
@@ -738,6 +739,7 @@ pub const Config = struct {
         pane_zoom, // toggle zoom/maximize of the focused tiled pane
         config_reload, // re-read the Lua config and hot-swap it
         copy_enter, // enter keyboard copy-mode
+        search_enter, // enter scrollback text search
     };
 
     pub const Bind = struct {
@@ -1377,6 +1379,7 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "pane.zoom")) return .pane_zoom;
     if (std.mem.eql(u8, action_type, "config.reload")) return .config_reload;
     if (std.mem.eql(u8, action_type, "copy.enter")) return .copy_enter;
+    if (std.mem.eql(u8, action_type, "search.enter")) return .search_enter;
     if (std.mem.eql(u8, action_type, "pane.select_mode")) return .pane_select_mode;
     if (std.mem.eql(u8, action_type, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action_type, "clipboard.request")) return .clipboard_request;
@@ -1430,6 +1433,7 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "pane.zoom")) return .pane_zoom;
     if (std.mem.eql(u8, action, "config.reload")) return .config_reload;
     if (std.mem.eql(u8, action, "copy.enter")) return .copy_enter;
+    if (std.mem.eql(u8, action, "search.enter")) return .search_enter;
     if (std.mem.eql(u8, action, "pane.select_mode")) return .pane_select_mode;
     if (std.mem.eql(u8, action, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action, "clipboard.request")) return .clipboard_request;

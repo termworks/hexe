@@ -28,6 +28,7 @@ pub const HostSurfaceAction = enum {
     pane_zoom,
     config_reload,
     copy_enter,
+    search_enter,
 };
 
 /// Frontend-neutral action request distilled from a config keybinding.
@@ -163,6 +164,7 @@ pub fn actionRequestFromBindAction(action: BindAction) ActionRequest {
         .pane_zoom => .{ .host_surface = .pane_zoom },
         .config_reload => .{ .host_surface = .config_reload },
         .copy_enter => .{ .host_surface = .copy_enter },
+        .search_enter => .{ .host_surface = .search_enter },
         .split_h => .split_h,
         .split_v => .split_v,
         .split_resize => |dir| if (directionFromBindKeyKind(dir)) |value|
@@ -397,6 +399,10 @@ test "actionRequestFromBindAction categorizes host-surface actions" {
     try std.testing.expectEqual(
         HostSurfaceAction.copy_enter,
         actionRequestFromBindAction(.copy_enter).host_surface,
+    );
+    try std.testing.expectEqual(
+        HostSurfaceAction.search_enter,
+        actionRequestFromBindAction(.search_enter).host_surface,
     );
 }
 

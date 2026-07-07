@@ -108,6 +108,10 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
             handleFloatRequest(state, fd, ctl_event.payload_len, buffer);
         },
         .pane_exited => {
+            // A pane (possibly the one being searched) is about to be freed;
+            // tear down any active scrollback search first so it can't hold a
+            // dangling screen pointer (PLAN 3.3).
+            if (state.isSearchActive()) state.exitSearchMode();
             handlePaneExited(state, fd, ctl_event.payload_len, buffer);
         },
         .session_state => {
