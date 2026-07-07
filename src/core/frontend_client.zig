@@ -5,6 +5,7 @@ const liblink_transport = @import("frontend_liblink_transport.zig");
 const logging = @import("logging.zig");
 const session_model = @import("session_model.zig");
 const wire = @import("wire.zig");
+const responses = @import("ses_client_responses.zig");
 
 pub const LocalIpcTransport = struct {
     autostart_ses: bool = true,
@@ -279,94 +280,21 @@ pub const SesClient = struct {
         };
     }
 
-    fn queuePendingPaneExit(self: *SesClient, uuid: [32]u8) void {
-        for (self.pending_pane_exits.items) |existing| {
-            if (std.mem.eql(u8, &existing, &uuid)) return;
-        }
-        self.pending_pane_exits.append(self.allocator, uuid) catch |err| {
-            logging.logError("frontend-client", "failed to queue pending pane exit", err);
-        };
-    }
-
-    /// Move queued pane-exit messages captured during sync calls into `out`.
-    pub fn drainPendingPaneExits(self: *SesClient, out: *std.ArrayList([32]u8)) void {
-        if (self.pending_pane_exits.items.len == 0) return;
-        out.appendSlice(self.allocator, self.pending_pane_exits.items) catch |err| {
-            logging.logError("frontend-client", "failed to drain pending pane exits", err);
-            return;
-        };
-        self.pending_pane_exits.clearRetainingCapacity();
-    }
-
-    pub fn queuePendingSessionState(self: *SesClient, session_state_json: []const u8) void {
-        const owned = self.allocator.dupe(u8, session_state_json) catch |err| {
-            logging.logError("frontend-client", "failed to queue pending session state", err);
-            return;
-        };
-        if (self.pending_session_state) |old| self.allocator.free(old);
-        self.pending_session_state = owned;
-    }
-
-    fn queuePendingCwdResponse(self: *SesClient, uuid: [32]u8, cwd: []const u8) void {
-        const owned = self.allocator.dupe(u8, cwd) catch |err| {
-            logging.logError("frontend-client", "failed to copy pending cwd response", err);
-            return;
-        };
-        self.pending_cwd_responses.append(self.allocator, .{ .uuid = uuid, .cwd = owned }) catch |err| {
-            logging.logError("frontend-client", "failed to queue pending cwd response", err);
-            self.allocator.free(owned);
-            return;
-        };
-    }
-
-    pub fn drainPendingCwdResponse(self: *SesClient) ?PendingCwdResponse {
-        if (self.pending_cwd_responses.items.len == 0) return null;
-        return self.pending_cwd_responses.orderedRemove(0);
-    }
-
-    fn queuePendingPaneInfoResponse(self: *SesClient, response: PendingPaneInfoResponse) void {
-        var owned = response;
-        self.pending_pane_info_responses.append(self.allocator, owned) catch {
-            owned.deinit(self.allocator);
-            return;
-        };
-    }
-
-    pub fn drainPendingPaneInfoResponse(self: *SesClient) ?PendingPaneInfoResponse {
-        if (self.pending_pane_info_responses.items.len == 0) return null;
-        return self.pending_pane_info_responses.orderedRemove(0);
-    }
-
-    pub fn drainPendingSessionState(self: *SesClient) ?[]u8 {
-        const pending = self.pending_session_state orelse return null;
-        self.pending_session_state = null;
-        return pending;
-    }
-
-    fn queuePendingControlResponse(self: *SesClient, response: PendingControlResponse) void {
-        var owned = response;
-        self.pending_control_responses.append(self.allocator, owned) catch |err| {
-            owned.deinit(self.allocator);
-            logging.logError("frontend-client", "failed to queue pending control response", err);
-            return;
-        };
-    }
-
-    fn takePendingControlResponse(self: *SesClient, request_id: u32) ?PendingControlResponse {
-        if (request_id == 0) return null;
-        for (self.pending_control_responses.items, 0..) |resp, i| {
-            if (resp.request_id == request_id) {
-                return self.pending_control_responses.orderedRemove(i);
-            }
-        }
-        return null;
-    }
-
-    pub fn takeResolvedNameOwned(self: *SesClient) ?[]u8 {
-        const resolved = self.resolved_name orelse return null;
-        self.resolved_name = null;
-        return resolved;
-    }
+    // Response store: pending sync/async response queues captured while a
+    // synchronous CTL call is in flight. Bodies live in `ses_client_responses`;
+    // aliased here so `client.<name>(...)` call sites are unchanged (PLAN 2.3).
+    const queuePendingPaneExit = responses.queuePendingPaneExit;
+    pub const drainPendingPaneExits = responses.drainPendingPaneExits;
+    pub const queuePendingSessionState = responses.queuePendingSessionState;
+    const queuePendingCwdResponse = responses.queuePendingCwdResponse;
+    pub const drainPendingCwdResponse = responses.drainPendingCwdResponse;
+    const queuePendingPaneInfoResponse = responses.queuePendingPaneInfoResponse;
+    pub const drainPendingPaneInfoResponse = responses.drainPendingPaneInfoResponse;
+    pub const drainPendingSessionState = responses.drainPendingSessionState;
+    const queuePendingControlResponse = responses.queuePendingControlResponse;
+    const takePendingControlResponse = responses.takePendingControlResponse;
+    pub const takeResolvedNameOwned = responses.takeResolvedNameOwned;
+    pub const drainPendingSessionStolen = responses.drainPendingSessionStolen;
 
     /// Reconnect hygiene: a fresh connection must not inherit fds or queued
     /// responses from a previous one. Stale queued responses can match a new
@@ -393,13 +321,6 @@ pub const SesClient = struct {
             self.pending_session_state = null;
         }
         self.pending_session_stolen = false;
-    }
-
-    /// Returns true once per consumed session_stolen push (see field docs).
-    pub fn drainPendingSessionStolen(self: *SesClient) bool {
-        const stolen = self.pending_session_stolen;
-        self.pending_session_stolen = false;
-        return stolen;
     }
 
     /// Connect to the ses daemon, starting it if necessary.
