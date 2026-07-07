@@ -267,8 +267,14 @@ lifecycle, and dispatch — which belong there. Further handler extraction
 - Extended the split to two more god objects along the module's own patterns:
   `com.zig` (1944 → 1476) — layout save/load/list → `com_layout.zig` (the
   command-per-file re-export pattern com.zig already uses); `api_bridge.zig`
-  (2666 → 2419) — the self-contained record C-API glue → `api_bridge_record.zig`,
-  re-exported so lua_runtime registration is unchanged.
+  (2666 → 1964, −26%) — three sibling modules carved off via a shared recipe
+  (new module imports api_bridge for shared bridge helpers, which are promoted to
+  `pub`; the group's external entry point is re-exported so callers are
+  unchanged; circular import is fine in Zig): `api_bridge_record.zig` (record
+  C-API glue), `api_bridge_layout.zig` (layout-tree parsers), `api_bridge_float.zig`
+  (float visual-options parsers). What remains is the entangled segment-parser
+  core (`parseSegmentAtPath`/`parseSegment`/`parseSegmentDef`) that shares a wide
+  helper surface — a heavier extraction, not yet done.
 
 ### 2.4 — `vt_routing.zig` decoy + mux→pod backpressure · M · HIGH · ✅ BACKPRESSURE LANDED (move deferred)
 - **Fix (landed):** the real gap — **mux→pod wrote synchronously with no
