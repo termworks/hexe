@@ -14,6 +14,7 @@ const overlay_render = @import("overlay_render.zig");
 const notification = @import("notification.zig");
 const render_vx = @import("render_vx.zig");
 const vaxis = @import("vaxis");
+const pane_search = @import("pane_search.zig");
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
 const Pane = @import("pane.zig").Pane;
@@ -47,6 +48,27 @@ fn renderSearchPrompt(state: *State, renderer: anytype) void {
         if (x >= w) break;
         renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = &[_]u8{b}, .width = 1 }, .style = bar_style });
         x += 1;
+    }
+}
+
+/// Reverse-video the current search match's cells (inclusive viewport range,
+/// pane-local) over the already-drawn focused pane.
+fn highlightSearchMatch(renderer: anytype, pane: *Pane, m: pane_search.PaneSearch.MatchViewport) void {
+    if (pane.width == 0 or pane.height == 0) return;
+    var y = m.sy;
+    while (y <= m.ey and y < pane.height) : (y += 1) {
+        const row_start: u16 = if (y == m.sy) m.sx else 0;
+        const row_end: u16 = if (y == m.ey) m.ex else pane.width - 1;
+        var x = row_start;
+        while (x <= row_end and x < pane.width) : (x += 1) {
+            const cx = pane.x + x;
+            const cy = pane.y + y;
+            if (renderer.getVaxisCell(cx, cy)) |cell| {
+                var c = cell;
+                c.style.reverse = true;
+                renderer.setVaxisCell(cx, cy, c);
+            }
+        }
     }
 }
 
@@ -282,9 +304,15 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
     }
 
-    // Scrollback search prompt (PLAN 3.3): a vim-style `/query [i/N]` bar on the
-    // bottom row while search is active.
+    // Scrollback search (PLAN 3.3): reverse-video the current match in the
+    // focused pane (drawn above), then a vim-style `/query [i/N]` bar on the
+    // bottom row.
     if (state.search_mode.active) {
+        if (state.currentLayout().getFocusedPane()) |fp| {
+            if (state.search_mode.currentMatchViewport(fp)) |m| {
+                highlightSearchMatch(renderer, fp, m);
+            }
+        }
         renderSearchPrompt(state, renderer);
     }
 

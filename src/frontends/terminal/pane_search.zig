@@ -131,6 +131,27 @@ pub const PaneSearch = struct {
         // growth while the search is open.
         pane.vt.terminal.screens.active.scroll(.{ .pin = hl.startPin() });
     }
+
+    /// Inclusive viewport-local cell bounds of the current match, or null if it
+    /// is not currently in the pane's viewport. Coordinates are pane-local
+    /// (0-based); the caller offsets by the pane's on-screen origin.
+    pub const MatchViewport = struct { sx: u16, sy: u16, ex: u16, ey: u16 };
+
+    pub fn currentMatchViewport(self: *PaneSearch, pane: *Pane) ?MatchViewport {
+        if (self.search) |*s| {
+            const hl = s.selectedMatch() orelse return null;
+            const pages = &pane.vt.terminal.screens.active.pages;
+            const sp = pages.pointFromPin(.viewport, hl.startPin()) orelse return null;
+            const ep = pages.pointFromPin(.viewport, hl.endPin()) orelse return null;
+            return .{
+                .sx = @intCast(sp.viewport.x),
+                .sy = @intCast(sp.viewport.y),
+                .ex = @intCast(ep.viewport.x),
+                .ey = @intCast(ep.viewport.y),
+            };
+        }
+        return null;
+    }
 };
 
 test "PaneSearch finds and counts matches in scrollback" {
@@ -160,6 +181,12 @@ test "PaneSearch finds and counts matches in scrollback" {
     try testing.expectEqual(@as(usize, 2), search.current);
     search.prev(&pane);
     try testing.expectEqual(@as(usize, 1), search.current);
+
+    // The current match resolves to an inclusive viewport range spanning the
+    // 5-cell "hello" needle on a single row.
+    const mv = search.currentMatchViewport(&pane).?;
+    try testing.expectEqual(mv.sy, mv.ey);
+    try testing.expectEqual(@as(u16, 4), mv.ex - mv.sx);
 
     // Clear the borrowed VT so deinit doesn't double-free (owned by `vt`).
     pane.vt = .{};
