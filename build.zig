@@ -306,6 +306,25 @@ pub fn build(b: *std.Build) void {
     });
     const run_pane_output_tests = b.addRunArtifact(pane_output_tests);
 
+    // Scrollback search (PLAN 3.3) tests.
+    const pane_search_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/pane_search.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    pane_search_test_module.addIncludePath(b.path("src/frontends/terminal"));
+    pane_search_test_module.addImport("core", core_module);
+    pane_search_test_module.addImport("pop", pop_module);
+    if (ghostty_vt_mod) |vt| {
+        pane_search_test_module.addImport("ghostty-vt", vt);
+    }
+
+    const pane_search_tests = b.addTest(.{
+        .root_module = pane_search_test_module,
+    });
+    const run_pane_search_tests = b.addRunArtifact(pane_search_tests);
+
     // Frontend-core host boundary tests.
     const frontend_core_test_module = b.createModule(.{
         .root_source_file = b.path("src/frontends/core/mod.zig"),
@@ -377,6 +396,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);
+    test_step.dependOn(&run_pane_search_tests.step);
     test_step.dependOn(&run_frontend_core_tests.step);
     test_step.dependOn(&run_web_host_tests.step);
     test_step.dependOn(&run_syslink_host_tests.step);

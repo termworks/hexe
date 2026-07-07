@@ -18,6 +18,7 @@ pub const CursorSnapshot = state_types.CursorSnapshot;
 pub const FloatUiState = state_types.FloatUiState;
 
 const layout_mod = @import("layout.zig");
+const pane_search = @import("pane_search.zig");
 const Layout = layout_mod.Layout;
 
 const Renderer = @import("render_core.zig").Renderer;
@@ -271,6 +272,7 @@ pub const State = struct {
     /// drives the shared mouse_selection machinery. When active, input is
     /// captured for navigation/selection instead of forwarded to the pane.
     copy_mode: CopyMode = .{},
+    search_mode: pane_search.PaneSearch = .{},
     /// When true, force cursor visible on next render (set after float death)
     cursor_needs_restore: bool,
     /// One-shot cursor snapshot restored after transient CLI float exits.
@@ -716,6 +718,66 @@ pub const State = struct {
         return self.copy_mode.active;
     }
 
+    // ── Scrollback search (PLAN 3.3) ──────────────────────────────────────────
+
+    /// Enter scrollback-search over the focused pane.
+    pub fn enterSearchMode(self: *State) void {
+        if (self.currentLayout().getFocusedPane() == null) return;
+        self.search_mode.enter();
+        self.notifications.showFor("Search: type · Enter search · n/N next/prev · Esc exit", 2500);
+        self.needs_render = true;
+    }
+
+    pub fn searchAppend(self: *State, text: []const u8) void {
+        self.search_mode.appendText(self.allocator, text);
+        self.needs_render = true;
+    }
+
+    pub fn searchBackspace(self: *State) void {
+        self.search_mode.backspace();
+        self.needs_render = true;
+    }
+
+    /// Run the typed query against the focused pane's scrollback.
+    pub fn searchRun(self: *State) void {
+        const pane = self.currentLayout().getFocusedPane() orelse {
+            self.exitSearchMode();
+            return;
+        };
+        const count = self.search_mode.run(self.allocator, pane);
+        if (count == 0) self.notifications.showFor("No matches", 1500);
+        self.markSearchDirty();
+    }
+
+    pub fn searchNext(self: *State) void {
+        const pane = self.currentLayout().getFocusedPane() orelse return;
+        self.search_mode.next(pane);
+        self.markSearchDirty();
+    }
+
+    pub fn searchPrev(self: *State) void {
+        const pane = self.currentLayout().getFocusedPane() orelse return;
+        self.search_mode.prev(pane);
+        self.markSearchDirty();
+    }
+
+    /// Tear down search. MUST be called before the focused pane can change
+    /// (tab switch, pane close, reattach) — the search holds a screen pointer.
+    pub fn exitSearchMode(self: *State) void {
+        self.search_mode.exit();
+        self.markSearchDirty();
+    }
+
+    pub fn isSearchActive(self: *const State) bool {
+        return self.search_mode.active;
+    }
+
+    fn markSearchDirty(self: *State) void {
+        self.renderer.invalidate();
+        self.force_full_render = true;
+        self.needs_render = true;
+    }
+
     fn removeQueuedPaneReplyTargets(
         uuids: *std.ArrayList([32]u8),
         enqueued_ms: *std.ArrayList(i64),
@@ -887,6 +949,7 @@ pub const State = struct {
         if (self.frontend_view) |*view| view.deinit();
         self.frontend_view = null;
 
+        self.search_mode.deinit(self.allocator);
         self.key_timers.deinit(self.allocator);
 
         self.view.deinit(self.allocator);
