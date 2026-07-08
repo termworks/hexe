@@ -1326,3 +1326,76 @@ test "SessionSnapshot.fromJson: mux-root (frontend reattach) format parses id-ba
     const fkey: [32]u8 = fju.*;
     try testing.expectEqual(SessionPaneKind.float, (snap.panes.get(fkey) orelse return error.TestUnexpectedResult).kind);
 }
+
+test "removePaneFromLayout: removing a leaf collapses its parent split to the sibling" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    var maybe_root: ?*SessionLayoutNode = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer freeLayoutClone(allocator, maybe_root);
+
+    try testing.expect(try removePaneFromLayout(allocator, &maybe_root, pa));
+    const r = maybe_root orelse return error.TestUnexpectedResult;
+    try testing.expect(r.* == .pane); // collapsed to the surviving sibling
+    try testing.expectEqualSlices(u8, &pb, &r.pane);
+}
+
+test "removePaneFromLayout: nested tree collapses the inner split" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+    // h[ a, v[ b, c ] ]
+    const inner = try tsSplit(allocator, .vertical, 0.4, try tsPane(allocator, pb), try tsPane(allocator, pc));
+    var maybe_root: ?*SessionLayoutNode = try tsSplit(allocator, .horizontal, 0.6, try tsPane(allocator, pa), inner);
+    defer freeLayoutClone(allocator, maybe_root);
+
+    try testing.expect(try removePaneFromLayout(allocator, &maybe_root, pb));
+    // → h[ a, c ]: outer split intact, inner collapsed to c.
+    const r = maybe_root orelse return error.TestUnexpectedResult;
+    try testing.expect(r.* == .split);
+    try testing.expectEqualSlices(u8, &pa, &r.split.first.pane);
+    try testing.expect(r.split.second.* == .pane);
+    try testing.expectEqualSlices(u8, &pc, &r.split.second.pane);
+}
+
+test "removePaneFromLayout: removing the only pane empties the layout" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    var maybe_root: ?*SessionLayoutNode = try tsPane(allocator, pa);
+    defer freeLayoutClone(allocator, maybe_root);
+    try testing.expect(try removePaneFromLayout(allocator, &maybe_root, pa));
+    try testing.expect(maybe_root == null);
+}
+
+test "removePaneFromLayout: removing a missing pane leaves the tree unchanged" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    var maybe_root: ?*SessionLayoutNode = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer freeLayoutClone(allocator, maybe_root);
+    try testing.expect(!(try removePaneFromLayout(allocator, &maybe_root, [_]u8{'z'} ** 32)));
+    const r = maybe_root orelse return error.TestUnexpectedResult;
+    try testing.expect(r.* == .split);
+    try testing.expect(layoutContainsPaneUuid(r, pa));
+    try testing.expect(layoutContainsPaneUuid(r, pb));
+}
+
+test "setSplitRatioByAnchors: sets and clamps the ratio between two sibling panes" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(setSplitRatioByAnchors(root, pa, pb, 0.75));
+    try testing.expectApproxEqAbs(@as(f32, 0.75), root.split.ratio, 0.0005);
+    _ = setSplitRatioByAnchors(root, pa, pb, 0.99); // clamp high
+    try testing.expectApproxEqAbs(@as(f32, 0.9), root.split.ratio, 0.0005);
+    _ = setSplitRatioByAnchors(root, pa, pb, 0.01); // clamp low
+    try testing.expectApproxEqAbs(@as(f32, 0.1), root.split.ratio, 0.0005);
+    // A missing/non-sibling anchor is rejected.
+    try testing.expect(!setSplitRatioByAnchors(root, pa, [_]u8{'z'} ** 32, 0.5));
+}
