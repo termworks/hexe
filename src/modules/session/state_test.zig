@@ -3329,3 +3329,45 @@ test "persist buildStateJson: adversarial sticky_pwd/socket produce valid, faith
     try testing.expectEqualStrings(nasty_pwd, panes.items[0].object.get("sticky_pwd").?.string);
     try testing.expectEqualStrings(nasty_sock, panes.items[0].object.get("socket").?.string);
 }
+
+test "client snapshot: error and no-op paths on invalid input" {
+    const allocator = testing.allocator;
+    const css = @import("client_session_snapshot.zig");
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+    const cid = try ses_state.addClient(1);
+    const tab = [_]u8{'t'} ** 32;
+    const pane = [_]u8{'p'} ** 32;
+    try css.addTab(&ses_state, cid, tab, pane, 0, "T");
+
+    // splitPane into a non-existent tab → error, layout untouched.
+    try testing.expectError(error.InvalidLayout, css.splitPane(&ses_state, cid, [_]u8{'z'} ** 32, pane, [_]u8{'n'} ** 32, 0, null, .vertical));
+    // splitPane whose source pane isn't in the tab layout → error.
+    try testing.expectError(error.InvalidLayout, css.splitPane(&ses_state, cid, tab, [_]u8{'q'} ** 32, [_]u8{'n'} ** 32, 0, null, .vertical));
+
+    // Unregistered client → InvalidClient (not a crash).
+    try testing.expectError(error.InvalidClient, css.splitPane(&ses_state, 999, tab, pane, [_]u8{'n'} ** 32, 0, null, .vertical));
+    try testing.expectError(error.InvalidClient, css.addTab(&ses_state, 999, tab, pane, 0, "X"));
+
+    {
+        const snap = &(ses_state.getClient(cid).?.session_snapshot.?);
+        try testing.expect(snap.tabs.items[0].root.?.* == .pane); // unchanged by failed splits
+        try testing.expect(!snap.panes.contains([_]u8{'n'} ** 32)); // no phantom pane added
+
+        // renameTab / removeTab / updateFocus of non-existent targets are no-ops.
+        css.renameTab(&ses_state, cid, [_]u8{'z'} ** 32, "nope");
+        try testing.expectEqualStrings("T", snap.tabs.items[0].name);
+        css.removeTab(&ses_state, cid, [_]u8{'z'} ** 32, null);
+        try testing.expectEqual(@as(usize, 1), snap.tabs.items.len);
+        css.updateFocus(&ses_state, cid, [_]u8{'q'} ** 32, 0, true); // pane not in snapshot
+    }
+
+    // addTab index beyond len clamps to an append.
+    const tab2 = [_]u8{'u'} ** 32;
+    try css.addTab(&ses_state, cid, tab2, [_]u8{'b'} ** 32, 99, "second");
+    {
+        const snap = &(ses_state.getClient(cid).?.session_snapshot.?);
+        try testing.expectEqual(@as(usize, 2), snap.tabs.items.len);
+        try testing.expectEqualSlices(u8, &tab2, &snap.tabs.items[1].uuid);
+    }
+}
