@@ -924,7 +924,7 @@ pub const Server = struct {
     /// Write a control reply to a client fd; on failure log and queue the
     /// connection for close so stale fds don't accumulate.
     pub fn replyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
-        wire.writeControlWithRequestId(fd, msg_type, self.responseRequestIdForFd(fd), payload) catch |err| {
+        wire.writeControlWithRequestIdTimeout(fd, msg_type, self.responseRequestIdForFd(fd), payload, HANDLER_IO_TIMEOUT_MS) catch |err| {
             core.logging.warnWithSource("ses", "reply failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
             self.queueCtlClose(fd, null);
         };
@@ -938,7 +938,7 @@ pub const Server = struct {
         payload: []const u8,
         trail: []const u8,
     ) void {
-        wire.writeControlWithTrailAndRequestId(fd, msg_type, self.responseRequestIdForFd(fd), payload, trail) catch |err| {
+        wire.writeControlWithTrailAndRequestIdTimeout(fd, msg_type, self.responseRequestIdForFd(fd), payload, trail, HANDLER_IO_TIMEOUT_MS) catch |err| {
             core.logging.warnWithSource("ses", "reply-with-trail failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
             self.queueCtlClose(fd, null);
         };
@@ -2197,7 +2197,7 @@ pub const Server = struct {
                 }
                 self.pending_exit_intent_cli_fd = fd;
                 // Forward to MUX.
-                wire.writeControl(mux_fd, .exit_intent, std.mem.asBytes(&ei)) catch |err| {
+                wire.writeControlTimeout(mux_fd, .exit_intent, std.mem.asBytes(&ei), HANDLER_IO_TIMEOUT_MS) catch |err| {
                     core.logging.logError("ses", "failed to forward exit_intent to mux", err);
                     // If forward fails, allow exit.
                     const allow = wire.ExitIntentResult{ .allow = 1 };
@@ -2240,7 +2240,7 @@ pub const Server = struct {
                     return;
                 };
                 // Forward entire float_request to MUX.
-                wire.writeControlWithTrail(mux_fd, .float_request, std.mem.asBytes(&fr), buf[0..trail_len]) catch |err| {
+                wire.writeControlWithTrailTimeout(mux_fd, .float_request, std.mem.asBytes(&fr), buf[0..trail_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
                     core.logging.logError("ses", "float_request forward to mux failed", err);
                     self.sendBinaryError(fd, "forward_failed");
                     posix.close(fd);

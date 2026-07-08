@@ -849,6 +849,47 @@ pub fn writeControlMsgWithRequestId(fd: posix.fd_t, msg_type: MsgType, request_i
     }
 }
 
+/// Control-message writers with an explicit stall budget, for single-threaded
+/// event loops: a wedged peer (e.g. a SIGSTOPped frontend with a full socket
+/// buffer) must cost the daemon a bounded stall, not the 10s writeAll default.
+pub fn writeControlTimeout(fd: posix.fd_t, msg_type: MsgType, payload: []const u8, timeout_ms: i32) !void {
+    try writeControlWithRequestIdTimeout(fd, msg_type, 0, payload, timeout_ms);
+}
+
+pub fn writeControlWithRequestIdTimeout(fd: posix.fd_t, msg_type: MsgType, request_id: u32, payload: []const u8, timeout_ms: i32) !void {
+    try writeControlMsgWithRequestIdTimeout(fd, msg_type, request_id, payload, &.{}, timeout_ms);
+}
+
+pub fn writeControlWithTrailTimeout(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, trail: []const u8, timeout_ms: i32) !void {
+    try writeControlMsgWithRequestIdTimeout(fd, msg_type, 0, fixed, &.{trail}, timeout_ms);
+}
+
+pub fn writeControlWithTrailAndRequestIdTimeout(fd: posix.fd_t, msg_type: MsgType, request_id: u32, fixed: []const u8, trail: []const u8, timeout_ms: i32) !void {
+    try writeControlMsgWithRequestIdTimeout(fd, msg_type, request_id, fixed, &.{trail}, timeout_ms);
+}
+
+pub fn writeControlMsgTimeout(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, trails: []const []const u8, timeout_ms: i32) !void {
+    try writeControlMsgWithRequestIdTimeout(fd, msg_type, 0, fixed, trails, timeout_ms);
+}
+
+pub fn writeControlMsgWithRequestIdTimeout(fd: posix.fd_t, msg_type: MsgType, request_id: u32, fixed: []const u8, trails: []const []const u8, timeout_ms: i32) !void {
+    var total: usize = fixed.len;
+    for (trails) |t| total += t.len;
+
+    var hdr: ControlHeader = .{
+        .msg_type = @intFromEnum(msg_type),
+        .request_id = request_id,
+        .payload_len = @intCast(total),
+    };
+    try writeAllTimeout(fd, std.mem.asBytes(&hdr), timeout_ms);
+    if (fixed.len > 0) {
+        try writeAllTimeout(fd, fixed, timeout_ms);
+    }
+    for (trails) |t| {
+        if (t.len > 0) try writeAllTimeout(fd, t, timeout_ms);
+    }
+}
+
 /// Read a ControlHeader from fd. Blocks until 6 bytes arrive.
 pub fn readControlHeader(fd: posix.fd_t) !ControlHeader {
     var buf: [@sizeOf(ControlHeader)]u8 = undefined;

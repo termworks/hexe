@@ -3,6 +3,7 @@ const posix = std.posix;
 const core = @import("core");
 const wire = core.wire;
 const ses = @import("main.zig");
+const server = @import("server.zig");
 const client_panes = @import("client_panes.zig");
 const snapshot_mod = @import("snapshot.zig");
 const sticky_panes = @import("sticky_panes.zig");
@@ -415,7 +416,7 @@ pub fn forceDetachAttachedSession(self: anytype, session_id: [16]u8) bool {
     }
 
     if (owner.mux_ctl_fd) |mfd| {
-        wire.writeControl(mfd, .session_stolen, &.{}) catch |err| {
+        wire.writeControlTimeout(mfd, .session_stolen, &.{}, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
             core.logging.logError("ses", "failed to notify owner session was stolen", err);
         };
     }

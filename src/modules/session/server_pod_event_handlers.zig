@@ -149,7 +149,7 @@ pub fn handleBinaryShellEvent(self: *Server, fd: posix.fd_t, payload_len: u32, b
             if (self.ses_state.getClient(client_id)) |client| {
                 if (client.mux_ctl_fd) |mux_fd| {
                     const trails: []const []const u8 = &.{buf[0..trail_len]};
-                    wire.writeControlMsg(mux_fd, .shell_event, std.mem.asBytes(&fwd), trails) catch |err| {
+                    wire.writeControlMsgTimeout(mux_fd, .shell_event, std.mem.asBytes(&fwd), trails, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
                         core.logging.warnWithSource("ses", "shell_event forward failed: fd={d} err={s}", .{ mux_fd, @errorName(err) }, @src());
                         self.queueCtlClose(mux_fd, null);
                     };
