@@ -1202,3 +1202,78 @@ test "SessionSnapshot.fromJson: small tab_visible integer round-trips (non-numbe
     defer restored.deinit();
     try testing.expectEqual(@as(u64, 5), restored.floats.items[0].tab_visible);
 }
+
+test "layoutContainsPaneUuid: finds panes at any depth" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+    const inner = try tsSplit(allocator, .vertical, 0.5, try tsPane(allocator, pb), try tsPane(allocator, pc));
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), inner);
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(layoutContainsPaneUuid(root, pa));
+    try testing.expect(layoutContainsPaneUuid(root, pb));
+    try testing.expect(layoutContainsPaneUuid(root, pc));
+    try testing.expect(!layoutContainsPaneUuid(root, [_]u8{'z'} ** 32));
+}
+
+test "splitPaneInLayout: splits a leaf into a split of two panes" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pnew = [_]u8{'n'} ** 32;
+    const root = try tsPane(allocator, pa);
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(try splitPaneInLayout(allocator, root, pa, pnew, .vertical));
+    try testing.expect(root.* == .split);
+    try testing.expectEqual(SessionSplitDir.vertical, root.split.dir);
+    try testing.expect(layoutContainsPaneUuid(root, pa));
+    try testing.expect(layoutContainsPaneUuid(root, pnew));
+    // Splitting a non-existent source is a no-op that reports false.
+    try testing.expect(!try splitPaneInLayout(allocator, root, [_]u8{'z'} ** 32, [_]u8{'q'} ** 32, .horizontal));
+}
+
+test "replacePaneUuidInLayout: renames a pane in place" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pnew = [_]u8{'x'} ** 32;
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(replacePaneUuidInLayout(root, pb, pnew));
+    try testing.expect(!layoutContainsPaneUuid(root, pb));
+    try testing.expect(layoutContainsPaneUuid(root, pnew));
+    try testing.expect(!replacePaneUuidInLayout(root, [_]u8{'z'} ** 32, pnew));
+}
+
+test "layoutNodeToJson/fromJson: split tree survives a node round-trip" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+    const inner = try tsSplit(allocator, .vertical, 0.35, try tsPane(allocator, pb), try tsPane(allocator, pc));
+    const root = try tsSplit(allocator, .horizontal, 0.65, try tsPane(allocator, pa), inner);
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+
+    const json = try layoutNodeToJson(allocator, root);
+    defer allocator.free(json);
+    const restored = try layoutNodeFromJson(allocator, json);
+    defer freeLayoutClone(allocator, restored);
+    try expectLayoutEq(root, restored);
+
+    // A null node round-trips to null.
+    const null_json = try layoutNodeToJson(allocator, null);
+    defer allocator.free(null_json);
+    try testing.expect((try layoutNodeFromJson(allocator, null_json)) == null);
+}
