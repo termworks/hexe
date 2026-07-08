@@ -101,10 +101,14 @@ pub const SessionConfig = struct {
     tabs: []TabConfig = &.{},
     floats: []FloatConfig = &.{}, // global floats
     filter_tab: ?[]const u8 = null, // if set, only launch this tab
+    /// Absolute path of the `.hexe.lua` this config was parsed from (when known).
+    /// Used to gate `on_start`/`on_stop` shell hooks against the trust ledger.
+    source_path: ?[]const u8 = null,
 
     pub fn deinit(self: *SessionConfig, allocator: std.mem.Allocator) void {
         if (self.name) |name| allocator.free(name);
         if (self.root) |root| allocator.free(root);
+        if (self.source_path) |sp| allocator.free(sp);
         for (self.on_start) |cmd| allocator.free(cmd);
         if (self.on_start.len > 0) allocator.free(self.on_start);
         for (self.on_stop) |cmd| allocator.free(cmd);
@@ -427,6 +431,11 @@ pub fn parseSessionLua(allocator: std.mem.Allocator, path: []const u8) !SessionC
     config.on_stop = parseStringArray(allocator, &runtime, table_idx, "on_stop") catch &.{};
     config.tabs = parseTabs(allocator, &runtime, table_idx) catch &.{};
     config.floats = parseFloats(allocator, &runtime, table_idx) catch &.{};
+
+    // Set last so error-returning parses above never leak this (config is
+    // discarded without deinit on the error paths). Gates on_start/on_stop
+    // against the trust ledger (PLAN 1.9).
+    config.source_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch null;
 
     return config;
 }

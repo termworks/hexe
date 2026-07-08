@@ -31,6 +31,7 @@ pub const resource_limits = @import("resource_limits.zig");
 pub const isolation_voidbox = @import("isolation_voidbox.zig");
 pub const session_config = @import("session_config.zig");
 pub const session_model = @import("session_model.zig");
+pub const trust = @import("trust.zig");
 pub const session_projection = @import("session_projection.zig");
 pub const frontend_attach_state = @import("frontend_attach_state.zig");
 pub const frontend_attach = @import("frontend_attach.zig");

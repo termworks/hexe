@@ -672,7 +672,10 @@ pub fn main() !void {
     try record_toggle.addArg(Arg.booleanOption("capture-input", null, null));
     try record_cmd.addSubcommands(&[_]yazap.Command{ record_start, record_stop, record_status, record_toggle });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
+    var allow_cmd = app.createCommand("allow", "Trust a project .hexe.lua so its on_start/on_stop hooks may run");
+    try allow_cmd.addArg(Arg.positional("path", null, null));
+
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -771,6 +774,8 @@ pub fn main() !void {
             try ses_pipe.run(allocator, m.getSingleValue("ses-socket") orelse "");
             return;
         }
+    } else if (matches.subcommandMatches("allow")) |m| {
+        try runAllow(allocator, m.getSingleValue("path") orelse "");
     } else if (matches.subcommandMatches("layout")) |layout_matches| {
         if (layout_matches.subcommandMatches("list")) |m| {
             try cli_cmds.runSessionLayoutList(allocator, m.containsArg("json"));
@@ -1323,6 +1328,31 @@ const RemoteConnectArgs = struct {
 // Stable storage for the defaulted identity path (process-lifetime; the CLI
 // runs a single session).
 var remote_identity_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+/// `hexe allow [path]` — record a project `.hexe.lua`'s content hash in the
+/// trust ledger so its on_start/on_stop hooks may run (PLAN 1.9). `path` may be
+/// a `.hexe.lua` file or a directory containing one; defaults to `./.hexe.lua`.
+fn runAllow(allocator: std.mem.Allocator, arg_path: []const u8) !void {
+    const path = if (arg_path.len == 0)
+        try allocator.dupe(u8, ".hexe.lua")
+    else if (std.mem.endsWith(u8, arg_path, ".lua"))
+        try allocator.dupe(u8, arg_path)
+    else
+        try std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{arg_path});
+    defer allocator.free(path);
+
+    core.trust.allow(allocator, path) catch |err| {
+        switch (err) {
+            error.FileNotFound => print("No .hexe.lua found at {s}\n", .{path}),
+            else => print("Failed to trust {s}: {s}\n", .{ path, @errorName(err) }),
+        }
+        return;
+    };
+
+    const abs = std.fs.cwd().realpathAlloc(allocator, path) catch null;
+    defer if (abs) |a| allocator.free(a);
+    print("Trusted {s} — its on_start/on_stop hooks will now run.\n", .{abs orelse path});
+}
 
 fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool, remote: RemoteConnectArgs) core.FrontendConnectOptions {
     var opts: core.FrontendConnectOptions = .{

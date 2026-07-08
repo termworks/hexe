@@ -46,9 +46,19 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
         return;
     }
 
-    // Run on_start hooks (fire and forget)
-    for (config.on_start) |cmd| {
-        runShellCommand(cmd);
+    // Run on_start hooks (fire and forget), gated by the trust ledger so an
+    // untrusted project `.hexe.lua` can't silently auto-run shell hooks when a
+    // session opens in its directory (PLAN 1.9).
+    if (projectCommandsAllowed(config)) {
+        for (config.on_start) |cmd| {
+            runShellCommand(cmd);
+        }
+    } else if (config.on_start.len > 0) {
+        core.logging.warn(
+            "terminal",
+            "skipping {d} on_start hook(s) from untrusted .hexe.lua — run `hexe allow` to trust it",
+            .{config.on_start.len},
+        );
     }
 
     var created_any = false;
@@ -631,6 +641,21 @@ fn writePaneCommand(self: anytype, pane: *Pane, cmd: []const u8) void {
     pane.write("\n") catch |err| {
         terminal_main.debugLogUuid(&pane.uuid, "layout command newline write failed: {s}", .{@errorName(err)});
     };
+}
+
+fn envFlagSet(name: []const u8) bool {
+    const v = std.posix.getenv(name) orelse return false;
+    return v.len > 0 and !std.mem.eql(u8, v, "0");
+}
+
+/// Whether project-sourced `on_start`/`on_stop` hooks may run for this config.
+/// Secure default: an identifiable `.hexe.lua` must be trusted via `hexe allow`.
+fn projectCommandsAllowed(config: SessionConfig) bool {
+    if (envFlagSet("HEXE_NO_PROJECT_COMMANDS")) return false; // hard opt-out
+    if (envFlagSet("HEXE_TRUST_ALL_PROJECTS")) return true; // CI/dev escape hatch
+    // No identifiable source file (not an auto-loaded project config): allow.
+    const src = config.source_path orelse return true;
+    return core.trust.isTrusted(std.heap.page_allocator, src);
 }
 
 fn runShellCommand(cmd: []const u8) void {
