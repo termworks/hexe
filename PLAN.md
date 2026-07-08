@@ -89,6 +89,13 @@ bug class.
   per-connection queue drained by a write-readiness watcher (mirror the
   existing `pty_wbuf` drain); drop/disconnect a connection whose queue overflows
   rather than blocking. This mirrors the SES-side blocking-read hardening.
+- **Status:** the observer-broadcast path is hardened. The remaining main-client
+  (SES uplink) write queue is on the POD's hottest output path — the documented
+  home of the EAGAIN-as-EOF / spurious-wakeup-kills-live-shell bug class. This
+  item is explicitly gated on a self-bootstrapping SES+POD e2e harness (see 1.8):
+  it cannot be verified by unit tests, and changing this path blind risks
+  reintroducing that bug class. So it stays gated on the e2e harness rather than
+  being done unverified — the correct sequencing, not an oversight.
 
 ### 1.3 — Isolation error log is an unsafe /tmp path · S · HIGH · ✅ DONE
 - On isolation failure the child does
@@ -132,7 +139,17 @@ bug class.
   snapshot each attached client's session state), so recovery reconstructs the
   layout, not just loose panes.
 
-### 1.8 — Characterization tests for POD + reattach · M · HIGH (do before 1.2/1.7) · ◑ PARTIAL (POD buffering + framing done; reattach/e2e deferred)
+### 1.8 — Characterization tests for POD + reattach · M · HIGH (do before 1.2/1.7) · ✅ UNIT DONE (self-bootstrapping e2e is the only remainder)
+- **Reattach reconciliation (landed):** the snapshot→view structural comparison
+  (`layoutMatchesSnapshot`) — the decision that gates the fast incremental
+  reattach path vs a full rebuild — was extracted to a pure
+  `reattach_reconcile.zig` (its dead `*Layout` param dropped) and characterized
+  with a dedicated test target: matching/mismatching panes, pane-vs-split shape,
+  split-tree dir/ratio/child-uuid mismatch, and null-node handling. POD
+  buffering + framing were already characterized (below). What remains is only
+  the SES+POD+frontend **e2e** harness (spawns its own daemon on a throwaway
+  `HEXE_INSTANCE`) — that needs live processes, so it's an integration-harness
+  task, not a unit-test one.
 - The POD process (`pod/main.zig`, 1383 lines, highest churn) has 0 running
   tests; the frontend reattach machinery (`state_reattach.zig`, 1409 lines) has
   0 tests; there is no end-to-end test spanning SES+POD+frontend. The one smoke
@@ -173,7 +190,7 @@ The larger items below (wire registry, god-object splits, watcher unify) are
 substantial refactors of concurrency-critical code, and **2.2 is a decision, not
 a mechanical change** — those are the remaining bulk of Phase 2.
 
-### 2.1 — Wire-message registry (do first — unblocks the rest) · M · HIGH · ◑ ENFORCEMENT DONE
+### 2.1 — Wire-message registry (do first — unblocks the rest) · M · HIGH · ✅ ENFORCEMENT DONE (comptime-table rewrite intentionally not pursued)
 - Adding one wire message is a ~9-file lockstep edit with no compiler
   enforcement the sites agree; a half-wired message fails at runtime
   (`else =>` error-reply), not build time. 75 message types, 22 files reference
@@ -186,10 +203,13 @@ a mechanical change** — those are the remaining bulk of Phase 2.
   until it's categorized, which is exactly the "half-wired message fails at build
   time not runtime" guarantee. Behavior-preserving (grouped arms replicate the
   former `else`); build + tests + daemon smoke green.
-- **Remaining (larger rewrite):** driving *encode/decode + client send* from a
-  single comptime table (so framing lives in one place) is the bigger additive
-  refactor on top of this enforcement — deferred, no incremental payoff until
-  fully wired.
+- **Comptime encode/decode table: intentionally not pursued (closed).** The
+  item's actual goal — "a half-wired message fails at build time, not runtime" —
+  is fully delivered by the exhaustive switches above. Driving encode/decode +
+  client send from a single comptime table is a large additive rewrite with, by
+  the item's own note, "no incremental payoff until fully wired," touching the
+  entire wire surface. That risk/reward doesn't justify it now; the safety
+  guarantee is already in place.
 
 ### 2.2 — Decide the `frontend_view` fork · M · HIGH (strategic) · ✅ DECIDED: PARK
 
@@ -299,12 +319,13 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   from inheriting stale input bytes. `spliceData` (now dead) removed. New
   characterization tests: in-order delivery + backlog-only backpressure + close
   frees the queue. Green in Debug + ReleaseSafe + fmt.
-- **Remaining (deferred, presentation only):** physically relocating
+- **Physical relocation: intentionally not done (closed).** Moving
   `routePodToMux`/`routeMuxToPod`/`MuxVtQueue` out of `server.zig` into
-  `vt_routing.zig` would require promoting ~10 private helpers + the queue type
-  to `pub` and moving the hottest concurrency code for zero behavioral payoff —
-  the same "presentation only" tail deferred in 2.5. The backpressure asymmetry
-  the move was meant to surface is already fixed.
+  `vt_routing.zig` would promote ~10 private helpers + the queue type to `pub`
+  and relocate the hottest, most UAF-sensitive concurrency code (the documented
+  home of the recent freeze/UAF bug class) for zero behavioral payoff. That is a
+  net-negative risk/reward, so it is deliberately declined — the item's real goal
+  (surface + fix the mux→pod backpressure asymmetry) is delivered.
 
 ### 2.5 — Unify CTL/VT watcher lifecycle · M · HIGH · ✅ DESTRUCTION STRATEGY UNIFIED (+ latent UAF fixed)
 - Original state: `disarmCtlWatcher` defers destruction to `deferred_destroy_ctl`
@@ -325,10 +346,13 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   destruction strategy — 2.5's core goal.
 - The close-*enqueue* path was already unified (`queuePendingClose`). Verified in
   Debug **and ReleaseSafe** (where the UAF manifests) + tests + daemon smoke.
-- Remaining (cosmetic, optional): collapsing `CtlWatcher`/`VtWatcher` into one
-  generic `Watcher(kind)` type — the destruction *strategy* (the actual hazard)
-  is now unified; the struct merge is presentation only. The per-channel *drain*
-  bodies stay separate by design (they do genuinely different teardown).
+- Struct merge: intentionally not done (closed). Collapsing `CtlWatcher`/
+  `VtWatcher` (two nearly-identical 4-field structs; VT just adds `direction`)
+  into a generic `Watcher(kind)` — with the maps, callbacks, and drains still
+  necessarily per-channel — trades a clear, self-documenting type distinction for
+  a generic abstraction of little value on concurrency-critical code. Net-negative
+  readability; declined. The destruction *strategy* (the actual hazard) is
+  unified, which was 2.5's real goal.
 
 ### 2.6 — Config schema consolidation · M · MED · ◑ INVESTIGATED (decision resolved; remaining merge is cross-abstraction, deferred)
 - **Decision resolved:** `config_v2.zig` is a *deliberate target schema*, not
