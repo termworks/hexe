@@ -1522,3 +1522,58 @@ test "SessionSnapshot.fromJson: deep nested split (recursion) does not crash" {
     defer snap.deinit();
     try testing.expect(snap.tabs.items[0].root.?.* == .split);
 }
+
+test "setSplitRatioByAnchors: selects the correct split in a multi-level tree" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+    // h[ v[ a, b ], c ] — outer horizontal, inner vertical.
+    const inner = try tsSplit(allocator, .vertical, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    const root = try tsSplit(allocator, .horizontal, 0.5, inner, try tsPane(allocator, pc));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    // (a, b) are siblings under the inner split → only that ratio changes.
+    try testing.expect(setSplitRatioByAnchors(root, pa, pb, 0.8));
+    try testing.expectApproxEqAbs(@as(f32, 0.8), inner.split.ratio, 0.0005);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), root.split.ratio, 0.0005); // outer unchanged
+    // (a, c) span the outer split (a in first subtree, c in second) → outer changes.
+    try testing.expect(setSplitRatioByAnchors(root, pa, pc, 0.3));
+    try testing.expectApproxEqAbs(@as(f32, 0.3), root.split.ratio, 0.0005);
+}
+
+test "replacePaneUuidInLayout: replaces the first match only" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const px = [_]u8{'x'} ** 32;
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(replacePaneUuidInLayout(root, pa, px));
+    try testing.expectEqualSlices(u8, &px, &root.split.first.pane);
+    try testing.expectEqualSlices(u8, &pb, &root.split.second.pane); // unaffected
+}
+
+test "splitPaneInLayout: splitting a pane nested inside a split recurses correctly" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pnew = [_]u8{'n'} ** 32;
+    // h[ a, b ]; split b → h[ a, v[ b, new ] ].
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(try splitPaneInLayout(allocator, root, pb, pnew, .vertical));
+    try testing.expectEqualSlices(u8, &pa, &root.split.first.pane); // a untouched
+    try testing.expect(root.split.second.* == .split);
+    try testing.expectEqual(SessionSplitDir.vertical, root.split.second.split.dir);
+    try testing.expect(layoutContainsPaneUuid(root, pb));
+    try testing.expect(layoutContainsPaneUuid(root, pnew));
+}
