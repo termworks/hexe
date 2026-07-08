@@ -74,6 +74,23 @@ fn maybeReconnectSes(state: *State, last_attempt_ms: *i64) void {
     // identity; capture it before re-registering mints anything new.
     const old_uuid: [32]u8 = state.runtime.sessionUuid();
 
+    // Re-register under a FRESH identity, exactly like a manual `hexe attach`
+    // from a new terminal. Registering with the OLD id would make the daemon
+    // delete the persisted session record (register handler treats an id
+    // match as "frontend restored it") and then the reattach RPC, finding
+    // only ourselves attached under that id, would force-detach US mid-call.
+    // reattachSession restores the old identity on success.
+    {
+        const fresh_uuid = core.uuid.generateHex();
+        const name_copy = state.allocator.dupe(u8, state.runtime.sessionName()) catch return;
+        defer state.allocator.free(name_copy);
+        if (!state.runtime.setSessionIdentity(fresh_uuid, name_copy)) {
+            terminal_main.debugLog("ses reconnect: failed to set recovery identity", .{});
+            return;
+        }
+        state.runtime.syncClientSessionIdentity();
+    }
+
     var attach = state.runtime.attachFrontend() catch |err| {
         terminal_main.debugLog("ses reconnect attempt failed: {s}", .{@errorName(err)});
         return;
