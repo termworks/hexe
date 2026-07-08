@@ -2952,3 +2952,88 @@ test "stealAttachedPane and suspendPane clear the session marker" {
         try testing.expect(pane.session_id == null);
     }
 }
+
+test "persist buildStateJson -> restore: detached snapshot survives incl float tab_visible + split layout" {
+    const allocator = testing.allocator;
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    const SLN = core.session_model.SessionLayoutNode;
+    const session_id = [_]u8{7} ** 16;
+    const session_hex: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const fu = [_]u8{'f'} ** 32;
+
+    // Build a detached-session snapshot: a tab with an h-split of two panes,
+    // and a sticky, all-tabs-visible float (tab_visible = maxInt(u64)).
+    var snapshot = try core.session_model.SessionSnapshot.initMinimal(allocator, session_hex, "persisted");
+    const first = try allocator.create(SLN);
+    first.* = .{ .pane = pa };
+    const second = try allocator.create(SLN);
+    second.* = .{ .pane = pb };
+    const root = try allocator.create(SLN);
+    root.* = .{ .split = .{ .dir = .horizontal, .ratio = 0.5, .first = first, .second = second } };
+    try snapshot.tabs.append(allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try allocator.dupe(u8, "T"),
+        .root = root,
+        .focused_pane_uuid = pa,
+        .allocator = allocator,
+    });
+    try snapshot.floats.append(allocator, .{
+        .pane_uuid = fu,
+        .parent_tab = null,
+        .visible = true,
+        .tab_visible = std.math.maxInt(u64),
+        .sticky = true,
+        .is_pwd = true,
+        .float_key = 'g',
+        .width_pct = 72,
+        .height_pct = 48,
+    });
+    try snapshot.panes.put(fu, .{ .uuid = fu, .kind = .float, .sticky = true, .is_pwd = true, .float_key = 'g' });
+
+    const pane_uuids = try allocator.alloc([32]u8, 1);
+    pane_uuids[0] = fu;
+
+    // Ownership of `snapshot` + `pane_uuids` transfers to the store here;
+    // `ses_state.deinit` frees them (no errdefer → no double-free on assert fail).
+    try ses_state.store.detached_sessions.put(session_id, .{
+        .session_id = session_id,
+        .session_snapshot = snapshot,
+        .pane_uuids = pane_uuids,
+        .detached_at = std.time.timestamp(),
+        .allocator = allocator,
+    });
+
+    // Serialize the whole store (FS-free), then restore the embedded snapshot
+    // the way `persist.load` does (SessionSnapshot.fromJson).
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try persist.buildStateJson(allocator, &ses_state, &buf);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, buf.items, .{});
+    defer parsed.deinit();
+    const detached = parsed.value.object.get("detached_sessions").?.array;
+    try testing.expectEqual(@as(usize, 1), detached.items.len);
+    const snap_json = detached.items[0].object.get("session_snapshot").?.string;
+
+    var restored = try core.session_model.SessionSnapshot.fromJson(allocator, snap_json);
+    defer restored.deinit();
+
+    // Float visibility bitmask survives daemon-crash recovery (the fix).
+    try testing.expectEqual(@as(usize, 1), restored.floats.items.len);
+    try testing.expectEqual(@as(u64, std.math.maxInt(u64)), restored.floats.items[0].tab_visible);
+    try testing.expect(restored.floats.items[0].sticky);
+    try testing.expect(restored.floats.items[0].is_pwd);
+    try testing.expectEqual(@as(u8, 72), restored.floats.items[0].width_pct);
+
+    // Split layout structure survives.
+    try testing.expectEqual(@as(usize, 1), restored.tabs.items.len);
+    const rroot = restored.tabs.items[0].root orelse return error.TestUnexpectedResult;
+    try testing.expect(rroot.* == .split);
+    try testing.expectEqual(core.session_model.SessionSplitDir.horizontal, rroot.split.dir);
+    try testing.expectEqualSlices(u8, &pa, &rroot.split.first.pane);
+    try testing.expectEqualSlices(u8, &pb, &rroot.split.second.pane);
+}
