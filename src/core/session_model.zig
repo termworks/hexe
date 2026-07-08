@@ -1399,3 +1399,64 @@ test "setSplitRatioByAnchors: sets and clamps the ratio between two sibling pane
     // A missing/non-sibling anchor is rejected.
     try testing.expect(!setSplitRatioByAnchors(root, pa, [_]u8{'z'} ** 32, 0.5));
 }
+
+test "SessionSnapshot: names with JSON-special + unicode chars survive round-trip" {
+    const allocator = testing.allocator;
+    // Quotes, backslash, newline, tab, control char, unicode, emoji.
+    const nasty = "a\"b\\c\nd\te\x01f\u{00e9}g\u{4e2d}h\u{1f600}";
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, nasty);
+    defer snap.deinit();
+    snap.base_root = try allocator.dupe(u8, "/pa\"th\\with\nnewline");
+    try snap.tabs.append(allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try allocator.dupe(u8, "tab\"with\\stuff\t\u{263a}"),
+        .root = try tsPane(allocator, [_]u8{'p'} ** 32),
+        .allocator = allocator,
+    });
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+
+    try testing.expectEqualStrings(nasty, restored.session_name);
+    try testing.expectEqualStrings("/pa\"th\\with\nnewline", restored.base_root.?);
+    try testing.expectEqualStrings("tab\"with\\stuff\t\u{263a}", restored.tabs.items[0].name);
+}
+
+test "SessionSnapshot: float geometry boundary values round-trip" {
+    const allocator = testing.allocator;
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "s");
+    defer snap.deinit();
+    // Extremes: 0 and 255 for u8 geometry, tab_visible = 0 and 1.
+    try snap.floats.append(allocator, .{ .pane_uuid = [_]u8{'1'} ** 32, .tab_visible = 0, .width_pct = 0, .height_pct = 255, .pos_x_pct = 255, .pos_y_pct = 0, .pad_x = 255, .pad_y = 0, .float_key = 255 });
+    try snap.floats.append(allocator, .{ .pane_uuid = [_]u8{'2'} ** 32, .tab_visible = 1, .width_pct = 100, .float_key = 0 });
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+
+    try testing.expectEqual(@as(u8, 0), restored.floats.items[0].width_pct);
+    try testing.expectEqual(@as(u8, 255), restored.floats.items[0].height_pct);
+    try testing.expectEqual(@as(u8, 255), restored.floats.items[0].float_key);
+    try testing.expectEqual(@as(u64, 0), restored.floats.items[0].tab_visible);
+    try testing.expectEqual(@as(u64, 1), restored.floats.items[1].tab_visible);
+    try testing.expectEqual(@as(u8, 100), restored.floats.items[1].width_pct);
+}
+
+test "SessionSnapshot: empty session name and large counters round-trip" {
+    const allocator = testing.allocator;
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "");
+    defer snap.deinit();
+    snap.tab_counter = 4_000_000_000;
+    snap.active_tab = 999;
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+    try testing.expectEqualStrings("", restored.session_name);
+    try testing.expectEqual(@as(usize, 4_000_000_000), restored.tab_counter);
+    try testing.expectEqual(@as(usize, 999), restored.active_tab);
+}
