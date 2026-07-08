@@ -323,12 +323,26 @@ lifecycle, and dispatch — which belong there. Further handler extraction
   is now unified; the struct merge is presentation only. The per-channel *drain*
   bodies stay separate by design (they do genuinely different teardown).
 
-### 2.6 — Config schema consolidation · M · MED (investigate first)
-- `config_v2.zig` (670 lines) is a parallel validation-only schema hand-synced
-  with `config.zig`; segment parsing is triplicated (`config.zig` + two
-  `api_bridge.zig` paths). Confirm whether `config_v2` is a deliberate target
-  schema; then either generate it from the canonical types or make it the runtime
-  type, and collapse the three segment parsers onto one.
+### 2.6 — Config schema consolidation · M · MED · ◑ INVESTIGATED (decision resolved; remaining merge is cross-abstraction, deferred)
+- **Decision resolved:** `config_v2.zig` is a *deliberate target schema*, not
+  accidental duplication — its own header says "This is the target AST for
+  `hexe.setup`… new parsing work should land here." It's the migration
+  destination (validation model + `LuaShapeSummary`, consumed by
+  `hexe config validate`). So it stays; do not collapse it away.
+- **The "triplication" is narrower than it looked.** `api_bridge.parseSegment`
+  is already a one-line delegate to `parseSegmentAtPath` (no dup there). The
+  genuine remaining overlap is between `config.zig`'s parser (written against the
+  `LuaRuntime` wrapper — `runtime.fieldType`/`pushTable`/`getString`) and
+  api_bridge's (raw zlua `lua.getField(idx,…)`). They target the same
+  `config.Segment` but through different Lua-access layers, and may have subtly
+  diverged (the plan's original worry). `parseSegmentDef` is a third shape but
+  produces a *different* type (`ShpConfigBuilder.SegmentDef`), so it doesn't fold
+  in trivially.
+- **Why deferred:** merging the two would mean unifying the Lua-access layer (or
+  bridging relative-index `runtime` calls to explicit-idx `lua` calls) on the
+  core, well-tested config path — a behavior-sensitive refactor, not a mechanical
+  win. Right move is a dedicated pass with characterization tests pinning the
+  current field-by-field behavior first, not a blind collapse.
 
 ---
 
