@@ -3152,3 +3152,85 @@ test "store closed-fd log: two-generation shield ages an fd out after two rotati
     try testing.expect(!store.closedFdNoted(5));
     try testing.expect(store.closedFdNoted(7));
 }
+
+test "client snapshot: addTab then renameTab mutate the canonical snapshot" {
+    const allocator = testing.allocator;
+    const css = @import("client_session_snapshot.zig");
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const tab_uuid = [_]u8{'t'} ** 32;
+    const pane_uuid = [_]u8{'p'} ** 32;
+
+    try css.addTab(&ses_state, client_id, tab_uuid, pane_uuid, 0, "first");
+
+    const client = ses_state.getClient(client_id) orelse return error.TestUnexpectedResult;
+    const snap = &(client.session_snapshot orelse return error.TestUnexpectedResult);
+    try testing.expectEqual(@as(usize, 1), snap.tabs.items.len);
+    try testing.expectEqualStrings("first", snap.tabs.items[0].name);
+    try testing.expectEqualSlices(u8, &tab_uuid, &snap.tabs.items[0].uuid);
+    try testing.expect(snap.panes.contains(pane_uuid));
+    // Tab root is the single pane; focus points at it.
+    try testing.expect(snap.tabs.items[0].root.?.* == .pane);
+    try testing.expectEqualSlices(u8, &pane_uuid, &snap.focused_pane_uuid.?);
+
+    // renameTab updates the name in place — this rename must survive reattach.
+    css.renameTab(&ses_state, client_id, tab_uuid, "renamed");
+    try testing.expectEqualStrings("renamed", snap.tabs.items[0].name);
+}
+
+test "client snapshot: splitPane grows the tab layout tree" {
+    const allocator = testing.allocator;
+    const css = @import("client_session_snapshot.zig");
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const tab_uuid = [_]u8{'t'} ** 32;
+    const pane_uuid = [_]u8{'p'} ** 32;
+    const new_pane = [_]u8{'n'} ** 32;
+
+    try css.addTab(&ses_state, client_id, tab_uuid, pane_uuid, 0, "T");
+    try css.splitPane(&ses_state, client_id, tab_uuid, pane_uuid, new_pane, 0, null, .vertical);
+
+    const client = ses_state.getClient(client_id) orelse return error.TestUnexpectedResult;
+    const snap = &(client.session_snapshot orelse return error.TestUnexpectedResult);
+    const root = snap.tabs.items[0].root orelse return error.TestUnexpectedResult;
+    try testing.expect(root.* == .split);
+    try testing.expectEqual(core.session_model.SessionSplitDir.vertical, root.split.dir);
+    try testing.expect(core.session_model.layoutContainsPaneUuid(root, pane_uuid));
+    try testing.expect(core.session_model.layoutContainsPaneUuid(root, new_pane));
+}
+
+test "client snapshot: inserting a tab reindexes later panes' parent_tab" {
+    const allocator = testing.allocator;
+    const css = @import("client_session_snapshot.zig");
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const ta = [_]u8{'A'} ** 32;
+    const tb = [_]u8{'B'} ** 32;
+    const tc = [_]u8{'C'} ** 32;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+
+    try css.addTab(&ses_state, client_id, ta, pa, 0, "A"); // [A]        pa->0
+    try css.addTab(&ses_state, client_id, tb, pb, 1, "B"); // [A,B]      pb->1
+    try css.addTab(&ses_state, client_id, tc, pc, 0, "C"); // [C,A,B]    pc->0, pa->1, pb->2
+
+    const client = ses_state.getClient(client_id) orelse return error.TestUnexpectedResult;
+    const snap = &(client.session_snapshot orelse return error.TestUnexpectedResult);
+
+    try testing.expectEqual(@as(usize, 3), snap.tabs.items.len);
+    try testing.expectEqualSlices(u8, &tc, &snap.tabs.items[0].uuid);
+    try testing.expectEqualSlices(u8, &ta, &snap.tabs.items[1].uuid);
+    try testing.expectEqualSlices(u8, &tb, &snap.tabs.items[2].uuid);
+
+    // Pane parent_tab indices shifted with the inserts.
+    try testing.expectEqual(@as(?usize, 0), snap.panes.get(pc).?.parent_tab);
+    try testing.expectEqual(@as(?usize, 1), snap.panes.get(pa).?.parent_tab);
+    try testing.expectEqual(@as(?usize, 2), snap.panes.get(pb).?.parent_tab);
+}
