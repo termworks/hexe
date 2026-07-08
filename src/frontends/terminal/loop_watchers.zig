@@ -133,7 +133,7 @@ pub fn drainSesVtAvailable(state: *State, max_frames: usize, comptime context: [
     ) catch |err| {
         core.logging.logError("terminal", context ++ ": failed to catch up SES VT frames", err);
         if (state.runtime.closeVtFdIf(vt_fd)) {
-            state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+            state.notifications.showFor("Lost connection to ses daemon (VT) — reconnecting...", 5000);
         }
     };
 }
@@ -149,7 +149,7 @@ fn sesVtCallback(
     _ = result catch {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
         if (slot.state.runtime.closeVtFdIf(slot.fd)) {
-            slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+            slot.state.notifications.showFor("Lost connection to ses daemon (VT) — reconnecting...", 5000);
         }
         return .disarm;
     };
@@ -174,7 +174,7 @@ fn sesVtCallback(
         core.logging.logError("terminal", "failed to read SES VT frame", read_err);
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
         if (slot.state.runtime.closeVtFdIf(slot.fd)) {
-            slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+            slot.state.notifications.showFor("Lost connection to ses daemon (VT) — reconnecting...", 5000);
         }
         return .disarm;
     };
@@ -237,7 +237,7 @@ fn sesCtlCallback(
     _ = result catch {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
         if (slot.state.runtime.closeCtlFdIf(slot.fd)) {
-            slot.state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
+            slot.state.notifications.showFor("Lost connection to ses daemon — reconnecting...", 5000);
         }
         return .disarm;
     };

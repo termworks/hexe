@@ -73,7 +73,7 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
     ) catch |err| {
         core.logging.logError("terminal", "failed to read SES control header", err);
         if (state.runtime.closeCtlFdIf(fd)) {
-            state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
+            state.notifications.showFor("Lost connection to ses daemon — reconnecting...", 5000);
         }
     };
 }

@@ -492,6 +492,16 @@ pub fn run(terminal_args: TerminalArgs) !void {
     try terminal_host.run(&state);
 }
 
+/// Export HEXE_SESSION for child panes. Reattach can change the session
+/// uuid, so this must be re-run after any identity change (startup and the
+/// loop's auto-reconnect both use it).
+pub fn exportSessionEnv(session_uuid: [32]u8) void {
+    var session_id_z: [33]u8 = undefined;
+    @memcpy(session_id_z[0..32], &session_uuid);
+    session_id_z[32] = 0;
+    _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 

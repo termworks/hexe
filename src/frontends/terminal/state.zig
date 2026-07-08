@@ -1057,7 +1057,7 @@ pub const State = struct {
     fn handleMuxVtWriteFailure(self: *State, fd: posix.fd_t) void {
         self.mux_vt_write_queue.clear();
         _ = self.runtime.closeVtFdIf(fd);
-        self.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+        self.notifications.showFor("Lost connection to ses daemon (VT) — reconnecting...", 5000);
         self.needs_render = true;
     }
 
