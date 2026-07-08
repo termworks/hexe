@@ -586,27 +586,9 @@ fn countSessionLayoutPanes(node: ?*const SessionLayoutNode) usize {
     };
 }
 
-fn layoutMatchesSnapshot(layout: *const layout_mod.Layout, node: ?*const LayoutNode, snapshot_node: ?*const SessionLayoutNode) bool {
-    const live = node orelse return snapshot_node == null;
-    const expected = snapshot_node orelse {
-        core.logging.warn("terminal", "reattach incremental snapshot check failed: live layout has extra node", .{});
-        return false;
-    };
-
-    return switch (live.*) {
-        .pane => |pane_uuid| switch (expected.*) {
-            .pane => |expected_uuid| std.mem.eql(u8, &pane_uuid, &expected_uuid),
-            .split => false,
-        },
-        .split => |split| switch (expected.*) {
-            .pane => false,
-            .split => |expected_split| split.dir == @as(layout_mod.SplitDir, if (expected_split.dir == .horizontal) .horizontal else .vertical) and
-                std.math.approxEqAbs(f32, split.ratio, expected_split.ratio, 0.0001) and
-                layoutMatchesSnapshot(layout, split.first, expected_split.first) and
-                layoutMatchesSnapshot(layout, split.second, expected_split.second),
-        },
-    };
-}
+// Pure snapshot→view structural comparison lives in `reattach_reconcile` so it
+// can be characterized in isolation (PLAN 1.8).
+const layoutMatchesSnapshot = @import("reattach_reconcile.zig").layoutMatchesSnapshot;
 
 fn hasLocalFloatView(self: anytype, pane_uuid: [32]u8) bool {
     for (self.view.float_views.items) |pane| {
@@ -660,7 +642,7 @@ fn canApplySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot
 
         const live_tab = &self.view.tab_views.items[idx];
         if (live_tab.layout.splits.count() != countSessionLayoutPanes(snapshot_tab.root)) return false;
-        if (!layoutMatchesSnapshot(&live_tab.layout, live_tab.layout.root, snapshot_tab.root)) return false;
+        if (!layoutMatchesSnapshot(live_tab.layout.root, snapshot_tab.root)) return false;
     }
 
     return true;
