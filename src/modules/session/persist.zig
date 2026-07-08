@@ -30,6 +30,36 @@ fn syncDirBestEffort(dir: std.fs.Dir) !void {
     }
 }
 
+/// Authoritative pod liveness probe: connect to the pod's unix socket.
+/// `kill(pid, 0)` lies after pid reuse (reboot, or a long daemon downtime):
+/// the persisted pid may now belong to an unrelated process, so a dead pane
+/// would be restored as a ghost — and a later killPane would SIGTERM an
+/// innocent pid. Only a listening pod socket proves the pod itself is alive.
+/// The probe connects non-blocking and closes immediately without sending a
+/// handshake; the pod rejects handshake-less connections without touching its
+/// real client, and at persist-load time SES has no live uplink to disturb.
+pub fn podSocketAlive(socket_path: []const u8) bool {
+    if (socket_path.len == 0 or socket_path.len >= 108) return false;
+    var addr: std.posix.sockaddr.un = .{ .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..socket_path.len], socket_path);
+
+    const fd = std.posix.socket(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
+        0,
+    ) catch return false;
+    defer std.posix.close(fd);
+
+    std.posix.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) catch |err| switch (err) {
+        // Backlog full still means someone is listening; refusal/absence is
+        // immediate for unix sockets, so WouldBlock is not "unknown" here.
+        error.WouldBlock => return true,
+        else => return false,
+    };
+    return true;
+}
+
 pub fn parseSessionIdHex(hex: []const u8) ?[16]u8 {
     if (hex.len != 32) return null;
     var session_id: [16]u8 = undefined;
@@ -319,6 +349,14 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
                 // Process exists, continue
             } else |_| {
                 // Process doesn't exist, skip this pane
+                continue;
+            }
+
+            // The pid check is necessary but not sufficient: after a reboot
+            // or pid reuse the pid may belong to an unrelated process. Only
+            // restore panes whose pod socket actually accepts a connection.
+            if (!podSocketAlive(socket_str)) {
+                log.warn("skipping persisted pane {s}: pod socket {s} not accepting (pid {d} likely reused)", .{ uuid_str, socket_str, pod_pid });
                 continue;
             }
 

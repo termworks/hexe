@@ -1938,6 +1938,36 @@ test "syncClientSessionFloat: upserts visibility and active float state" {
 // Session Affinity Tests
 // ============================================================================
 
+/// A live unix listener standing in for a pod socket: sticky re-adoption now
+/// probes the socket (pid checks lie across pid reuse), so synthetic panes in
+/// these tests must be backed by something that actually accepts.
+const TestPodSocket = struct {
+    server: std.net.Server,
+    buf: [96]u8,
+    len: usize,
+
+    fn init(tag: []const u8) !TestPodSocket {
+        var self: TestPodSocket = undefined;
+        const sock_path = try std.fmt.bufPrint(&self.buf, "/tmp/hexe-tps-{d}-{s}.sock", .{ std.os.linux.getpid(), tag });
+        self.len = sock_path.len;
+        std.fs.deleteFileAbsolute(sock_path) catch {};
+        const addr = try std.net.Address.initUnix(sock_path);
+        self.server = try addr.listen(.{});
+        return self;
+    }
+
+    // Reslice from the struct's own buffer on every call: a slice captured in
+    // init would dangle after the struct is returned by value.
+    fn path(self: *const TestPodSocket) []const u8 {
+        return self.buf[0..self.len];
+    }
+
+    fn deinit(self: *TestPodSocket) void {
+        self.server.deinit();
+        std.fs.deleteFileAbsolute(self.path()) catch {};
+    }
+};
+
 test "findStickyPaneWithAffinity: prefers same session" {
     var ses_state = state.SesState.init(testing.allocator);
     defer ses_state.deinit();
@@ -1949,6 +1979,10 @@ test "findStickyPaneWithAffinity: prefers same session" {
     // so the tests must use a live pid. The current test process is always
     // alive, so use its pid for both synthetic panes.
     const live_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+    var tps1 = try TestPodSocket.init("aff1");
+    defer tps1.deinit();
+    var tps2 = try TestPodSocket.init("aff2");
+    defer tps2.deinit();
 
     // Create two sticky panes with same pwd+key, different sessions
     const uuid1 = [_]u8{1} ** 32;
@@ -1958,7 +1992,7 @@ test "findStickyPaneWithAffinity: prefers same session" {
         .uuid = uuid1,
         .name = try testing.allocator.dupe(u8, "pane1"),
         .pod_pid = live_pid,
-        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/pane1"),
+        .pod_socket_path = try testing.allocator.dupe(u8, tps1.path()),
         .child_pid = live_pid,
         .state = .sticky,
         .sticky_pwd = try testing.allocator.dupe(u8, pwd),
@@ -1975,7 +2009,7 @@ test "findStickyPaneWithAffinity: prefers same session" {
         .uuid = uuid2,
         .name = try testing.allocator.dupe(u8, "pane2"),
         .pod_pid = live_pid,
-        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/pane2"),
+        .pod_socket_path = try testing.allocator.dupe(u8, tps2.path()),
         .child_pid = live_pid,
         .state = .sticky,
         .sticky_pwd = try testing.allocator.dupe(u8, pwd),
@@ -2006,13 +2040,15 @@ test "findStickyPaneWithAffinity: fallback when no affinity match" {
     const pwd = "/home/test";
     const key: u8 = 'a';
     const live_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+    var tps = try TestPodSocket.init("fallback");
+    defer tps.deinit();
 
     const uuid = [_]u8{1} ** 32;
     const pane = state.Pane{
         .uuid = uuid,
         .name = try testing.allocator.dupe(u8, "pane1"),
         .pod_pid = live_pid,
-        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/pane1"),
+        .pod_socket_path = try testing.allocator.dupe(u8, tps.path()),
         .child_pid = live_pid,
         .state = .sticky,
         .sticky_pwd = try testing.allocator.dupe(u8, pwd),
@@ -2045,12 +2081,14 @@ test "findStickyPaneWithAffinity: finds detached per-cwd sticky pane" {
     const live_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
     const session_id = [_]u8{9} ** 16;
     const uuid = [_]u8{3} ** 32;
+    var tps = try TestPodSocket.init("detcwd");
+    defer tps.deinit();
 
     const pane = state.Pane{
         .uuid = uuid,
         .name = try testing.allocator.dupe(u8, "detached-cwd-float"),
         .pod_pid = live_pid,
-        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/detached-cwd-float"),
+        .pod_socket_path = try testing.allocator.dupe(u8, tps.path()),
         .child_pid = live_pid,
         .state = .detached,
         .sticky_pwd = try testing.allocator.dupe(u8, pwd),
@@ -2082,14 +2120,19 @@ test "per-CWD sticky floats: keys 1/2/3 in one pwd resolve independently" {
         [_]u8{0x43} ** 32,
     };
 
+    var tps_arr: [3]TestPodSocket = undefined;
+    var tps_n: usize = 0;
+    defer for (tps_arr[0..tps_n]) |*t| t.deinit();
     for (keys, uuids) |key, uuid| {
-        var sock_buf: [64]u8 = undefined;
-        const sock = try std.fmt.bufPrint(&sock_buf, "/tmp/hexe-cwdfloat-{c}", .{key});
+        var tag_buf: [16]u8 = undefined;
+        const tag = try std.fmt.bufPrint(&tag_buf, "cwdf{c}", .{key});
+        tps_arr[tps_n] = try TestPodSocket.init(tag);
+        tps_n += 1;
         try ses_state.store.panes.put(uuid, .{
             .uuid = uuid,
             .name = try testing.allocator.dupe(u8, "cwd-float"),
             .pod_pid = live_pid,
-            .pod_socket_path = try testing.allocator.dupe(u8, sock),
+            .pod_socket_path = try testing.allocator.dupe(u8, tps_arr[tps_n - 1].path()),
             .child_pid = live_pid,
             .state = .sticky,
             .sticky_pwd = try testing.allocator.dupe(u8, pwd),
@@ -3679,4 +3722,74 @@ test "removePaneFromSessionSnapshot: removing a tiled pane collapses the split" 
     try testing.expect(snap.tabs.items[0].root.?.* == .pane);
     try testing.expectEqualSlices(u8, &pb, &(snap.tabs.items[0].root.?.pane));
     try testing.expectEqualSlices(u8, &pb, &(snap.focused_pane_uuid.?));
+}
+
+test "podSocketAlive: only a listening socket counts as a live pod" {
+    // Sockets live in /tmp directly: unix socket paths are capped at ~108
+    // bytes and zig-cache tmp dirs can push past that.
+    var prng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp() & std.math.maxInt(u62)));
+    const tag = prng.random().int(u32);
+    var live_buf: [64]u8 = undefined;
+    var stale_buf: [64]u8 = undefined;
+    const live_path = try std.fmt.bufPrint(&live_buf, "/tmp/hexe-test-{x}-live.sock", .{tag});
+    const stale_path = try std.fmt.bufPrint(&stale_buf, "/tmp/hexe-test-{x}-stale.sock", .{tag});
+    defer std.fs.deleteFileAbsolute(live_path) catch {};
+    defer std.fs.deleteFileAbsolute(stale_path) catch {};
+
+    // A socket with a live listener → alive.
+    const addr_live = try std.net.Address.initUnix(live_path);
+    var server = try addr_live.listen(.{});
+    defer server.deinit();
+    try testing.expect(persist.podSocketAlive(live_path));
+
+    // A socket file whose listener is gone (the ghost-pane case) → dead.
+    {
+        const addr_stale = try std.net.Address.initUnix(stale_path);
+        var dead = try addr_stale.listen(.{});
+        dead.deinit(); // closes the fd; the file remains on disk
+    }
+    try testing.expect(!persist.podSocketAlive(stale_path));
+
+    // Nonexistent, empty, and over-long paths → dead.
+    try testing.expect(!persist.podSocketAlive("/tmp/hexe-test-definitely-missing.sock"));
+    try testing.expect(!persist.podSocketAlive(""));
+    const long = "/tmp/" ++ ("x" ** 120);
+    try testing.expect(!persist.podSocketAlive(long));
+}
+
+test "findStickyPaneWithAffinity: live pid but dead pod socket is not re-adopted" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const pwd = "/home/test";
+    const key: u8 = 'a';
+    // The test process pid is alive — this simulates pid reuse where the pod
+    // is gone but some unrelated process holds its old pid.
+    const live_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+    const uuid = [_]u8{4} ** 32;
+
+    // Stale socket file with no listener behind it.
+    var tps = try TestPodSocket.init("ghost");
+    const stale = try testing.allocator.dupe(u8, tps.path());
+    tps.server.deinit(); // listener gone; file remains
+    defer std.fs.deleteFileAbsolute(stale) catch {};
+
+    try ses_state.store.panes.put(uuid, .{
+        .uuid = uuid,
+        .name = try testing.allocator.dupe(u8, "ghost-float"),
+        .pod_pid = live_pid,
+        .pod_socket_path = stale,
+        .child_pid = live_pid,
+        .state = .sticky,
+        .sticky_pwd = try testing.allocator.dupe(u8, pwd),
+        .sticky_key = key,
+        .attached_to = null,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = std.time.timestamp(),
+        .allocator = testing.allocator,
+    });
+
+    // Must NOT hand out the ghost: caller falls through to a fresh spawn.
+    try testing.expect(ses_state.findStickyPaneWithAffinity(pwd, key, null) == null);
 }
