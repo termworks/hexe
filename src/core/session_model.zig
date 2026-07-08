@@ -1277,3 +1277,52 @@ test "layoutNodeToJson/fromJson: split tree survives a node round-trip" {
     defer allocator.free(null_json);
     try testing.expect((try layoutNodeFromJson(allocator, null_json)) == null);
 }
+
+test "SessionSnapshot.fromJson: mux-root (frontend reattach) format parses id-based layout + floats" {
+    const allocator = testing.allocator;
+    const su = "s" ** 32;
+    const tu = "t" ** 32;
+    const au = "a" ** 32;
+    const bu = "b" ** 32;
+    const fju = "f" ** 32;
+
+    // The frontend sends this shape on reattach: id-based `splits` per tab, an
+    // id-referencing layout `tree`, and no top-level `panes` key (→ fromMuxRoot).
+    const json = "{\"uuid\":\"" ++ su ++ "\",\"session_name\":\"reattach\",\"active_tab\":0,\"tab_counter\":1," ++
+        "\"tabs\":[{\"uuid\":\"" ++ tu ++ "\",\"name\":\"T\"," ++
+        "\"splits\":[{\"uuid\":\"" ++ au ++ "\",\"id\":1},{\"uuid\":\"" ++ bu ++ "\",\"id\":2}]," ++
+        "\"focused_split_id\":1," ++
+        "\"tree\":{\"type\":\"split\",\"dir\":\"h\",\"ratio\":0.5,\"first\":{\"type\":\"pane\",\"id\":1},\"second\":{\"type\":\"pane\",\"id\":2}}}]," ++
+        "\"floats\":[{\"uuid\":\"" ++ fju ++ "\",\"visible\":true,\"tab_visible\":18446744073709551615,\"sticky\":true,\"float_key\":103,\"float_width_pct\":72}]}";
+
+    var snap = try SessionSnapshot.fromJson(allocator, json);
+    defer snap.deinit();
+
+    try testing.expectEqualStrings("reattach", snap.session_name);
+    try testing.expectEqualSlices(u8, su, &snap.uuid);
+
+    try testing.expectEqual(@as(usize, 1), snap.tabs.items.len);
+    const tab = snap.tabs.items[0];
+    try testing.expectEqualStrings("T", tab.name);
+    // focused_split_id 1 resolves to pane "a".
+    try testing.expectEqualSlices(u8, au, &tab.focused_pane_uuid.?);
+
+    // The id-based tree resolves ids → pane uuids.
+    const root = tab.root orelse return error.TestUnexpectedResult;
+    try testing.expect(root.* == .split);
+    try testing.expectEqual(SessionSplitDir.horizontal, root.split.dir);
+    try testing.expectEqualSlices(u8, au, &root.split.first.pane);
+    try testing.expectEqualSlices(u8, bu, &root.split.second.pane);
+
+    // Float visibility bitmask survives the frontend reattach parse too.
+    try testing.expectEqual(@as(usize, 1), snap.floats.items.len);
+    try testing.expectEqual(@as(u64, std.math.maxInt(u64)), snap.floats.items[0].tab_visible);
+    try testing.expect(snap.floats.items[0].sticky);
+    try testing.expectEqual(@as(u8, 103), snap.floats.items[0].float_key);
+    try testing.expectEqual(@as(u8, 72), snap.floats.items[0].width_pct);
+
+    // Pane map derived from splits + floats: a, b (split) and f (float).
+    try testing.expectEqual(@as(usize, 3), snap.panes.count());
+    const fkey: [32]u8 = fju.*;
+    try testing.expectEqual(SessionPaneKind.float, (snap.panes.get(fkey) orelse return error.TestUnexpectedResult).kind);
+}
