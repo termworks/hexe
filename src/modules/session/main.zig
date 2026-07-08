@@ -713,7 +713,12 @@ fn acquireInstanceLock() bool {
     // Ensure the runtime dir exists (mirrors ipc.Server socket dir creation).
     if (std.fs.path.dirname(lock_path)) |dir| std.fs.cwd().makePath(dir) catch {};
 
-    const fd = posix.open(lock_path, .{ .ACCMODE = .RDWR, .CREAT = true }, 0o600) catch |err| {
+    // CLOEXEC is load-bearing: a flock is owned by the open file DESCRIPTION,
+    // which fork+exec'd children share. Without it every spawned pod inherits
+    // the lock fd, so after a daemon crash the pods keep the instance lock
+    // held and no replacement daemon can ever start (silent exit here) until
+    // every pod dies — "hexe won't start" after any crash with live panes.
+    const fd = posix.open(lock_path, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true }, 0o600) catch |err| {
         debugLog("acquireInstanceLock: open '{s}' failed: {s} (allowing start)", .{ lock_path, @errorName(err) });
         return true;
     };

@@ -62,6 +62,10 @@ pub fn verifyPeerUid(fd: posix.fd_t) bool {
 }
 
 /// Unix domain socket server for IPC
+// All ipc fds are CLOEXEC: daemons fork+exec long-lived children (SES spawns
+// pods, pods spawn the user's shell), and any inherited socket fd outlives its
+// owner — a dead daemon's lock/listen/client fds held by pods break restart
+// and half-open detection. Inherit nothing by default.
 pub const Server = struct {
     fd: posix.fd_t,
     path: []const u8,
@@ -98,7 +102,7 @@ pub const Server = struct {
         // Check if socket file exists and if something is listening
         if (accessSocketPath(path)) |_| {
             // Socket file exists - try to connect to see if something is listening
-            const test_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch {
+            const test_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0) catch {
                 // Can't create socket, just try to delete the file
                 deleteSocketPath(path) catch |err| {
                     if (err != error.FileNotFound) log.warn("failed to remove stale socket '{s}': {}", .{ path, err });
@@ -133,7 +137,7 @@ pub const Server = struct {
 
     fn initSocket(allocator: std.mem.Allocator, path: []const u8) !Server {
         // Create socket
-        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
         errdefer posix.close(fd);
         setCloexec(fd);
 
@@ -178,7 +182,7 @@ pub const Server = struct {
     }
 
     pub fn accept(self: *Server) !Connection {
-        const client_fd = try posix.accept(self.fd, null, null, 0);
+        const client_fd = try posix.accept(self.fd, null, null, posix.SOCK.CLOEXEC);
         setCloexec(client_fd);
         return Connection{ .fd = client_fd };
     }
@@ -200,7 +204,7 @@ pub const Server = struct {
 
         // Accept WITHOUT SOCK_NONBLOCK so the client fd is blocking.
         // This allows wire.readExact to work correctly without busy-spinning.
-        const client_fd = posix.accept(self.fd, null, null, 0) catch |err| {
+        const client_fd = posix.accept(self.fd, null, null, posix.SOCK.CLOEXEC) catch |err| {
             if (err == error.WouldBlock) return null;
             return err;
         };
@@ -221,7 +225,7 @@ pub const Client = struct {
         // Validate path length to avoid silent truncation
         if (path.len >= 108) return error.NameTooLong; // sockaddr_un.path max
 
-        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
         setCloexec(fd);
         errdefer posix.close(fd);
 
