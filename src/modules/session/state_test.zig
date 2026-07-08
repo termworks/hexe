@@ -3535,3 +3535,89 @@ test "removePaneFromDetachedSessions: prunes pane; deletes the session when it e
     detached_sessions.removePaneFromDetachedSessions(allocator, store, pb);
     try testing.expect(store.detached_sessions.getPtr(sid) == null);
 }
+
+test "snapshot: paneUuidInList + firstLayoutPaneUuid (DFS leftmost)" {
+    const allocator = testing.allocator;
+    const snapshot = @import("snapshot.zig");
+    const sm = core.session_model;
+    const SLN = sm.SessionLayoutNode;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+
+    const list = [_][32]u8{ pa, pb };
+    try testing.expect(snapshot.paneUuidInList(&list, pa));
+    try testing.expect(snapshot.paneUuidInList(&list, pb));
+    try testing.expect(!snapshot.paneUuidInList(&list, pc));
+    try testing.expect(!snapshot.paneUuidInList(&.{}, pa));
+
+    try testing.expect(snapshot.firstLayoutPaneUuid(null) == null);
+    // h[ v[ a, b ], c ] → leftmost DFS pane is a.
+    const va = try allocator.create(SLN);
+    va.* = .{ .pane = pa };
+    const vb = try allocator.create(SLN);
+    vb.* = .{ .pane = pb };
+    const inner = try allocator.create(SLN);
+    inner.* = .{ .split = .{ .dir = .vertical, .ratio = 0.5, .first = va, .second = vb } };
+    const cc = try allocator.create(SLN);
+    cc.* = .{ .pane = pc };
+    const root = try allocator.create(SLN);
+    root.* = .{ .split = .{ .dir = .horizontal, .ratio = 0.5, .first = inner, .second = cc } };
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expectEqualSlices(u8, &pa, &(snapshot.firstLayoutPaneUuid(root).?));
+}
+
+test "snapshot: normalizeAfterPaneRemoval repairs dangling focus/active pointers" {
+    const allocator = testing.allocator;
+    const snapshot = @import("snapshot.zig");
+    const sm = core.session_model;
+    var snap = try sm.SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "s");
+    defer snap.deinit();
+
+    const pa = [_]u8{'a'} ** 32;
+    const root = try allocator.create(sm.SessionLayoutNode);
+    root.* = .{ .pane = pa };
+    try snap.tabs.append(allocator, .{ .uuid = [_]u8{'t'} ** 32, .name = try allocator.dupe(u8, "T"), .root = root, .focused_pane_uuid = null, .allocator = allocator });
+    try snap.panes.put(pa, .{ .uuid = pa, .kind = .split, .parent_tab = 0 });
+    snap.active_tab = 99; // out of range
+    snap.active_float_uuid = [_]u8{'z'} ** 32; // dangling (not in panes)
+
+    snapshot.normalizeAfterPaneRemoval(&snap);
+
+    try testing.expectEqual(@as(usize, 0), snap.active_tab); // clamped to the only tab
+    try testing.expectEqualSlices(u8, &pa, &(snap.tabs.items[0].focused_pane_uuid.?)); // seeded from layout
+    try testing.expect(snap.active_float_uuid == null); // dangling float dropped
+    try testing.expectEqualSlices(u8, &pa, &(snap.focused_pane_uuid.?)); // falls back to tab focus
+}
+
+test "snapshot: normalizeAfterPaneRemoval with no tabs" {
+    const allocator = testing.allocator;
+    const snapshot = @import("snapshot.zig");
+    const sm = core.session_model;
+
+    // No tabs, dangling active float → everything clears.
+    {
+        var snap = try sm.SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "s");
+        defer snap.deinit();
+        snap.active_tab = 5;
+        snap.active_float_uuid = [_]u8{'z'} ** 32;
+        snapshot.normalizeAfterPaneRemoval(&snap);
+        try testing.expectEqual(@as(usize, 0), snap.active_tab);
+        try testing.expect(snap.active_float_uuid == null);
+        try testing.expect(snap.focused_pane_uuid == null);
+    }
+    // No tabs but a live float → focus stays on the float.
+    {
+        var snap = try sm.SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "s");
+        defer snap.deinit();
+        const fu = [_]u8{'f'} ** 32;
+        try snap.panes.put(fu, .{ .uuid = fu, .kind = .float });
+        snap.active_float_uuid = fu;
+        snapshot.normalizeAfterPaneRemoval(&snap);
+        try testing.expectEqualSlices(u8, &fu, &(snap.active_float_uuid.?));
+        try testing.expectEqualSlices(u8, &fu, &(snap.focused_pane_uuid.?));
+    }
+}
