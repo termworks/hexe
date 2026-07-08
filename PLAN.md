@@ -334,15 +334,22 @@ lifecycle, and dispatch — which belong there. Further handler extraction
 
 ## Phase 3 — Features (ongoing, independent increments)
 
-### 3.1 — Remote attach (highest value per effort) · S–M · HIGH · ◑ WIRED (needs a live remote host to prove the handshake)
-- `liblink` transport with real auth (`connectRemoteRaw`, `authenticateClient`)
-  is fully implemented and wired into `SesClient`, but `resolveTransport`
-  unconditionally returns `localIpcTransport` (`frontend_transport_helpers.zig:18`)
-  and no CLI flag constructs a remote transport. The hard part is done.
-- Fix: add `--remote host:port` (+ `--user`) to `terminal attach`/`new`,
-  construct the liblink transport, thread it through `runTerminal*`, and
-  implement the `.liblink` branch of `sendNotify`. Scope as a spike: prove one
-  remote attach round-trip first.
+### 3.1 — Remote attach · S–M · HIGH · ✅ ATTACH WIRED end-to-end (needs a live host to prove the handshake)
+- The full path is present and building: `terminal new`/`attach` expose
+  `--remote host:port`, `--user/-u`, `--identity/-i` (`app.zig:497-510`), parsed
+  into `RemoteConnectArgs` at dispatch and threaded through
+  `buildTerminalConnectOptions` → `FrontendConnectOptions` (host/port split, user
+  from flag-or-`$USER`, identity from flag-or-`~/.ssh/id_ed25519`) →
+  `resolveTransport` (now builds a `.liblink` transport when `remote_host` is set,
+  no longer a stub) → `SesClient.connect` (`.liblink => connectLiblink`, which does
+  the liblink connect + `authenticateClient` + preconnected ctl/vt wiring). The
+  hard part (transport + auth) was already done; the CLI/threading is now done
+  too. What's left is a **live-host spike** to prove one round-trip — not
+  codeable headlessly.
+- Remaining minor gap: `sendNotify`'s `.liblink` branch (remote `hexe notify`)
+  still returns `error.UnsupportedTransport` (fails cleanly). It needs a
+  lightweight CLI-channel-over-liblink (the existing `connect()` sets up the
+  heavier frontend ctl/vt channels + register); deferred as niche + unverifiable.
 
 ### 3.2 — Web/syslink: build or be honest · S (honesty) / L (build)
 - The web/syslink hosts advertise `pixel_render`/`clipboard`/`remote_transport`
