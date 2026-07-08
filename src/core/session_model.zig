@@ -1156,3 +1156,49 @@ test "SessionSnapshot: deep-nested split layout survives round-trip" {
     defer restored.deinit();
     try expectSnapshotEq(&snap, &restored);
 }
+
+test "SessionSnapshot.fromJson: rejects malformed / non-object state" {
+    const allocator = testing.allocator;
+    try testing.expectError(error.SyntaxError, SessionSnapshot.fromJson(allocator, "not json"));
+    try testing.expectError(error.UnexpectedEndOfInput, SessionSnapshot.fromJson(allocator, "{"));
+    try testing.expectError(error.InvalidStateJson, SessionSnapshot.fromJson(allocator, "[]"));
+    try testing.expectError(error.InvalidStateJson, SessionSnapshot.fromJson(allocator, "42"));
+}
+
+test "SessionSnapshot.fromJson: canonical root missing required fields is rejected" {
+    const allocator = testing.allocator;
+    // Has "panes" (→ canonical path) but no uuid.
+    try testing.expectError(
+        error.InvalidStateJson,
+        SessionSnapshot.fromJson(allocator, "{\"panes\":[],\"tabs\":[],\"floats\":[]}"),
+    );
+}
+
+test "SessionSnapshot.fromJson: tolerates unknown/extra fields (forward compat)" {
+    const allocator = testing.allocator;
+    var snap = try buildRichSnapshot(allocator);
+    defer snap.deinit();
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+
+    // Splice an unknown top-level field in; a future writer may add fields.
+    const injected = try std.mem.concat(allocator, u8, &.{ "{\"future_field\":true,", json[1..] });
+    defer allocator.free(injected);
+
+    var restored = try SessionSnapshot.fromJson(allocator, injected);
+    defer restored.deinit();
+    try expectSnapshotEq(&snap, &restored);
+}
+
+test "SessionSnapshot.fromJson: small tab_visible integer round-trips (non-number_string path)" {
+    const allocator = testing.allocator;
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "s");
+    defer snap.deinit();
+    try snap.floats.append(allocator, .{ .pane_uuid = [_]u8{'f'} ** 32, .tab_visible = 5, .float_key = 'a' });
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+    try testing.expectEqual(@as(u64, 5), restored.floats.items[0].tab_visible);
+}
