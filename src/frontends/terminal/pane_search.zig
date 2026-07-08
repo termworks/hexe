@@ -223,7 +223,10 @@ test "PaneSearch finds and counts matches in scrollback" {
     try testing.expectEqual(mv.sy, mv.ey);
     try testing.expectEqual(@as(u16, 4), mv.ex - mv.sx);
 
-    // Clear the borrowed VT so deinit doesn't double-free (owned by `vt`).
+    // Tear down the search while its borrowed screen is still alive (mirrors the
+    // production lifecycle: exit before the pane's screen is freed). Then clear
+    // the borrowed VT so the later `vt.deinit` is the sole owner that frees it.
+    search.exit();
     pane.vt = .{};
 }
 
