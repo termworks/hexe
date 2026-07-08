@@ -3290,3 +3290,42 @@ test "client snapshot: removeTab drops its panes and reindexes the rest" {
     try testing.expect(!snap.panes.contains(pa)); // pane of removed tab is gone
     try testing.expectEqual(@as(?usize, 0), (snap.panes.get(pb) orelse return error.TestUnexpectedResult).parent_tab);
 }
+
+test "persist buildStateJson: adversarial sticky_pwd/socket produce valid, faithful JSON" {
+    const allocator = testing.allocator;
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    // Quotes, backslash, newline, tab, control char — must survive persist's
+    // hand-rolled JSON escaping and re-parse identically.
+    const nasty_pwd = "/pa\"th\\with\nnewline\ttab\x01ctrl";
+    const nasty_sock = "/tmp/so\"ck\\et\r.sock";
+    const uuid = [_]u8{'p'} ** 32;
+    try ses_state.store.panes.put(uuid, .{
+        .uuid = uuid,
+        .name = null,
+        .pod_pid = 0,
+        .pod_socket_path = try allocator.dupe(u8, nasty_sock),
+        .child_pid = 0,
+        .state = .sticky,
+        .sticky_pwd = try allocator.dupe(u8, nasty_pwd),
+        .sticky_key = 'k',
+        .attached_to = null,
+        .session_id = [_]u8{9} ** 16,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = allocator,
+    });
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try persist.buildStateJson(allocator, &ses_state, &buf);
+
+    // The whole state file must remain valid JSON despite adversarial content.
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, buf.items, .{});
+    defer parsed.deinit();
+    const panes = parsed.value.object.get("panes").?.array;
+    try testing.expectEqual(@as(usize, 1), panes.items.len);
+    try testing.expectEqualStrings(nasty_pwd, panes.items[0].object.get("sticky_pwd").?.string);
+    try testing.expectEqualStrings(nasty_sock, panes.items[0].object.get("socket").?.string);
+}
