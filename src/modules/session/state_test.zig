@@ -3371,3 +3371,47 @@ test "client snapshot: error and no-op paths on invalid input" {
         try testing.expectEqualSlices(u8, &tab2, &snap.tabs.items[1].uuid);
     }
 }
+
+test "client snapshot: replaceSplitPane / setSplitRatio / removeFloat" {
+    const allocator = testing.allocator;
+    const css = @import("client_session_snapshot.zig");
+    const sm = core.session_model;
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+    const cid = try ses_state.addClient(1);
+    const tab = [_]u8{'t'} ** 32;
+    const p = [_]u8{'p'} ** 32;
+    const n = [_]u8{'n'} ** 32;
+    try css.addTab(&ses_state, cid, tab, p, 0, "T");
+    try css.splitPane(&ses_state, cid, tab, p, n, 0, null, .vertical);
+
+    // replaceSplitPane swaps a pane uuid (e.g. on pod reconnect) in tree + map.
+    const x = [_]u8{'x'} ** 32;
+    try css.replaceSplitPane(&ses_state, cid, tab, p, x, 0, null);
+    {
+        const snap = &(ses_state.getClient(cid).?.session_snapshot.?);
+        const root = snap.tabs.items[0].root.?;
+        try testing.expect(sm.layoutContainsPaneUuid(root, x));
+        try testing.expect(!sm.layoutContainsPaneUuid(root, p));
+        try testing.expect(snap.panes.contains(x));
+        try testing.expect(!snap.panes.contains(p));
+    }
+
+    // setSplitRatio (persisted divider resize) via anchors.
+    try css.setSplitRatio(&ses_state, cid, tab, 0, x, n, 0.7);
+    {
+        const snap = &(ses_state.getClient(cid).?.session_snapshot.?);
+        try testing.expectApproxEqAbs(@as(f32, 0.7), snap.tabs.items[0].root.?.split.ratio, 0.0005);
+    }
+
+    // removeFloat drops the float from both the list and the pane map.
+    const f = [_]u8{'f'} ** 32;
+    try css.syncFloat(&ses_state, cid, f, 0, null, true, 1, false, false, 'a', 60, 60, 50, 50, 1, 0, true);
+    try testing.expectEqual(@as(usize, 1), ses_state.getClient(cid).?.session_snapshot.?.floats.items.len);
+    css.removeFloat(&ses_state, cid, f);
+    {
+        const snap = &(ses_state.getClient(cid).?.session_snapshot.?);
+        try testing.expectEqual(@as(usize, 0), snap.floats.items.len);
+        try testing.expect(!snap.panes.contains(f));
+    }
+}
