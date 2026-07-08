@@ -91,6 +91,10 @@ pub fn listDetachedSessions(
 }
 
 pub fn findByNameOrPrefix(store: *const store_mod.SessionStore, id: []const u8) ?[16]u8 {
+    // An empty id must never match: `startsWith(hex, "")` is always true, so it
+    // would otherwise reattach to an arbitrary (hashmap-order) session.
+    if (id.len == 0) return null;
+
     var iter = store.detached_sessions.iterator();
     while (iter.next()) |entry| {
         const session = entry.value_ptr;

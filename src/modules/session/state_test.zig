@@ -3415,3 +3415,44 @@ test "client snapshot: replaceSplitPane / setSplitRatio / removeFloat" {
         try testing.expect(!snap.panes.contains(f));
     }
 }
+
+fn addDetachedNamed(ses_state: *state.SesState, sid: [16]u8, name: []const u8) !void {
+    const hex: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+    var snap = try core.session_model.SessionSnapshot.initMinimal(ses_state.allocator, hex, name);
+    errdefer snap.deinit();
+    const uuids = try ses_state.allocator.alloc([32]u8, 0);
+    try ses_state.store.detached_sessions.put(sid, .{
+        .session_id = sid,
+        .session_snapshot = snap,
+        .pane_uuids = uuids,
+        .detached_at = 0,
+        .allocator = ses_state.allocator,
+    });
+}
+
+test "findByNameOrPrefix: matches exact name, hex-id prefix, full id; rejects miss and empty" {
+    const allocator = testing.allocator;
+    const detached_sessions = @import("detached_sessions.zig");
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    const sid1 = [_]u8{0x11} ** 16;
+    const sid2 = [_]u8{0xab} ** 16;
+    try addDetachedNamed(&ses_state, sid1, "alpha");
+    try addDetachedNamed(&ses_state, sid2, "beta");
+    const store = &ses_state.store;
+
+    // Exact name.
+    try testing.expectEqualSlices(u8, &sid1, &(detached_sessions.findByNameOrPrefix(store, "alpha").?));
+    try testing.expectEqualSlices(u8, &sid2, &(detached_sessions.findByNameOrPrefix(store, "beta").?));
+    // Hex-id prefix.
+    try testing.expectEqualSlices(u8, &sid1, &(detached_sessions.findByNameOrPrefix(store, "1111").?));
+    try testing.expectEqualSlices(u8, &sid2, &(detached_sessions.findByNameOrPrefix(store, "abab").?));
+    // Full hex id.
+    const full1: [32]u8 = std.fmt.bytesToHex(&sid1, .lower);
+    try testing.expectEqualSlices(u8, &sid1, &(detached_sessions.findByNameOrPrefix(store, &full1).?));
+    // Non-matching name/prefix.
+    try testing.expectEqual(@as(?[16]u8, null), detached_sessions.findByNameOrPrefix(store, "zzz"));
+    // Empty id must NOT match an arbitrary session (startsWith("", ...) footgun).
+    try testing.expectEqual(@as(?[16]u8, null), detached_sessions.findByNameOrPrefix(store, ""));
+}
