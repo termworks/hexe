@@ -3621,3 +3621,62 @@ test "snapshot: normalizeAfterPaneRemoval with no tabs" {
         try testing.expectEqualSlices(u8, &fu, &(snap.focused_pane_uuid.?));
     }
 }
+
+test "removePaneFromSessionSnapshot: removing a float drops it and clears active_float" {
+    const allocator = testing.allocator;
+    const snapshot = @import("snapshot.zig");
+    const sm = core.session_model;
+    var snap = try sm.SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "s");
+    defer snap.deinit();
+
+    const pa = [_]u8{'a'} ** 32;
+    const pf = [_]u8{'f'} ** 32;
+    const root = try allocator.create(sm.SessionLayoutNode);
+    root.* = .{ .pane = pa };
+    try snap.tabs.append(allocator, .{ .uuid = [_]u8{'t'} ** 32, .name = try allocator.dupe(u8, "T"), .root = root, .focused_pane_uuid = pa, .allocator = allocator });
+    try snap.panes.put(pa, .{ .uuid = pa, .kind = .split, .parent_tab = 0 });
+    try snap.floats.append(allocator, .{ .pane_uuid = pf, .float_key = 'g', .visible = true });
+    try snap.panes.put(pf, .{ .uuid = pf, .kind = .float, .float_key = 'g' });
+    snap.active_float_uuid = pf;
+    snap.focused_pane_uuid = pf;
+
+    snapshot.removePaneFromSessionSnapshot(allocator, &snap, pf);
+
+    try testing.expectEqual(@as(usize, 0), snap.floats.items.len); // float dropped
+    try testing.expect(snap.active_float_uuid == null); // active float cleared
+    // Focus falls back to the tab's split pane (via normalize).
+    try testing.expectEqualSlices(u8, &pa, &(snap.focused_pane_uuid.?));
+    // The tiled pane and tab are untouched.
+    try testing.expectEqual(@as(usize, 1), snap.tabs.items.len);
+    try testing.expect(snap.panes.contains(pa));
+}
+
+test "removePaneFromSessionSnapshot: removing a tiled pane collapses the split" {
+    const allocator = testing.allocator;
+    const snapshot = @import("snapshot.zig");
+    const sm = core.session_model;
+    const SLN = sm.SessionLayoutNode;
+    var snap = try sm.SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "s");
+    defer snap.deinit();
+
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const first = try allocator.create(SLN);
+    first.* = .{ .pane = pa };
+    const second = try allocator.create(SLN);
+    second.* = .{ .pane = pb };
+    const root = try allocator.create(SLN);
+    root.* = .{ .split = .{ .dir = .horizontal, .ratio = 0.5, .first = first, .second = second } };
+    try snap.tabs.append(allocator, .{ .uuid = [_]u8{'t'} ** 32, .name = try allocator.dupe(u8, "T"), .root = root, .focused_pane_uuid = pa, .allocator = allocator });
+    try snap.panes.put(pa, .{ .uuid = pa, .kind = .split, .parent_tab = 0 });
+    try snap.panes.put(pb, .{ .uuid = pb, .kind = .split, .parent_tab = 0 });
+
+    snapshot.removePaneFromSessionSnapshot(allocator, &snap, pa);
+
+    try testing.expect(!snap.panes.contains(pa));
+    try testing.expect(snap.panes.contains(pb));
+    // Layout collapsed to the surviving pane; focus re-seeded to it.
+    try testing.expect(snap.tabs.items[0].root.?.* == .pane);
+    try testing.expectEqualSlices(u8, &pb, &(snap.tabs.items[0].root.?.pane));
+    try testing.expectEqualSlices(u8, &pb, &(snap.focused_pane_uuid.?));
+}
