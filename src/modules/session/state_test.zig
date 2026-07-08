@@ -3482,3 +3482,56 @@ test "resolveSessionName: cascades past already-taken suffixes" {
     defer ses_state.allocator.free(resolved);
     try testing.expectEqualStrings("alpha-3", resolved);
 }
+
+test "removePaneFromDetachedSessions: prunes pane; deletes the session when it empties" {
+    const allocator = testing.allocator;
+    const detached_sessions = @import("detached_sessions.zig");
+    const SLN = core.session_model.SessionLayoutNode;
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    const sid = [_]u8{7} ** 16;
+    const hex: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+
+    var snap = try core.session_model.SessionSnapshot.initMinimal(allocator, hex, "s");
+    // Layout h[a, b] + both panes in the map.
+    const first = try allocator.create(SLN);
+    first.* = .{ .pane = pa };
+    const second = try allocator.create(SLN);
+    second.* = .{ .pane = pb };
+    const root = try allocator.create(SLN);
+    root.* = .{ .split = .{ .dir = .horizontal, .ratio = 0.5, .first = first, .second = second } };
+    try snap.tabs.append(allocator, .{ .uuid = [_]u8{'t'} ** 32, .name = try allocator.dupe(u8, "T"), .root = root, .allocator = allocator });
+    try snap.panes.put(pa, .{ .uuid = pa, .kind = .split, .parent_tab = 0 });
+    try snap.panes.put(pb, .{ .uuid = pb, .kind = .split, .parent_tab = 0 });
+
+    const uuids = try allocator.alloc([32]u8, 2);
+    uuids[0] = pa;
+    uuids[1] = pb;
+    try store.detached_sessions.put(sid, .{
+        .session_id = sid,
+        .session_snapshot = snap,
+        .pane_uuids = uuids,
+        .detached_at = 0,
+        .allocator = allocator,
+    });
+
+    // Remove pane a: session survives with just b; snapshot drops a and collapses.
+    detached_sessions.removePaneFromDetachedSessions(allocator, store, pa);
+    {
+        const ds = store.detached_sessions.getPtr(sid) orelse return error.MissingSession;
+        try testing.expectEqual(@as(usize, 1), ds.pane_uuids.len);
+        try testing.expectEqualSlices(u8, &pb, &ds.pane_uuids[0]);
+        try testing.expect(!ds.session_snapshot.panes.contains(pa));
+        try testing.expect(ds.session_snapshot.panes.contains(pb));
+        // Layout collapsed to the single surviving pane b.
+        try testing.expect(ds.session_snapshot.tabs.items[0].root.?.* == .pane);
+    }
+
+    // Remove the last pane b: the whole detached session is deleted.
+    detached_sessions.removePaneFromDetachedSessions(allocator, store, pb);
+    try testing.expect(store.detached_sessions.getPtr(sid) == null);
+}
