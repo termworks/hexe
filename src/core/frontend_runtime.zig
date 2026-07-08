@@ -452,6 +452,16 @@ pub const FrontendRuntime = struct {
         return try self.client.getPaneAux(uuid);
     }
 
+    /// Oldest async push captured by a synchronous reader (see SesClient
+    /// pending_pushes); caller frees the payload via freeCtlPushPayload.
+    pub fn popPendingCtlPush(self: *FrontendRuntime) ?FrontendClient.QueuedPush {
+        return self.client.popPendingPush();
+    }
+
+    pub fn freeCtlPushPayload(self: *FrontendRuntime, payload: []u8) void {
+        self.client.allocator.free(payload);
+    }
+
     pub fn adoptPane(
         self: *FrontendRuntime,
         uuid: [32]u8,

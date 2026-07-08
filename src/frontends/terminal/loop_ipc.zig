@@ -59,6 +59,12 @@ fn sendFailedFloatResult(state: *State, exit_code: i32, comptime context: []cons
 pub fn handleSesMessage(state: *State, buffer: []u8) void {
     const fd = state.runtime.getCtlFd() orelse return;
 
+    // Replay async pushes that a synchronous reader consumed mid-request
+    // BEFORE reading new frames, preserving event order. Without this a
+    // float_request or pane_exited that raced a sync call was silently lost
+    // ("hexe float" hanging, frozen pane views — intermittently).
+    replayQueuedPushes(state, buffer);
+
     frontend_core.drainCtlFrameHeaders(
         fd,
         32,
@@ -70,6 +76,43 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
             state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
         }
     };
+}
+
+fn replayQueuedPushes(state: *State, buffer: []u8) void {
+    var n: usize = 0;
+    while (n < 64) : (n += 1) {
+        const push = state.runtime.popPendingCtlPush() orelse break;
+        defer state.runtime.freeCtlPushPayload(push.payload);
+        dispatchQueuedPush(state, push, buffer);
+    }
+}
+
+/// Re-dispatch one captured push through the regular frame handlers. The
+/// handlers read their payload from an fd, so the captured bytes are staged
+/// in a pipe: payloads are capped well below the 64K pipe buffer, so the
+/// write never blocks, and the read side then behaves exactly like the CTL
+/// socket did when the frame originally arrived.
+fn dispatchQueuedPush(state: *State, push: core.FrontendClient.QueuedPush, buffer: []u8) void {
+    var fds: [2]posix.fd_t = undefined;
+    const rc = std.os.linux.pipe2(&fds, .{ .CLOEXEC = true });
+    if (std.os.linux.E.init(rc) != .SUCCESS) return;
+    defer posix.close(fds[0]);
+    {
+        defer posix.close(fds[1]);
+        var off: usize = 0;
+        while (off < push.payload.len) {
+            off += posix.write(fds[1], push.payload[off..]) catch {
+                return;
+            };
+        }
+    }
+    const hdr: wire.ControlHeader = .{
+        .msg_type = push.msg_type,
+        .request_id = push.request_id,
+        .payload_len = @intCast(push.payload.len),
+    };
+    const event = frontend_core.ctlFrameEventFromHeader(hdr);
+    _ = dispatchCtlFrame(.{ .state = state, .fd = fds[0], .buffer = buffer }, event);
 }
 
 fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEvent) bool {

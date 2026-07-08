@@ -181,7 +181,25 @@ pub const SesClient = struct {
     /// Set when a session_stolen push is consumed by a synchronous reader
     /// instead of the IPC loop; the loop drains it so the steal is never lost.
     pending_session_stolen: bool = false,
+    /// Async pushes (float_request, notify, shell_event, pane_exited, ...)
+    /// consumed by a synchronous reader instead of the IPC loop. Dropping
+    /// them loses user-visible events — a float_request drop hangs the
+    /// `hexe float` CLI until timeout. The loop replays these in order.
+    pending_pushes: std.ArrayList(QueuedPush) = .empty,
     next_ctl_request_id: u32 = 1,
+
+    pub const QueuedPush = struct {
+        msg_type: u16,
+        request_id: u32,
+        payload: []u8,
+    };
+
+    /// Oldest queued push, ownership transferred to the caller (free payload
+    /// with the client's allocator).
+    pub fn popPendingPush(self: *SesClient) ?QueuedPush {
+        if (self.pending_pushes.items.len == 0) return null;
+        return self.pending_pushes.orderedRemove(0);
+    }
 
     pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, log_level: ?logging.Level, log_file: ?[]const u8) SesClient {
         return initLocalIpc(allocator, session_id, session_name, keepalive, log_level, log_file, .terminal);
@@ -246,6 +264,8 @@ pub const SesClient = struct {
         for (self.pending_control_responses.items) |*resp| resp.deinit(self.allocator);
         self.pending_control_responses.deinit(self.allocator);
         if (self.pending_session_state) |json| self.allocator.free(json);
+        for (self.pending_pushes.items) |push| self.allocator.free(push.payload);
+        self.pending_pushes.deinit(self.allocator);
         self.ctl_fd = null;
         self.vt_fd = null;
         self.bridge = null;
@@ -298,6 +318,7 @@ pub const SesClient = struct {
     pub const takePendingControlResponse = responses.takePendingControlResponse;
     pub const takeResolvedNameOwned = responses.takeResolvedNameOwned;
     pub const drainPendingSessionStolen = responses.drainPendingSessionStolen;
+    pub const queuePendingPush = responses.queuePendingPush;
 
     /// Reconnect hygiene: a fresh connection must not inherit fds or queued
     /// responses from a previous one. Stale queued responses can match a new
@@ -324,6 +345,8 @@ pub const SesClient = struct {
             self.pending_session_state = null;
         }
         self.pending_session_stolen = false;
+        for (self.pending_pushes.items) |push| self.allocator.free(push.payload);
+        self.pending_pushes.clearRetainingCapacity();
     }
 
     /// Connect to the ses daemon, starting it if necessary.
@@ -1547,4 +1570,60 @@ test "SesClient: sync pane cwd reader replays queued payload-bearing response" {
     try std.testing.expectEqualSlices(u8, &second_uuid, &second.uuid);
     try std.testing.expectEqualStrings(second_cwd, second.cwd);
     try std.testing.expectEqual(@as(usize, 0), client.pending_control_responses.items.len);
+}
+
+test "SesClient: replayable pushes are queued FIFO; non-replayable are skipped" {
+    var client = SesClient.init(std.testing.allocator, [_]u8{'s'} ** 32, "test", false, null, null);
+    defer client.deinit();
+
+    var fds: [2]posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expect(rc == 0);
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    // A replayable notify push: payload staged on the socket, header passed in.
+    const payload1 = "hello";
+    _ = try posix.write(fds[1], payload1);
+    client.queuePendingPush(fds[0], .{
+        .msg_type = @intFromEnum(wire.MsgType.notify),
+        .request_id = 7,
+        .payload_len = payload1.len,
+    });
+
+    const payload2 = "float!";
+    _ = try posix.write(fds[1], payload2);
+    client.queuePendingPush(fds[0], .{
+        .msg_type = @intFromEnum(wire.MsgType.float_request),
+        .request_id = 8,
+        .payload_len = payload2.len,
+    });
+
+    // A non-replayable response type is consumed (skipped), never queued.
+    _ = try posix.write(fds[1], "xxxx");
+    client.queuePendingPush(fds[0], .{
+        .msg_type = @intFromEnum(wire.MsgType.pong),
+        .request_id = 9,
+        .payload_len = 4,
+    });
+
+    // FIFO order with intact payloads and metadata.
+    const p1 = client.popPendingPush().?;
+    defer std.testing.allocator.free(p1.payload);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.notify)), p1.msg_type);
+    try std.testing.expectEqual(@as(u32, 7), p1.request_id);
+    try std.testing.expectEqualStrings(payload1, p1.payload);
+
+    const p2 = client.popPendingPush().?;
+    defer std.testing.allocator.free(p2.payload);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.float_request)), p2.msg_type);
+    try std.testing.expectEqualStrings(payload2, p2.payload);
+
+    try std.testing.expect(client.popPendingPush() == null);
+
+    // The skipped pong bytes were consumed from the socket (next read would
+    // block, not return stale bytes) — verified by the socket being drained.
+    var probe: [8]u8 = undefined;
+    @import("ipc.zig").setNonBlocking(fds[0]) catch {};
+    try std.testing.expectError(error.WouldBlock, posix.read(fds[0], &probe));
 }

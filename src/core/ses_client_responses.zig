@@ -9,7 +9,9 @@
 //! `resolved_name`, and its allocator — no transport or wire I/O.
 
 const std = @import("std");
+const posix = std.posix;
 const logging = @import("logging.zig");
+const wire = @import("wire.zig");
 const frontend_client = @import("frontend_client.zig");
 
 const SesClient = frontend_client.SesClient;
@@ -111,4 +113,56 @@ pub fn drainPendingSessionStolen(self: *SesClient) bool {
     const stolen = self.pending_session_stolen;
     self.pending_session_stolen = false;
     return stolen;
+}
+
+/// Capture an async push consumed by a synchronous reader so the IPC loop can
+/// replay it. Bounded in count and payload size: overflow falls back to the
+/// old skip-and-drop (logged), never to blocking or unbounded memory. The
+/// payload cap also guarantees a replay pipe write cannot block (< 64K pipe
+/// buffer).
+pub const MAX_QUEUED_PUSHES: usize = 64;
+pub const MAX_QUEUED_PUSH_PAYLOAD: usize = 60 * 1024;
+
+pub fn queuePendingPush(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) void {
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    const replayable = switch (msg_type) {
+        .float_request,
+        .notify,
+        .targeted_notify,
+        .shell_event,
+        .send_keys,
+        .focus_move,
+        .exit_intent,
+        .pane_exited,
+        .pop_confirm,
+        .pop_choose,
+        => true,
+        else => false,
+    };
+    if (!replayable or hdr.payload_len > MAX_QUEUED_PUSH_PAYLOAD or
+        self.pending_pushes.items.len >= MAX_QUEUED_PUSHES)
+    {
+        if (replayable) {
+            logging.warn("frontend-client", "dropping queued push type=0x{x:0>4} len={d} (queue full or oversized)", .{ hdr.msg_type, hdr.payload_len });
+        }
+        self.skipPayload(fd, hdr.payload_len);
+        return;
+    }
+    const payload = self.allocator.alloc(u8, hdr.payload_len) catch {
+        self.skipPayload(fd, hdr.payload_len);
+        return;
+    };
+    wire.readExact(fd, payload) catch |err| {
+        self.allocator.free(payload);
+        logging.logError("frontend-client", "failed to read queued push payload", err);
+        if (self.ctl_fd == fd) self.ctl_fd = null;
+        return;
+    };
+    self.pending_pushes.append(self.allocator, .{
+        .msg_type = hdr.msg_type,
+        .request_id = hdr.request_id,
+        .payload = payload,
+    }) catch {
+        self.allocator.free(payload);
+    };
 }

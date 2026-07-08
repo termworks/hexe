@@ -424,7 +424,11 @@ pub fn consumeQueuedControlResponse(self: *SesClient, fd: posix.fd_t, hdr: wire.
             self.skipPayload(fd, hdr.payload_len);
             self.pending_session_stolen = true;
         },
-        else => self.skipPayload(fd, hdr.payload_len),
+        // Replayable async pushes (float_request, notify, shell_event,
+        // pane_exited, ...) are captured for the IPC loop instead of being
+        // dropped: a dropped float_request hangs the `hexe float` CLI, a
+        // dropped pane_exited leaves a frozen pane view.
+        else => self.queuePendingPush(fd, hdr),
     }
 }
 
