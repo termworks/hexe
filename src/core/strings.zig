@@ -46,3 +46,25 @@ test "sanitize respects max_len" {
     const result = sanitize(&buf, "verylongname", 5);
     try std.testing.expectEqualSlices(u8, "veryl", result);
 }
+
+test "sanitize: edge cases (empty, invalid->underscore, truncation)" {
+    var buf: [64]u8 = undefined;
+    // Empty stays empty (callers must treat as "no instance").
+    try std.testing.expectEqualSlices(u8, "", sanitize(&buf, "", 24));
+    // Invalid chars become '_' (length-preserving → distinct inputs stay distinct).
+    try std.testing.expectEqualSlices(u8, "a_b_c.d", sanitize(&buf, "a b/c.d", 24)[0..7]);
+    try std.testing.expectEqualSlices(u8, "___", sanitize(&buf, "/*?", 24));
+    // Dot, dash, underscore are allowed through.
+    try std.testing.expectEqualSlices(u8, "a.b-c_d", sanitize(&buf, "a.b-c_d", 24));
+    // Truncated to max_len.
+    try std.testing.expectEqualSlices(u8, "abcde", sanitize(&buf, "abcdefghij", 5));
+    // Truncated to the smaller of out.len and max_len.
+    var small: [3]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, "abc", sanitize(&small, "abcdefg", 24));
+}
+
+test "sanitizeWithFallback: uses fallback only when the result is empty" {
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualSlices(u8, "default", sanitizeWithFallback(&buf, "", 24, "default"));
+    try std.testing.expectEqualSlices(u8, "keep", sanitizeWithFallback(&buf, "keep", 24, "default"));
+}
