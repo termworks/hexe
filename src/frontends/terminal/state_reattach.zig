@@ -18,6 +18,29 @@ const SessionFloat = session_model.SessionFloat;
 const AdoptInfo = struct { pane_id: u16 };
 const ExistingPaneViews = std.AutoHashMap([32]u8, *Pane);
 
+/// Adopt a pane with a bounded retry. A reattach that loses this race drops
+/// the pane from the rebuilt layout permanently: it lingers unowned in SES
+/// until the orphan sweep kills it, which the user experiences as "reattach
+/// sometimes loses panes". Transient transport failures (an interleaved push
+/// confusing a sync reader, a briefly saturated daemon) deserve another
+/// attempt; a definitive refusal (SES error: pane gone or owned by another
+/// live client) or a dead connection does not.
+fn adoptPaneWithRetry(self: anytype, uuid: [32]u8) !core.FrontendRuntime.PaneAttachResult {
+    var attempt: usize = 1;
+    while (true) : (attempt += 1) {
+        return self.runtime.adoptPane(uuid) catch |err| {
+            switch (err) {
+                error.SesError, error.NotConnected => return err,
+                else => {},
+            }
+            if (attempt >= 3) return err;
+            terminal_main.debugLogUuid(&uuid, "adoptPaneWithRetry: attempt {d} failed: {s}; retrying", .{ attempt, @errorName(err) });
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            continue;
+        };
+    }
+}
+
 fn applyDeferredPaneExits(self: anytype) void {
     var pending: std.ArrayList([32]u8) = .empty;
     defer pending.deinit(self.allocator);
@@ -276,7 +299,7 @@ fn ensureAdoptInfo(
             }
         }
     }
-    if (self.runtime.adoptPane(uuid)) |adopt_res| {
+    if (adoptPaneWithRetry(self, uuid)) |adopt_res| {
         const info = AdoptInfo{ .pane_id = adopt_res.pane_id };
         uuid_pane_map.put(uuid, info) catch |err| {
             terminal_main.debugLog("ensureAdoptInfo: failed to cache adopted pane uuid={s}: {s}", .{ uuid[0..8], @errorName(err) });
@@ -841,7 +864,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             continue;
         }
 
-        const adopt_result = self.runtime.adoptPane(uuid) catch |e| {
+        const adopt_result = adoptPaneWithRetry(self, uuid) catch |e| {
             terminal_main.debugLog("reattachSession: adoptPane failed for uuid={s}: {s}", .{ uuid[0..8], @errorName(e) });
             failed_adoptions += 1;
             continue;
@@ -1293,7 +1316,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             defer if (node_needs_cleanup) self.allocator.destroy(node);
 
             // Found matching pane, adopt it only after local prerequisites are ready.
-            const result = self.runtime.adoptPane(p.uuid) catch |err| {
+            const result = adoptPaneWithRetry(self, p.uuid) catch |err| {
                 terminal_main.debugLogUuid(&p.uuid, "attachOrphanedPane adoptPane failed: {s}", .{@errorName(err)});
                 return false;
             };
