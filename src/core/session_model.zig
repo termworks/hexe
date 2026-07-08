@@ -1460,3 +1460,65 @@ test "SessionSnapshot: empty session name and large counters round-trip" {
     try testing.expectEqual(@as(usize, 4_000_000_000), restored.tab_counter);
     try testing.expectEqual(@as(usize, 999), restored.active_tab);
 }
+
+test "SessionSnapshot.fromJson: corrupt canonical inputs error, never crash" {
+    const allocator = testing.allocator;
+    const T = struct {
+        fn expectErr(a: std.mem.Allocator, json: []const u8) !void {
+            // Any error is fine; the point is it must not crash or succeed.
+            if (SessionSnapshot.fromJson(a, json)) |*snap| {
+                var s = snap.*;
+                s.deinit();
+                return error.UnexpectedSuccess;
+            } else |_| {}
+        }
+    };
+    // Has "panes" → canonical path. Each is structurally broken.
+    try T.expectErr(allocator, "{\"panes\":[],\"session_name\":\"x\",\"tabs\":[],\"floats\":[]}"); // no uuid
+    // uuid wrong length (31 chars).
+    try T.expectErr(allocator, "{\"panes\":[],\"uuid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_name\":\"x\",\"tabs\":[],\"floats\":[]}");
+    // tabs is an object, not an array.
+    try T.expectErr(allocator, "{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\",\"tabs\":{},\"floats\":[]}");
+    // A split tree node missing its "second" child.
+    try T.expectErr(allocator, "{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\"," ++
+        "\"tabs\":[{\"uuid\":\"" ++ ("t" ** 32) ++ "\",\"name\":\"T\",\"root\":{\"type\":\"split\",\"dir\":\"h\",\"ratio\":0.5,\"first\":{\"type\":\"pane\",\"uuid\":\"" ++ ("p" ** 32) ++ "\"}}}],\"floats\":[]}");
+    // A canonical pane node with no uuid.
+    try T.expectErr(allocator, "{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\"," ++
+        "\"tabs\":[{\"uuid\":\"" ++ ("t" ** 32) ++ "\",\"name\":\"T\",\"root\":{\"type\":\"pane\"}}],\"floats\":[]}");
+}
+
+test "SessionSnapshot.fromJson: wrong field types degrade gracefully (no crash)" {
+    const allocator = testing.allocator;
+    // active_tab / tab_counter as strings → default to 0 (intField returns null).
+    // ratio as a string in a split → floatField returns null → default 0.5.
+    const json = "{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\"," ++
+        "\"active_tab\":\"nope\",\"tab_counter\":\"lots\"," ++
+        "\"tabs\":[{\"uuid\":\"" ++ ("t" ** 32) ++ "\",\"name\":\"T\",\"root\":{\"type\":\"split\",\"dir\":\"h\",\"ratio\":\"half\",\"first\":{\"type\":\"pane\",\"uuid\":\"" ++ ("p" ** 32) ++ "\"},\"second\":{\"type\":\"pane\",\"uuid\":\"" ++ ("q" ** 32) ++ "\"}}}],\"floats\":[]}";
+    var snap = try SessionSnapshot.fromJson(allocator, json);
+    defer snap.deinit();
+    try testing.expectEqual(@as(usize, 0), snap.active_tab);
+    try testing.expectEqual(@as(usize, 0), snap.tab_counter);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), snap.tabs.items[0].root.?.split.ratio, 0.0005);
+}
+
+test "SessionSnapshot.fromJson: deep nested split (recursion) does not crash" {
+    const allocator = testing.allocator;
+    // Build a 40-deep left-nested split JSON.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll("{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\",\"tabs\":[{\"uuid\":\"" ++ ("t" ** 32) ++ "\",\"name\":\"T\",\"root\":");
+    const depth = 40;
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        try w.writeAll("{\"type\":\"split\",\"dir\":\"h\",\"ratio\":0.5,\"first\":{\"type\":\"pane\",\"uuid\":\"" ++ ("p" ** 32) ++ "\"},\"second\":");
+    }
+    try w.writeAll("{\"type\":\"pane\",\"uuid\":\"" ++ ("q" ** 32) ++ "\"}");
+    i = 0;
+    while (i < depth) : (i += 1) try w.writeAll("}");
+    try w.writeAll("}],\"floats\":[]}");
+
+    var snap = try SessionSnapshot.fromJson(allocator, buf.items);
+    defer snap.deinit();
+    try testing.expect(snap.tabs.items[0].root.?.* == .split);
+}
