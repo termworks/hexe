@@ -15,7 +15,7 @@ pub fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf
         self.sendBinaryError(fd, "register: payload too small");
         return;
     }
-    const reg = wire.readStruct(wire.FrontendRegister, fd) catch |err| {
+    const reg = wire.readStructTimeout(wire.FrontendRegister, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "register request read failed", err);
         self.sendBinaryError(fd, "register: read failed");
@@ -40,7 +40,7 @@ pub fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf
             return;
         }
         if (trailing_len <= buf.len) {
-            wire.readExact(fd, buf[0..trailing_len]) catch |err| {
+            wire.readExactTimeout(fd, buf[0..trailing_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
                 self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.logError("ses", "register trailing payload read failed", err);
                 self.sendBinaryError(fd, "register: name read failed");

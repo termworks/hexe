@@ -15,7 +15,7 @@ pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
         self.sendBinaryError(fd, "detach: payload too small for Detach header");
         return;
     }
-    const det = wire.readStruct(wire.Detach, fd) catch |err| {
+    const det = wire.readStructTimeout(wire.Detach, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "detach request read failed", err);
         self.sendBinaryError(fd, "detach: read failed");
@@ -74,7 +74,7 @@ pub fn handleBinaryReattach(self: *Server, fd: posix.fd_t, payload_len: u32, buf
         self.sendBinaryError(fd, "invalid_payload");
         return;
     }
-    const ra = wire.readStruct(wire.Reattach, fd) catch |err| {
+    const ra = wire.readStructTimeout(wire.Reattach, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "reattach request read failed", err);
         self.sendBinaryError(fd, "reattach: read failed");
@@ -85,7 +85,7 @@ pub fn handleBinaryReattach(self: *Server, fd: posix.fd_t, payload_len: u32, buf
         self.sendBinaryError(fd, "invalid_id");
         return;
     }
-    wire.readExact(fd, buf[0..ra.id_len]) catch |err| {
+    wire.readExactTimeout(fd, buf[0..ra.id_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "reattach id read failed", err);
         self.sendBinaryError(fd, "reattach: id read failed");
@@ -390,7 +390,7 @@ pub fn handleBinaryDisconnect(self: *Server, fd: posix.fd_t, payload_len: u32, b
         self.sendBinaryError(fd, "disconnect: payload too small");
         return true;
     }
-    const dc = wire.readStruct(wire.Disconnect, fd) catch |err| {
+    const dc = wire.readStructTimeout(wire.Disconnect, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "disconnect request read failed", err);
         return false;

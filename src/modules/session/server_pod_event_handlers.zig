@@ -16,7 +16,7 @@ pub fn handleBinaryCwdChanged(self: *Server, fd: posix.fd_t, payload_len: u32, b
         core.logging.warnWithSource("ses", "cwd_changed payload too small: fd={d} len={d}", .{ fd, payload_len }, @src());
         return;
     }
-    const cc = wire.readStruct(wire.CwdChanged, fd) catch |err| {
+    const cc = wire.readStructTimeout(wire.CwdChanged, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.warnWithSource("ses", "cwd_changed read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
         return;
@@ -27,7 +27,7 @@ pub fn handleBinaryCwdChanged(self: *Server, fd: posix.fd_t, payload_len: u32, b
         return;
     }
     if (cc.cwd_len > 0) {
-        wire.readExact(fd, buf[0..cc.cwd_len]) catch |err| {
+        wire.readExactTimeout(fd, buf[0..cc.cwd_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "cwd_changed path read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;
@@ -55,7 +55,7 @@ pub fn handleBinaryFgChanged(self: *Server, fd: posix.fd_t, payload_len: u32, bu
         core.logging.warnWithSource("ses", "fg_changed payload too small: fd={d} len={d}", .{ fd, payload_len }, @src());
         return;
     }
-    const fc = wire.readStruct(wire.FgChanged, fd) catch |err| {
+    const fc = wire.readStructTimeout(wire.FgChanged, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.warnWithSource("ses", "fg_changed read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
         return;
@@ -66,7 +66,7 @@ pub fn handleBinaryFgChanged(self: *Server, fd: posix.fd_t, payload_len: u32, bu
         return;
     }
     if (fc.name_len > 0) {
-        wire.readExact(fd, buf[0..fc.name_len]) catch |err| {
+        wire.readExactTimeout(fd, buf[0..fc.name_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "fg_changed name read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;
@@ -95,7 +95,7 @@ pub fn handleBinaryShellEvent(self: *Server, fd: posix.fd_t, payload_len: u32, b
         core.logging.warnWithSource("ses", "shell_event payload too small: fd={d} len={d}", .{ fd, payload_len }, @src());
         return;
     }
-    const ev = wire.readStruct(wire.ShpShellEvent, fd) catch |err| {
+    const ev = wire.readStructTimeout(wire.ShpShellEvent, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.warnWithSource("ses", "shell_event read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
         return;
@@ -106,7 +106,7 @@ pub fn handleBinaryShellEvent(self: *Server, fd: posix.fd_t, payload_len: u32, b
         return;
     }
     if (trail_len > 0) {
-        wire.readExact(fd, buf[0..trail_len]) catch |err| {
+        wire.readExactTimeout(fd, buf[0..trail_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "shell_event trail read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;

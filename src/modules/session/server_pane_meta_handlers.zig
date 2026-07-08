@@ -14,7 +14,7 @@ pub fn handleBinaryUpdatePaneName(self: *Server, fd: posix.fd_t, payload_len: u3
         self.sendBinaryError(fd, "update_pane_name: payload too small");
         return;
     }
-    const upn = wire.readStruct(wire.UpdatePaneName, fd) catch |err| {
+    const upn = wire.readStructTimeout(wire.UpdatePaneName, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "update_pane_name request read failed", err);
         self.sendBinaryError(fd, "update_pane_name: read failed");
@@ -26,7 +26,7 @@ pub fn handleBinaryUpdatePaneName(self: *Server, fd: posix.fd_t, payload_len: u3
         return;
     }
     if (upn.name_len > 0) {
-        wire.readExact(fd, buf[0..upn.name_len]) catch |err| {
+        wire.readExactTimeout(fd, buf[0..upn.name_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "update_pane_name name read failed", err);
             self.sendBinaryError(fd, "update_pane_name: name read failed");
@@ -56,7 +56,7 @@ pub fn handleBinaryUpdatePaneAux(self: *Server, fd: posix.fd_t, payload_len: u32
         self.sendBinaryError(fd, "update_pane_aux: payload too small");
         return;
     }
-    const upa = wire.readStruct(wire.UpdatePaneAux, fd) catch |err| {
+    const upa = wire.readStructTimeout(wire.UpdatePaneAux, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "update_pane_aux request read failed", err);
         self.sendBinaryError(fd, "update_pane_aux: read failed");
@@ -91,7 +91,7 @@ pub fn handleBinaryUpdatePaneShell(self: *Server, fd: posix.fd_t, payload_len: u
         self.sendBinaryError(fd, "update_pane_shell: payload too small");
         return;
     }
-    const ups = wire.readStruct(wire.UpdatePaneShell, fd) catch |err| {
+    const ups = wire.readStructTimeout(wire.UpdatePaneShell, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "update_pane_shell request read failed", err);
         self.sendBinaryError(fd, "update_pane_shell: read failed");
@@ -104,7 +104,7 @@ pub fn handleBinaryUpdatePaneShell(self: *Server, fd: posix.fd_t, payload_len: u
         return;
     }
     if (trail_len > 0) {
-        wire.readExact(fd, buf[0..trail_len]) catch |err| {
+        wire.readExactTimeout(fd, buf[0..trail_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "update_pane_shell trail read failed", err);
             self.sendBinaryError(fd, "update_pane_shell: trail read failed");

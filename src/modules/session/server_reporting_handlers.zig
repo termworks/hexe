@@ -17,7 +17,7 @@ pub fn handleBinaryExitIntentResult(self: *Server, fd: posix.fd_t, payload_len: 
         self.sendBinaryError(fd, "exit_intent_result: payload too small");
         return;
     }
-    const result = wire.readStruct(wire.ExitIntentResult, fd) catch |err| {
+    const result = wire.readStructTimeout(wire.ExitIntentResult, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "exit_intent_result request read failed", err);
         self.sendBinaryError(fd, "exit_intent_result: read failed");
@@ -42,7 +42,7 @@ pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, 
         self.sendBinaryError(fd, "float_result: payload too small");
         return;
     }
-    const result = wire.readStruct(wire.FloatResult, fd) catch |err| {
+    const result = wire.readStructTimeout(wire.FloatResult, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "float_result request read failed", err);
         self.sendBinaryError(fd, "float_result: read failed");
@@ -70,7 +70,7 @@ pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, 
         // reused by then). queueCtlClose dedups, so routing the success
         // path through it too gives the fd exactly one owner.
         if (trail_len > 0 and trail_len <= buf.len) {
-            wire.readExact(fd, buf[0..trail_len]) catch |err| {
+            wire.readExactTimeout(fd, buf[0..trail_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
                 self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.warnWithSource("ses", "float_result trail read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
                 self.queueCtlClose(cfd, null);

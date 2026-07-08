@@ -116,7 +116,7 @@ pub fn handleBinaryPopResponse(self: *Server, fd: posix.fd_t, payload_len: u32, 
         self.sendBinaryError(fd, "pop_response: payload too small");
         return;
     }
-    const pr = wire.readStruct(wire.PopResponse, fd) catch |err| {
+    const pr = wire.readStructTimeout(wire.PopResponse, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "pop_response request read failed", err);
         self.sendBinaryError(fd, "pop_response: read failed");
@@ -141,7 +141,7 @@ pub fn handleBinaryExited(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
         core.logging.warnWithSource("ses", "exited payload too small: fd={d} len={d}", .{ fd, payload_len }, @src());
         return;
     }
-    const ex = wire.readStruct(wire.Exited, fd) catch |err| {
+    const ex = wire.readStructTimeout(wire.Exited, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.warnWithSource("ses", "exited read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
         return;

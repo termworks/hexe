@@ -21,7 +21,7 @@ pub fn handleKillSession(self: *Server, fd: posix.fd_t, payload_len: u32, buf: [
         return;
     }
 
-    const ks = wire.readStruct(wire.KillSession, fd) catch |err| {
+    const ks = wire.readStructTimeout(wire.KillSession, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "kill_session request read failed", err);
         const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
@@ -35,7 +35,7 @@ pub fn handleKillSession(self: *Server, fd: posix.fd_t, payload_len: u32, buf: [
         return;
     }
 
-    wire.readExact(fd, buf[0..ks.id_len]) catch |err| {
+    wire.readExactTimeout(fd, buf[0..ks.id_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "kill_session id read failed", err);
         const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
@@ -253,7 +253,7 @@ pub fn handleGetLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u
         self.sendBinaryError(fd, "invalid payload");
         return;
     }
-    const pu = wire.readStruct(wire.PaneUuid, fd) catch |err| {
+    const pu = wire.readStructTimeout(wire.PaneUuid, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "get_layout pane uuid read failed", err);
         self.sendBinaryError(fd, "read failed");
@@ -292,7 +292,7 @@ pub fn handleGetSessionState(self: *Server, fd: posix.fd_t, payload_len: u32, bu
     }
 
     var hex_uuid: [32]u8 = undefined;
-    wire.readExact(fd, &hex_uuid) catch |err| {
+    wire.readExactTimeout(fd, &hex_uuid, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "get_session_state uuid read failed", err);
         self.sendBinaryError(fd, "read failed");
@@ -332,7 +332,7 @@ pub fn handleApplyLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: [
         return;
     }
 
-    const al = wire.readStruct(wire.ApplyLayout, fd) catch |err| {
+    const al = wire.readStructTimeout(wire.ApplyLayout, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "apply_layout request read failed", err);
         self.sendBinaryError(fd, "read failed");
@@ -352,7 +352,7 @@ pub fn handleApplyLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: [
     };
     defer self.allocator.free(json_buf);
 
-    wire.readExact(fd, json_buf) catch |err| {
+    wire.readExactTimeout(fd, json_buf, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "apply_layout json read failed", err);
         self.sendBinaryError(fd, "read json failed");

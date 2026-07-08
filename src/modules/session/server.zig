@@ -19,8 +19,16 @@ const xev = @import("xev").Dynamic;
 
 // Keep VT routing I/O short to avoid blocking the whole SES event loop when a
 // peer dies mid-frame on stream sockets.
-const VT_ROUTE_IO_TIMEOUT_MS: i32 = 2000;
-const CTL_FRAME_IO_TIMEOUT_MS: i32 = 2000;
+// Stall budgets for reads inside the single-threaded event loop. These used
+// to be 2s (and 10s via wire defaults), which let ONE stalled client — e.g. a
+// frontend SIGSTOPped between a frame header and its payload — freeze every
+// other session's I/O for that long, repeatedly. Local unix-socket peers
+// complete frame writes in microseconds once scheduled; 500ms is generous
+// slack for a loaded machine, and a peer that stalls longer is dropped and
+// heals via reconnect/backlog-replay.
+const VT_ROUTE_IO_TIMEOUT_MS: i32 = 500;
+const CTL_FRAME_IO_TIMEOUT_MS: i32 = 500;
+pub const HANDLER_IO_TIMEOUT_MS: i32 = 500;
 const MUX_VT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
 // Symmetric cap for the MUX→POD (input) direction. A frame is always accepted
 // onto an empty queue (so a single large paste is never undeliverable);
@@ -105,12 +113,12 @@ fn expectBinaryError(fd: posix.fd_t, expected: []const u8) !void {
     try std.testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.@"error")), hdr.msg_type);
     try std.testing.expectEqual(@as(u32, @intCast(@sizeOf(wire.Error) + expected.len)), hdr.payload_len);
 
-    const payload = try wire.readStruct(wire.Error, fd);
+    const payload = try wire.readStructTimeout(wire.Error, fd, HANDLER_IO_TIMEOUT_MS);
     try std.testing.expectEqual(@as(u16, @intCast(expected.len)), payload.msg_len);
 
     var buf: [128]u8 = undefined;
     try std.testing.expect(expected.len <= buf.len);
-    try wire.readExact(fd, buf[0..expected.len]);
+    try wire.readExactTimeout(fd, buf[0..expected.len], HANDLER_IO_TIMEOUT_MS);
     try std.testing.expectEqualStrings(expected, buf[0..expected.len]);
 }
 
@@ -1405,7 +1413,7 @@ pub const Server = struct {
                 // Frontend VT data channel — read 32-byte session_id to identify client.
                 ses.debugLog("accept: frontend VT channel fd={d}", .{conn.fd});
                 var sid: [32]u8 = undefined;
-                wire.readExact(conn.fd, &sid) catch |err| {
+                wire.readExactTimeout(conn.fd, &sid, HANDLER_IO_TIMEOUT_MS) catch |err| {
                     core.logging.logError("ses", "frontend VT session id read failed", err);
                     var tmp = conn;
                     tmp.close();
@@ -1466,7 +1474,7 @@ pub const Server = struct {
                 // POD control uplink — read 16-byte binary UUID.
                 ses.debugLog("accept: POD ctl uplink fd={d}", .{conn.fd});
                 var uuid_bin: [16]u8 = undefined;
-                wire.readExact(conn.fd, &uuid_bin) catch |err| {
+                wire.readExactTimeout(conn.fd, &uuid_bin, HANDLER_IO_TIMEOUT_MS) catch |err| {
                     core.logging.logError("ses", "POD ctl uuid read failed", err);
                     var tmp = conn;
                     tmp.close();
@@ -2004,7 +2012,7 @@ pub const Server = struct {
                     self.replyOrClose(fd, .@"error", &.{});
                     return false;
                 }
-                const pu = wire.readStruct(wire.PaneUuid, fd) catch |err| {
+                const pu = wire.readStructTimeout(wire.PaneUuid, fd, HANDLER_IO_TIMEOUT_MS) catch |err| {
                     self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "failed to read pane_info payload", err);
                     return false;
@@ -2104,7 +2112,7 @@ pub const Server = struct {
         var remaining: usize = len;
         while (remaining > 0) {
             const chunk = @min(remaining, buf.len);
-            wire.readExact(fd, buf[0..chunk]) catch |err| {
+            wire.readExactTimeout(fd, buf[0..chunk], HANDLER_IO_TIMEOUT_MS) catch |err| {
                 core.logging.logError("ses", "failed to skip CTL payload", err);
                 // The skip consumed an unknown number of bytes: the stream
                 // framing is unrecoverable, so tear the connection down.
@@ -2147,7 +2155,7 @@ pub const Server = struct {
                     self.closeCliRequest(fd, "focus_move payload too small");
                     return;
                 }
-                const fm = wire.readStruct(wire.FocusMove, fd) catch |err| {
+                const fm = wire.readStructTimeout(wire.FocusMove, fd, HANDLER_IO_TIMEOUT_MS) catch |err| {
                     self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "focus_move read failed", err);
                     self.closeCliRequest(fd, "focus_move read failed");
@@ -2167,7 +2175,7 @@ pub const Server = struct {
                     self.closeCliRequest(fd, "exit_intent payload too small");
                     return;
                 }
-                const ei = wire.readStruct(wire.ExitIntent, fd) catch |err| {
+                const ei = wire.readStructTimeout(wire.ExitIntent, fd, HANDLER_IO_TIMEOUT_MS) catch |err| {
                     self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "exit_intent read failed", err);
                     self.closeCliRequest(fd, "exit_intent read failed");
@@ -2204,7 +2212,7 @@ pub const Server = struct {
                     return;
                 }
                 const payload_len = hdr.payload_len;
-                const fr = wire.readStruct(wire.FloatRequest, fd) catch |err| {
+                const fr = wire.readStructTimeout(wire.FloatRequest, fd, HANDLER_IO_TIMEOUT_MS) catch |err| {
                     self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "float_request read failed", err);
                     self.closeCliRequest(fd, "float_request read failed");
@@ -2217,7 +2225,7 @@ pub const Server = struct {
                     return;
                 }
                 if (trail_len > 0) {
-                    wire.readExact(fd, buf[0..trail_len]) catch |err| {
+                    wire.readExactTimeout(fd, buf[0..trail_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
                         self.ctlStreamDesynced(fd, "mid-message read failed");
                         core.logging.logError("ses", "float_request trail read failed", err);
                         self.closeCliRequest(fd, "float_request trail read failed");
@@ -2263,7 +2271,7 @@ pub const Server = struct {
                     return;
                 }
                 if (hdr.payload_len > 0) {
-                    wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                    wire.readExactTimeout(fd, buf[0..hdr.payload_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
                         self.ctlStreamDesynced(fd, "mid-message read failed");
                         core.logging.logError("ses", "notify payload read failed", err);
                         self.closeCliRequest(fd, "notify payload read failed");
@@ -2286,7 +2294,7 @@ pub const Server = struct {
                     self.closeCliRequest(fd, "send_keys payload too large");
                     return;
                 }
-                wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                wire.readExactTimeout(fd, buf[0..hdr.payload_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
                     self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "send_keys payload read failed", err);
                     self.closeCliRequest(fd, "send_keys payload read failed");
@@ -2315,7 +2323,7 @@ pub const Server = struct {
                     self.closeCliRequest(fd, "targeted_notify payload too large");
                     return;
                 }
-                wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                wire.readExactTimeout(fd, buf[0..hdr.payload_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
                     self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "targeted_notify payload read failed", err);
                     self.closeCliRequest(fd, "targeted_notify payload read failed");
@@ -2337,7 +2345,7 @@ pub const Server = struct {
                     return;
                 }
                 if (hdr.payload_len > 0) {
-                    wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                    wire.readExactTimeout(fd, buf[0..hdr.payload_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
                         self.ctlStreamDesynced(fd, "mid-message read failed");
                         core.logging.logError("ses", "broadcast_notify payload read failed", err);
                         self.closeCliRequest(fd, "broadcast_notify payload read failed");
@@ -2361,7 +2369,7 @@ pub const Server = struct {
                     self.closeCliRequest(fd, "pop_confirm payload too large");
                     return;
                 }
-                wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                wire.readExactTimeout(fd, buf[0..hdr.payload_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
                     self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "pop_confirm payload read failed", err);
                     self.closeCliRequest(fd, "pop_confirm payload read failed");
@@ -2400,7 +2408,7 @@ pub const Server = struct {
                     self.closeCliRequest(fd, "pop_choose payload too large");
                     return;
                 }
-                wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                wire.readExactTimeout(fd, buf[0..hdr.payload_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
                     self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "pop_choose payload read failed", err);
                     self.closeCliRequest(fd, "pop_choose payload read failed");
@@ -2435,7 +2443,7 @@ pub const Server = struct {
                     self.closeCliRequest(fd, "pane_info payload too small");
                     return;
                 }
-                const pu = wire.readStruct(wire.PaneUuid, fd) catch |err| {
+                const pu = wire.readStructTimeout(wire.PaneUuid, fd, HANDLER_IO_TIMEOUT_MS) catch |err| {
                     self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "pane_info payload read failed", err);
                     self.closeCliRequest(fd, "pane_info payload read failed");
@@ -2449,7 +2457,7 @@ pub const Server = struct {
                 var full_mode: bool = false;
                 if (hdr.payload_len >= 1) {
                     var flag: [1]u8 = undefined;
-                    wire.readExact(fd, &flag) catch |err| {
+                    wire.readExactTimeout(fd, &flag, HANDLER_IO_TIMEOUT_MS) catch |err| {
                         self.ctlStreamDesynced(fd, "mid-message read failed");
                         core.logging.logError("ses", "status flag read failed", err);
                         self.closeCliRequest(fd, "status flag read failed");

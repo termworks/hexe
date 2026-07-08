@@ -890,6 +890,16 @@ pub fn readStruct(comptime T: type, fd: posix.fd_t) !T {
     return std.mem.bytesToValue(T, &buf);
 }
 
+/// readStruct with an explicit stall budget. Event-loop handlers must use
+/// this (or readExactTimeout) with a SHORT budget: a single-threaded daemon
+/// blocked on one stalled peer's payload stalls every other session's I/O
+/// for the whole timeout.
+pub fn readStructTimeout(comptime T: type, fd: posix.fd_t, timeout_ms: i32) !T {
+    var buf: [@sizeOf(T)]u8 = undefined;
+    try readExactTimeout(fd, &buf, timeout_ms);
+    return std.mem.bytesToValue(T, &buf);
+}
+
 /// Write a MuxVtHeader + payload.
 pub fn writeMuxVt(fd: posix.fd_t, pane_id: u16, frame_type: u8, payload: []const u8) !void {
     var hdr: MuxVtHeader = .{
