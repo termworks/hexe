@@ -34,6 +34,23 @@ pub fn isPidAlive(pid: posix.pid_t) bool {
     return true;
 }
 
+/// Whether the process still IS this pane's pod, not a pid-reuse impostor.
+/// Pods exec as `hexe pod daemon --uuid <32-hex>`, so the pane uuid appears
+/// verbatim in /proc/<pid>/cmdline — a reused pid cannot match by accident.
+/// Unlike a socket probe this also matches a wedged-but-alive pod, which
+/// makes it the right identity check before SIGNALING the pid: a dead or
+/// reused pid must never be signaled, a wedged real pod must be.
+pub fn podPidMatchesPane(pid: posix.pid_t, uuid: [32]u8) bool {
+    if (pid <= 0) return false;
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pid}) catch return false;
+    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    defer file.close();
+    var buf: [4096]u8 = undefined;
+    const n = file.read(&buf) catch return false;
+    return std.mem.indexOf(u8, buf[0..n], &uuid) != null;
+}
+
 pub fn findStickyPane(store: *store_mod.SessionStore, pwd: []const u8, key: u8) ?*store_mod.Pane {
     return findStickyPaneWithAffinity(store, pwd, key, null);
 }

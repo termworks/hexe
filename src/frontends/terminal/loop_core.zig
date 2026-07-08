@@ -58,7 +58,14 @@ fn loopTimerCallback(
 const RECONNECT_RETRY_MS: i64 = 2_000;
 
 fn maybeReconnectSes(state: *State, last_attempt_ms: *i64) void {
-    if (state.runtime.getCtlFd() != null) return;
+    // VT-only loss (e.g. the intentional mux-queue-overflow drop after a huge
+    // output burst) used to freeze all panes forever while CTL stayed healthy.
+    // A full reconnect + reattach heals it too: panes are rebuilt from the
+    // session snapshot and re-painted from pod backlogs, so there is no
+    // missed-output gap or duplicated content a raw VT re-open would cause.
+    const ctl_ok = state.runtime.getCtlFd() != null;
+    const vt_ok = state.runtime.getVtFd() != null;
+    if (ctl_ok and vt_ok) return;
     const now = std.time.milliTimestamp();
     if (now - last_attempt_ms.* < RECONNECT_RETRY_MS) return;
     last_attempt_ms.* = now;

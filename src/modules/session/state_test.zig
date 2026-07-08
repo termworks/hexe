@@ -1328,12 +1328,34 @@ test "cleanupOrphanedPanes: removes timed-out panes" {
     try testing.expect(!ses_state.store.panes.contains(uuid));
 }
 
+/// Spawn a real child whose argv contains the pane uuid, standing in for a
+/// pod process: the sweep's pid-identity check reads /proc/<pid>/cmdline, so
+/// the test-process pid no longer passes for a pod.
+fn spawnFakePod(allocator: std.mem.Allocator, uuid: [32]u8) !std.process.Child {
+    var child = std.process.Child.init(&.{ "/bin/sh", "-c", "sleep 30", uuid[0..] }, allocator);
+    try child.spawn();
+    // Wait out the fork->exec window: until exec completes, /proc/<pid>/cmdline
+    // still shows the parent image and the pid-identity check would miss.
+    var tries: usize = 0;
+    while (tries < 200) : (tries += 1) {
+        const sticky_panes = @import("sticky_panes.zig");
+        if (sticky_panes.podPidMatchesPane(child.id, uuid)) return child;
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    _ = child.kill() catch {};
+    return error.FakePodNeverExeced;
+}
+
 test "cleanupOrphanedPanes: keyed sticky float with live pod survives timeout" {
     var ses_state = state.SesState.init(testing.allocator);
     defer ses_state.deinit();
 
-    const live_pid: std.posix.pid_t = @intCast(std.c.getpid());
     const uuid = [_]u8{7} ** 32;
+    var fake_pod = try spawnFakePod(testing.allocator, uuid);
+    defer {
+        _ = fake_pod.kill() catch {};
+    }
+    const live_pid: std.posix.pid_t = fake_pod.id;
     try ses_state.store.panes.put(uuid, .{
         .uuid = uuid,
         .name = null,
@@ -3832,4 +3854,42 @@ test "client snapshot mutations mark the store dirty (attached crash recovery)" 
     ses_state.store.dirty = false;
     css.removeTab(&ses_state, cid, tab, null);
     try testing.expect(ses_state.store.dirty);
+}
+
+test "cleanupOrphanedPanes: pid-reused ghost sticky float ages out" {
+    const sticky_panes_mod = @import("sticky_panes.zig");
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    // A live pid that is NOT this pane's pod (the test process stands in for
+    // an unrelated process that inherited the pod's pid after reuse). The old
+    // pid-only exemption kept such ghosts forever.
+    const reused_pid: std.posix.pid_t = @intCast(std.c.getpid());
+    const uuid = [_]u8{8} ** 32;
+    try testing.expect(sticky_panes_mod.isPidAlive(reused_pid));
+    try testing.expect(!sticky_panes_mod.podPidMatchesPane(reused_pid, uuid));
+
+    try ses_state.store.panes.put(uuid, .{
+        .uuid = uuid,
+        .name = null,
+        .pod_pid = reused_pid,
+        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/test-ghost-sweep"),
+        .child_pid = reused_pid,
+        .state = .sticky,
+        .sticky_pwd = try testing.allocator.dupe(u8, "/home/test/proj"),
+        .sticky_key = 'g',
+        .attached_to = null,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = std.time.timestamp() - (400 * 3600),
+        .allocator = testing.allocator,
+    });
+    ses_state.store.orphan_timeout_hours = 24;
+
+    ses_state.cleanupOrphanedPanes();
+
+    // The ghost is reaped — and killPane's identity guard means reaping it
+    // did NOT signal the innocent reused pid (this test process survived to
+    // make this assertion).
+    try testing.expect(!ses_state.store.panes.contains(uuid));
 }

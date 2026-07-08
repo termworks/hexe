@@ -394,8 +394,16 @@ pub fn killPane(self: anytype, uuid: [32]u8) !void {
         _ = self.store.pane_id_to_pod_vt.remove(pane.value.pane_id);
     }
 
-    ses.debugLog("killPane: {s} sending SIGTERM to pid={d}", .{ hex_uuid[0..8], pane.value.pod_pid });
-    _ = std.c.kill(pane.value.pod_pid, std.c.SIG.TERM);
+    // Never signal a pid that is no longer our pod: after pid reuse it may
+    // belong to an unrelated process (killing a ghost pane must not SIGTERM
+    // an innocent pid). A wedged real pod still matches by cmdline uuid and
+    // is signaled; a dead pod simply has nothing to signal.
+    if (sticky_panes.podPidMatchesPane(pane.value.pod_pid, uuid)) {
+        ses.debugLog("killPane: {s} sending SIGTERM to pid={d}", .{ hex_uuid[0..8], pane.value.pod_pid });
+        _ = std.c.kill(pane.value.pod_pid, std.c.SIG.TERM);
+    } else {
+        ses.debugLog("killPane: {s} pid={d} is not our pod (dead or reused); not signaling", .{ hex_uuid[0..8], pane.value.pod_pid });
+    }
 
     pane.value.deinit();
     ses.debugLog("killPane: {s} done", .{hex_uuid[0..8]});

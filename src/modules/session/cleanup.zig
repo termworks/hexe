@@ -44,8 +44,12 @@ pub fn cleanupOrphanedPanes(self: anytype) void {
                     // /proc liveness probe runs only here, after the timeout
                     // check, so the 1s sweep does no I/O for healthy panes.
                     if (pane.sticky_key != null and pane.sticky_pwd != null and
-                        sticky_panes.isPidAlive(pane.pod_pid))
+                        sticky_panes.isPidAlive(pane.pod_pid) and
+                        sticky_panes.podPidMatchesPane(pane.pod_pid, pane.uuid))
                     {
+                        // A live pid alone is not enough: after pid reuse the
+                        // pid may belong to an unrelated process, and the
+                        // ghost pane would be exempted forever.
                         continue;
                     }
                     to_remove.append(self.allocator, entry.key_ptr.*) catch |err| {
