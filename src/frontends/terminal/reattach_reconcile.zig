@@ -39,9 +39,49 @@ pub fn layoutMatchesSnapshot(node: ?*const LayoutNode, snapshot_node: ?*const Se
     };
 }
 
+/// Number of leaf panes in a session snapshot layout subtree. The incremental
+/// reattach gate compares this against the live tab's pane count to detect a
+/// structural change that needs a rebuild.
+pub fn countSessionLayoutPanes(node: ?*const SessionLayoutNode) usize {
+    const root = node orelse return 0;
+    return switch (root.*) {
+        .pane => 1,
+        .split => |split| countSessionLayoutPanes(split.first) + countSessionLayoutPanes(split.second),
+    };
+}
+
 const testing = std.testing;
 const ua = [_]u8{'a'} ** 32;
 const ub = [_]u8{'b'} ** 32;
+
+fn tsPane(allocator: std.mem.Allocator, uuid: [32]u8) !*SessionLayoutNode {
+    const n = try allocator.create(SessionLayoutNode);
+    n.* = .{ .pane = uuid };
+    return n;
+}
+
+fn tsSplit(allocator: std.mem.Allocator, first: *SessionLayoutNode, second: *SessionLayoutNode) !*SessionLayoutNode {
+    const n = try allocator.create(SessionLayoutNode);
+    n.* = .{ .split = .{ .dir = .horizontal, .ratio = 0.5, .first = first, .second = second } };
+    return n;
+}
+
+test "countSessionLayoutPanes: counts leaves at any depth" {
+    const allocator = testing.allocator;
+    try testing.expectEqual(@as(usize, 0), countSessionLayoutPanes(null));
+
+    var leaf = SessionLayoutNode{ .pane = ua };
+    try testing.expectEqual(@as(usize, 1), countSessionLayoutPanes(&leaf));
+
+    // h[ a, h[ b, c ] ] → 3 panes.
+    const inner = try tsSplit(allocator, try tsPane(allocator, ua), try tsPane(allocator, ub));
+    const root = try tsSplit(allocator, try tsPane(allocator, [_]u8{'c'} ** 32), inner);
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expectEqual(@as(usize, 3), countSessionLayoutPanes(root));
+}
 
 test "layoutMatchesSnapshot: matching and mismatching panes" {
     var live_a = LayoutNode{ .pane = ua };

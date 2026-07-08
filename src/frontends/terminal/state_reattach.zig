@@ -578,13 +578,7 @@ fn restoreFloatPane(
     return pane;
 }
 
-fn countSessionLayoutPanes(node: ?*const SessionLayoutNode) usize {
-    const root = node orelse return 0;
-    return switch (root.*) {
-        .pane => 1,
-        .split => |split| countSessionLayoutPanes(split.first) + countSessionLayoutPanes(split.second),
-    };
-}
+const countSessionLayoutPanes = @import("reattach_reconcile.zig").countSessionLayoutPanes;
 
 // Pure snapshot→view structural comparison lives in `reattach_reconcile` so it
 // can be characterized in isolation (PLAN 1.8).
