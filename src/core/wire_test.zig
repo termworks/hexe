@@ -246,3 +246,79 @@ test "wire round-trip: Error payload + trail" {
     try wire.readExact(pair.b, buf[0..msg.len]);
     try testing.expectEqualStrings(msg, buf[0..msg.len]);
 }
+
+test "wire round-trip: Detach carries the session id" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    var sent: wire.Detach = .{ .session_id = undefined };
+    for (&sent.session_id, 0..) |*b, i| b.* = @intCast(i);
+
+    try wire.writeControl(pair.a, .detach, std.mem.asBytes(&sent));
+
+    const hdr = try wire.readControlHeader(pair.b);
+    try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.detach)), hdr.msg_type);
+    try testing.expectEqual(@as(u32, @sizeOf(wire.Detach)), hdr.payload_len);
+    const got = try wire.readStruct(wire.Detach, pair.b);
+    try testing.expectEqualSlices(u8, &sent.session_id, &got.session_id);
+}
+
+test "wire round-trip: Reattach prefix (id_len + trailing session id)" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    const sid = "pikachu-3";
+    var sent: wire.Reattach = .{ .id_len = @intCast(sid.len) };
+
+    try wire.writeControlWithTrail(pair.a, .reattach, std.mem.asBytes(&sent), sid);
+
+    const hdr = try wire.readControlHeader(pair.b);
+    try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.reattach)), hdr.msg_type);
+    try testing.expectEqual(@as(u32, @intCast(@sizeOf(wire.Reattach) + sid.len)), hdr.payload_len);
+    const got = try wire.readStruct(wire.Reattach, pair.b);
+    try testing.expectEqual(sent.id_len, got.id_len);
+    var buf: [32]u8 = undefined;
+    try wire.readExact(pair.b, buf[0..sid.len]);
+    try testing.expectEqualStrings(sid, buf[0..sid.len]);
+}
+
+test "wire round-trip: SessionReattached (snapshot + pane uuids trail)" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    const snapshot = "{\"uuid\":\"snap\"}";
+    const pane_count: u16 = 2;
+    var uuids: [2][32]u8 = undefined;
+    for (&uuids, 0..) |*u, i| {
+        for (u, 0..) |*b, j| b.* = @intCast((i * 32 + j) & 0xff);
+    }
+
+    var sent: wire.SessionReattached = .{ .state_len = @intCast(snapshot.len), .pane_count = pane_count };
+
+    var trail: [256]u8 = undefined;
+    @memcpy(trail[0..snapshot.len], snapshot);
+    const uuid_bytes = std.mem.sliceAsBytes(uuids[0..]);
+    @memcpy(trail[snapshot.len .. snapshot.len + uuid_bytes.len], uuid_bytes);
+    const trail_len = snapshot.len + uuid_bytes.len;
+
+    try wire.writeControlWithTrail(pair.a, .session_reattached, std.mem.asBytes(&sent), trail[0..trail_len]);
+
+    const hdr = try wire.readControlHeader(pair.b);
+    try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.session_reattached)), hdr.msg_type);
+    try testing.expectEqual(@as(u32, @intCast(@sizeOf(wire.SessionReattached) + trail_len)), hdr.payload_len);
+
+    const got = try wire.readStruct(wire.SessionReattached, pair.b);
+    try testing.expectEqual(sent.state_len, got.state_len);
+    try testing.expectEqual(sent.pane_count, got.pane_count);
+
+    var snap_buf: [64]u8 = undefined;
+    try wire.readExact(pair.b, snap_buf[0..snapshot.len]);
+    try testing.expectEqualStrings(snapshot, snap_buf[0..snapshot.len]);
+
+    var got_uuids: [64]u8 = undefined;
+    try wire.readExact(pair.b, got_uuids[0..uuid_bytes.len]);
+    try testing.expectEqualSlices(u8, uuid_bytes, got_uuids[0..uuid_bytes.len]);
+}
