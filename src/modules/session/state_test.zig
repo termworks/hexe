@@ -3456,3 +3456,29 @@ test "findByNameOrPrefix: matches exact name, hex-id prefix, full id; rejects mi
     // Empty id must NOT match an arbitrary session (startsWith("", ...) footgun).
     try testing.expectEqual(@as(?[16]u8, null), detached_sessions.findByNameOrPrefix(store, ""));
 }
+
+test "resolveSessionName: empty/whitespace defaults to 'session'; trims" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const r1 = try ses_state.resolveSessionName("", null, null);
+    defer ses_state.allocator.free(r1);
+    try testing.expectEqualStrings("session", r1);
+    const r2 = try ses_state.resolveSessionName("   \t\n ", null, null);
+    defer ses_state.allocator.free(r2);
+    try testing.expectEqualStrings("session", r2);
+    const r3 = try ses_state.resolveSessionName("  alpha  ", null, null);
+    defer ses_state.allocator.free(r3);
+    try testing.expectEqualStrings("alpha", r3);
+}
+
+test "resolveSessionName: cascades past already-taken suffixes" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const c1 = try ses_state.addClient(1);
+    ses_state.getClient(c1).?.session_name = try ses_state.allocator.dupe(u8, "alpha");
+    const c2 = try ses_state.addClient(2);
+    ses_state.getClient(c2).?.session_name = try ses_state.allocator.dupe(u8, "alpha-2");
+    const resolved = try ses_state.resolveSessionName("alpha", null, null);
+    defer ses_state.allocator.free(resolved);
+    try testing.expectEqualStrings("alpha-3", resolved);
+}
