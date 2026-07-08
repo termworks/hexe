@@ -3109,3 +3109,46 @@ test "layout_template: malformed template nodes are rejected" {
     var idxb: usize = 0;
     try testing.expectError(error.InvalidNode, layout_template.buildTemplateLayoutNode(allocator, pane.value, &uuids, &idxb));
 }
+
+test "store.allocPaneId: increments, skips 0, wraps to 1" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    try testing.expectEqual(@as(u16, 1), store.allocPaneId());
+    try testing.expectEqual(@as(u16, 2), store.allocPaneId());
+
+    // At the u16 ceiling the next id wraps past 0 straight to 1 — a pane id of
+    // 0 (the "no pane" sentinel) must never be handed out.
+    store.next_pane_id = std.math.maxInt(u16);
+    try testing.expectEqual(std.math.maxInt(u16), store.allocPaneId());
+    try testing.expectEqual(@as(u16, 1), store.next_pane_id);
+    try testing.expectEqual(@as(u16, 1), store.allocPaneId());
+}
+
+test "store closed-fd log: two-generation shield ages an fd out after two rotations" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    // A freshly-noted fd is shielded; an unrelated fd is not. This shielding is
+    // what stops a reattached mux that reused an fd number from being torn down
+    // by a late pending-close for the OLD connection.
+    store.noteClosedFd(5);
+    try testing.expect(store.closedFdNoted(5));
+    try testing.expect(!store.closedFdNoted(6));
+
+    // Survives one rotation (now in the previous generation).
+    store.rotateClosedFdLog();
+    try testing.expect(store.closedFdNoted(5));
+
+    // A newly-noted fd coexists in the current generation.
+    store.noteClosedFd(7);
+    try testing.expect(store.closedFdNoted(5));
+    try testing.expect(store.closedFdNoted(7));
+
+    // Second rotation ages fd 5 out; fd 7 survives its first rotation.
+    store.rotateClosedFdLog();
+    try testing.expect(!store.closedFdNoted(5));
+    try testing.expect(store.closedFdNoted(7));
+}
