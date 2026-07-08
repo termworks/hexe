@@ -1,10 +1,17 @@
-.PHONY: build test install release
+.PHONY: build test smoke install release
 
 build:
 	zig build -Doptimize=ReleaseFast
 
 test:
 	zig build test -Doptimize=ReleaseFast
+
+# Live end-to-end smokes: real frontend under a pty, isolated HEXE_INSTANCE.
+# Requires a debug build in zig-out (zig build) and python3.
+smoke:
+	zig build
+	python3 -u scripts/smoke_reconnect.py
+	python3 -u scripts/smoke_detach_reattach.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"
