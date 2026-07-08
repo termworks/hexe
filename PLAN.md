@@ -145,14 +145,21 @@ bug class.
   covers server-side; promote the smoke tool into a self-bootstrapping e2e that
   spawns its own SES+POD on a throwaway `HEXE_INSTANCE`.
 
-### 1.9 — Project `.hexe.lua` command trust gate · M · MED · ✅ DOCUMENTED + opt-out (ledger deferred)
-- Session `command=`/`on_start`/`on_stop` strings from an in-repo `.hexe.lua`
-  are shelled out (`session_config.zig:561-609`, `pty.zig:142-147`) — the direnv
-  auto-trust problem. Pure config is mitigated (Lua loads sandboxed, no
-  `io`/`os`), but the command path is not.
-- Fix: a trust ledger (hash of `.hexe.lua` → allowed) with an explicit
-  `hexe allow` before honoring project-sourced commands, or at minimum an env
-  opt-in. Document the current behavior regardless.
+### 1.9 — Project `.hexe.lua` command trust gate · M · MED · ✅ LEDGER DONE
+- Session `on_start`/`on_stop` strings from an in-repo `.hexe.lua` were shelled
+  out on session open (the direnv auto-trust problem). Pure config was already
+  mitigated (Lua sandboxed, no `io`/`os`), but the shell-hook path was not.
+- **Fix (landed):** a content-hash trust ledger (`core/trust.zig`): a project
+  `.hexe.lua`'s `on_start` hooks only run once its SHA-256 is recorded via
+  `hexe allow [path]`. Editing the file invalidates trust (hash changes → TOFU),
+  so a repo can't swap in new commands after being allowed. The gate lives in
+  `applySessionConfig` keyed by the config's `source_path`; `HEXE_NO_PROJECT_COMMANDS`
+  is a hard opt-out, `HEXE_TRUST_ALL_PROJECTS` a CI/dev escape hatch. Ledger at
+  `$XDG_STATE_HOME/hexe/trust` (overridable via `$HEXE_TRUST_LEDGER`). Unit-tested
+  (allow → trusted → edit → untrusted) and driven end-to-end through the real
+  `hexe allow` CLI. Remaining (documented follow-up): per-pane `command=` fields
+  are a separate, more disruptive gate — not yet covered; on_stop execution is
+  not wired in the frontend so it inherits the same gate when it is.
 
 ---
 

@@ -453,6 +453,26 @@ Future enhancement: Custom network namespaces with virtual interfaces for contro
 
 ---
 
+## Project `.hexe.lua` command trust
+
+A project-local `.hexe.lua` can declare `on_start`/`on_stop` shell hooks that run
+when a session opens in that directory. To avoid the "direnv problem" (opening an
+untrusted repo silently running its hooks), these hooks are gated by a trust
+ledger:
+
+- Hooks run only after you explicitly trust the file: `hexe allow [path]`
+  (defaults to `./.hexe.lua`). Trust is keyed by the file's **content hash**, so
+  editing the file re-requires `hexe allow` (trust-on-first-use).
+- The ledger lives at `$XDG_STATE_HOME/hexe/trust` (fallback
+  `~/.local/state/hexe/trust`).
+- `HEXE_NO_PROJECT_COMMANDS=1` disables project hooks entirely; whereas
+  `HEXE_TRUST_ALL_PROJECTS=1` bypasses the ledger (for CI / fully-trusted setups).
+
+Pure configuration (layouts, keybinds, statusbar) always loads — the Lua runtime
+is sandboxed (no `io`/`os`); only the shell-hook path is gated.
+
+---
+
 ## See Also
 
 - [Libvoid Documentation](https://github.com/bresilla/libvoid) - Underlying sandboxing library
