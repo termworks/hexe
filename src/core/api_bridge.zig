@@ -1862,6 +1862,62 @@ test "parseSegmentAtPath accepts callback active_when at segment level" {
     try std.testing.expect(std.mem.startsWith(u8, seg.button_active_bash.?, CALLBACK_REF_PREFIX));
 }
 
+test "parseSegmentAtPath characterizes core segment fields (PLAN 2.6 safety net)" {
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    const chunk =
+        "seg = {" ++
+        "  name='clock'," ++
+        "  priority=7," ++
+        "  render=function(_) return 'x' end," ++
+        "  inverse_on_hover=false," ++
+        "}";
+    const z = try std.testing.allocator.dupeZ(u8, chunk);
+    defer std.testing.allocator.free(z);
+    try lua.loadString(z);
+    try lua.protectedCall(.{ .args = 0, .results = 0 });
+    _ = try lua.getGlobal("seg");
+    defer lua.pop(1);
+
+    var seg = parseSegmentAtPath(lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
+    defer freeParsedSegment(&seg, std.testing.allocator);
+
+    try std.testing.expectEqualStrings("clock", seg.name);
+    try std.testing.expectEqual(@as(u8, 7), seg.priority);
+    // A function `render` produces a `.value` segment whose command is a
+    // registered-callback reference.
+    try std.testing.expectEqual(config.SegmentKind.value, seg.kind);
+    try std.testing.expect(seg.command != null);
+    try std.testing.expect(std.mem.startsWith(u8, seg.command.?, CALLBACK_REF_PREFIX));
+    try std.testing.expect(!seg.inverse_on_hover);
+}
+
+test "parseSegmentAtPath characterizes progress controls (PLAN 2.6 safety net)" {
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    const chunk =
+        "seg = {" ++
+        "  name='dl'," ++
+        "  render=function(_) return 'x' end," ++
+        "  progress={ every_ms=250 }," ++
+        "}";
+    const z = try std.testing.allocator.dupeZ(u8, chunk);
+    defer std.testing.allocator.free(z);
+    try lua.loadString(z);
+    try lua.protectedCall(.{ .args = 0, .results = 0 });
+    _ = try lua.getGlobal("seg");
+    defer lua.pop(1);
+
+    var seg = parseSegmentAtPath(lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
+    defer freeParsedSegment(&seg, std.testing.allocator);
+
+    // A `progress` table makes a `.progress` segment and sets the tick interval.
+    try std.testing.expectEqual(config.SegmentKind.progress, seg.kind);
+    try std.testing.expectEqual(@as(u64, 250), seg.progress_every_ms);
+}
+
 test "parseLayoutFloat reads canonical attrs table" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.deinit();
