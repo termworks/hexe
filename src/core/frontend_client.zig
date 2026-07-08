@@ -51,16 +51,16 @@ fn defaultCapabilityFlags(frontend_kind: wire.FrontendKind, transport_kind: wire
                 wire.FrontendCapabilityFlag.clipboard |
                 wire.FrontendCapabilityFlag.desktop_notify;
         },
+        // No pixel renderer exists yet, so `pixel_render` is intentionally not
+        // advertised — mirrors frontend_core `defaultCapabilities` (PLAN 3.2).
         .web => {
-            flags |= wire.FrontendCapabilityFlag.pixel_render |
-                wire.FrontendCapabilityFlag.mouse |
+            flags |= wire.FrontendCapabilityFlag.mouse |
                 wire.FrontendCapabilityFlag.clipboard |
                 wire.FrontendCapabilityFlag.desktop_notify |
                 wire.FrontendCapabilityFlag.reconnect;
         },
         .desktop => {
-            flags |= wire.FrontendCapabilityFlag.pixel_render |
-                wire.FrontendCapabilityFlag.mouse |
+            flags |= wire.FrontendCapabilityFlag.mouse |
                 wire.FrontendCapabilityFlag.clipboard |
                 wire.FrontendCapabilityFlag.desktop_notify |
                 wire.FrontendCapabilityFlag.reconnect;

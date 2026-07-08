@@ -26,9 +26,14 @@ pub fn defaultCapabilities(kind: core.wire.FrontendKind) HostCapabilities {
             .clipboard = true,
             .desktop_notify = true,
         },
+        // `pixel_render` is deliberately NOT advertised: there is no pixel
+        // renderer anywhere yet — the web/desktop hosts are cell/snapshot
+        // consumers. The remaining flags below describe input events these
+        // adapters already translate (see WebHost.mapBrowserEvent /
+        // SyslinkHost.mapRemoteEvent); re-add `pixel_render` when a real
+        // pixel-drawing frontend lands.
         .web => .{
             .frontend_kind = .web,
-            .pixel_render = true,
             .mouse = true,
             .clipboard = true,
             .desktop_notify = true,
@@ -36,7 +41,6 @@ pub fn defaultCapabilities(kind: core.wire.FrontendKind) HostCapabilities {
         },
         .desktop => .{
             .frontend_kind = .desktop,
-            .pixel_render = true,
             .mouse = true,
             .clipboard = true,
             .desktop_notify = true,
@@ -84,7 +88,8 @@ test "defaultCapabilities separates terminal and web concerns" {
 
     try std.testing.expectEqual(core.wire.FrontendKind.web, web.frontend_kind);
     try std.testing.expect(web.cell_render);
-    try std.testing.expect(web.pixel_render);
+    // No pixel renderer exists yet — must not be advertised (honesty, PLAN 3.2).
+    try std.testing.expect(!web.pixel_render);
     try std.testing.expect(web.reconnect);
 }
 
