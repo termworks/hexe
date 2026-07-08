@@ -37,16 +37,12 @@ inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
     core.logging.debugWithSource("pod", fmt, args, @src());
 }
 
-fn setBlocking(fd: posix.fd_t) void {
-    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| {
-        debugLog("setBlocking: fcntl GETFL failed for fd={d}: {s}", .{ fd, @errorName(err) });
-        return;
-    };
-    const new_flags: usize = flags & ~@as(usize, @intCast(c.O_NONBLOCK));
-    _ = posix.fcntl(fd, posix.F.SETFL, new_flags) catch |err| {
-        debugLog("setBlocking: fcntl SETFL failed for fd={d}: {s}", .{ fd, @errorName(err) });
-    };
-}
+/// Stall budget for writes to the SES VT uplink. The uplink fd is
+/// non-blocking: a SES that stops draining (stopped, swapping, wedged) makes
+/// a blocking write freeze this pod's event loop — and the user's shell —
+/// forever. Output is appended to the backlog ring BEFORE the uplink write,
+/// so on timeout the connection is dropped and SES heals via backlog replay.
+const CLIENT_WRITE_TIMEOUT_MS: i32 = 2_000;
 
 fn setNonBlocking(fd: posix.fd_t) void {
     const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| {
@@ -1136,7 +1132,7 @@ const Pod = struct {
             self.backlog.append(data);
         }
         if (self.client) |*client| {
-            pod_protocol.writeFrame(client, .output, data) catch {
+            pod_protocol.writeFrameBounded(client, .output, data, CLIENT_WRITE_TIMEOUT_MS) catch {
                 debugLog("processPtyOutput: writeFrame FAILED, closing client fd={d}", .{client.fd});
                 client.close();
                 self.client = null;
@@ -1189,7 +1185,10 @@ const Pod = struct {
         // Replace existing client if any.
         if (self.client) |*old| old.close();
 
-        setBlocking(conn.fd);
+        // Non-blocking: writes go through writeFrameBounded so a wedged SES
+        // costs at most CLIENT_WRITE_TIMEOUT_MS before the drop-and-replay
+        // path takes over, instead of freezing the pod (and shell) forever.
+        setNonBlocking(conn.fd);
         self.client = conn;
 
         // Send acknowledgment so client knows we're ready.
@@ -1209,7 +1208,7 @@ const Pod = struct {
         var off: usize = 0;
         while (off < n) {
             const chunk = @min(@as(usize, 16 * 1024), n - off);
-            pod_protocol.writeFrame(&self.client.?, .output, backlog_tmp[off .. off + chunk]) catch |err| {
+            pod_protocol.writeFrameBounded(&self.client.?, .output, backlog_tmp[off .. off + chunk], CLIENT_WRITE_TIMEOUT_MS) catch |err| {
                 debugLog("acceptVtClient: backlog replay failed at offset={d}: {s}", .{ off, @errorName(err) });
                 if (self.client) |*current| current.close();
                 self.client = null;
@@ -1217,7 +1216,7 @@ const Pod = struct {
             };
             off += chunk;
         }
-        pod_protocol.writeFrame(&self.client.?, .backlog_end, &[_]u8{}) catch |err| {
+        pod_protocol.writeFrameBounded(&self.client.?, .backlog_end, &[_]u8{}, CLIENT_WRITE_TIMEOUT_MS) catch |err| {
             debugLog("acceptVtClient: backlog_end write failed: {s}", .{@errorName(err)});
             if (self.client) |*current| current.close();
             self.client = null;

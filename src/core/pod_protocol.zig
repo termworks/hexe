@@ -27,6 +27,26 @@ pub fn writeFrame(conn: *ipc.Connection, frame_type: FrameType, payload: []const
     }
 }
 
+/// writeFrame for a NON-BLOCKING fd with a bounded stall budget. A peer that
+/// stops draining makes the plain writeFrame block the pod's event loop
+/// forever (frozen shell); this variant fails with error.Timeout instead so
+/// the caller can drop the connection and heal via backlog replay. A partial
+/// frame may have been written on failure — the connection must be dropped,
+/// never reused.
+pub fn writeFrameBounded(conn: *ipc.Connection, frame_type: FrameType, payload: []const u8, timeout_ms: i32) !void {
+    if (payload.len > MAX_FRAME_LEN) return error.FrameTooLarge;
+    if (payload.len > std.math.maxInt(u32)) return error.FrameTooLarge;
+
+    var header: [5]u8 = undefined;
+    header[0] = @intFromEnum(frame_type);
+    std.mem.writeInt(u32, header[1..5], @intCast(payload.len), .big);
+
+    try wire.writeAllTimeout(conn.fd, &header, timeout_ms);
+    if (payload.len > 0) {
+        try wire.writeAllTimeout(conn.fd, payload, timeout_ms);
+    }
+}
+
 pub const Frame = struct {
     frame_type: FrameType,
     payload: []const u8,
@@ -258,4 +278,30 @@ test "pod_protocol.Reader: skips an over-capacity frame and resumes" {
 
     try testing.expectEqual(@as(usize, 1), col.count);
     try testing.expectEqualStrings("fits", col.payload(0));
+}
+
+test "writeFrameBounded: wedged peer yields Timeout, not a hang" {
+    var fds: [2]posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expect(rc == 0);
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    // Simulate a wedged SES: tiny send buffer, nobody reading the peer end.
+    const sndbuf: c_int = 4096;
+    try posix.setsockopt(fds[0], posix.SOL.SOCKET, posix.SO.SNDBUF, std.mem.asBytes(&sndbuf));
+    try ipc.setNonBlocking(fds[0]);
+
+    var conn = ipc.Connection{ .fd = fds[0] };
+    var big: [256 * 1024]u8 = undefined;
+    @memset(&big, 'x');
+
+    const started = std.time.milliTimestamp();
+    // Must fail with Timeout within roughly the budget — never block forever.
+    try std.testing.expectError(
+        error.Timeout,
+        writeFrameBounded(&conn, .output, &big, 100),
+    );
+    const elapsed = std.time.milliTimestamp() - started;
+    try std.testing.expect(elapsed < 5_000);
 }
