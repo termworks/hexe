@@ -3234,3 +3234,59 @@ test "client snapshot: inserting a tab reindexes later panes' parent_tab" {
     try testing.expectEqual(@as(?usize, 1), snap.panes.get(pa).?.parent_tab);
     try testing.expectEqual(@as(?usize, 2), snap.panes.get(pb).?.parent_tab);
 }
+
+test "client snapshot: syncFloat records a float (survives in the snapshot)" {
+    const allocator = testing.allocator;
+    const css = @import("client_session_snapshot.zig");
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    try css.addTab(&ses_state, client_id, [_]u8{'t'} ** 32, [_]u8{'p'} ** 32, 0, "T");
+
+    const fu = [_]u8{'f'} ** 32;
+    try css.syncFloat(&ses_state, client_id, fu, 0, null, true, std.math.maxInt(u64), true, true, 'g', 72, 48, 40, 30, 2, 1, true);
+
+    const client = ses_state.getClient(client_id) orelse return error.TestUnexpectedResult;
+    const snap = &(client.session_snapshot orelse return error.TestUnexpectedResult);
+    try testing.expectEqual(@as(usize, 1), snap.floats.items.len);
+    const f = snap.floats.items[0];
+    try testing.expectEqualSlices(u8, &fu, &f.pane_uuid);
+    try testing.expect(f.sticky);
+    try testing.expect(f.is_pwd);
+    try testing.expectEqual(@as(u64, std.math.maxInt(u64)), f.tab_visible);
+    try testing.expectEqual(@as(u8, 'g'), f.float_key);
+    try testing.expectEqual(@as(u8, 72), f.width_pct);
+    try testing.expectEqual(core.session_model.SessionPaneKind.float, (snap.panes.get(fu) orelse return error.TestUnexpectedResult).kind);
+
+    // A second sync with the same uuid updates in place (no duplicate).
+    try css.syncFloat(&ses_state, client_id, fu, 0, null, false, 3, true, true, 'g', 50, 50, 50, 50, 1, 0, true);
+    try testing.expectEqual(@as(usize, 1), snap.floats.items.len);
+    try testing.expect(!snap.floats.items[0].visible);
+    try testing.expectEqual(@as(u64, 3), snap.floats.items[0].tab_visible);
+}
+
+test "client snapshot: removeTab drops its panes and reindexes the rest" {
+    const allocator = testing.allocator;
+    const css = @import("client_session_snapshot.zig");
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const ta = [_]u8{'A'} ** 32;
+    const tb = [_]u8{'B'} ** 32;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+
+    try css.addTab(&ses_state, client_id, ta, pa, 0, "A"); // pa -> tab 0
+    try css.addTab(&ses_state, client_id, tb, pb, 1, "B"); // pb -> tab 1
+
+    css.removeTab(&ses_state, client_id, ta, null); // remove tab 0; pb 1 -> 0
+
+    const client = ses_state.getClient(client_id) orelse return error.TestUnexpectedResult;
+    const snap = &(client.session_snapshot orelse return error.TestUnexpectedResult);
+    try testing.expectEqual(@as(usize, 1), snap.tabs.items.len);
+    try testing.expectEqualSlices(u8, &tb, &snap.tabs.items[0].uuid);
+    try testing.expect(!snap.panes.contains(pa)); // pane of removed tab is gone
+    try testing.expectEqual(@as(?usize, 0), (snap.panes.get(pb) orelse return error.TestUnexpectedResult).parent_tab);
+}
