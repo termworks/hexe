@@ -61,9 +61,10 @@ fn renderSearchPrompt(state: *State, renderer: anytype) void {
     }
 }
 
-/// Reverse-video the current search match's cells (inclusive viewport range,
-/// pane-local) over the already-drawn focused pane.
-fn highlightSearchMatch(renderer: anytype, pane: *Pane, m: pane_search.PaneSearch.MatchViewport) void {
+/// Highlight a search match's cells (inclusive viewport range, pane-local) over
+/// the already-drawn focused pane. `current` matches reverse-video; others get
+/// a yellow tint.
+fn highlightSearchMatch(renderer: anytype, pane: *Pane, m: pane_search.PaneSearch.MatchViewport, current: bool) void {
     if (pane.width == 0 or pane.height == 0) return;
     var y = m.sy;
     while (y <= m.ey and y < pane.height) : (y += 1) {
@@ -75,7 +76,12 @@ fn highlightSearchMatch(renderer: anytype, pane: *Pane, m: pane_search.PaneSearc
             const cy = pane.y + y;
             if (renderer.getVaxisCell(cx, cy)) |cell| {
                 var c = cell;
-                c.style.reverse = true;
+                if (current) {
+                    c.style.reverse = true;
+                } else {
+                    c.style.bg = .{ .index = 3 };
+                    c.style.fg = .{ .index = 0 };
+                }
                 renderer.setVaxisCell(cx, cy, c);
             }
         }
@@ -319,8 +325,13 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // bottom row.
     if (state.search_mode.active) {
         if (state.currentLayout().getFocusedPane()) |fp| {
+            // All on-screen matches get a yellow tint; the current one is drawn
+            // last with reverse-video so it stands out.
+            for (state.search_mode.visible[0..state.search_mode.visible_count]) |m| {
+                highlightSearchMatch(renderer, fp, m, false);
+            }
             if (state.search_mode.currentMatchViewport(fp)) |m| {
-                highlightSearchMatch(renderer, fp, m);
+                highlightSearchMatch(renderer, fp, m, true);
             }
         }
         renderSearchPrompt(state, renderer);

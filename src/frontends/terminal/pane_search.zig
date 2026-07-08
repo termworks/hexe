@@ -16,6 +16,8 @@ const Pane = @import("pane.zig").Pane;
 const ScreenSearch = ghostty.search.Screen;
 
 pub const MAX_QUERY_LEN: usize = 256;
+/// Cap on matches highlighted in the viewport at once (dense pages).
+pub const MAX_VISIBLE_MATCHES: usize = 256;
 
 pub const PaneSearch = struct {
     active: bool = false,
@@ -26,6 +28,10 @@ pub const PaneSearch = struct {
     match_count: usize = 0,
     /// 1-based position of the current match (0 = none selected).
     current: usize = 0,
+    /// Viewport ranges of matches currently on screen, refreshed on each
+    /// navigation (not per-frame) so the renderer can highlight them cheaply.
+    visible: [MAX_VISIBLE_MATCHES]MatchViewport = undefined,
+    visible_count: usize = 0,
 
     pub fn deinit(self: *PaneSearch, allocator: std.mem.Allocator) void {
         self.clearSearch();
@@ -38,6 +44,7 @@ pub const PaneSearch = struct {
         self.search = null;
         self.match_count = 0;
         self.current = 0;
+        self.visible_count = 0;
     }
 
     /// Begin a new search: activate, reset to the typing phase, clear the query.
@@ -102,24 +109,50 @@ pub const PaneSearch = struct {
             self.current = 1;
             self.scrollToCurrent(pane);
         }
+        self.refreshVisible(allocator, pane);
         return self.match_count;
     }
 
     /// Advance to the next (older) match, if any.
-    pub fn next(self: *PaneSearch, pane: *Pane) void {
+    pub fn next(self: *PaneSearch, allocator: std.mem.Allocator, pane: *Pane) void {
         if (self.search == null or self.current >= self.match_count) return;
         if (self.search.?.select(.next) catch false) {
             self.current += 1;
             self.scrollToCurrent(pane);
+            self.refreshVisible(allocator, pane);
         }
     }
 
     /// Move to the previous (newer) match, if any.
-    pub fn prev(self: *PaneSearch, pane: *Pane) void {
+    pub fn prev(self: *PaneSearch, allocator: std.mem.Allocator, pane: *Pane) void {
         if (self.search == null or self.current <= 1) return;
         if (self.search.?.select(.prev) catch false) {
             self.current -= 1;
             self.scrollToCurrent(pane);
+            self.refreshVisible(allocator, pane);
+        }
+    }
+
+    /// Recompute the on-screen match ranges after the viewport moved. Cheap
+    /// enough to skip caching invalidation: only called on navigation, never
+    /// per render frame.
+    fn refreshVisible(self: *PaneSearch, allocator: std.mem.Allocator, pane: *Pane) void {
+        self.visible_count = 0;
+        if (self.search == null) return;
+        const all = self.search.?.matches(allocator) catch return;
+        defer allocator.free(all); // shallow slice; entries alias the search's data
+        const pages = &pane.vt.terminal.screens.active.pages;
+        for (all) |hl| {
+            if (self.visible_count >= self.visible.len) break;
+            const sp = pages.pointFromPin(.viewport, hl.startPin()) orelse continue;
+            const ep = pages.pointFromPin(.viewport, hl.endPin()) orelse continue;
+            self.visible[self.visible_count] = .{
+                .sx = @intCast(sp.viewport.x),
+                .sy = @intCast(sp.viewport.y),
+                .ex = @intCast(ep.viewport.x),
+                .ey = @intCast(ep.viewport.y),
+            };
+            self.visible_count += 1;
         }
     }
 
@@ -173,13 +206,15 @@ test "PaneSearch finds and counts matches in scrollback" {
     const count = search.run(testing.allocator, &pane);
     try testing.expectEqual(@as(usize, 2), count);
     try testing.expectEqual(@as(usize, 1), search.current);
+    // Both matches sit in the 24-row viewport, so both are highlightable.
+    try testing.expectEqual(@as(usize, 2), search.visible_count);
 
     // Navigation is bounded and moves the selection.
-    search.next(&pane);
+    search.next(testing.allocator, &pane);
     try testing.expectEqual(@as(usize, 2), search.current);
-    search.next(&pane); // already at last → no-op
+    search.next(testing.allocator, &pane); // already at last → no-op
     try testing.expectEqual(@as(usize, 2), search.current);
-    search.prev(&pane);
+    search.prev(testing.allocator, &pane);
     try testing.expectEqual(@as(usize, 1), search.current);
 
     // The current match resolves to an inclusive viewport range spanning the

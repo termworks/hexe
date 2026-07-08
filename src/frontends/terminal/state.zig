@@ -751,13 +751,13 @@ pub const State = struct {
 
     pub fn searchNext(self: *State) void {
         const pane = self.currentLayout().getFocusedPane() orelse return;
-        self.search_mode.next(pane);
+        self.search_mode.next(self.allocator, pane);
         self.markSearchDirty();
     }
 
     pub fn searchPrev(self: *State) void {
         const pane = self.currentLayout().getFocusedPane() orelse return;
-        self.search_mode.prev(pane);
+        self.search_mode.prev(self.allocator, pane);
         self.markSearchDirty();
     }
 
