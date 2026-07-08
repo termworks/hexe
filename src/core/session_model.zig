@@ -1577,3 +1577,35 @@ test "splitPaneInLayout: splitting a pane nested inside a split recurses correct
     try testing.expect(layoutContainsPaneUuid(root, pb));
     try testing.expect(layoutContainsPaneUuid(root, pnew));
 }
+
+test "SessionSnapshot.fromJson mux-root: every float field is read (distinct values)" {
+    const allocator = testing.allocator;
+    const su = "s" ** 32;
+    const tu = "t" ** 32;
+    const au = "a" ** 32;
+    const fu = "f" ** 32;
+    // Frontend reattach format uses `float_*`-prefixed geometry keys; a field
+    // the parser forgets would silently reset to its default on reattach.
+    const json = "{\"uuid\":\"" ++ su ++ "\",\"session_name\":\"r\",\"active_tab\":0," ++
+        "\"tabs\":[{\"uuid\":\"" ++ tu ++ "\",\"name\":\"T\",\"splits\":[{\"uuid\":\"" ++ au ++ "\",\"id\":1}],\"tree\":{\"type\":\"pane\",\"id\":1}}]," ++
+        "\"floats\":[{\"uuid\":\"" ++ fu ++ "\",\"parent_tab\":0,\"visible\":false,\"tab_visible\":7," ++
+        "\"sticky\":true,\"is_pwd\":true,\"float_key\":103," ++
+        "\"float_width_pct\":11,\"float_height_pct\":22,\"float_pos_x_pct\":33,\"float_pos_y_pct\":44,\"float_pad_x\":55,\"float_pad_y\":66}]}";
+
+    var snap = try SessionSnapshot.fromJson(allocator, json);
+    defer snap.deinit();
+    try testing.expectEqual(@as(usize, 1), snap.floats.items.len);
+    const f = snap.floats.items[0];
+    try testing.expectEqual(@as(?usize, 0), f.parent_tab);
+    try testing.expect(!f.visible);
+    try testing.expectEqual(@as(u64, 7), f.tab_visible);
+    try testing.expect(f.sticky);
+    try testing.expect(f.is_pwd);
+    try testing.expectEqual(@as(u8, 103), f.float_key);
+    try testing.expectEqual(@as(u8, 11), f.width_pct);
+    try testing.expectEqual(@as(u8, 22), f.height_pct);
+    try testing.expectEqual(@as(u8, 33), f.pos_x_pct);
+    try testing.expectEqual(@as(u8, 44), f.pos_y_pct);
+    try testing.expectEqual(@as(u8, 55), f.pad_x);
+    try testing.expectEqual(@as(u8, 66), f.pad_y);
+}
