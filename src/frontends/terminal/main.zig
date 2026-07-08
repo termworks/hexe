@@ -393,34 +393,40 @@ pub fn run(terminal_args: TerminalArgs) !void {
         debugLog("applying session config from: {s}", .{config_path});
         const session_config = core.session_config;
         var applied_canonical_layout = false;
+        var legacy_config: ?core.SessionConfig = null;
+        // Single-execution parse: the old canonical-then-legacy fallback ran
+        // the .hexe.lua file twice, so its Lua side effects fired twice.
         if (terminal_args.session_tab_filter == null) {
-            if (session_config.parseSessionLayoutLua(allocator, config_path)) |layout_value| {
-                var layout = layout_value;
-                defer layout.deinit(allocator);
+            if (session_config.parseSessionLuaOnce(allocator, config_path)) |parsed| switch (parsed) {
+                .layout => |layout_value| {
+                    var layout = layout_value;
+                    defer layout.deinit(allocator);
 
-                if (state.runtime.setSessionName(layout.name)) {
-                    const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
-                        core.logging.logError("terminal", "startup: failed to sync layout session identity", err);
-                        break :blk null;
-                    };
-                    if (identity_change) |change| {
-                        var owned_change = change;
-                        defer owned_change.deinit(allocator);
+                    if (state.runtime.setSessionName(layout.name)) {
+                        const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
+                            core.logging.logError("terminal", "startup: failed to sync layout session identity", err);
+                            break :blk null;
+                        };
+                        if (identity_change) |change| {
+                            var owned_change = change;
+                            defer owned_change.deinit(allocator);
+                        }
                     }
-                }
 
-                state.applyLayoutDef(&layout) catch |err| {
-                    debugLog("applyLayoutDef from session config failed: {s}", .{@errorName(err)});
-                    std.debug.print("Error applying session layout: {s}\n", .{@errorName(err)});
-                    try state.createTab();
-                };
-                applied_canonical_layout = true;
+                    state.applyLayoutDef(&layout) catch |err| {
+                        debugLog("applyLayoutDef from session config failed: {s}", .{@errorName(err)});
+                        std.debug.print("Error applying session layout: {s}\n", .{@errorName(err)});
+                        try state.createTab();
+                    };
+                    applied_canonical_layout = true;
+                },
+                .legacy => |cfg| legacy_config = cfg,
             } else |err| {
-                debugLog("parseSessionLayoutLua failed, falling back to legacy session parser: {s}", .{@errorName(err)});
+                debugLog("parseSessionLuaOnce failed: {s}", .{@errorName(err)});
             }
         }
         if (!applied_canonical_layout) {
-            var config = session_config.parseSessionLua(allocator, config_path) catch |err| {
+            var config = legacy_config orelse session_config.parseSessionLua(allocator, config_path) catch |err| {
                 if (err == error.FileNotFound) {
                     std.debug.print("Session config not found: {s}\n", .{config_path});
                 } else {

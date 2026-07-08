@@ -497,9 +497,24 @@ pub const LayoutDef = struct {
     enabled: bool = false,
     tabs: []LayoutTabDef = &[_]LayoutTabDef{},
     floats: []LayoutFloatDef = &[_]LayoutFloatDef{},
+    /// Shell hooks from the config. The legacy SessionConfig parser always
+    /// carried these; the canonical hexe.setup path silently dropped them,
+    /// so the same .hexe.lua ran its hooks or not depending on which parser
+    /// happened to win.
+    on_start: [][]const u8 = &.{},
+    on_stop: [][]const u8 = &.{},
+    /// Absolute path of the project file this layout came from, for the
+    /// trust-ledger gate on the hooks above. Null for layouts from the
+    /// user's own hexe config (implicitly trusted).
+    source_path: ?[]const u8 = null,
 
     pub fn deinit(self: *LayoutDef, allocator: std.mem.Allocator) void {
         allocator.free(@constCast(self.name));
+        for (self.on_start) |cmd| allocator.free(cmd);
+        if (self.on_start.len > 0) allocator.free(self.on_start);
+        for (self.on_stop) |cmd| allocator.free(cmd);
+        if (self.on_stop.len > 0) allocator.free(self.on_stop);
+        if (self.source_path) |sp| allocator.free(sp);
         for (self.tabs) |*tab| {
             var t = @constCast(tab);
             t.deinit(allocator);

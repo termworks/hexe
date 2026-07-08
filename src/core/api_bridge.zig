@@ -1385,6 +1385,32 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
     return float_def;
 }
 
+fn parseLayoutStringArray(lua: *Lua, idx: i32, key: [:0]const u8, allocator: std.mem.Allocator) [][]const u8 {
+    _ = lua.getField(idx, key);
+    defer lua.pop(1);
+    if (lua.typeOf(-1) != .table) return &.{};
+    const len = lua.rawLen(-1);
+    if (len == 0) return &.{};
+
+    var list = std.ArrayList([]const u8).empty;
+    var i: i32 = 1;
+    while (i <= len) : (i += 1) {
+        _ = lua.rawGetIndex(-1, i);
+        defer lua.pop(1);
+        const str = lua.toString(-1) catch continue;
+        const duped = allocator.dupe(u8, str) catch continue;
+        list.append(allocator, duped) catch {
+            allocator.free(duped);
+            continue;
+        };
+    }
+    return list.toOwnedSlice(allocator) catch {
+        for (list.items) |cmd| allocator.free(cmd);
+        list.deinit(allocator);
+        return &.{};
+    };
+}
+
 pub fn parseLayoutDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) !config.LayoutDef {
     if (lua.typeOf(idx) != .table) return error.InvalidLayout;
 
@@ -1490,6 +1516,8 @@ pub fn parseLayoutDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) !config
         .enabled = enabled,
         .tabs = try tabs.toOwnedSlice(allocator),
         .floats = try floats.toOwnedSlice(allocator),
+        .on_start = parseLayoutStringArray(lua, idx, "on_start", allocator),
+        .on_stop = parseLayoutStringArray(lua, idx, "on_stop", allocator),
     };
 
     return layout;

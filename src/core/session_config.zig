@@ -388,6 +388,39 @@ pub fn parseSessionLua(allocator: std.mem.Allocator, path: []const u8) !SessionC
         return error.LuaError;
     };
 
+    return extractLegacyFromRuntime(allocator, &runtime, path);
+}
+
+/// Either shape a .hexe.lua can parse to. Callers deinit whichever arm.
+pub const ParsedSessionLua = union(enum) {
+    layout: config_mod.LayoutDef,
+    legacy: SessionConfig,
+};
+
+/// Parse a .hexe.lua by EXECUTING IT EXACTLY ONCE, then trying the canonical
+/// hexe.setup extraction and falling back to the legacy table shape on the
+/// same runtime. The old two-parser fallback re-ran the whole file for the
+/// legacy attempt, so any Lua side effects executed twice.
+pub fn parseSessionLuaOnce(allocator: std.mem.Allocator, path: []const u8) !ParsedSessionLua {
+    var runtime = try LuaRuntime.init(allocator);
+    defer runtime.deinit();
+
+    runtime.loadConfig(path) catch |err| {
+        if (err == error.FileNotFound) return err;
+        if (runtime.last_error) |msg| {
+            std.debug.print("Error loading {s}: {s}\n", .{ path, msg });
+        }
+        return error.LuaError;
+    };
+
+    if (extractLayoutFromRuntime(allocator, &runtime, path)) |layout| {
+        return .{ .layout = layout };
+    } else |_| {}
+
+    return .{ .legacy = try extractLegacyFromRuntime(allocator, &runtime, path) };
+}
+
+fn extractLegacyFromRuntime(allocator: std.mem.Allocator, runtime: *LuaRuntime, path: []const u8) !SessionConfig {
     // The file should return a table — check top of stack
     if (runtime.typeOf(-1) != .table) {
         std.debug.print("Error: {s} must return a table\n", .{path});
@@ -427,10 +460,10 @@ pub fn parseSessionLua(allocator: std.mem.Allocator, path: []const u8) !SessionC
     if (runtime.getStringAlloc(table_idx, "name")) |s| config.name = s;
     if (runtime.getStringAlloc(table_idx, "root")) |s| config.root = s;
 
-    config.on_start = parseStringArray(allocator, &runtime, table_idx, "on_start") catch &.{};
-    config.on_stop = parseStringArray(allocator, &runtime, table_idx, "on_stop") catch &.{};
-    config.tabs = parseTabs(allocator, &runtime, table_idx) catch &.{};
-    config.floats = parseFloats(allocator, &runtime, table_idx) catch &.{};
+    config.on_start = parseStringArray(allocator, runtime, table_idx, "on_start") catch &.{};
+    config.on_stop = parseStringArray(allocator, runtime, table_idx, "on_stop") catch &.{};
+    config.tabs = parseTabs(allocator, runtime, table_idx) catch &.{};
+    config.floats = parseFloats(allocator, runtime, table_idx) catch &.{};
 
     // Set last so error-returning parses above never leak this (config is
     // discarded without deinit on the error paths). Gates on_start/on_stop
@@ -457,6 +490,10 @@ pub fn parseSessionLayoutLua(allocator: std.mem.Allocator, path: []const u8) !co
         return error.LuaError;
     };
 
+    return extractLayoutFromRuntime(allocator, &runtime, path);
+}
+
+fn extractLayoutFromRuntime(allocator: std.mem.Allocator, runtime: *LuaRuntime, path: []const u8) !config_mod.LayoutDef {
     const builder = runtime.getBuilder() orelse return error.InvalidConfig;
     const ses_builder = builder.ses orelse return error.InvalidConfig;
     var ses_config = try ses_builder.build();
@@ -464,7 +501,7 @@ pub fn parseSessionLayoutLua(allocator: std.mem.Allocator, path: []const u8) !co
 
     if (ses_config.layouts.len == 0) return error.InvalidConfig;
 
-    const layout = ses_config.layouts[0];
+    var layout = ses_config.layouts[0];
 
     for (ses_config.layouts[1..]) |*extra| {
         extra.deinit(allocator);
@@ -472,6 +509,13 @@ pub fn parseSessionLayoutLua(allocator: std.mem.Allocator, path: []const u8) !co
     allocator.free(ses_config.layouts);
     ses_config.layouts = &[_]config_mod.LayoutDef{};
     ses_config.isolation.deinit(allocator);
+
+    // Identify the project file for the on_start/on_stop trust gate; without
+    // it the hooks would run ungated (null source_path means "user's own
+    // config, implicitly trusted").
+    if (layout.source_path == null) {
+        layout.source_path = std.fs.cwd().realpathAlloc(allocator, path) catch allocator.dupe(u8, path) catch null;
+    }
 
     return layout;
 }
@@ -733,4 +777,88 @@ test "parseSessionLua rejects old top-level layout wrapper" {
     defer std.testing.allocator.free(path);
 
     try std.testing.expectError(error.InvalidConfig, parseSessionLua(std.testing.allocator, path));
+}
+
+test "parseSessionLuaOnce: canonical layout carries on_start and executes the file once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const counter_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(counter_path);
+
+    // The file appends to a counter on every execution: the old two-parser
+    // fallback executed it twice.
+    const code = try std.fmt.allocPrint(std.testing.allocator, "local f = io.open('{s}/count', 'a')\n" ++
+        "f:write('x')\n" ++
+        "f:close()\n" ++
+        "local hexe = require('hexe')\n" ++
+        "return hexe.setup({{ ses = {{ layouts = {{ hexe.layout('unit', {{\n" ++
+        "  root = '.',\n" ++
+        "  on_start = {{ 'echo one', 'echo two' }},\n" ++
+        "  tabs = {{ hexe.tab('main', {{ root = hexe.pane({{ command = 'sh' }}) }}) }},\n" ++
+        "}}) }} }} }})\n", .{counter_path});
+    defer std.testing.allocator.free(code);
+
+    try tmp.dir.writeFile(.{ .sub_path = "layout.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.lua");
+    defer std.testing.allocator.free(path);
+
+    var parsed = try parseSessionLuaOnce(std.testing.allocator, path);
+    switch (parsed) {
+        .layout => |*layout| {
+            defer layout.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("unit", layout.name);
+            // The canonical path used to silently drop on_start hooks.
+            try std.testing.expectEqual(@as(usize, 2), layout.on_start.len);
+            try std.testing.expectEqualStrings("echo one", layout.on_start[0]);
+            try std.testing.expectEqualStrings("echo two", layout.on_start[1]);
+            // source_path must be set for the trust-ledger gate.
+            try std.testing.expect(layout.source_path != null);
+        },
+        .legacy => return error.TestUnexpectedResult,
+    }
+
+    // Exactly one execution.
+    const count = try tmp.dir.readFileAlloc(std.testing.allocator, "count", 16);
+    defer std.testing.allocator.free(count);
+    try std.testing.expectEqualStrings("x", count);
+}
+
+test "parseSessionLuaOnce: legacy fallback still executes the file once" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const counter_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(counter_path);
+
+    // Legacy shape (plain returned table, no hexe.setup builder): the
+    // canonical extraction fails and the legacy extraction must reuse the
+    // SAME run instead of re-executing the file.
+    const code = try std.fmt.allocPrint(std.testing.allocator, "local f = io.open('{s}/count', 'a')\n" ++
+        "f:write('x')\n" ++
+        "f:close()\n" ++
+        "return {{ ses = {{ layouts = {{ {{\n" ++
+        "  name = 'legacy-unit',\n" ++
+        "  on_start = {{ 'echo legacy' }},\n" ++
+        "  tabs = {{ {{ name = 'main' }} }},\n" ++
+        "}} }} }} }}\n", .{counter_path});
+    defer std.testing.allocator.free(code);
+
+    try tmp.dir.writeFile(.{ .sub_path = "cfg.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "cfg.lua");
+    defer std.testing.allocator.free(path);
+
+    var parsed = try parseSessionLuaOnce(std.testing.allocator, path);
+    switch (parsed) {
+        .layout => return error.TestUnexpectedResult,
+        .legacy => |*cfg| {
+            defer cfg.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("legacy-unit", cfg.name.?);
+            try std.testing.expectEqual(@as(usize, 1), cfg.on_start.len);
+        },
+    }
+
+    const count = try tmp.dir.readFileAlloc(std.testing.allocator, "count", 16);
+    defer std.testing.allocator.free(count);
+    try std.testing.expectEqualStrings("x", count);
 }

@@ -96,6 +96,21 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
 pub fn applyLayoutDef(self: anytype, layout: *const LayoutDef) !void {
     terminal_main.debugLog("applyLayoutDef: '{s}' tabs={d} floats={d}", .{ layout.name, layout.tabs.len, layout.floats.len });
 
+    // Hook parity with applySessionConfig: the canonical hexe.setup path used
+    // to silently drop on_start, so the same .hexe.lua ran its hooks or not
+    // depending on which parser won. Same trust-ledger gate (PLAN 1.9).
+    if (projectCommandsAllowedForPath(layout.source_path)) {
+        for (layout.on_start) |cmd| {
+            runShellCommand(cmd);
+        }
+    } else if (layout.on_start.len > 0) {
+        core.logging.warn(
+            "terminal",
+            "skipping {d} on_start hook(s) from untrusted .hexe.lua — run `hexe allow` to trust it",
+            .{layout.on_start.len},
+        );
+    }
+
     if (layout.tabs.len == 0) {
         try self.createTab();
         return;
@@ -651,10 +666,14 @@ fn envFlagSet(name: []const u8) bool {
 /// Whether project-sourced `on_start`/`on_stop` hooks may run for this config.
 /// Secure default: an identifiable `.hexe.lua` must be trusted via `hexe allow`.
 fn projectCommandsAllowed(config: SessionConfig) bool {
+    return projectCommandsAllowedForPath(config.source_path);
+}
+
+fn projectCommandsAllowedForPath(source_path: ?[]const u8) bool {
     if (envFlagSet("HEXE_NO_PROJECT_COMMANDS")) return false; // hard opt-out
     if (envFlagSet("HEXE_TRUST_ALL_PROJECTS")) return true; // CI/dev escape hatch
     // No identifiable source file (not an auto-loaded project config): allow.
-    const src = config.source_path orelse return true;
+    const src = source_path orelse return true;
     return core.trust.isTrusted(std.heap.page_allocator, src);
 }
 
