@@ -3793,3 +3793,43 @@ test "findStickyPaneWithAffinity: live pid but dead pod socket is not re-adopted
     // Must NOT hand out the ghost: caller falls through to a fresh spawn.
     try testing.expect(ses_state.findStickyPaneWithAffinity(pwd, key, null) == null);
 }
+
+test "client snapshot mutations mark the store dirty (attached crash recovery)" {
+    const allocator = testing.allocator;
+    const css = @import("client_session_snapshot.zig");
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+    const cid = try ses_state.addClient(1);
+    const tab = [_]u8{'t'} ** 32;
+    const pane = [_]u8{'p'} ** 32;
+
+    // Every layout mutation must dirty the store, or the periodic save skips
+    // the attached session and a daemon crash restores a stale layout.
+    ses_state.store.dirty = false;
+    try css.addTab(&ses_state, cid, tab, pane, 0, "T");
+    try testing.expect(ses_state.store.dirty);
+
+    ses_state.store.dirty = false;
+    try css.splitPane(&ses_state, cid, tab, pane, [_]u8{'n'} ** 32, 0, null, .vertical);
+    try testing.expect(ses_state.store.dirty);
+
+    ses_state.store.dirty = false;
+    css.renameTab(&ses_state, cid, tab, "renamed");
+    try testing.expect(ses_state.store.dirty);
+
+    ses_state.store.dirty = false;
+    try css.syncFloat(&ses_state, cid, [_]u8{'f'} ** 32, 0, null, true, 1, false, false, 'a', 50, 50, 50, 50, 1, 0, true);
+    try testing.expect(ses_state.store.dirty);
+
+    ses_state.store.dirty = false;
+    css.removeFloat(&ses_state, cid, [_]u8{'f'} ** 32);
+    try testing.expect(ses_state.store.dirty);
+
+    ses_state.store.dirty = false;
+    css.updateFocus(&ses_state, cid, pane, 0, true);
+    try testing.expect(ses_state.store.dirty);
+
+    ses_state.store.dirty = false;
+    css.removeTab(&ses_state, cid, tab, null);
+    try testing.expect(ses_state.store.dirty);
+}
