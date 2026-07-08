@@ -3037,3 +3037,75 @@ test "persist buildStateJson -> restore: detached snapshot survives incl float t
     try testing.expectEqualSlices(u8, &pa, &rroot.split.first.pane);
     try testing.expectEqualSlices(u8, &pb, &rroot.split.second.pane);
 }
+
+test "layout_template: restore a session layout tree from a saved template" {
+    const allocator = testing.allocator;
+    const layout_template = @import("layout_template.zig");
+
+    // Saved-layout format: v[ pane(/a), h[ pane(/b), pane(no-cwd) ] ].
+    const tmpl_json = "{\"type\":\"split\",\"dir\":\"v\",\"ratio\":0.5," ++
+        "\"first\":{\"type\":\"pane\",\"cwd\":\"/a\"}," ++
+        "\"second\":{\"type\":\"split\",\"dir\":\"h\",\"ratio\":0.3," ++
+        "\"first\":{\"type\":\"pane\",\"cwd\":\"/b\"}," ++
+        "\"second\":{\"type\":\"pane\"}}}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, tmpl_json, .{});
+    defer parsed.deinit();
+
+    try testing.expectEqual(@as(usize, 3), layout_template.countTemplateLeaves(parsed.value));
+
+    // Cwds are collected in DFS leaf order (null where absent).
+    var cwds: std.ArrayList(?[]const u8) = .empty;
+    defer cwds.deinit(allocator);
+    try layout_template.collectTemplateCwds(parsed.value, &cwds, allocator);
+    try testing.expectEqual(@as(usize, 3), cwds.items.len);
+    try testing.expectEqualStrings("/a", cwds.items[0].?);
+    try testing.expectEqualStrings("/b", cwds.items[1].?);
+    try testing.expect(cwds.items[2] == null);
+
+    // Build the tree, assigning freshly-created pane uuids in DFS order.
+    const pua = [_]u8{'1'} ** 32;
+    const pub_ = [_]u8{'2'} ** 32;
+    const puc = [_]u8{'3'} ** 32;
+    const uuids = [_][32]u8{ pua, pub_, puc };
+    var idx: usize = 0;
+    const root = try layout_template.buildTemplateLayoutNode(allocator, parsed.value, &uuids, &idx);
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expectEqual(@as(usize, 3), idx);
+
+    try testing.expect(root.* == .split);
+    try testing.expectEqual(core.session_model.SessionSplitDir.vertical, root.split.dir);
+    try testing.expectEqualSlices(u8, &pua, &root.split.first.pane);
+    try testing.expect(root.split.second.* == .split);
+    try testing.expectEqual(core.session_model.SessionSplitDir.horizontal, root.split.second.split.dir);
+    try testing.expectEqualSlices(u8, &pub_, &root.split.second.split.first.pane);
+    try testing.expectEqualSlices(u8, &puc, &root.split.second.split.second.pane);
+
+    // Round-trip the uuids back out in the same DFS order.
+    var collected: std.ArrayList([32]u8) = .empty;
+    defer collected.deinit(allocator);
+    try layout_template.collectLayoutPaneUuids(allocator, root, &collected);
+    try testing.expectEqual(@as(usize, 3), collected.items.len);
+    try testing.expectEqualSlices(u8, &pua, &collected.items[0]);
+    try testing.expectEqualSlices(u8, &pub_, &collected.items[1]);
+    try testing.expectEqualSlices(u8, &puc, &collected.items[2]);
+}
+
+test "layout_template: malformed template nodes are rejected" {
+    const allocator = testing.allocator;
+    const layout_template = @import("layout_template.zig");
+    const uuids = [_][32]u8{};
+
+    const bogus = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"bogus\"}", .{});
+    defer bogus.deinit();
+    var idxa: usize = 0;
+    try testing.expectError(error.InvalidNode, layout_template.buildTemplateLayoutNode(allocator, bogus.value, &uuids, &idxa));
+
+    // A pane node with no remaining uuid to assign fails too.
+    const pane = try std.json.parseFromSlice(std.json.Value, allocator, "{\"type\":\"pane\"}", .{});
+    defer pane.deinit();
+    var idxb: usize = 0;
+    try testing.expectError(error.InvalidNode, layout_template.buildTemplateLayoutNode(allocator, pane.value, &uuids, &idxb));
+}
