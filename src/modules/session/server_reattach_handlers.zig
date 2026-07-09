@@ -9,6 +9,24 @@ const ses = @import("main.zig");
 const server = @import("server.zig");
 const Server = server.Server;
 
+/// Force-detach with full server-side fd bookkeeping. The state layer's
+/// forceDetachAttachedSession closes the owner's fds (noted), but only the
+/// server knows about watchers, binary_ctl_fds, pending pops and the per-fd
+/// mux VT queue — skipping the purge leaves armed watchers on dead fds and,
+/// worse, lets a NEW connection that reuses the vt fd number inherit the old
+/// owner's queued output bytes.
+fn forceDetachWithPurge(self: *Server, session_id: [16]u8) bool {
+    for (self.ses_state.store.clients.items) |client| {
+        if (client.session_id) |sid| {
+            if (std.mem.eql(u8, &sid, &session_id)) {
+                self.purgeClientFdState(client.id);
+                break;
+            }
+        }
+    }
+    return self.ses_state.forceDetachAttachedSession(session_id);
+}
+
 pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.Detach)) {
         self.skipBinaryPayload(fd, payload_len, buf);
@@ -174,7 +192,7 @@ pub fn handleBinaryReattach(self: *Server, fd: posix.fd_t, payload_len: u32, buf
 
         if (attached_uuid_count == 1) {
             const session_id = attached_uuid_match.?;
-            if (!self.ses_state.forceDetachAttachedSession(session_id)) {
+            if (!forceDetachWithPurge(self, session_id)) {
                 core.logging.warn("ses", "reattach failed to force-detach attached session by uuid session={s}", .{id_prefix});
                 self.sendBinaryError(fd, "reattach_failed");
                 return;
@@ -221,7 +239,7 @@ pub fn handleBinaryReattach(self: *Server, fd: posix.fd_t, payload_len: u32, buf
 
         if (attached_name_count == 1) {
             const session_id = attached_name_matches[0].session_id;
-            if (!self.ses_state.forceDetachAttachedSession(session_id)) {
+            if (!forceDetachWithPurge(self, session_id)) {
                 core.logging.warn("ses", "reattach failed to force-detach attached session by name session={s}", .{id_prefix});
                 self.sendBinaryError(fd, "reattach_failed");
                 return;
