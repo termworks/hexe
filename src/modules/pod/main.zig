@@ -1256,7 +1256,7 @@ const Pod = struct {
         }
 
         // Read the fixed struct.
-        const evt = wire.readStruct(wire.ShpShellEvent, conn.fd) catch {
+        const evt = wire.readStructTimeout(wire.ShpShellEvent, conn.fd, POD_CTL_IO_TIMEOUT_MS) catch {
             var tmp = conn;
             tmp.close();
             return;
@@ -1271,7 +1271,7 @@ const Pod = struct {
             return;
         }
         if (trail_len > 0) {
-            wire.readExact(conn.fd, trail_buf[0..trail_len]) catch {
+            wire.readExactTimeout(conn.fd, trail_buf[0..trail_len], POD_CTL_IO_TIMEOUT_MS) catch {
                 var tmp = conn;
                 tmp.close();
                 return;
@@ -1284,7 +1284,7 @@ const Pod = struct {
         // Forward as binary shell_event on the POD uplink (channel ④).
         if (!self.uplink.ensureConnected()) return;
         const uplink_fd = self.uplink.fd orelse return;
-        wire.writeControlWithTrail(uplink_fd, .shell_event, std.mem.asBytes(&evt), trail_buf[0..trail_len]) catch {
+        wire.writeControlWithTrailTimeout(uplink_fd, .shell_event, std.mem.asBytes(&evt), trail_buf[0..trail_len], CLIENT_WRITE_TIMEOUT_MS) catch {
             self.uplink.disconnect();
         };
     }

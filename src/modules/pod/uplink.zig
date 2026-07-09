@@ -6,6 +6,10 @@ const core = @import("core");
 const wire = core.wire;
 const log = std.log.scoped(.pod_uplink);
 
+/// Stall budget for uplink writes (same rationale as the VT client's
+/// CLIENT_WRITE_TIMEOUT_MS): bounded pain, then disconnect-and-heal.
+const UPLINK_WRITE_TIMEOUT_MS: i32 = 2_000;
+
 pub const PodUplink = struct {
     allocator: std.mem.Allocator,
     uuid: [32]u8,
@@ -84,7 +88,7 @@ pub const PodUplink = struct {
                 .cwd_len = @intCast(@min(cwd_str.len, std.math.maxInt(u16))),
             };
             const trails = [_][]const u8{cwd_str[0..cwd_msg.cwd_len]};
-            wire.writeControlMsg(fd, .cwd_changed, std.mem.asBytes(&cwd_msg), &trails) catch |err| {
+            wire.writeControlMsgTimeout(fd, .cwd_changed, std.mem.asBytes(&cwd_msg), &trails, UPLINK_WRITE_TIMEOUT_MS) catch |err| {
                 log.warn("failed to send cwd_changed uplink message: {}", .{err});
                 self.disconnect();
                 return;
@@ -98,7 +102,7 @@ pub const PodUplink = struct {
                 .name_len = @intCast(@min(name_str.len, std.math.maxInt(u16))),
             };
             const trails = [_][]const u8{name_str[0..fg_msg.name_len]};
-            wire.writeControlMsg(fd, .fg_changed, std.mem.asBytes(&fg_msg), &trails) catch |err| {
+            wire.writeControlMsgTimeout(fd, .fg_changed, std.mem.asBytes(&fg_msg), &trails, UPLINK_WRITE_TIMEOUT_MS) catch |err| {
                 log.warn("failed to send fg_changed uplink message: {}", .{err});
                 self.disconnect();
                 return;
@@ -132,6 +136,16 @@ pub const PodUplink = struct {
         @memcpy(handshake[2..18], &uuid_bin);
         wire.writeAll(fd, &handshake) catch |err| {
             log.warn("failed to send POD uplink handshake: {}", .{err});
+            posix.close(fd);
+            return false;
+        };
+
+        // Non-blocking is load-bearing: the wire write timeouts only engage
+        // on WouldBlock. On a blocking fd a wedged SES that stops draining
+        // this channel parks the next tick() write in the kernel FOREVER,
+        // freezing the pod's event loop — and the user's shell — for good.
+        core.ipc.setNonBlocking(fd) catch |err| {
+            log.warn("failed to set POD uplink non-blocking: {}", .{err});
             posix.close(fd);
             return false;
         };
