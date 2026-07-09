@@ -3893,3 +3893,28 @@ test "cleanupOrphanedPanes: pid-reused ghost sticky float ages out" {
     // make this assertion).
     try testing.expect(!ses_state.store.panes.contains(uuid));
 }
+
+test "findByNameOrPrefix: ambiguous uuid prefix matches nothing (kill safety)" {
+    const allocator = testing.allocator;
+    const detached_sessions = @import("detached_sessions.zig");
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+
+    // Two sessions sharing a 15-byte id prefix; only the last byte differs.
+    var sid1 = [_]u8{0xaa} ** 16;
+    var sid2 = [_]u8{0xaa} ** 16;
+    sid1[15] = 0x01;
+    sid2[15] = 0x02;
+    try addDetachedNamed(&ses_state, sid1, "amb-one");
+    try addDetachedNamed(&ses_state, sid2, "amb-two");
+    const store = &ses_state.store;
+
+    // The shared prefix is ambiguous — destructive callers (kill_session)
+    // must get "not found", never an arbitrary victim.
+    try testing.expectEqual(@as(?[16]u8, null), detached_sessions.findByNameOrPrefix(store, "aaaaaaaa"));
+    // A prefix long enough to disambiguate resolves.
+    const full1: [32]u8 = std.fmt.bytesToHex(&sid1, .lower);
+    try testing.expectEqualSlices(u8, &sid1, &(detached_sessions.findByNameOrPrefix(store, full1[0..32]).?));
+    // Exact names still resolve despite the shared uuid prefix.
+    try testing.expectEqualSlices(u8, &sid2, &(detached_sessions.findByNameOrPrefix(store, "amb-two").?));
+}

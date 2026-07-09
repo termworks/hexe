@@ -95,6 +95,12 @@ pub fn findByNameOrPrefix(store: *const store_mod.SessionStore, id: []const u8) 
     // would otherwise reattach to an arbitrary (hashmap-order) session.
     if (id.len == 0) return null;
 
+    // Exact name matches win (names are kept unique at registration). A uuid
+    // PREFIX must match uniquely: callers include destructive paths
+    // (kill_session), and first-match-wins on an ambiguous prefix would kill
+    // an arbitrary same-prefixed session.
+    var prefix_match: ?[16]u8 = null;
+    var prefix_count: usize = 0;
     var iter = store.detached_sessions.iterator();
     while (iter.next()) |entry| {
         const session = entry.value_ptr;
@@ -104,8 +110,10 @@ pub fn findByNameOrPrefix(store: *const store_mod.SessionStore, id: []const u8) 
 
         const hex_id = std.fmt.bytesToHex(entry.key_ptr.*, .lower);
         if (id.len <= hex_id.len and std.mem.startsWith(u8, &hex_id, id)) {
-            return entry.key_ptr.*;
+            prefix_match = entry.key_ptr.*;
+            prefix_count += 1;
         }
     }
+    if (prefix_count == 1) return prefix_match;
     return null;
 }

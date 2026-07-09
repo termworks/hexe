@@ -1078,8 +1078,9 @@ const Pod = struct {
         // non-blocking so a stalled observer that stops draining returns
         // EAGAIN on write instead of blocking the PTY hot path forever; the
         // write-failure paths below (and broadcastToObservers) then drop it.
-        // The main VT client fd stays blocking — losing its output would break
-        // the pane; that path needs a proper async write queue instead.
+        // The main VT client fd is ALSO non-blocking now (acceptVtClient) with
+        // bounded writeFrameBounded writes; output survives in the backlog
+        // ring and replays on reconnect.
         setNonBlocking(conn.fd);
 
         // Replay current backlog to new observer unless password mode is
