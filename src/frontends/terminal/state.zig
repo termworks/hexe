@@ -1084,6 +1084,14 @@ pub const State = struct {
         }
     }
 
+    /// Register this State's mux-VT write queue as the single writer for all
+    /// pane->pod frames (input, resize, password-mode). Must be called once
+    /// the State has a stable address. See pane.zig queuePodFrame for why
+    /// direct writes are forbidden.
+    pub fn registerSharedVtQueue(self: *State) void {
+        @import("pane.zig").setSharedVtWriteQueue(&self.mux_vt_write_queue, self.allocator);
+    }
+
     pub fn writePaneInput(self: *State, pane: *Pane, data: []const u8) void {
         if (data.len == 0) return;
         const pod = pane.backend.pod;

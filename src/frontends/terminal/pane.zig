@@ -6,6 +6,7 @@ const pod_protocol = core.pod_protocol;
 const wire = core.wire;
 
 const pane_output = @import("pane_output.zig");
+const vt_write_queue = @import("vt_write_queue.zig");
 const widgets = pop.widgets;
 
 const pop = @import("pop");
@@ -35,6 +36,33 @@ const CsiQueryState = enum {
 
 /// A Pane is a ghostty VT that receives bytes via the SES VT channel
 /// (pod-backed, persistent scrollback).
+/// The State's shared mux-VT write queue, registered once at State init.
+/// All pane->pod frames MUST go through it: the queue can hold a PARTIAL
+/// frame after a backpressured flush, and a direct writeMuxVt would inject
+/// its bytes ahead of the queued remainder — desyncing the multiplexed
+/// stream for every pane on the fd. Direct writes also block the UI loop
+/// for up to the 10s wire default when SES stops draining.
+var shared_vt_queue: ?*vt_write_queue.Queue = null;
+var shared_vt_queue_alloc: std.mem.Allocator = undefined;
+const max_pending_mux_vt_bytes: usize = 8 * 1024 * 1024;
+
+pub fn setSharedVtWriteQueue(queue: *vt_write_queue.Queue, allocator: std.mem.Allocator) void {
+    shared_vt_queue = queue;
+    shared_vt_queue_alloc = allocator;
+}
+
+fn queuePodFrame(pane_id: u16, vt_fd: std.posix.fd_t, frame_type: u8, payload: []const u8) !void {
+    if (shared_vt_queue) |queue| {
+        const queued = queue.enqueueFrame(shared_vt_queue_alloc, pane_id, frame_type, payload, max_pending_mux_vt_bytes) catch {
+            return error.WriteFailed;
+        };
+        if (!queued) return error.WriteFailed;
+        return;
+    }
+    // No queue registered (tests / probe contexts): direct bounded write.
+    try wire.writeMuxVt(vt_fd, pane_id, frame_type, payload);
+}
+
 pub const Pane = struct {
     allocator: std.mem.Allocator = undefined,
     id: u16 = 0,
@@ -180,7 +208,7 @@ pub const Pane = struct {
     pub fn write(self: *Pane, data: []const u8) !void {
         const pod = self.backend.pod;
         const frame_type = @intFromEnum(pod_protocol.FrameType.input);
-        try wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, data);
+        try queuePodFrame(pod.pane_id, pod.vt_fd, frame_type, data);
     }
 
     pub fn resize(self: *Pane, x: u16, y: u16, width: u16, height: u16) !void {
@@ -342,7 +370,7 @@ pub const Pane = struct {
         std.mem.writeInt(u16, payload[0..2], cols, .big);
         std.mem.writeInt(u16, payload[2..4], rows, .big);
         const frame_type = @intFromEnum(pod_protocol.FrameType.resize);
-        wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, &payload) catch |err| {
+        queuePodFrame(pod.pane_id, pod.vt_fd, frame_type, &payload) catch |err| {
             core.logging.logError("terminal", "pane resize mux write failed", err);
         };
     }
@@ -351,7 +379,7 @@ pub const Pane = struct {
         const pod = self.backend.pod;
         const payload = [_]u8{@intFromBool(enabled)};
         const frame_type = @intFromEnum(pod_protocol.FrameType.password_mode);
-        wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, &payload) catch |err| {
+        queuePodFrame(pod.pane_id, pod.vt_fd, frame_type, &payload) catch |err| {
             core.logging.logError("terminal", "pane password-mode mux write failed", err);
         };
     }

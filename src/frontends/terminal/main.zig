@@ -295,6 +295,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Register state for signal handlers.
     global_state.store(&state, .release);
+    state.registerSharedVtQueue();
     defer global_state.store(null, .release);
 
     // Show notification for config status.
