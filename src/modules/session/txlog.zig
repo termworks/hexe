@@ -47,7 +47,7 @@ pub const TxLog = struct {
 
         const fd = try posix.open(
             self.log_path,
-            .{ .ACCMODE = .RDWR, .CREAT = true, .APPEND = true },
+            .{ .ACCMODE = .RDWR, .CREAT = true, .APPEND = true, .CLOEXEC = true },
             0o600,
         );
         errdefer posix.close(fd);
@@ -206,7 +206,7 @@ pub const TxLog = struct {
         // Reopen with TRUNC
         const fd = try posix.open(
             self.log_path,
-            .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true },
+            .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true },
             0o600,
         );
         try writeAll(fd, FILE_HEADER[0..]);

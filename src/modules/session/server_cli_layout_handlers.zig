@@ -12,7 +12,14 @@ const Server = server.Server;
 
 /// Handle kill_session CLI request.
 pub fn handleKillSession(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
-    defer posix.close(fd);
+    // Note-then-close: a failed reply also queues this fd for close, and the
+    // pending-close processor only skips NOTED fds. An unnoted direct close
+    // here lets the queued entry fire later against whatever new connection
+    // reused the fd number (the double-close family).
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
 
     if (payload_len < @sizeOf(wire.KillSession)) {
         self.skipBinaryPayload(fd, payload_len, buf);
@@ -67,7 +74,14 @@ pub fn handleKillSession(self: *Server, fd: posix.fd_t, payload_len: u32, buf: [
 
 /// Handle clear_sessions CLI request.
 pub fn handleClearSessions(self: *Server, fd: posix.fd_t) void {
-    defer posix.close(fd);
+    // Note-then-close: a failed reply also queues this fd for close, and the
+    // pending-close processor only skips NOTED fds. An unnoted direct close
+    // here lets the queued entry fire later against whatever new connection
+    // reused the fd number (the double-close family).
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
 
     ses.debugLog("clear_sessions: starting", .{});
     const counts = self.ses_state.killAllDetachedSessions();
@@ -82,7 +96,14 @@ pub fn handleClearSessions(self: *Server, fd: posix.fd_t) void {
 
 /// Handle clear_orphaned_panes CLI request.
 pub fn handleClearOrphanedPanes(self: *Server, fd: posix.fd_t) void {
-    defer posix.close(fd);
+    // Note-then-close: a failed reply also queues this fd for close, and the
+    // pending-close processor only skips NOTED fds. An unnoted direct close
+    // here lets the queued entry fire later against whatever new connection
+    // reused the fd number (the double-close family).
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
 
     ses.debugLog("clear_orphaned_panes: starting", .{});
     const killed = self.ses_state.killAllOrphanedPanes();
@@ -246,7 +267,14 @@ pub fn buildLayoutExportJson(self: *Server, snapshot: *const state.SessionSnapsh
 /// Handle get_layout CLI request — derive layout export JSON from the
 /// canonical session snapshot owned by SES.
 pub fn handleGetLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
-    defer posix.close(fd);
+    // Note-then-close: a failed reply also queues this fd for close, and the
+    // pending-close processor only skips NOTED fds. An unnoted direct close
+    // here lets the queued entry fire later against whatever new connection
+    // reused the fd number (the double-close family).
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
 
     if (payload_len < @sizeOf(wire.PaneUuid)) {
         self.skipBinaryPayload(fd, payload_len, buf);
@@ -282,7 +310,14 @@ pub fn handleGetLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u
 
 /// Handle get_session_state CLI request — return JSON state for detached session.
 pub fn handleGetSessionState(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
-    defer posix.close(fd);
+    // Note-then-close: a failed reply also queues this fd for close, and the
+    // pending-close processor only skips NOTED fds. An unnoted direct close
+    // here lets the queued entry fire later against whatever new connection
+    // reused the fd number (the double-close family).
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
 
     // Expect exactly 32 bytes (hex UUID)
     if (payload_len != 32) {
@@ -324,7 +359,14 @@ pub fn handleGetSessionState(self: *Server, fd: posix.fd_t, payload_len: u32, bu
 /// Handle apply_layout CLI request — mutate canonical SES state, then push
 /// the updated snapshot to the attached frontend.
 pub fn handleApplyLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
-    defer posix.close(fd);
+    // Note-then-close: a failed reply also queues this fd for close, and the
+    // pending-close processor only skips NOTED fds. An unnoted direct close
+    // here lets the queued entry fire later against whatever new connection
+    // reused the fd number (the double-close family).
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
 
     if (payload_len < @sizeOf(wire.ApplyLayout)) {
         self.skipBinaryPayload(fd, payload_len, buf);
