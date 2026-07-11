@@ -15,6 +15,7 @@ smoke:
 	python3 -u scripts/smoke_fullscreen_reattach.py
 	python3 -u scripts/smoke_paste.py
 	python3 -u scripts/smoke_kill.py
+	python3 -u scripts/smoke_bighistory.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"
