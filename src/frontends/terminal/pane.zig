@@ -68,6 +68,11 @@ pub const Pane = struct {
     id: u16 = 0,
     vt: core.VT = .{},
     backend: Backend = undefined,
+    /// True while the pod's backlog replay is in flight (cleared by the
+    /// backlog_end frame). Replay chunks feed the VT without scheduling a
+    /// render each — repainting per chunk is what made reattaching to a
+    /// large-history pane feel stuck.
+    backlog_replaying: bool = false,
 
     // UUID for tracking (32 hex chars)
     uuid: [32]u8 = undefined,
@@ -134,6 +139,7 @@ pub const Pane = struct {
         self.* = .{ .allocator = allocator, .id = id, .x = x, .y = y, .width = width, .height = height, .uuid = uuid };
 
         self.backend = .{ .pod = .{ .pane_id = pane_id, .vt_fd = vt_fd } };
+        self.backlog_replaying = true;
 
         try self.vt.init(allocator, width, height);
         errdefer self.vt.deinit();
@@ -165,6 +171,7 @@ pub const Pane = struct {
 
     /// Replace backend with a pod (used during reattach to adopt panes).
     pub fn replaceWithPod(self: *Pane, pane_id: u16, vt_fd: posix.fd_t, uuid: [32]u8) !void {
+        self.backlog_replaying = true;
         self.uuid = uuid;
         self.backend = .{ .pod = .{ .pane_id = pane_id, .vt_fd = vt_fd } };
 

@@ -313,6 +313,9 @@ pub const State = struct {
     csi_reply_in_progress: bool,
 
     mux_vt_write_queue: VtWriteQueue,
+    /// Resumable non-blocking reader for the SES VT stream. Reset whenever
+    /// the VT connection is replaced (loop_watchers arms a new node).
+    mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
     mux_vt_write_overflow_notified: bool,
 
     // Stdin input can arrive split across reads. When using escape-sequence based

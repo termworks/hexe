@@ -9,18 +9,33 @@ const HostHooks = @import("loop_host_hooks.zig").HostHooks;
 const terminal_main = @import("main.zig");
 const loop_ipc = @import("loop_ipc.zig");
 
+// SES fd watchers use heap-allocated per-connection nodes (the same model as
+// the SES daemon's watchers). The completion handed to io_uring must stay
+// alive until its CQE — and a poll on a since-closed fd may NEVER complete,
+// so a node can neither be reused nor freed at replace time. When the
+// connection fd changes (reattach, reconnect), the old node is ORPHANED: a
+// fresh node is armed immediately for the new fd, and the orphan is left
+// allocated (a stale CQE just disarms it). Waiting for the old CQE instead —
+// the previous design — left the NEW fd unwatched forever: after a reattach
+// the loop only woke on unrelated CTL pushes and VT replay trickled in at
+// one frame per ~2.5s ("reattach is stuck").
 const SesVtSlot = struct {
     state: *State,
     fd: posix.fd_t,
+    gen: u64,
     buffer: []u8,
-    watched_fd: *?posix.fd_t,
+    watcher: *SesVtWatcher,
+    node: *SesVtNode,
+};
+
+pub const SesVtNode = struct {
+    completion: xev.Completion = .{},
+    slot: SesVtSlot = undefined,
 };
 
 pub const SesVtWatcher = struct {
     loop: *xev.Loop,
-    completion: xev.Completion = .{},
-    slot: SesVtSlot = undefined,
-    watched_fd: ?posix.fd_t = null,
+    current: ?*SesVtNode = null,
 };
 
 const SesVtDispatchContext = struct {
@@ -30,15 +45,20 @@ const SesVtDispatchContext = struct {
 const SesCtlSlot = struct {
     state: *State,
     fd: posix.fd_t,
+    gen: u64,
     buffer: []u8,
-    watched_fd: *?posix.fd_t,
+    watcher: *SesCtlWatcher,
+    node: *SesCtlNode,
+};
+
+pub const SesCtlNode = struct {
+    completion: xev.Completion = .{},
+    slot: SesCtlSlot = undefined,
 };
 
 pub const SesCtlWatcher = struct {
     loop: *xev.Loop,
-    completion: xev.Completion = .{},
-    slot: SesCtlSlot = undefined,
-    watched_fd: ?posix.fd_t = null,
+    current: ?*SesCtlNode = null,
 };
 
 const StdinSlot = struct {
@@ -76,25 +96,50 @@ pub const LoopResources = struct {
 };
 
 pub fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []u8) void {
-    if (watcher.watched_fd != null) return;
-    const vt_fd = state.runtime.getVtFd() orelse return;
-
-    watcher.watched_fd = vt_fd;
-    watcher.slot = .{ .state = state, .fd = vt_fd, .buffer = buffer, .watched_fd = &watcher.watched_fd };
+    const vt_fd = state.runtime.getVtFd() orelse {
+        watcher.current = null; // connection gone; orphan any node
+        return;
+    };
+    const gen = state.runtime.vtConnGen();
+    if (watcher.current) |node| {
+        // Compare the GENERATION, not just the fd number: a reconnect often
+        // reuses the number, but the old poll watches the old (closed) file
+        // description and will never fire for the new connection.
+        if (node.slot.fd == vt_fd and node.slot.gen == gen) return;
+        watcher.current = null; // connection replaced: orphan, arm fresh below
+    }
+    const node = state.allocator.create(SesVtNode) catch |err| {
+        core.logging.logError("terminal", "failed to allocate SES VT watcher node", err);
+        return;
+    };
+    node.* = .{};
+    node.slot = .{ .state = state, .fd = vt_fd, .gen = gen, .buffer = buffer, .watcher = watcher, .node = node };
+    watcher.current = node;
+    // Fresh connection: any partial-frame progress belonged to the old one.
+    state.mux_vt_reader.reset();
     const file = xev.File.initFd(vt_fd);
-    watcher.completion = .{};
-    file.poll(watcher.loop, &watcher.completion, .read, SesVtSlot, &watcher.slot, sesVtCallback);
+    file.poll(watcher.loop, &node.completion, .read, SesVtSlot, &node.slot, sesVtCallback);
 }
 
 pub fn ensureSesCtlWatcherArmed(state: *State, watcher: *SesCtlWatcher, buffer: []u8) void {
-    if (watcher.watched_fd != null) return;
-    const ctl_fd = state.runtime.getCtlFd() orelse return;
-
-    watcher.watched_fd = ctl_fd;
-    watcher.slot = .{ .state = state, .fd = ctl_fd, .buffer = buffer, .watched_fd = &watcher.watched_fd };
+    const ctl_fd = state.runtime.getCtlFd() orelse {
+        watcher.current = null;
+        return;
+    };
+    const gen = state.runtime.ctlConnGen();
+    if (watcher.current) |node| {
+        if (node.slot.fd == ctl_fd and node.slot.gen == gen) return;
+        watcher.current = null;
+    }
+    const node = state.allocator.create(SesCtlNode) catch |err| {
+        core.logging.logError("terminal", "failed to allocate SES CTL watcher node", err);
+        return;
+    };
+    node.* = .{};
+    node.slot = .{ .state = state, .fd = ctl_fd, .gen = gen, .buffer = buffer, .watcher = watcher, .node = node };
+    watcher.current = node;
     const file = xev.File.initFd(ctl_fd);
-    watcher.completion = .{};
-    file.poll(watcher.loop, &watcher.completion, .read, SesCtlSlot, &watcher.slot, sesCtlCallback);
+    file.poll(watcher.loop, &node.completion, .read, SesCtlSlot, &node.slot, sesCtlCallback);
 }
 
 pub fn ensureStdinWatcherArmed(state: *State, watcher: *StdinWatcher, buffer: []u8, hooks: *const HostHooks) void {
@@ -123,7 +168,7 @@ pub fn drainSesVtAvailable(state: *State, max_frames: usize, comptime context: [
     };
     defer state.allocator.free(buffer);
 
-    frontend_core.drainMuxVtFrames(
+    state.mux_vt_reader.drain(
         vt_fd,
         buffer,
         max_frames,
@@ -146,8 +191,12 @@ fn sesVtCallback(
     result: xev.PollError!xev.PollEvent,
 ) xev.CallbackAction {
     const slot = ctx orelse return .disarm;
+    // Stale CQE for an orphaned node (fd was replaced): just stop. The node
+    // stays allocated — freeing here races xev's batch processing, and
+    // orphans are rare (one per reconnect/reattach) and tiny.
+    if (slot.watcher.current != slot.node) return .disarm;
     _ = result catch {
-        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        if (slot.watcher.current == slot.node) slot.watcher.current = null;
         if (slot.state.runtime.closeVtFdIf(slot.fd)) {
             slot.state.notifications.showFor("Lost connection to ses daemon (VT) — reconnecting...", 5000);
         }
@@ -155,15 +204,15 @@ fn sesVtCallback(
     };
 
     const vt_fd = slot.state.runtime.getVtFd() orelse {
-        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        if (slot.watcher.current == slot.node) slot.watcher.current = null;
         return .disarm;
     };
     if (vt_fd != slot.fd) {
-        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        if (slot.watcher.current == slot.node) slot.watcher.current = null;
         return .disarm;
     }
 
-    frontend_core.drainMuxVtFrames(
+    slot.state.mux_vt_reader.drain(
         vt_fd,
         slot.buffer,
         64,
@@ -172,7 +221,7 @@ fn sesVtCallback(
         dispatchOversizedSesVtFrame,
     ) catch |read_err| {
         core.logging.logError("terminal", "failed to read SES VT frame", read_err);
-        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        if (slot.watcher.current == slot.node) slot.watcher.current = null;
         if (slot.state.runtime.closeVtFdIf(slot.fd)) {
             slot.state.notifications.showFor("Lost connection to ses daemon (VT) — reconnecting...", 5000);
         }
@@ -203,11 +252,21 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
                         state.enqueueCsiReplyTarget(pane.uuid);
                     }
                 }
-                pane.vt.invalidateRenderState();
-                state.needs_render = true;
+                // During backlog replay, feed the VT silently: scheduling a
+                // render per 16K chunk repainted the whole UI hundreds of
+                // times and made reattaching to a large history feel stuck.
+                // backlog_end triggers the single full repaint. If the end
+                // frame is ever lost, any other render trigger (statusbar
+                // tick, input) still paints the current VT state — the
+                // suppression only skips per-chunk scheduling.
+                if (!pane.backlog_replaying) {
+                    pane.vt.invalidateRenderState();
+                    state.needs_render = true;
+                }
             },
             .backlog_end => {
                 terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} backlog_end", .{vt_event.pane_id});
+                pane.backlog_replaying = false;
                 pane.vt.invalidateRenderState();
                 state.needs_render = true;
                 state.force_full_render = true;
@@ -234,8 +293,9 @@ fn sesCtlCallback(
     result: xev.PollError!xev.PollEvent,
 ) xev.CallbackAction {
     const slot = ctx orelse return .disarm;
+    if (slot.watcher.current != slot.node) return .disarm;
     _ = result catch {
-        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        if (slot.watcher.current == slot.node) slot.watcher.current = null;
         if (slot.state.runtime.closeCtlFdIf(slot.fd)) {
             slot.state.notifications.showFor("Lost connection to ses daemon — reconnecting...", 5000);
         }
@@ -243,11 +303,11 @@ fn sesCtlCallback(
     };
 
     const ctl_fd = slot.state.runtime.getCtlFd() orelse {
-        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        if (slot.watcher.current == slot.node) slot.watcher.current = null;
         return .disarm;
     };
     if (ctl_fd != slot.fd) {
-        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        if (slot.watcher.current == slot.node) slot.watcher.current = null;
         return .disarm;
     }
 

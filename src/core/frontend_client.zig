@@ -186,6 +186,13 @@ pub const SesClient = struct {
     /// them loses user-visible events — a float_request drop hangs the
     /// `hexe float` CLI until timeout. The loop replays these in order.
     pending_pushes: std.ArrayList(QueuedPush) = .empty,
+    /// Bumped every time a NEW ctl/vt connection is established. io_uring
+    /// polls are registered against a file DESCRIPTION, and a reconnect often
+    /// reuses the same fd NUMBER — watchers must compare generations, not fd
+    /// numbers, to know when to re-arm (a poll on the old closed description
+    /// never fires, leaving the new connection silently unwatched).
+    ctl_conn_gen: u64 = 0,
+    vt_conn_gen: u64 = 0,
     next_ctl_request_id: u32 = 1,
 
     pub const QueuedPush = struct {
@@ -524,7 +531,8 @@ pub const SesClient = struct {
             return false;
         };
         self.ctl_fd = ctl_fd;
-        self.debugLog("ses ctl connected: fd={d}", .{ctl_fd});
+        self.ctl_conn_gen +%= 1;
+        self.debugLog("ses ctl connected: fd={d} gen={d}", .{ ctl_fd, self.ctl_conn_gen });
         return true;
     }
 
@@ -579,7 +587,8 @@ pub const SesClient = struct {
             return false;
         };
         self.vt_fd = vt_fd;
-        self.debugLog("ses vt connected: fd={d}", .{vt_fd});
+        self.vt_conn_gen +%= 1;
+        self.debugLog("ses vt connected: fd={d} gen={d}", .{ vt_fd, self.vt_conn_gen });
         return true;
     }
 

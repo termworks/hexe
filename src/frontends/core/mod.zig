@@ -86,6 +86,7 @@ pub const vtFrameEventFromHeader = vt_events.vtFrameEventFromHeader;
 pub const vtFrameKindFromRaw = vt_events.vtFrameKindFromRaw;
 pub const VtFrameReadResult = vt_events.VtFrameReadResult;
 pub const drainMuxVtFrames = vt_events.drainMuxVtFrames;
+pub const MuxVtReader = vt_events.MuxVtReader;
 pub const readMuxVtFrame = vt_events.readMuxVtFrame;
 
 test {

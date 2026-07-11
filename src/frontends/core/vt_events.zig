@@ -148,3 +148,132 @@ test "drainMuxVtFrames accepts an empty drain without touching fd" {
     var buffer: [1]u8 = undefined;
     try drainMuxVtFrames(invalid_fd, &buffer, 0, {}, testVtDrainNoopFrame, testVtDrainNoopOversized);
 }
+
+/// Resumable, fully non-blocking multiplexed-VT frame reader.
+///
+/// The sender (SES) flushes its queue with non-blocking writes and may leave
+/// a PARTIAL frame in the socket under backpressure. The old drain treated a
+/// started header as "block until the whole frame arrives" (10s wire default
+/// per read) — inside the event-loop poll callback, which wedged the entire
+/// frontend for the duration of a large backlog replay. This reader never
+/// blocks: it consumes whatever bytes are available, remembers exactly where
+/// it stopped (mid-header, mid-payload, or mid-oversized-drain), and resumes
+/// on the next call. One instance per VT connection; reset() when the
+/// connection is replaced.
+pub const MuxVtReader = struct {
+    hdr_buf: [@sizeOf(wire.MuxVtHeader)]u8 = undefined,
+    hdr_got: usize = 0,
+    event: ?VtFrameEvent = null,
+    payload_got: usize = 0,
+    oversized_remaining: usize = 0,
+
+    pub fn reset(self: *MuxVtReader) void {
+        self.* = .{};
+    }
+
+    fn readSome(fd: posix.fd_t, out: []u8) !usize {
+        const n = posix.read(fd, out) catch |err| switch (err) {
+            error.WouldBlock => return 0,
+            else => return err,
+        };
+        if (n == 0) return error.ConnectionClosed;
+        return n;
+    }
+
+    /// Pump up to `max_frames` COMPLETE frames; returns without blocking when
+    /// the socket runs dry (partial progress is kept for the next call).
+    pub fn drain(
+        self: *MuxVtReader,
+        fd: posix.fd_t,
+        buffer: []u8,
+        max_frames: usize,
+        context: anytype,
+        comptime on_frame: fn (@TypeOf(context), VtFrameEvent, []const u8) bool,
+        comptime on_oversized: fn (@TypeOf(context), VtFrameEvent) bool,
+    ) !void {
+        var frames: usize = 0;
+        while (frames < max_frames) {
+            if (self.event == null) {
+                // Header phase.
+                while (self.hdr_got < self.hdr_buf.len) {
+                    const n = try readSome(fd, self.hdr_buf[self.hdr_got..]);
+                    if (n == 0) return; // dry mid-header; resume later
+                    self.hdr_got += n;
+                }
+                const header = std.mem.bytesToValue(wire.MuxVtHeader, &self.hdr_buf);
+                self.hdr_got = 0;
+                self.event = vtFrameEventFromHeader(header);
+                self.payload_got = 0;
+                self.oversized_remaining = if (header.len > buffer.len) header.len else 0;
+            }
+            const event = self.event.?;
+
+            if (self.oversized_remaining > 0) {
+                // Oversized frame: consume and discard in buffer-sized gulps.
+                while (self.oversized_remaining > 0) {
+                    const want = @min(self.oversized_remaining, buffer.len);
+                    const n = try readSome(fd, buffer[0..want]);
+                    if (n == 0) return;
+                    self.oversized_remaining -= n;
+                }
+                self.event = null;
+                frames += 1;
+                if (!on_oversized(context, event)) return;
+                continue;
+            }
+
+            const payload_len: usize = @intCast(event.payload_len);
+            while (self.payload_got < payload_len) {
+                const n = try readSome(fd, buffer[self.payload_got..payload_len]);
+                if (n == 0) return; // dry mid-payload; resume later
+                self.payload_got += n;
+            }
+            self.event = null;
+            frames += 1;
+            if (!on_frame(context, event, buffer[0..payload_len])) return;
+        }
+    }
+};
+
+test "MuxVtReader: resumes a frame split across arbitrary boundaries" {
+    var fds: [2]posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0, &fds);
+    try std.testing.expect(rc == 0);
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const Collect = struct {
+        var frames: usize = 0;
+        var last_len: usize = 0;
+        fn onFrame(_: void, event: VtFrameEvent, payload: []const u8) bool {
+            frames += 1;
+            last_len = payload.len;
+            _ = event;
+            return true;
+        }
+        fn onOversized(_: void, _: VtFrameEvent) bool {
+            return true;
+        }
+    };
+    Collect.frames = 0;
+
+    var reader = MuxVtReader{};
+    var buffer: [64]u8 = undefined;
+
+    // Frame: header (7B) + 10B payload, delivered in 3 fragments.
+    var hdr: wire.MuxVtHeader = .{ .pane_id = 1, .frame_type = 1, .len = 10 };
+    const hdr_bytes = std.mem.asBytes(&hdr);
+    _ = try posix.write(fds[1], hdr_bytes[0..3]); // partial header
+    try reader.drain(fds[0], &buffer, 16, {}, Collect.onFrame, Collect.onOversized);
+    try std.testing.expectEqual(@as(usize, 0), Collect.frames);
+
+    _ = try posix.write(fds[1], hdr_bytes[3..]); // rest of header
+    _ = try posix.write(fds[1], "abcd"); // partial payload
+    try reader.drain(fds[0], &buffer, 16, {}, Collect.onFrame, Collect.onOversized);
+    try std.testing.expectEqual(@as(usize, 0), Collect.frames);
+
+    _ = try posix.write(fds[1], "efghij"); // rest of payload
+    try reader.drain(fds[0], &buffer, 16, {}, Collect.onFrame, Collect.onOversized);
+    try std.testing.expectEqual(@as(usize, 1), Collect.frames);
+    try std.testing.expectEqual(@as(usize, 10), Collect.last_len);
+}
