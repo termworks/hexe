@@ -1474,3 +1474,59 @@ pub fn runSesClear(allocator: std.mem.Allocator, force: bool) !void {
 
     print("Killed {d} sessions ({d} panes)\n", .{ result.killed_sessions, result.killed_panes });
 }
+
+/// `hexe terminal kill|close <id>`: kill a whole session (detached or
+/// attached) or a single pane/float, by name or uuid prefix.
+pub fn runTerminalKill(allocator: std.mem.Allocator, target: []const u8) !void {
+    const wire = core.wire;
+    const posix = std.posix;
+
+    if (target.len == 0) {
+        print("Error: session name, pane uuid, or uuid prefix required\n", .{});
+        return;
+    }
+
+    const fd = connectSesCliChannel(allocator) orelse return;
+    defer posix.close(fd);
+
+    const kt = wire.KillTarget{ .id_len = @intCast(target.len) };
+    wire.writeControlWithTrail(fd, .kill_target, std.mem.asBytes(&kt), target) catch {
+        print("Error: failed to send request\n", .{});
+        return;
+    };
+
+    const hdr = wire.readControlHeader(fd) catch {
+        print("Error: failed to read response\n", .{});
+        return;
+    };
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    if (msg_type != .kill_target or hdr.payload_len < @sizeOf(wire.KillTargetResult)) {
+        print("Error: unexpected response\n", .{});
+        return;
+    }
+
+    const result = wire.readStruct(wire.KillTargetResult, fd) catch {
+        print("Error: failed to read result\n", .{});
+        return;
+    };
+
+    if (result.success != 0) {
+        const kind: wire.KillTargetKind = @enumFromInt(result.kind);
+        switch (kind) {
+            .detached_session => print("Killed detached session ({d} panes)\n", .{result.killed_panes}),
+            .attached_session => print("Killed attached session ({d} panes)\n", .{result.killed_panes}),
+            .pane => print("Killed pane\n", .{}),
+            .none => print("Killed\n", .{}),
+        }
+    } else if (result.error_len > 0) {
+        var err_buf: [256]u8 = undefined;
+        const err_len = @min(result.error_len, err_buf.len);
+        wire.readExact(fd, err_buf[0..err_len]) catch {
+            print("Error: target not found\n", .{});
+            return;
+        };
+        print("Error: {s}\n", .{err_buf[0..err_len]});
+    } else {
+        print("Error: target not found\n", .{});
+    }
+}

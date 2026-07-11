@@ -132,6 +132,7 @@ pub const MsgType = enum(u16) {
     session_replace_split_pane = 0x013F,
     session_set_split_ratio = 0x0140,
     session_rename_tab = 0x0141, // MUX → SES: rename a tab in the canonical snapshot
+    kill_target = 0x0142, // CLI → SES: kill a session (detached or attached) or a single pane/float by name/uuid prefix
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -583,6 +584,27 @@ pub const KillSession = extern struct {
 /// If success=0, followed by error message bytes (error_len).
 pub const KillSessionResult = extern struct {
     success: u8 align(1),
+    killed_panes: u16 align(1),
+    error_len: u16 align(1),
+};
+
+/// KillTarget request: id_len bytes of session name / uuid prefix / pane uuid
+/// prefix follow. Resolution order: detached session, attached session, pane.
+pub const KillTarget = extern struct {
+    id_len: u16 align(1),
+};
+
+/// What kill_target resolved to.
+pub const KillTargetKind = enum(u8) {
+    none = 0,
+    detached_session = 1,
+    attached_session = 2,
+    pane = 3,
+};
+
+pub const KillTargetResult = extern struct {
+    success: u8 align(1),
+    kind: u8 align(1),
     killed_panes: u16 align(1),
     error_len: u16 align(1),
 };
