@@ -387,6 +387,11 @@ fn redirectStderrToLog(log_path: []const u8) void {
 /// Write buffer capacity for non-blocking PTY writes.
 /// Large enough to absorb typical clipboard pastes without dropping data.
 const PTY_WRITE_BUF_CAP: usize = 256 * 1024;
+/// Hard ceiling for the PTY input buffer. Dropping input bytes is NEVER okay
+/// short of this: a torn bracketed paste (lost ESC[201~) leaves the shell or
+/// app in paste mode swallowing every later keystroke — the pane looks
+/// permanently frozen. Grow instead; real pastes are a few MB at most.
+const PTY_WRITE_BUF_MAX: usize = 16 * 1024 * 1024;
 const POD_EXIT_ATTACH_GRACE_MS: i64 = 300;
 
 fn applyPasswordMode(backlog: *RingBuffer, password_mode: *bool, enabled: bool) void {
@@ -904,8 +909,20 @@ const Pod = struct {
             remaining = remaining[n..];
         }
 
-        // Buffer whatever could not be written.
+        // Buffer whatever could not be written, growing as needed: a large
+        // paste into a slow reader (vim reads pastes in tiny chunks) easily
+        // exceeds the initial capacity, and dropping the tail used to tear
+        // the bracketed-paste framing and freeze the pane.
         if (remaining.len > 0) {
+            const needed = self.pty_wbuf_len + remaining.len;
+            if (needed > self.pty_wbuf.len and needed <= PTY_WRITE_BUF_MAX) {
+                const new_cap = @min(PTY_WRITE_BUF_MAX, @max(needed, self.pty_wbuf.len * 2));
+                if (self.allocator.realloc(self.pty_wbuf, new_cap)) |grown| {
+                    self.pty_wbuf = grown;
+                } else |err| {
+                    core.logging.logError("pod", "failed to grow pty write buffer", err);
+                }
+            }
             const space = self.pty_wbuf.len - self.pty_wbuf_len;
             const to_copy = @min(remaining.len, space);
             if (to_copy > 0) {
@@ -913,7 +930,7 @@ const Pod = struct {
                 self.pty_wbuf_len += to_copy;
             }
             if (to_copy < remaining.len) {
-                debugLog("queuePtyWrite: write buffer full, dropped {d} bytes", .{remaining.len - to_copy});
+                core.logging.warn("pod", "pty input buffer overflow: dropped {d} bytes — input framing may be torn", .{remaining.len - to_copy});
             }
             self.armPtyDrainTimer();
         }
