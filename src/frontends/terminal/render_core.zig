@@ -51,7 +51,11 @@ pub const Renderer = struct {
 
         var stable = cell;
         if (cell.char.grapheme.len > 0) {
-            stable.char.grapheme = self.frame_arena.allocator().dupe(u8, cell.char.grapheme) catch cell.char.grapheme;
+            // The screen stores this slice across frames; a transient caller
+            // buffer must never leak into it (grapheme iteration over a dead
+            // pointer is a segfault). On OOM, drop the glyph rather than
+            // store the caller's pointer.
+            stable.char.grapheme = self.frame_arena.allocator().dupe(u8, cell.char.grapheme) catch " ";
         }
         self.vx.screen.writeCell(x, y, stable);
     }
