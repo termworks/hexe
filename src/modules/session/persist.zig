@@ -30,6 +30,36 @@ fn syncDirBestEffort(dir: std.fs.Dir) !void {
     }
 }
 
+/// Authoritative pod liveness probe: connect to the pod's unix socket.
+/// `kill(pid, 0)` lies after pid reuse (reboot, or a long daemon downtime):
+/// the persisted pid may now belong to an unrelated process, so a dead pane
+/// would be restored as a ghost — and a later killPane would SIGTERM an
+/// innocent pid. Only a listening pod socket proves the pod itself is alive.
+/// The probe connects non-blocking and closes immediately without sending a
+/// handshake; the pod rejects handshake-less connections without touching its
+/// real client, and at persist-load time SES has no live uplink to disturb.
+pub fn podSocketAlive(socket_path: []const u8) bool {
+    if (socket_path.len == 0 or socket_path.len >= 108) return false;
+    var addr: std.posix.sockaddr.un = .{ .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..socket_path.len], socket_path);
+
+    const fd = std.posix.socket(
+        std.posix.AF.UNIX,
+        std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK | std.posix.SOCK.CLOEXEC,
+        0,
+    ) catch return false;
+    defer std.posix.close(fd);
+
+    std.posix.connect(fd, @ptrCast(&addr), @sizeOf(std.posix.sockaddr.un)) catch |err| switch (err) {
+        // Backlog full still means someone is listening; refusal/absence is
+        // immediate for unix sockets, so WouldBlock is not "unknown" here.
+        error.WouldBlock => return true,
+        else => return false,
+    };
+    return true;
+}
+
 pub fn parseSessionIdHex(hex: []const u8) ?[16]u8 {
     if (hex.len != 32) return null;
     var session_id: [16]u8 = undefined;
@@ -115,6 +145,33 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
+    try buildStateJson(allocator, ses_state, &buf);
+
+    // Atomic overwrite: write tmp then rename.
+    {
+        var file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true, .mode = 0o600 });
+        defer file.close();
+        try file.writeAll(buf.items);
+        try file.sync();
+    }
+    try std.fs.renameAbsolute(tmp_path, path);
+
+    // fsync the parent directory so the rename is durable. Without this a
+    // crash between rename and directory commit could lose the update even
+    // though the data file itself reached disk.
+    if (std.fs.path.dirname(path)) |dir_path| {
+        if (std.fs.openDirAbsolute(dir_path, .{})) |d| {
+            var dir = d;
+            defer dir.close();
+            try syncDirBestEffort(dir);
+        } else |_| {}
+    }
+}
+
+/// Serialize the canonical store to the persisted JSON shape. Split out from
+/// `save` so the serialization (including attached-session recovery) can be
+/// unit-tested without touching the filesystem.
+pub fn buildStateJson(allocator: std.mem.Allocator, ses_state: *state.SesState, buf: *std.ArrayList(u8)) !void {
     const w = buf.writer(allocator);
 
     try w.writeAll("{\"version\":");
@@ -180,34 +237,59 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
         }
         try w.writeAll("]}");
     }
+
+    // Also persist ATTACHED sessions as recoverable detached entries. Without
+    // this, a daemon crash while a session is attached loses the whole layout
+    // (only the loose panes survive in panes[]); on restart the session
+    // reappears as detached and the frontend can reattach by id/name. The
+    // panes load unowned and are re-adopted by the reattach flow.
+    const now = std.time.timestamp();
+    for (ses_state.store.clients.items) |*client| {
+        const sid = client.session_id orelse continue;
+        if (client.session_snapshot == null) continue;
+        const snapshot = &client.session_snapshot.?;
+        // Skip if this session is already represented as detached.
+        if (ses_state.store.detached_sessions.contains(sid)) continue;
+
+        const hex_id: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+        const snapshot_json = try snapshot.toJson(allocator);
+        defer allocator.free(snapshot_json);
+        if (!first) try w.writeAll(",");
+        first = false;
+        try w.writeAll("{\"session_id\":");
+        try writeJsonString(w, &hex_id);
+        try w.writeAll(",\"session_name\":");
+        try writeJsonString(w, snapshot.session_name);
+        try w.print(",\"detached_at\":{d},\"session_snapshot\":", .{now});
+        try writeJsonString(w, snapshot_json);
+        try w.writeAll(",\"panes\":[");
+        for (client.pane_uuids.items, 0..) |uuid, i| {
+            if (i > 0) try w.writeAll(",");
+            try writeJsonString(w, &uuid);
+        }
+        try w.writeAll("]}");
+    }
     try w.writeAll("]");
 
     try w.writeAll("}\n");
-
-    // Atomic overwrite: write tmp then rename.
-    {
-        var file = try std.fs.createFileAbsolute(tmp_path, .{ .truncate = true, .mode = 0o600 });
-        defer file.close();
-        try file.writeAll(buf.items);
-        try file.sync();
-    }
-    try std.fs.renameAbsolute(tmp_path, path);
-
-    // fsync the parent directory so the rename is durable. Without this a
-    // crash between rename and directory commit could lose the update even
-    // though the data file itself reached disk.
-    if (std.fs.path.dirname(path)) |dir_path| {
-        if (std.fs.openDirAbsolute(dir_path, .{})) |d| {
-            var dir = d;
-            defer dir.close();
-            try syncDirBestEffort(dir);
-        } else |_| {}
-    }
 }
 
-/// Allocator is ignored — see `SesState.init` for the rationale. Temporary
-/// parsing allocations use `page_allocator`; owned data goes on
-/// `ses_state.allocator` (which is also `page_allocator` in production).
+/// Move an unreadable state file aside instead of leaving it in place, where
+/// the first dirty save would atomically overwrite it and destroy the only
+/// copy of the user's sessions. The `.corrupt` copy allows manual recovery.
+fn quarantineStateFile(allocator: std.mem.Allocator, path: []const u8) void {
+    const backup_path = std.fmt.allocPrint(allocator, "{s}.corrupt", .{path}) catch |err| {
+        core.logging.logError("ses", "failed to build corrupt state backup path", err);
+        return;
+    };
+    defer allocator.free(backup_path);
+    std.fs.renameAbsolute(path, backup_path) catch |err| {
+        core.logging.logError("ses", "failed to quarantine corrupt state file", err);
+        return;
+    };
+    core.logging.warn("ses", "unreadable session state moved to {s}", .{backup_path});
+}
+
 pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
     const tmp_alloc = std.heap.page_allocator;
 
@@ -224,20 +306,27 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
 
     const parsed = std.json.parseFromSlice(std.json.Value, tmp_alloc, data, .{}) catch |err| {
         core.logging.logError("ses", "failed to parse persisted session state", err);
+        quarantineStateFile(tmp_alloc, path);
         return;
     };
     defer parsed.deinit();
 
-    const root = jsonObject(parsed.value) orelse return;
+    const root = jsonObject(parsed.value) orelse {
+        quarantineStateFile(tmp_alloc, path);
+        return;
+    };
     const version = jsonI64(root.get("version") orelse {
         core.logging.warn("ses", "ignoring persisted session state without version", .{});
+        quarantineStateFile(tmp_alloc, path);
         return;
     }) orelse {
         core.logging.warn("ses", "ignoring persisted session state with invalid version", .{});
+        quarantineStateFile(tmp_alloc, path);
         return;
     };
     if (version != SESSION_STATE_VERSION) {
         core.logging.warn("ses", "ignoring persisted session state version {d}; expected {d}", .{ version, SESSION_STATE_VERSION });
+        quarantineStateFile(tmp_alloc, path);
         return;
     }
 
@@ -260,6 +349,14 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
                 // Process exists, continue
             } else |_| {
                 // Process doesn't exist, skip this pane
+                continue;
+            }
+
+            // The pid check is necessary but not sufficient: after a reboot
+            // or pid reuse the pid may belong to an unrelated process. Only
+            // restore panes whose pod socket actually accepts a connection.
+            if (!podSocketAlive(socket_str)) {
+                log.warn("skipping persisted pane {s}: pod socket {s} not accepting (pid {d} likely reused)", .{ uuid_str, socket_str, pod_pid });
                 continue;
             }
 

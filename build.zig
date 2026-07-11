@@ -306,6 +306,44 @@ pub fn build(b: *std.Build) void {
     });
     const run_pane_output_tests = b.addRunArtifact(pane_output_tests);
 
+    // Scrollback search (PLAN 3.3) tests.
+    const pane_search_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/pane_search.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    pane_search_test_module.addIncludePath(b.path("src/frontends/terminal"));
+    pane_search_test_module.addImport("core", core_module);
+    pane_search_test_module.addImport("pop", pop_module);
+    if (ghostty_vt_mod) |vt| {
+        pane_search_test_module.addImport("ghostty-vt", vt);
+    }
+
+    const pane_search_tests = b.addTest(.{
+        .root_module = pane_search_test_module,
+    });
+    const run_pane_search_tests = b.addRunArtifact(pane_search_tests);
+
+    // Reattach reconciliation (PLAN 1.8) tests.
+    const reattach_reconcile_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/reattach_reconcile.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    reattach_reconcile_test_module.addIncludePath(b.path("src/frontends/terminal"));
+    reattach_reconcile_test_module.addImport("core", core_module);
+    reattach_reconcile_test_module.addImport("pop", pop_module);
+    if (ghostty_vt_mod) |vt| {
+        reattach_reconcile_test_module.addImport("ghostty-vt", vt);
+    }
+
+    const reattach_reconcile_tests = b.addTest(.{
+        .root_module = reattach_reconcile_test_module,
+    });
+    const run_reattach_reconcile_tests = b.addRunArtifact(reattach_reconcile_tests);
+
     // Frontend-core host boundary tests.
     const frontend_core_test_module = b.createModule(.{
         .root_source_file = b.path("src/frontends/core/mod.zig"),
@@ -347,13 +385,38 @@ pub fn build(b: *std.Build) void {
     });
     const run_syslink_host_tests = b.addRunArtifact(syslink_host_tests);
 
+    // Core library tests (Lua config parsing, api_bridge, session_config,
+    // wire, config_v2, etc.). Reuse `core_module` — it already carries every
+    // dependency import — as the test root; the refAllDeclsRecursive shim in
+    // src/core/mod.zig collects the submodule test blocks.
+    const core_tests = b.addTest(.{
+        .root_module = core_module,
+    });
+    const run_core_tests = b.addRunArtifact(core_tests);
+
+    // POD output-buffering tests (ring buffer + OSC7 cwd scanner). Self-
+    // contained (std only), so it roots directly at the module file.
+    const pod_buffering_test_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/pod/buffering.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const pod_buffering_tests = b.addTest(.{
+        .root_module = pod_buffering_test_module,
+    });
+    const run_pod_buffering_tests = b.addRunArtifact(pod_buffering_tests);
+
     const test_step = b.step("test", "Run hexe test suites");
+    test_step.dependOn(&run_core_tests.step);
+    test_step.dependOn(&run_pod_buffering_tests.step);
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);
     test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);
+    test_step.dependOn(&run_pane_search_tests.step);
+    test_step.dependOn(&run_reattach_reconcile_tests.step);
     test_step.dependOn(&run_frontend_core_tests.step);
     test_step.dependOn(&run_web_host_tests.step);
     test_step.dependOn(&run_syslink_host_tests.step);

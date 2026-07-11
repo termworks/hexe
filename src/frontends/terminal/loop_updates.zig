@@ -71,7 +71,12 @@ pub fn updateSelectionAndStatus(state: *State, now_ms: i64, last_status_update: 
         }
     }
 
-    if (now_ms - last_status_update.* >= statusUpdateInterval(state)) {
+    // The periodic refresh keeps time-driven UI current: statusbar content
+    // (clock, spinners, process info) and float border title segments, which
+    // run through the same segment machinery. With neither present, renders
+    // can be purely event-driven.
+    const has_time_driven_ui = state.config.tabs.status.enabled or state.view.float_views.items.len > 0;
+    if (has_time_driven_ui and now_ms - last_status_update.* >= statusUpdateInterval(state)) {
         state.needs_render = true;
         last_status_update.* = now_ms;
     }

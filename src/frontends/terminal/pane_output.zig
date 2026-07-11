@@ -34,10 +34,7 @@ fn canSkipControlScanners(self: *const Pane, data: []const u8) bool {
     if (self.osc_in_progress or self.osc_pending_esc or self.osc_prev_esc) return false;
     if (std.mem.indexOfScalar(u8, self.esc_tail[0..self.esc_tail_len], 0x1b) != null) return false;
 
-    for (data) |b| {
-        if (b == 0x1b or b == 0x0c or b == 0x9d) return false;
-    }
-    return true;
+    return std.mem.indexOfAny(u8, data, &.{ 0x1b, 0x0c, 0x9d }) == null;
 }
 
 fn updateEscTail(self: *Pane, data: []const u8) void {

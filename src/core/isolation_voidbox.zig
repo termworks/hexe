@@ -84,12 +84,11 @@ pub fn applyParentCgroups(child_pid: posix.pid_t, pane_uuid: ?[]const u8) void {
     };
 
     var buf: [128]u8 = undefined;
-    const pid_line = std.fmt.bufPrint(&buf, "{d}\n", .{child_pid}) catch |err| {
-        log.warn("failed to format voidbox cgroup child pid: {}", .{err});
-        return;
-    };
-    _ = tryWriteCgroupFile(dir_path, "cgroup.procs", pid_line);
 
+    // Write the resource limits BEFORE moving the child into the cgroup, so a
+    // fast fork-bomb or memory spike at startup is already capped. Writing
+    // cgroup.procs first (as before) left a window where the child ran
+    // uncapped. This matches the ordering in isolation.zig's cgroup setup.
     if (posix.getenv("HEXE_CGROUP_MEM_MAX")) |mem| {
         const line = std.fmt.bufPrint(&buf, "{s}\n", .{mem}) catch |err| {
             log.warn("failed to format voidbox memory.max cgroup value: {}", .{err});
@@ -111,6 +110,13 @@ pub fn applyParentCgroups(child_pid: posix.pid_t, pane_uuid: ?[]const u8) void {
         };
         _ = tryWriteCgroupFile(dir_path, "cpu.max", line);
     }
+
+    // Move the child in last, now that the limits are enforced.
+    const pid_line = std.fmt.bufPrint(&buf, "{d}\n", .{child_pid}) catch |err| {
+        log.warn("failed to format voidbox cgroup child pid: {}", .{err});
+        return;
+    };
+    _ = tryWriteCgroupFile(dir_path, "cgroup.procs", pid_line);
 }
 
 // ============================================================================

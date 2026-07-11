@@ -5,6 +5,10 @@ const liblink_transport = @import("frontend_liblink_transport.zig");
 const logging = @import("logging.zig");
 const session_model = @import("session_model.zig");
 const wire = @import("wire.zig");
+const responses = @import("ses_client_responses.zig");
+const commands = @import("ses_client_commands.zig");
+const reads = @import("ses_client_reads.zig");
+const queries = @import("ses_client_queries.zig");
 
 pub const LocalIpcTransport = struct {
     autostart_ses: bool = true,
@@ -27,9 +31,9 @@ pub const Transport = union(enum) {
 /// Static buffer for synchronous CWD fetch (getPaneCwdSync).
 var sync_cwd_buf: [4096]u8 = undefined;
 
-const SYNC_RESPONSE_TIMEOUT_MS: i64 = 10_000;
+pub const SYNC_RESPONSE_TIMEOUT_MS: i64 = 10_000;
 const REATTACH_RESPONSE_TIMEOUT_MS: i64 = 15_000;
-const COMMAND_ACK_TIMEOUT_MS: i64 = 5_000;
+pub const COMMAND_ACK_TIMEOUT_MS: i64 = 5_000;
 
 fn deleteSocketPath(path: []const u8) void {
     if (std.fs.path.isAbsolute(path)) {
@@ -47,16 +51,16 @@ fn defaultCapabilityFlags(frontend_kind: wire.FrontendKind, transport_kind: wire
                 wire.FrontendCapabilityFlag.clipboard |
                 wire.FrontendCapabilityFlag.desktop_notify;
         },
+        // No pixel renderer exists yet, so `pixel_render` is intentionally not
+        // advertised — mirrors frontend_core `defaultCapabilities` (PLAN 3.2).
         .web => {
-            flags |= wire.FrontendCapabilityFlag.pixel_render |
-                wire.FrontendCapabilityFlag.mouse |
+            flags |= wire.FrontendCapabilityFlag.mouse |
                 wire.FrontendCapabilityFlag.clipboard |
                 wire.FrontendCapabilityFlag.desktop_notify |
                 wire.FrontendCapabilityFlag.reconnect;
         },
         .desktop => {
-            flags |= wire.FrontendCapabilityFlag.pixel_render |
-                wire.FrontendCapabilityFlag.mouse |
+            flags |= wire.FrontendCapabilityFlag.mouse |
                 wire.FrontendCapabilityFlag.clipboard |
                 wire.FrontendCapabilityFlag.desktop_notify |
                 wire.FrontendCapabilityFlag.reconnect;
@@ -174,7 +178,28 @@ pub const SesClient = struct {
     pending_pane_exits: std.ArrayList([32]u8),
     pending_control_responses: std.ArrayList(PendingControlResponse),
     pending_session_state: ?[]u8 = null,
+    /// Set when a session_stolen push is consumed by a synchronous reader
+    /// instead of the IPC loop; the loop drains it so the steal is never lost.
+    pending_session_stolen: bool = false,
+    /// Async pushes (float_request, notify, shell_event, pane_exited, ...)
+    /// consumed by a synchronous reader instead of the IPC loop. Dropping
+    /// them loses user-visible events — a float_request drop hangs the
+    /// `hexe float` CLI until timeout. The loop replays these in order.
+    pending_pushes: std.ArrayList(QueuedPush) = .empty,
     next_ctl_request_id: u32 = 1,
+
+    pub const QueuedPush = struct {
+        msg_type: u16,
+        request_id: u32,
+        payload: []u8,
+    };
+
+    /// Oldest queued push, ownership transferred to the caller (free payload
+    /// with the client's allocator).
+    pub fn popPendingPush(self: *SesClient) ?QueuedPush {
+        if (self.pending_pushes.items.len == 0) return null;
+        return self.pending_pushes.orderedRemove(0);
+    }
 
     pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, log_level: ?logging.Level, log_file: ?[]const u8) SesClient {
         return initLocalIpc(allocator, session_id, session_name, keepalive, log_level, log_file, .terminal);
@@ -239,6 +264,8 @@ pub const SesClient = struct {
         for (self.pending_control_responses.items) |*resp| resp.deinit(self.allocator);
         self.pending_control_responses.deinit(self.allocator);
         if (self.pending_session_state) |json| self.allocator.free(json);
+        for (self.pending_pushes.items) |push| self.allocator.free(push.payload);
+        self.pending_pushes.deinit(self.allocator);
         self.ctl_fd = null;
         self.vt_fd = null;
         self.bridge = null;
@@ -246,12 +273,12 @@ pub const SesClient = struct {
         self.pending_session_state = null;
     }
 
-    fn debugLog(self: *const SesClient, comptime fmt: []const u8, args: anytype) void {
+    pub fn debugLog(self: *const SesClient, comptime fmt: []const u8, args: anytype) void {
         if (!self.debug) return;
         logging.debugWithSource("frontend-client", fmt, args, @src());
     }
 
-    fn debugLogUuid(self: *const SesClient, uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
+    pub fn debugLogUuid(self: *const SesClient, uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
         if (!self.debug) return;
         const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
         logging.debugWithSource("frontend-client", "[{s}] " ++ fmt, .{short_uuid} ++ args, @src());
@@ -276,94 +303,22 @@ pub const SesClient = struct {
         };
     }
 
-    fn queuePendingPaneExit(self: *SesClient, uuid: [32]u8) void {
-        for (self.pending_pane_exits.items) |existing| {
-            if (std.mem.eql(u8, &existing, &uuid)) return;
-        }
-        self.pending_pane_exits.append(self.allocator, uuid) catch |err| {
-            logging.logError("frontend-client", "failed to queue pending pane exit", err);
-        };
-    }
-
-    /// Move queued pane-exit messages captured during sync calls into `out`.
-    pub fn drainPendingPaneExits(self: *SesClient, out: *std.ArrayList([32]u8)) void {
-        if (self.pending_pane_exits.items.len == 0) return;
-        out.appendSlice(self.allocator, self.pending_pane_exits.items) catch |err| {
-            logging.logError("frontend-client", "failed to drain pending pane exits", err);
-            return;
-        };
-        self.pending_pane_exits.clearRetainingCapacity();
-    }
-
-    pub fn queuePendingSessionState(self: *SesClient, session_state_json: []const u8) void {
-        const owned = self.allocator.dupe(u8, session_state_json) catch |err| {
-            logging.logError("frontend-client", "failed to queue pending session state", err);
-            return;
-        };
-        if (self.pending_session_state) |old| self.allocator.free(old);
-        self.pending_session_state = owned;
-    }
-
-    fn queuePendingCwdResponse(self: *SesClient, uuid: [32]u8, cwd: []const u8) void {
-        const owned = self.allocator.dupe(u8, cwd) catch |err| {
-            logging.logError("frontend-client", "failed to copy pending cwd response", err);
-            return;
-        };
-        self.pending_cwd_responses.append(self.allocator, .{ .uuid = uuid, .cwd = owned }) catch |err| {
-            logging.logError("frontend-client", "failed to queue pending cwd response", err);
-            self.allocator.free(owned);
-            return;
-        };
-    }
-
-    pub fn drainPendingCwdResponse(self: *SesClient) ?PendingCwdResponse {
-        if (self.pending_cwd_responses.items.len == 0) return null;
-        return self.pending_cwd_responses.orderedRemove(0);
-    }
-
-    fn queuePendingPaneInfoResponse(self: *SesClient, response: PendingPaneInfoResponse) void {
-        var owned = response;
-        self.pending_pane_info_responses.append(self.allocator, owned) catch {
-            owned.deinit(self.allocator);
-            return;
-        };
-    }
-
-    pub fn drainPendingPaneInfoResponse(self: *SesClient) ?PendingPaneInfoResponse {
-        if (self.pending_pane_info_responses.items.len == 0) return null;
-        return self.pending_pane_info_responses.orderedRemove(0);
-    }
-
-    pub fn drainPendingSessionState(self: *SesClient) ?[]u8 {
-        const pending = self.pending_session_state orelse return null;
-        self.pending_session_state = null;
-        return pending;
-    }
-
-    fn queuePendingControlResponse(self: *SesClient, response: PendingControlResponse) void {
-        var owned = response;
-        self.pending_control_responses.append(self.allocator, owned) catch |err| {
-            owned.deinit(self.allocator);
-            logging.logError("frontend-client", "failed to queue pending control response", err);
-            return;
-        };
-    }
-
-    fn takePendingControlResponse(self: *SesClient, request_id: u32) ?PendingControlResponse {
-        if (request_id == 0) return null;
-        for (self.pending_control_responses.items, 0..) |resp, i| {
-            if (resp.request_id == request_id) {
-                return self.pending_control_responses.orderedRemove(i);
-            }
-        }
-        return null;
-    }
-
-    pub fn takeResolvedNameOwned(self: *SesClient) ?[]u8 {
-        const resolved = self.resolved_name orelse return null;
-        self.resolved_name = null;
-        return resolved;
-    }
+    // Response store: pending sync/async response queues captured while a
+    // synchronous CTL call is in flight. Bodies live in `ses_client_responses`;
+    // aliased here so `client.<name>(...)` call sites are unchanged (PLAN 2.3).
+    pub const queuePendingPaneExit = responses.queuePendingPaneExit;
+    pub const drainPendingPaneExits = responses.drainPendingPaneExits;
+    pub const queuePendingSessionState = responses.queuePendingSessionState;
+    pub const queuePendingCwdResponse = responses.queuePendingCwdResponse;
+    pub const drainPendingCwdResponse = responses.drainPendingCwdResponse;
+    pub const queuePendingPaneInfoResponse = responses.queuePendingPaneInfoResponse;
+    pub const drainPendingPaneInfoResponse = responses.drainPendingPaneInfoResponse;
+    pub const drainPendingSessionState = responses.drainPendingSessionState;
+    pub const queuePendingControlResponse = responses.queuePendingControlResponse;
+    pub const takePendingControlResponse = responses.takePendingControlResponse;
+    pub const takeResolvedNameOwned = responses.takeResolvedNameOwned;
+    pub const drainPendingSessionStolen = responses.drainPendingSessionStolen;
+    pub const queuePendingPush = responses.queuePendingPush;
 
     /// Reconnect hygiene: a fresh connection must not inherit fds or queued
     /// responses from a previous one. Stale queued responses can match a new
@@ -389,6 +344,9 @@ pub const SesClient = struct {
             self.allocator.free(json);
             self.pending_session_state = null;
         }
+        self.pending_session_stolen = false;
+        for (self.pending_pushes.items) |push| self.allocator.free(push.payload);
+        self.pending_pushes.clearRetainingCapacity();
     }
 
     /// Connect to the ses daemon, starting it if necessary.
@@ -409,19 +367,19 @@ pub const SesClient = struct {
         return id;
     }
 
-    fn writeControlRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) !u32 {
+    pub fn writeControlRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) !u32 {
         const request_id = self.allocateCtlRequestId();
         try wire.writeControlWithRequestId(fd, msg_type, request_id, payload);
         return request_id;
     }
 
-    fn writeControlTrailRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, fixed: []const u8, trail: []const u8) !u32 {
+    pub fn writeControlTrailRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, fixed: []const u8, trail: []const u8) !u32 {
         const request_id = self.allocateCtlRequestId();
         try wire.writeControlWithTrailAndRequestId(fd, msg_type, request_id, fixed, trail);
         return request_id;
     }
 
-    fn writeControlMsgRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, fixed: []const u8, trails: []const []const u8) !u32 {
+    pub fn writeControlMsgRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, fixed: []const u8, trails: []const []const u8) !u32 {
         const request_id = self.allocateCtlRequestId();
         try wire.writeControlMsgWithRequestId(fd, msg_type, request_id, fixed, trails);
         return request_id;
@@ -730,157 +688,16 @@ pub const SesClient = struct {
         self.vt_fd = null;
     }
 
-    pub fn sessionAddTab(
-        self: *SesClient,
-        tab_uuid: [32]u8,
-        pane_uuid: [32]u8,
-        tab_index: usize,
-        name: []const u8,
-    ) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SessionAddTab = .{
-            .tab_uuid = tab_uuid,
-            .pane_uuid = pane_uuid,
-            .tab_index = @intCast(tab_index),
-            .name_len = @intCast(name.len),
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlTrailRequest(fd, .session_add_tab, std.mem.asBytes(&msg), name);
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    pub fn sessionRemoveTab(self: *SesClient, tab_uuid: [32]u8, active_tab: ?usize) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SessionRemoveTab = .{
-            .tab_uuid = tab_uuid,
-            .active_tab = @intCast(active_tab orelse 0),
-            .has_active_tab = if (active_tab != null) 1 else 0,
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlRequest(fd, .session_remove_tab, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    pub fn sessionSyncFloat(
-        self: *SesClient,
-        pane_uuid: [32]u8,
-        active_tab: ?usize,
-        parent_tab: ?usize,
-        visible: bool,
-        tab_visible: u64,
-        sticky: bool,
-        is_pwd: bool,
-        float_key: u8,
-        width_pct: u8,
-        height_pct: u8,
-        pos_x_pct: u8,
-        pos_y_pct: u8,
-        pad_x: u8,
-        pad_y: u8,
-        active: bool,
-    ) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SessionSyncFloat = .{
-            .pane_uuid = pane_uuid,
-            .active_tab = @intCast(active_tab orelse 0),
-            .parent_tab = @intCast(parent_tab orelse 0),
-            .tab_visible = tab_visible,
-            .has_active_tab = if (active_tab != null) 1 else 0,
-            .has_parent_tab = if (parent_tab != null) 1 else 0,
-            .visible = @intFromBool(visible),
-            .sticky = @intFromBool(sticky),
-            .is_pwd = @intFromBool(is_pwd),
-            .float_key = float_key,
-            .width_pct = width_pct,
-            .height_pct = height_pct,
-            .pos_x_pct = pos_x_pct,
-            .pos_y_pct = pos_y_pct,
-            .pad_x = pad_x,
-            .pad_y = pad_y,
-            .active = @intFromBool(active),
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlRequest(fd, .session_sync_float, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    pub fn sessionRemoveFloat(self: *SesClient, pane_uuid: [32]u8) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SessionRemoveFloat = .{ .pane_uuid = pane_uuid };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlRequest(fd, .session_remove_float, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    pub fn sessionSplitPane(
-        self: *SesClient,
-        tab_uuid: [32]u8,
-        source_pane_uuid: [32]u8,
-        new_pane_uuid: [32]u8,
-        active_tab: usize,
-        focused_pane_uuid: ?[32]u8,
-        dir: session_model.SessionSplitDir,
-    ) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SessionSplitPane = .{
-            .tab_uuid = tab_uuid,
-            .source_pane_uuid = source_pane_uuid,
-            .new_pane_uuid = new_pane_uuid,
-            .focused_pane_uuid = if (focused_pane_uuid) |uuid| uuid else .{0} ** 32,
-            .active_tab = @intCast(active_tab),
-            .dir = switch (dir) {
-                .horizontal => 0,
-                .vertical => 1,
-            },
-            .has_focused_pane = if (focused_pane_uuid != null) 1 else 0,
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlRequest(fd, .session_split_pane, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    pub fn sessionReplaceSplitPane(
-        self: *SesClient,
-        tab_uuid: [32]u8,
-        old_pane_uuid: [32]u8,
-        new_pane_uuid: [32]u8,
-        active_tab: usize,
-        focused_pane_uuid: ?[32]u8,
-    ) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SessionReplaceSplitPane = .{
-            .tab_uuid = tab_uuid,
-            .old_pane_uuid = old_pane_uuid,
-            .new_pane_uuid = new_pane_uuid,
-            .focused_pane_uuid = if (focused_pane_uuid) |uuid| uuid else .{0} ** 32,
-            .active_tab = @intCast(active_tab),
-            .has_focused_pane = if (focused_pane_uuid != null) 1 else 0,
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlRequest(fd, .session_replace_split_pane, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    pub fn sessionSetSplitRatio(
-        self: *SesClient,
-        tab_uuid: [32]u8,
-        active_tab: usize,
-        first_anchor_uuid: [32]u8,
-        second_anchor_uuid: [32]u8,
-        ratio: f32,
-    ) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SessionSetSplitRatio = .{
-            .tab_uuid = tab_uuid,
-            .first_anchor_uuid = first_anchor_uuid,
-            .second_anchor_uuid = second_anchor_uuid,
-            .active_tab = @intCast(active_tab),
-            .ratio = ratio,
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlRequest(fd, .session_set_split_ratio, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-    }
+    // Session-mutation commands: bodies live in `ses_client_commands`; aliased
+    // here so `client.<name>(...)` call sites are unchanged (PLAN 2.3).
+    pub const sessionAddTab = commands.sessionAddTab;
+    pub const sessionRemoveTab = commands.sessionRemoveTab;
+    pub const sessionSyncFloat = commands.sessionSyncFloat;
+    pub const sessionRemoveFloat = commands.sessionRemoveFloat;
+    pub const sessionSplitPane = commands.sessionSplitPane;
+    pub const sessionReplaceSplitPane = commands.sessionReplaceSplitPane;
+    pub const sessionSetSplitRatio = commands.sessionSetSplitRatio;
+    pub const sessionRenameTab = commands.sessionRenameTab;
 
     /// Create a new pane via ses.
     /// Returns the pane UUID, pane_id (for VT routing), and pod PID.
@@ -996,38 +813,12 @@ pub const SesClient = struct {
         return .{ .uuid = resp.uuid, .pane_id = resp.pane_id, .pid = resp.pid };
     }
 
-    /// Orphan a pane (manual suspend).
-    pub fn orphanPane(self: *SesClient, uuid: [32]u8) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        self.drainQueuedControlResponses(fd);
-        var msg: wire.PaneUuid = .{ .uuid = uuid };
-        const request_id = try self.writeControlRequest(fd, .orphan_pane, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    /// Set sticky info on a pane.
-    pub fn setSticky(self: *SesClient, uuid: [32]u8, pwd: []const u8, key: u8) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SetSticky = .{
-            .uuid = uuid,
-            .key = key,
-            .pwd_len = @intCast(pwd.len),
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlTrailRequest(fd, .set_sticky, std.mem.asBytes(&msg), pwd);
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    /// Kill a pane.
-    pub fn killPane(self: *SesClient, uuid: [32]u8) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        self.debugLogUuid(&uuid, "killPane: sending to SES ctl_fd={d} vt_fd={?d}", .{ fd, self.vt_fd });
-        self.drainQueuedControlResponses(fd);
-        var msg: wire.PaneUuid = .{ .uuid = uuid };
-        const request_id = try self.writeControlRequest(fd, .kill_pane, std.mem.asBytes(&msg));
-        try self.readCommandAckForRequest(fd, request_id);
-        self.debugLogUuid(&uuid, "killPane: acknowledged by SES", .{});
-    }
+    // Pane metadata/lifecycle commands: bodies in `ses_client_commands`.
+    pub const orphanPane = commands.orphanPane;
+    pub const setSticky = commands.setSticky;
+    pub const killPane = commands.killPane;
+    pub const updatePaneName = commands.updatePaneName;
+    pub const updatePaneShell = commands.updatePaneShell;
 
     /// Request pane CWD from ses (fire-and-forget; response handled in handleSesMessage).
     pub fn requestPaneCwd(self: *SesClient, uuid: [32]u8) void {
@@ -1080,41 +871,6 @@ pub const SesClient = struct {
         return resp_type == .pong;
     }
 
-    /// Update pane name in ses and consume its acknowledgement.
-    pub fn updatePaneName(self: *SesClient, uuid: [32]u8, name: ?[]const u8) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        const name_bytes = name orelse "";
-        var msg: wire.UpdatePaneName = .{
-            .uuid = uuid,
-            .name_len = @intCast(name_bytes.len),
-        };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlTrailRequest(fd, .update_pane_name, std.mem.asBytes(&msg), name_bytes);
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
-    /// Update shell-provided pane metadata and consume its acknowledgement.
-    pub fn updatePaneShell(self: *SesClient, uuid: [32]u8, cmd: ?[]const u8, cwd: ?[]const u8, status: ?i32, duration_ms: ?u64, jobs: ?u16) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        const cmd_bytes = cmd orelse "";
-        const cwd_bytes = cwd orelse "";
-        var msg: wire.UpdatePaneShell = .{
-            .uuid = uuid,
-            .status = status orelse 0,
-            .has_status = if (status != null) 1 else 0,
-            .duration_ms = if (duration_ms) |d| @intCast(d) else 0,
-            .has_duration = if (duration_ms != null) 1 else 0,
-            .jobs = jobs orelse 0,
-            .has_jobs = if (jobs != null) 1 else 0,
-            .cmd_len = @intCast(cmd_bytes.len),
-            .cwd_len = @intCast(cwd_bytes.len),
-        };
-        const trails: []const []const u8 = &.{ cmd_bytes, cwd_bytes };
-        self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlMsgRequest(fd, .update_pane_shell, std.mem.asBytes(&msg), trails);
-        try self.readCommandAckForRequest(fd, request_id);
-    }
-
     /// Pane type enum for auxiliary info.
     pub const PaneType = enum { split, float };
     pub const PaneAuxInfo = struct { created_from: ?[32]u8, focused_from: ?[32]u8 };
@@ -1128,18 +884,18 @@ pub const SesClient = struct {
         fg_pid: ?i32,
     };
     pub const PaneProcessInfo = struct { name: ?[]u8 = null, pid: ?i32 = null };
-    const PaneInfoRead = struct {
+    pub const PaneInfoRead = struct {
         hdr: wire.ControlHeader,
         resp: wire.PaneInfoResp,
         trail: ?[]u8 = null,
         offset: usize = 0,
 
-        fn deinit(self: *PaneInfoRead, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *PaneInfoRead, allocator: std.mem.Allocator) void {
             if (self.trail) |trail| allocator.free(trail);
             self.* = undefined;
         }
 
-        fn readExact(self: *PaneInfoRead, client: *SesClient, fd: posix.fd_t, dest: []u8) !void {
+        pub fn readExact(self: *PaneInfoRead, client: *SesClient, fd: posix.fd_t, dest: []u8) !void {
             if (self.trail) |trail| {
                 if (self.offset + dest.len > trail.len) return error.EndOfStream;
                 @memcpy(dest, trail[self.offset .. self.offset + dest.len]);
@@ -1151,7 +907,7 @@ pub const SesClient = struct {
             _ = client;
         }
 
-        fn skip(self: *PaneInfoRead, client: *SesClient, fd: posix.fd_t, len: usize) void {
+        pub fn skip(self: *PaneInfoRead, client: *SesClient, fd: posix.fd_t, len: usize) void {
             if (len == 0) return;
             if (self.trail) |trail| {
                 self.offset = @min(trail.len, self.offset + len);
@@ -1161,11 +917,11 @@ pub const SesClient = struct {
             self.offset += len;
         }
     };
-    const PaneCwdRead = struct {
+    pub const PaneCwdRead = struct {
         uuid: [32]u8,
         cwd: []const u8,
 
-        fn deinit(self: *PaneCwdRead, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *PaneCwdRead, allocator: std.mem.Allocator) void {
             if (self.cwd.len > 0) allocator.free(self.cwd);
             self.* = undefined;
         }
@@ -1208,237 +964,20 @@ pub const SesClient = struct {
         try self.readCommandAckForRequest(fd, request_id);
     }
 
-    /// Get auxiliary pane info — queries SES for created_from/focused_from.
-    pub fn getPaneAux(self: *SesClient, uuid: [32]u8) !PaneAuxInfo {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.PaneUuid = .{ .uuid = uuid };
-        const request_id = self.writeControlRequest(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
-            logging.logError("frontend-client", "failed to request pane aux", err);
-            if (self.ctl_fd == fd) self.ctl_fd = null;
-            return error.WriteFailed;
-        };
+    // Pane read-queries: bodies live in `ses_client_queries`; aliased here so
+    // `client.<name>(...)` call sites are unchanged (PLAN 2.3).
+    pub const getPaneAux = queries.getPaneAux;
+    pub const requestPaneProcess = queries.requestPaneProcess;
+    pub const getPaneName = queries.getPaneName;
+    pub const probePaneExistence = queries.probePaneExistence;
+    pub const getPaneInfoSnapshot = queries.getPaneInfoSnapshot;
 
-        var read = self.readExpectedPaneInfoResponse(fd, uuid, request_id) catch |err| {
-            logging.logError("frontend-client", "failed to read pane aux response", err);
-            return err;
-        };
-        defer read.deinit(self.allocator);
-        const hdr = read.hdr;
-        const resp = read.resp;
-        // Skip trailing data.
-        const trail_len = hdr.payload_len - @sizeOf(wire.PaneInfoResp);
-        if (trail_len > 0) read.skip(self, fd, trail_len);
+    pub const PaneExistence = enum { exists, missing, unknown };
 
-        return .{
-            .created_from = if (resp.has_created_from != 0) resp.created_from else null,
-            .focused_from = if (resp.has_focused_from != 0) resp.focused_from else null,
-        };
-    }
-
-    /// Request foreground process info for a pane (fire-and-forget; response handled in handleSesMessage).
-    pub fn requestPaneProcess(self: *SesClient, uuid: [32]u8) void {
-        const fd = self.ctl_fd orelse return;
-        var msg: wire.PaneUuid = .{ .uuid = uuid };
-        _ = self.writeControlRequest(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
-            logging.logError("frontend-client", "failed to request pane process info", err);
-            if (self.ctl_fd == fd) self.ctl_fd = null;
-        };
-    }
-
-    /// Best-effort pane name (sync call, queues unrelated async responses).
-    pub fn getPaneName(self: *SesClient, uuid: [32]u8) ?[]u8 {
-        const fd = self.ctl_fd orelse return null;
-        var msg: wire.PaneUuid = .{ .uuid = uuid };
-        const request_id = self.writeControlRequest(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
-            logging.logError("frontend-client", "failed to request pane name", err);
-            if (self.ctl_fd == fd) self.ctl_fd = null;
-            return null;
-        };
-
-        var read = self.readExpectedPaneInfoResponse(fd, uuid, request_id) catch |err| {
-            logging.logError("frontend-client", "failed to read pane name response", err);
-            return null;
-        };
-        defer read.deinit(self.allocator);
-        const resp = read.resp;
-        var result: ?[]u8 = null;
-
-        // Calculate total trailing bytes.
-        const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
-            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
-            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
-            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
-            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
-
-        if (resp.name_len > 0) {
-            const buf = self.allocator.alloc(u8, resp.name_len) catch {
-                self.skipPayload(fd, @intCast(trail_total));
-                return null;
-            };
-            read.readExact(self, fd, buf) catch |err| {
-                logging.logError("frontend-client", "failed to read pane name payload", err);
-                if (self.ctl_fd == fd) self.ctl_fd = null;
-                self.allocator.free(buf);
-                return null;
-            };
-            result = buf;
-        }
-        // Skip all remaining trailing bytes.
-        const remaining = trail_total - @as(usize, resp.name_len);
-        if (remaining > 0) {
-            read.skip(self, fd, remaining);
-        }
-        return result;
-    }
-
-    /// Best-effort synchronous pane metadata snapshot.
-    /// Returns owned strings that caller must free.
-    pub fn getPaneInfoSnapshot(self: *SesClient, uuid: [32]u8) ?PaneInfoSnapshot {
-        const fd = self.ctl_fd orelse return null;
-        var msg: wire.PaneUuid = .{ .uuid = uuid };
-        const request_id = self.writeControlRequest(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
-            logging.logError("frontend-client", "failed to request pane info snapshot", err);
-            if (self.ctl_fd == fd) self.ctl_fd = null;
-            return null;
-        };
-
-        // Read response directly — do NOT use readSyncResponse which skips
-        // large pane_info responses (treating them as async noise).
-        var read = self.readExpectedPaneInfoResponse(fd, uuid, request_id) catch |err| {
-            logging.logError("frontend-client", "failed to read pane info snapshot response", err);
-            return null;
-        };
-        defer read.deinit(self.allocator);
-        const resp = read.resp;
-        const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
-            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
-            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
-            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
-            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
-
-        var consumed: usize = 0;
-        var name: ?[]u8 = null;
-        var fg_name: ?[]u8 = null;
-        var cwd: ?[]u8 = null;
-        var sticky_pwd: ?[]u8 = null;
-
-        if (resp.name_len > 0) {
-            const n = @as(usize, resp.name_len);
-            if (n <= 16 * 1024) {
-                const buf = self.allocator.alloc(u8, n) catch |err| {
-                    logging.logError("frontend-client", "failed to allocate pane info name", err);
-                    read.skip(self, fd, trail_total - consumed);
-                    return null;
-                };
-                read.readExact(self, fd, buf) catch |err| {
-                    logging.logError("frontend-client", "failed to read pane info name payload", err);
-                    if (self.ctl_fd == fd) self.ctl_fd = null;
-                    self.allocator.free(buf);
-                    return null;
-                };
-                name = buf;
-            } else {
-                read.skip(self, fd, n);
-            }
-            consumed += n;
-        }
-
-        if (resp.fg_len > 0) {
-            const n = @as(usize, resp.fg_len);
-            if (n <= 16 * 1024) {
-                const buf = self.allocator.alloc(u8, n) catch |err| {
-                    logging.logError("frontend-client", "failed to allocate pane info foreground", err);
-                    read.skip(self, fd, trail_total - consumed);
-                    if (name) |s| self.allocator.free(s);
-                    return null;
-                };
-                read.readExact(self, fd, buf) catch |err| {
-                    logging.logError("frontend-client", "failed to read pane info foreground payload", err);
-                    if (self.ctl_fd == fd) self.ctl_fd = null;
-                    self.allocator.free(buf);
-                    if (name) |s| self.allocator.free(s);
-                    return null;
-                };
-                fg_name = buf;
-            } else {
-                read.skip(self, fd, n);
-            }
-            consumed += n;
-        }
-
-        if (resp.cwd_len > 0) {
-            const n = @as(usize, resp.cwd_len);
-            if (n <= 64 * 1024) {
-                const buf = self.allocator.alloc(u8, n) catch |err| {
-                    logging.logError("frontend-client", "failed to allocate pane info cwd", err);
-                    read.skip(self, fd, trail_total - consumed);
-                    if (name) |s| self.allocator.free(s);
-                    if (fg_name) |s| self.allocator.free(s);
-                    return null;
-                };
-                read.readExact(self, fd, buf) catch |err| {
-                    logging.logError("frontend-client", "failed to read pane info cwd payload", err);
-                    if (self.ctl_fd == fd) self.ctl_fd = null;
-                    self.allocator.free(buf);
-                    if (name) |s| self.allocator.free(s);
-                    if (fg_name) |s| self.allocator.free(s);
-                    return null;
-                };
-                cwd = buf;
-            } else {
-                read.skip(self, fd, n);
-            }
-            consumed += n;
-        }
-
-        const before_sticky_len: usize = @as(usize, resp.tty_len) + @as(usize, resp.socket_path_len) +
-            @as(usize, resp.session_name_len) + @as(usize, resp.layout_path_len) +
-            @as(usize, resp.last_cmd_len) + @as(usize, resp.base_process_len);
-        if (before_sticky_len > 0) {
-            read.skip(self, fd, before_sticky_len);
-            consumed += before_sticky_len;
-        }
-
-        if (resp.sticky_pwd_len > 0) {
-            const n = @as(usize, resp.sticky_pwd_len);
-            if (n <= 64 * 1024) {
-                const buf = self.allocator.alloc(u8, n) catch |err| {
-                    logging.logError("frontend-client", "failed to allocate pane info sticky pwd", err);
-                    read.skip(self, fd, trail_total - consumed);
-                    if (name) |s| self.allocator.free(s);
-                    if (fg_name) |s| self.allocator.free(s);
-                    if (cwd) |s| self.allocator.free(s);
-                    return null;
-                };
-                read.readExact(self, fd, buf) catch |err| {
-                    logging.logError("frontend-client", "failed to read pane info sticky pwd payload", err);
-                    if (self.ctl_fd == fd) self.ctl_fd = null;
-                    self.allocator.free(buf);
-                    if (name) |s| self.allocator.free(s);
-                    if (fg_name) |s| self.allocator.free(s);
-                    if (cwd) |s| self.allocator.free(s);
-                    return null;
-                };
-                sticky_pwd = buf;
-            } else {
-                read.skip(self, fd, n);
-            }
-            consumed += n;
-        }
-
-        const remaining = trail_total -| consumed;
-        if (remaining > 0) read.skip(self, fd, remaining);
-
-        return .{
-            .pane_id = resp.pane_id,
-            .pid = if (resp.pid != 0) resp.pid else null,
-            .name = name,
-            .cwd = cwd,
-            .sticky_pwd = sticky_pwd,
-            .fg_name = fg_name,
-            .fg_pid = if (resp.fg_pid != 0) resp.fg_pid else null,
-        };
-    }
+    pub const PaneExistenceProbe = struct {
+        outcome: PaneExistence,
+        pid: ?posix.pid_t = null,
+    };
 
     /// Adopt an orphaned pane.
     pub fn adoptPane(self: *SesClient, uuid: [32]u8) !struct { uuid: [32]u8, pane_id: u16, pid: posix.pid_t } {
@@ -1779,530 +1318,30 @@ pub const SesClient = struct {
         return true;
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
-    fn readExpectedPaneInfoResponse(self: *SesClient, fd: posix.fd_t, expected_uuid: [32]u8, expected_request_id: u32) !PaneInfoRead {
-        if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
-            var pending = pending_response;
-            defer pending.deinit(self.allocator);
-            if (pending.msg_type != .pane_info) return error.UnexpectedResponse;
-            const read = try self.readPaneInfoPendingPayload(pending.payload);
-            if (!std.mem.eql(u8, &read.resp.uuid, &expected_uuid)) {
-                var owned = read;
-                owned.deinit(self.allocator);
-                return error.UnexpectedResponse;
-            }
-            return read;
-        }
-
-        while (true) {
-            const hdr = try wire.readControlHeader(fd);
-            const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-            switch (msg_type) {
-                .ok, .pane_exited, .session_state => {
-                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
-                        self.skipPayload(fd, hdr.payload_len);
-                        return error.UnexpectedResponse;
-                    }
-                    self.consumeQueuedControlResponse(fd, hdr);
-                    continue;
-                },
-                .get_pane_cwd => {
-                    const resp = self.readPaneCwdBody(fd, hdr) catch |err| {
-                        logging.logError("frontend-client", "failed to read queued pane cwd response", err);
-                        if (self.ctl_fd == fd) self.ctl_fd = null;
-                        return err;
-                    };
-                    self.queuePendingPaneCwdBody(fd, resp);
-                    continue;
-                },
-                .pane_info => {
-                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
-                        try self.queuePendingControlResponseBody(fd, hdr);
-                        continue;
-                    }
-                    if (hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
-                        self.skipPayload(fd, hdr.payload_len);
-                        logging.logError("frontend-client", "pane_info response too small", error.UnexpectedResponse);
-                        if (self.ctl_fd == fd) self.ctl_fd = null;
-                        return error.UnexpectedResponse;
-                    }
-                    const resp = wire.readStruct(wire.PaneInfoResp, fd) catch |err| {
-                        self.skipPayload(fd, hdr.payload_len);
-                        logging.logError("frontend-client", "failed to read pane_info response", err);
-                        if (self.ctl_fd == fd) self.ctl_fd = null;
-                        return err;
-                    };
-                    if (hdr.request_id == expected_request_id and std.mem.eql(u8, &resp.uuid, &expected_uuid)) {
-                        return .{ .hdr = hdr, .resp = resp };
-                    }
-                    self.queuePaneInfoResponseBody(fd, resp);
-                    continue;
-                },
-                else => {
-                    self.skipPayload(fd, hdr.payload_len);
-                    return error.UnexpectedResponse;
-                },
-            }
-        }
-    }
-
-    fn readExpectedPaneCwdResponse(self: *SesClient, fd: posix.fd_t, expected_uuid: [32]u8, expected_request_id: u32) !PaneCwdRead {
-        if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
-            var pending = pending_response;
-            defer pending.deinit(self.allocator);
-            if (pending.msg_type != .get_pane_cwd) return error.UnexpectedResponse;
-            const read = try self.readPaneCwdPendingPayload(pending.payload);
-            if (!std.mem.eql(u8, &read.uuid, &expected_uuid)) {
-                var owned = read;
-                owned.deinit(self.allocator);
-                return error.UnexpectedResponse;
-            }
-            return read;
-        }
-
-        while (true) {
-            const hdr = try wire.readControlHeader(fd);
-            const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-            switch (msg_type) {
-                .ok, .pane_exited, .session_state, .pane_info => {
-                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id and msg_type != .pane_info) {
-                        self.skipPayload(fd, hdr.payload_len);
-                        return error.UnexpectedResponse;
-                    }
-                    self.consumeQueuedControlResponse(fd, hdr);
-                    continue;
-                },
-                .get_pane_cwd => {
-                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
-                        try self.queuePendingControlResponseBody(fd, hdr);
-                        continue;
-                    }
-                    var resp = self.readPaneCwdBodyOwned(fd, hdr) catch |err| {
-                        logging.logError("frontend-client", "failed to read pane cwd response", err);
-                        if (self.ctl_fd == fd) self.ctl_fd = null;
-                        return err;
-                    };
-                    if (hdr.request_id == expected_request_id and std.mem.eql(u8, &resp.uuid, &expected_uuid)) return resp;
-                    self.queuePendingCwdResponse(resp.uuid, resp.cwd);
-                    resp.deinit(self.allocator);
-                    continue;
-                },
-                else => {
-                    self.skipPayload(fd, hdr.payload_len);
-                    return error.UnexpectedResponse;
-                },
-            }
-        }
-    }
-
-    fn remainingDeadlineMs(deadline_ms: i64) !i32 {
-        const remaining = deadline_ms - std.time.milliTimestamp();
-        if (remaining <= 0) return error.Timeout;
-        return @intCast(@min(remaining, @as(i64, std.math.maxInt(i32))));
-    }
-
-    fn readSyncResponseForRequest(self: *SesClient, fd: posix.fd_t, expected_request_id: u32) !ControlResponseRead {
-        return self.readSyncResponseUntilForRequest(fd, expected_request_id, std.time.milliTimestamp() + SYNC_RESPONSE_TIMEOUT_MS, "sync response");
-    }
-
-    fn readSyncResponseUntilForRequest(self: *SesClient, fd: posix.fd_t, expected_request_id: u32, deadline_ms: i64, comptime context: []const u8) !ControlResponseRead {
-        if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
-            return .{
-                .hdr = .{
-                    .msg_type = @intFromEnum(pending_response.msg_type),
-                    .request_id = pending_response.request_id,
-                    .payload_len = @intCast(pending_response.payload.len),
-                },
-                .payload = pending_response.payload,
-            };
-        }
-
-        while (true) {
-            const hdr = wire.readControlHeaderTimeout(fd, try remainingDeadlineMs(deadline_ms)) catch |err| {
-                self.debugLog("{s}: timed out/failed waiting for control header: {s}", .{ context, @errorName(err) });
-                return err;
-            };
-            const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-            const matches_request = hdr.request_id == expected_request_id;
-            switch (msg_type) {
-                // Stale acks from older commands without dedicated responses.
-                .ok => {
-                    if (matches_request) return .{ .hdr = hdr };
-                    if (hdr.request_id != 0) {
-                        try self.queuePendingControlResponseBody(fd, hdr);
-                        continue;
-                    }
-                    self.consumeQueuedControlResponse(fd, hdr);
-                    continue;
-                },
-                // Async get_pane_cwd response.
-                .get_pane_cwd => {
-                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
-                        try self.queuePendingControlResponseBody(fd, hdr);
-                        continue;
-                    }
-                    self.consumeQueuedControlResponse(fd, hdr);
-                    continue;
-                },
-                // Async pane_info response (large payload = response, not request).
-                .pane_info => {
-                    if (hdr.payload_len >= @sizeOf(wire.PaneInfoResp) and hdr.request_id == 0) {
-                        self.consumeQueuedControlResponse(fd, hdr);
-                        continue;
-                    }
-                    if (!matches_request and hdr.request_id != 0) {
-                        try self.queuePendingControlResponseBody(fd, hdr);
-                        continue;
-                    }
-                    return .{ .hdr = hdr };
-                },
-                .pane_exited => {
-                    self.consumeQueuedControlResponse(fd, hdr);
-                    continue;
-                },
-                .session_state => {
-                    self.consumeQueuedControlResponse(fd, hdr);
-                    continue;
-                },
-                else => {
-                    if (!matches_request) {
-                        if (hdr.request_id != 0) {
-                            try self.queuePendingControlResponseBody(fd, hdr);
-                            continue;
-                        }
-                        self.skipPayload(fd, hdr.payload_len);
-                        return error.UnexpectedResponse;
-                    }
-                    return .{ .hdr = hdr };
-                },
-            }
-        }
-    }
-
-    fn drainQueuedControlResponses(self: *SesClient, fd: posix.fd_t) void {
-        while (true) {
-            var fds = [_]posix.pollfd{
-                .{ .fd = fd, .events = posix.POLL.IN, .revents = 0 },
-            };
-            const ready = posix.poll(&fds, 0) catch |err| {
-                logging.logError("frontend-client", "failed to poll queued control responses", err);
-                if (self.ctl_fd == fd) self.ctl_fd = null;
-                return;
-            };
-            if (ready == 0 or (fds[0].revents & posix.POLL.IN) == 0) return;
-
-            const hdr = wire.readControlHeader(fd) catch |err| {
-                logging.logError("frontend-client", "failed to read queued control response header", err);
-                if (self.ctl_fd == fd) self.ctl_fd = null;
-                return;
-            };
-            self.consumeQueuedControlResponse(fd, hdr);
-        }
-    }
-
-    fn readCommandAckForRequest(self: *SesClient, fd: posix.fd_t, expected_request_id: u32) !void {
-        return self.readCommandAckUntilForRequest(fd, expected_request_id, std.time.milliTimestamp() + COMMAND_ACK_TIMEOUT_MS, "command ack");
-    }
-
-    fn readCommandAckUntilForRequest(self: *SesClient, fd: posix.fd_t, expected_request_id: u32, deadline_ms: i64, comptime context: []const u8) !void {
-        if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
-            var pending = pending_response;
-            defer pending.deinit(self.allocator);
-            switch (pending.msg_type) {
-                .ok => return,
-                .@"error" => return error.SesError,
-                else => return error.UnexpectedResponse,
-            }
-        }
-
-        while (true) {
-            const hdr = wire.readControlHeaderTimeout(fd, try remainingDeadlineMs(deadline_ms)) catch |err| {
-                self.debugLog("{s}: timed out/failed waiting for ack header: {s}", .{ context, @errorName(err) });
-                return err;
-            };
-            const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-            const matches_request = hdr.request_id == expected_request_id;
-            switch (msg_type) {
-                .ok => {
-                    if (!matches_request) {
-                        if (hdr.request_id == 0) {
-                            self.skipPayload(fd, hdr.payload_len);
-                            continue;
-                        }
-                        try self.queuePendingControlResponseBody(fd, hdr);
-                        continue;
-                    }
-                    self.skipPayload(fd, hdr.payload_len);
-                    return;
-                },
-                .@"error" => {
-                    if (!matches_request) {
-                        if (hdr.request_id == 0) {
-                            self.skipPayload(fd, hdr.payload_len);
-                            continue;
-                        }
-                        try self.queuePendingControlResponseBody(fd, hdr);
-                        continue;
-                    }
-                    self.skipPayload(fd, hdr.payload_len);
-                    return error.SesError;
-                },
-                .get_pane_cwd, .pane_info, .pane_exited, .session_state => {
-                    self.consumeQueuedControlResponse(fd, hdr);
-                    continue;
-                },
-                else => {
-                    self.skipPayload(fd, hdr.payload_len);
-                    return error.UnexpectedResponse;
-                },
-            }
-        }
-    }
-
-    fn queuePendingControlResponseBody(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) !void {
-        if (hdr.request_id == 0) {
-            self.skipPayload(fd, hdr.payload_len);
-            return;
-        }
-        if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
-            self.skipPayload(fd, hdr.payload_len);
-            return error.UnexpectedResponse;
-        }
-        const payload = try self.allocator.alloc(u8, hdr.payload_len);
-        errdefer self.allocator.free(payload);
-        if (hdr.payload_len > 0) {
-            try wire.readExact(fd, payload);
-        }
-        self.queuePendingControlResponse(.{
-            .request_id = hdr.request_id,
-            .msg_type = @enumFromInt(hdr.msg_type),
-            .payload = payload,
-        });
-    }
-
-    fn consumeQueuedControlResponse(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) void {
-        const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-        switch (msg_type) {
-            .pane_exited => {
-                if (hdr.payload_len >= @sizeOf(wire.PaneUuid)) {
-                    const pu = wire.readStruct(wire.PaneUuid, fd) catch {
-                        self.skipPayload(fd, hdr.payload_len);
-                        return;
-                    };
-                    self.queuePendingPaneExit(pu.uuid);
-                    const rem = hdr.payload_len - @sizeOf(wire.PaneUuid);
-                    if (rem > 0) self.skipPayload(fd, rem);
-                } else {
-                    self.skipPayload(fd, hdr.payload_len);
-                }
-            },
-            .session_state => {
-                if (hdr.payload_len == 0 or hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
-                    self.skipPayload(fd, hdr.payload_len);
-                    return;
-                }
-                const json = self.allocator.alloc(u8, hdr.payload_len) catch {
-                    self.skipPayload(fd, hdr.payload_len);
-                    return;
-                };
-                wire.readExact(fd, json) catch {
-                    self.allocator.free(json);
-                    return;
-                };
-                self.queuePendingSessionState(json);
-                self.allocator.free(json);
-            },
-            .get_pane_cwd => {
-                const resp = self.readPaneCwdBody(fd, hdr) catch |err| {
-                    logging.logError("frontend-client", "failed to consume queued pane cwd response", err);
-                    if (self.ctl_fd == fd) self.ctl_fd = null;
-                    return;
-                };
-                self.queuePendingPaneCwdBody(fd, resp);
-            },
-            .pane_info => {
-                if (hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
-                    self.skipPayload(fd, hdr.payload_len);
-                    logging.logError("frontend-client", "queued pane_info response too small", error.UnexpectedResponse);
-                    if (self.ctl_fd == fd) self.ctl_fd = null;
-                    return;
-                }
-                const resp = wire.readStruct(wire.PaneInfoResp, fd) catch |err| {
-                    self.skipPayload(fd, hdr.payload_len);
-                    logging.logError("frontend-client", "failed to consume queued pane_info response", err);
-                    if (self.ctl_fd == fd) self.ctl_fd = null;
-                    return;
-                };
-                self.queuePaneInfoResponseBody(fd, resp);
-            },
-            else => self.skipPayload(fd, hdr.payload_len),
-        }
-    }
-
-    fn readPaneCwdBody(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) !wire.PaneCwd {
-        if (hdr.payload_len < @sizeOf(wire.PaneCwd)) {
-            self.skipPayload(fd, hdr.payload_len);
-            return error.UnexpectedResponse;
-        }
-        return wire.readStruct(wire.PaneCwd, fd);
-    }
-
-    fn readPaneCwdBodyOwned(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) !PaneCwdRead {
-        const resp = try self.readPaneCwdBody(fd, hdr);
-        const body_len = hdr.payload_len - @sizeOf(wire.PaneCwd);
-        if (resp.cwd_len == 0) {
-            if (body_len > 0) self.skipPayload(fd, body_len);
-            return .{ .uuid = resp.uuid, .cwd = &.{} };
-        }
-        if (resp.cwd_len != body_len or resp.cwd_len > wire.MAX_PAYLOAD_LEN) {
-            self.skipPayload(fd, body_len);
-            return error.UnexpectedResponse;
-        }
-        const cwd = try self.allocator.alloc(u8, resp.cwd_len);
-        errdefer self.allocator.free(cwd);
-        try wire.readExact(fd, cwd);
-        return .{ .uuid = resp.uuid, .cwd = cwd };
-    }
-
-    fn readPaneCwdPendingPayload(self: *SesClient, payload: []const u8) !PaneCwdRead {
-        if (payload.len < @sizeOf(wire.PaneCwd)) return error.UnexpectedResponse;
-        const resp = wire.bytesToStruct(wire.PaneCwd, payload[0..@sizeOf(wire.PaneCwd)]) orelse return error.UnexpectedResponse;
-        const body = payload[@sizeOf(wire.PaneCwd)..];
-        if (resp.cwd_len == 0) return .{ .uuid = resp.uuid, .cwd = &.{} };
-        if (resp.cwd_len != body.len or resp.cwd_len > wire.MAX_PAYLOAD_LEN) return error.UnexpectedResponse;
-        const cwd = try self.allocator.dupe(u8, body);
-        return .{ .uuid = resp.uuid, .cwd = cwd };
-    }
-
-    fn queuePendingPaneCwdBody(self: *SesClient, fd: posix.fd_t, resp: wire.PaneCwd) void {
-        if (resp.cwd_len == 0) return;
-        if (resp.cwd_len > wire.MAX_PAYLOAD_LEN) {
-            self.skipPayload(fd, resp.cwd_len);
-            logging.logError("frontend-client", "queued pane cwd response too large", error.UnexpectedResponse);
-            return;
-        }
-        const cwd = self.allocator.alloc(u8, resp.cwd_len) catch {
-            self.skipPayload(fd, resp.cwd_len);
-            logging.logError("frontend-client", "failed to allocate queued pane cwd response", error.OutOfMemory);
-            return;
-        };
-        defer self.allocator.free(cwd);
-        wire.readExact(fd, cwd) catch |err| {
-            logging.logError("frontend-client", "failed to read queued pane cwd payload", err);
-            if (self.ctl_fd == fd) self.ctl_fd = null;
-            return;
-        };
-        self.queuePendingCwdResponse(resp.uuid, cwd);
-    }
-
-    fn readPaneInfoPendingPayload(self: *SesClient, payload: []const u8) !PaneInfoRead {
-        if (payload.len < @sizeOf(wire.PaneInfoResp)) return error.UnexpectedResponse;
-        const resp = wire.bytesToStruct(wire.PaneInfoResp, payload[0..@sizeOf(wire.PaneInfoResp)]) orelse return error.UnexpectedResponse;
-        const trail = payload[@sizeOf(wire.PaneInfoResp)..];
-        const expected_trail_len: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
-            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
-            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
-            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
-            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
-        if (expected_trail_len != trail.len) return error.UnexpectedResponse;
-
-        const owned_trail = try self.allocator.dupe(u8, trail);
-        return .{
-            .hdr = .{
-                .msg_type = @intFromEnum(wire.MsgType.pane_info),
-                .request_id = 0,
-                .payload_len = @intCast(payload.len),
-            },
-            .resp = resp,
-            .trail = owned_trail,
-        };
-    }
-
-    fn queuePaneInfoResponseBody(self: *SesClient, fd: posix.fd_t, resp: wire.PaneInfoResp) void {
-        const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
-            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
-            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
-            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
-            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
-
-        var pending = PendingPaneInfoResponse{
-            .uuid = resp.uuid,
-            .fg_pid = if (resp.fg_pid != 0) resp.fg_pid else null,
-        };
-        var queued = false;
-        defer if (!queued) pending.deinit(self.allocator);
-
-        if (resp.name_len > 0) {
-            pending.name = self.allocator.alloc(u8, resp.name_len) catch {
-                self.skipPayload(fd, @intCast(trail_total));
-                logging.logError("frontend-client", "failed to allocate queued pane name", error.OutOfMemory);
-                return;
-            };
-            wire.readExact(fd, pending.name.?) catch |err| {
-                logging.logError("frontend-client", "failed to read queued pane name", err);
-                if (self.ctl_fd == fd) self.ctl_fd = null;
-                return;
-            };
-        }
-        if (resp.fg_len > 0) {
-            pending.fg_name = self.allocator.alloc(u8, resp.fg_len) catch {
-                const remaining = trail_total -| @as(usize, resp.name_len);
-                self.skipPayload(fd, @intCast(remaining));
-                logging.logError("frontend-client", "failed to allocate queued pane foreground name", error.OutOfMemory);
-                return;
-            };
-            wire.readExact(fd, pending.fg_name.?) catch |err| {
-                logging.logError("frontend-client", "failed to read queued pane foreground name", err);
-                if (self.ctl_fd == fd) self.ctl_fd = null;
-                return;
-            };
-        }
-
-        const remaining = trail_total -| @as(usize, resp.name_len) -| @as(usize, resp.fg_len);
-        if (remaining > 0) self.skipPayload(fd, @intCast(remaining));
-        queued = true;
-        self.queuePendingPaneInfoResponse(pending);
-    }
-
-    fn skipPayloadChecked(_: *SesClient, fd: posix.fd_t, len: u32) !void {
-        var remaining: usize = len;
-        var buf: [4096]u8 = undefined;
-        while (remaining > 0) {
-            const chunk = @min(remaining, buf.len);
-            try wire.readExact(fd, buf[0..chunk]);
-            remaining -= chunk;
-        }
-    }
-
-    fn skipPayload(self: *SesClient, fd: posix.fd_t, len: u32) void {
-        self.skipPayloadChecked(fd, len) catch |err| {
-            logging.logError("frontend-client", "failed to skip control payload", err);
-            if (self.ctl_fd == fd) self.ctl_fd = null;
-        };
-    }
-
-    fn skipPayloadU16Checked(_: *SesClient, fd: posix.fd_t, len: u16) !void {
-        var remaining: usize = len;
-        var buf: [4096]u8 = undefined;
-        while (remaining > 0) {
-            const chunk = @min(remaining, buf.len);
-            try wire.readExact(fd, buf[0..chunk]);
-            remaining -= chunk;
-        }
-    }
-
-    fn skipPayloadU16(self: *SesClient, fd: posix.fd_t, len: u16) void {
-        self.skipPayloadU16Checked(fd, len) catch |err| {
-            logging.logError("frontend-client", "failed to skip control payload", err);
-            if (self.ctl_fd == fd) self.ctl_fd = null;
-        };
-    }
-
-    fn skipPayloadU32(self: *SesClient, fd: posix.fd_t, len: u32) void {
-        self.skipPayload(fd, len);
-    }
-
+    // Synchronous response readers: bodies live in `ses_client_reads`; aliased
+    // here so `self.<name>(...)` call sites and the command mixins resolve
+    // unchanged (PLAN 2.3). This cluster tolerates interleaved async pushes and
+    // is the home of the float-loss bug class — moved verbatim, behavior intact.
+    pub const readExpectedPaneInfoResponse = reads.readExpectedPaneInfoResponse;
+    pub const readExpectedPaneCwdResponse = reads.readExpectedPaneCwdResponse;
+    pub const readSyncResponseForRequest = reads.readSyncResponseForRequest;
+    pub const readSyncResponseUntilForRequest = reads.readSyncResponseUntilForRequest;
+    pub const drainQueuedControlResponses = reads.drainQueuedControlResponses;
+    pub const readCommandAckForRequest = reads.readCommandAckForRequest;
+    pub const readCommandAckUntilForRequest = reads.readCommandAckUntilForRequest;
+    pub const queuePendingControlResponseBody = reads.queuePendingControlResponseBody;
+    pub const consumeQueuedControlResponse = reads.consumeQueuedControlResponse;
+    pub const readPaneCwdBody = reads.readPaneCwdBody;
+    pub const readPaneCwdBodyOwned = reads.readPaneCwdBodyOwned;
+    pub const readPaneCwdPendingPayload = reads.readPaneCwdPendingPayload;
+    pub const queuePendingPaneCwdBody = reads.queuePendingPaneCwdBody;
+    pub const readPaneInfoPendingPayload = reads.readPaneInfoPendingPayload;
+    pub const queuePaneInfoResponseBody = reads.queuePaneInfoResponseBody;
+    pub const skipPayloadChecked = reads.skipPayloadChecked;
+    pub const skipPayload = reads.skipPayload;
+    pub const skipPayloadU16Checked = reads.skipPayloadU16Checked;
+    pub const skipPayloadU16 = reads.skipPayloadU16;
+    pub const skipPayloadU32 = reads.skipPayloadU32;
     /// Send a ping to SES to check connection is alive.
     /// Returns true if pong received, false if connection appears dead.
     pub fn sendPing(self: *SesClient) bool {
@@ -2438,8 +1477,7 @@ test "SesClient: pending control responses are retrieved by request id" {
 }
 
 test "SesClient: command ack reader queues out-of-order request ids" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -2458,8 +1496,7 @@ test "SesClient: command ack reader queues out-of-order request ids" {
 }
 
 test "SesClient: sync response reader queues and replays out-of-order direct payloads" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -2499,8 +1536,7 @@ test "SesClient: sync response reader queues and replays out-of-order direct pay
 }
 
 test "SesClient: sync pane cwd reader replays queued payload-bearing response" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -2534,4 +1570,60 @@ test "SesClient: sync pane cwd reader replays queued payload-bearing response" {
     try std.testing.expectEqualSlices(u8, &second_uuid, &second.uuid);
     try std.testing.expectEqualStrings(second_cwd, second.cwd);
     try std.testing.expectEqual(@as(usize, 0), client.pending_control_responses.items.len);
+}
+
+test "SesClient: replayable pushes are queued FIFO; non-replayable are skipped" {
+    var client = SesClient.init(std.testing.allocator, [_]u8{'s'} ** 32, "test", false, null, null);
+    defer client.deinit();
+
+    var fds: [2]posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expect(rc == 0);
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    // A replayable notify push: payload staged on the socket, header passed in.
+    const payload1 = "hello";
+    _ = try posix.write(fds[1], payload1);
+    client.queuePendingPush(fds[0], .{
+        .msg_type = @intFromEnum(wire.MsgType.notify),
+        .request_id = 7,
+        .payload_len = payload1.len,
+    });
+
+    const payload2 = "float!";
+    _ = try posix.write(fds[1], payload2);
+    client.queuePendingPush(fds[0], .{
+        .msg_type = @intFromEnum(wire.MsgType.float_request),
+        .request_id = 8,
+        .payload_len = payload2.len,
+    });
+
+    // A non-replayable response type is consumed (skipped), never queued.
+    _ = try posix.write(fds[1], "xxxx");
+    client.queuePendingPush(fds[0], .{
+        .msg_type = @intFromEnum(wire.MsgType.pong),
+        .request_id = 9,
+        .payload_len = 4,
+    });
+
+    // FIFO order with intact payloads and metadata.
+    const p1 = client.popPendingPush().?;
+    defer std.testing.allocator.free(p1.payload);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.notify)), p1.msg_type);
+    try std.testing.expectEqual(@as(u32, 7), p1.request_id);
+    try std.testing.expectEqualStrings(payload1, p1.payload);
+
+    const p2 = client.popPendingPush().?;
+    defer std.testing.allocator.free(p2.payload);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.float_request)), p2.msg_type);
+    try std.testing.expectEqualStrings(payload2, p2.payload);
+
+    try std.testing.expect(client.popPendingPush() == null);
+
+    // The skipped pong bytes were consumed from the socket (next read would
+    // block, not return stale bytes) — verified by the socket being drained.
+    var probe: [8]u8 = undefined;
+    @import("ipc.zig").setNonBlocking(fds[0]) catch {};
+    try std.testing.expectError(error.WouldBlock, posix.read(fds[0], &probe));
 }

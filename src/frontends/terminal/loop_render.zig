@@ -13,9 +13,80 @@ const float_title = @import("float_title.zig");
 const overlay_render = @import("overlay_render.zig");
 const notification = @import("notification.zig");
 const render_vx = @import("render_vx.zig");
+const vaxis = @import("vaxis");
+const pane_search = @import("pane_search.zig");
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
 const Pane = @import("pane.zig").Pane;
+
+/// Draw the scrollback-search prompt on the bottom terminal row:
+/// `/<query>` while typing, `/<query>  [i/N]` (or `[no matches]`) after running.
+fn renderSearchPrompt(state: *State, renderer: anytype) void {
+    const w = state.term_width;
+    if (w == 0 or state.term_height == 0) return;
+    const row: u16 = state.term_height - 1;
+    const sm = &state.search_mode;
+
+    var buf: [576]u8 = undefined;
+    const text: []const u8 = switch (sm.phase) {
+        .typing => std.fmt.bufPrint(&buf, "/{s}", .{sm.query.items}) catch "/",
+        .results => if (sm.match_count == 0)
+            std.fmt.bufPrint(&buf, "/{s}  [no matches]", .{sm.query.items}) catch "/"
+        else
+            std.fmt.bufPrint(&buf, "/{s}  [{d}/{d}]", .{ sm.query.items, sm.current, sm.match_count }) catch "/",
+    };
+
+    const bar_style: vaxis.Style = .{ .bg = .{ .index = 4 }, .fg = .{ .index = 15 } };
+    // Fill the row, then overlay the prompt text one codepoint per cell so
+    // multibyte queries render as their glyph rather than mojibake.
+    var x: u16 = 0;
+    while (x < w) : (x += 1) {
+        renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = " ", .width = 1 }, .style = bar_style });
+    }
+    x = 0;
+    if (std.unicode.Utf8View.init(text)) |view| {
+        var it = view.iterator();
+        while (it.nextCodepointSlice()) |cp_bytes| {
+            if (x >= w) break;
+            renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = cp_bytes, .width = 1 }, .style = bar_style });
+            x += 1;
+        }
+    } else |_| {
+        // Invalid UTF-8 (shouldn't happen for typed input) — draw raw bytes.
+        for (text) |b| {
+            if (x >= w) break;
+            renderer.setVaxisCell(x, row, .{ .char = .{ .grapheme = &[_]u8{b}, .width = 1 }, .style = bar_style });
+            x += 1;
+        }
+    }
+}
+
+/// Highlight a search match's cells (inclusive viewport range, pane-local) over
+/// the already-drawn focused pane. `current` matches reverse-video; others get
+/// a yellow tint.
+fn highlightSearchMatch(renderer: anytype, pane: *Pane, m: pane_search.PaneSearch.MatchViewport, current: bool) void {
+    if (pane.width == 0 or pane.height == 0) return;
+    var y = m.sy;
+    while (y <= m.ey and y < pane.height) : (y += 1) {
+        const row_start: u16 = if (y == m.sy) m.sx else 0;
+        const row_end: u16 = if (y == m.ey) m.ex else pane.width - 1;
+        var x = row_start;
+        while (x <= row_end and x < pane.width) : (x += 1) {
+            const cx = pane.x + x;
+            const cy = pane.y + y;
+            if (renderer.getVaxisCell(cx, cy)) |cell| {
+                var c = cell;
+                if (current) {
+                    c.style.reverse = true;
+                } else {
+                    c.style.bg = .{ .index = 3 };
+                    c.style.fg = .{ .index = 0 };
+                }
+                renderer.setVaxisCell(cx, cy, c);
+            }
+        }
+    }
+}
 
 fn drawPaneRenderState(renderer: anytype, pane: *Pane, state: anytype, x: u16, y: u16, width: u16, height: u16, stdout: std.fs.File) void {
     const root = renderer.vx.window();
@@ -192,6 +263,11 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Draw splits into the cell buffer.
     var pane_it = state.currentLayout().splitIterator();
     while (pane_it.next()) |pane| {
+        // When a pane is zoomed, render only it (at full tab bounds) and skip
+        // the rest of the tiled layout.
+        if (state.zoomed_pane_uuid) |zu| {
+            if (!std.mem.eql(u8, &pane.*.uuid, &zu)) continue;
+        }
         const render_state = pane.*.getRenderState() catch |err| {
             core.logging.logError("terminal", "failed to get split pane render state", err);
             continue;
@@ -222,10 +298,43 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
     }
 
-    // Draw split borders when there are multiple splits.
-    if (state.currentLayout().splitCount() > 1) {
+    // Draw split borders when there are multiple splits (never while zoomed —
+    // only the zoomed pane is visible).
+    if (state.zoomed_pane_uuid == null and state.currentLayout().splitCount() > 1) {
         const content_height = state.term_height - state.status_height;
         borders.drawSplitBorders(renderer, state.currentLayout(), &state.config.splits, state.term_width, content_height);
+    }
+
+    // Copy-mode cursor: reverse-video the cell under the keyboard cursor.
+    if (state.copy_mode.active) {
+        if (state.currentLayout().getFocusedPane()) |fp| {
+            const max_x: u16 = if (fp.width > 0) fp.width - 1 else 0;
+            const max_y: u16 = if (fp.height > 0) fp.height - 1 else 0;
+            const cx = fp.x + @min(state.copy_mode.x, max_x);
+            const cy = fp.y + @min(state.copy_mode.y, max_y);
+            if (renderer.getVaxisCell(cx, cy)) |cell| {
+                var c = cell;
+                c.style.reverse = true;
+                renderer.setVaxisCell(cx, cy, c);
+            }
+        }
+    }
+
+    // Scrollback search (PLAN 3.3): reverse-video the current match in the
+    // focused pane (drawn above), then a vim-style `/query [i/N]` bar on the
+    // bottom row.
+    if (state.search_mode.active) {
+        if (state.currentLayout().getFocusedPane()) |fp| {
+            // All on-screen matches get a yellow tint; the current one is drawn
+            // last with reverse-video so it stands out.
+            for (state.search_mode.visible[0..state.search_mode.visible_count]) |m| {
+                highlightSearchMatch(renderer, fp, m, false);
+            }
+            if (state.search_mode.currentMatchViewport(fp)) |m| {
+                highlightSearchMatch(renderer, fp, m, true);
+            }
+        }
+        renderSearchPrompt(state, renderer);
     }
 
     const now_ms: u64 = @intCast(std.time.milliTimestamp());

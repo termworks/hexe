@@ -37,16 +37,12 @@ inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
     core.logging.debugWithSource("pod", fmt, args, @src());
 }
 
-fn setBlocking(fd: posix.fd_t) void {
-    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| {
-        debugLog("setBlocking: fcntl GETFL failed for fd={d}: {s}", .{ fd, @errorName(err) });
-        return;
-    };
-    const new_flags: usize = flags & ~@as(usize, @intCast(c.O_NONBLOCK));
-    _ = posix.fcntl(fd, posix.F.SETFL, new_flags) catch |err| {
-        debugLog("setBlocking: fcntl SETFL failed for fd={d}: {s}", .{ fd, @errorName(err) });
-    };
-}
+/// Stall budget for writes to the SES VT uplink. The uplink fd is
+/// non-blocking: a SES that stops draining (stopped, swapping, wedged) makes
+/// a blocking write freeze this pod's event loop — and the user's shell —
+/// forever. Output is appended to the backlog ring BEFORE the uplink write,
+/// so on timeout the connection is dropped and SES heals via backlog replay.
+const CLIENT_WRITE_TIMEOUT_MS: i32 = 2_000;
 
 fn setNonBlocking(fd: posix.fd_t) void {
     const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| {
@@ -239,10 +235,22 @@ fn writePodMetaSidecar(
     const line = try meta.formatMetaLine(allocator);
     defer allocator.free(line);
 
-    var f = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o600 });
-    defer f.close();
-    try f.writeAll(line);
-    try f.writeAll("\n");
+    // Write to a temp file then atomically rename into place. Truncating the
+    // real path in place let a discovery scan (`hexe pod ls`) read an empty or
+    // half-written file and drop this pane from listings; rename is atomic on
+    // the same filesystem, so readers only ever see the old or the new file.
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+    defer allocator.free(tmp_path);
+
+    {
+        var f = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true, .mode = 0o600 });
+        errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+        defer f.close();
+        try f.writeAll(line);
+        try f.writeAll("\n");
+    }
+    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+    try std.fs.cwd().rename(tmp_path, path);
 }
 
 fn detectShell(child_pid: posix.pid_t) ?[]const u8 {
@@ -635,6 +643,8 @@ const Pod = struct {
         opts: RunOptions,
         ticker: xev.Timer,
         last_meta_ms: i64 = 0,
+        last_meta_cwd_hash: ?u64 = null,
+        last_meta_write_ms: i64 = 0,
     };
 
     fn acceptCallback(
@@ -755,10 +765,18 @@ const Pod = struct {
         }
 
         const n = posix.read(slot.fd, client_ctx.io_buf) catch |err| switch (err) {
-            error.WouldBlock => 0,
+            // Spurious wakeup with no data — this is not EOF; keep watching.
+            error.WouldBlock => return .rearm,
             else => {
-                debugLog("clientCallback: read error on fd={d}: {s}", .{ slot.fd, @errorName(err) });
-                client_ctx.callback_error.* = err;
+                // An abnormal error on the SES link (e.g. ECONNRESET on a
+                // crashed daemon) must not take down the pod — that would
+                // kill the user's shell and defeat SES-restart survival.
+                // Drop the client exactly like EOF and keep buffering into
+                // the ring so a restarted SES can reattach.
+                debugLog("clientCallback: read error on fd={d}, dropping client: {s}", .{ slot.fd, @errorName(err) });
+                if (client_ctx.pod.client) |*conn| conn.close();
+                client_ctx.pod.client = null;
+                client_ctx.watched_fd = null;
                 return .disarm;
             },
         };
@@ -811,7 +829,10 @@ const Pod = struct {
 
             const read_buf = pty_ctx.io_buf[0..@min(pty_ctx.io_buf.len, free)];
             const n = pty_ctx.pod.pty.read(read_buf) catch |err| switch (err) {
-                error.WouldBlock => 0,
+                // Spurious poll wakeup with nothing to read. This must never
+                // be conflated with child exit (n == 0): the PTY master is
+                // non-blocking, and treating EAGAIN as EOF kills a live shell.
+                error.WouldBlock => return .rearm,
                 // PTY masters commonly report EIO once the child side is gone.
                 // Treat that as clean end-of-stream so the pod can keep the
                 // socket alive briefly and SES can still attach/read backlog.
@@ -842,7 +863,8 @@ const Pod = struct {
         }
 
         const n = pty_ctx.pod.pty.read(pty_ctx.io_buf) catch |err| switch (err) {
-            error.WouldBlock => 0,
+            // See above: EAGAIN is a spurious wakeup, never child exit.
+            error.WouldBlock => return .rearm,
             error.InputOutput => 0,
             else => {
                 pty_ctx.callback_error.* = err;
@@ -965,25 +987,38 @@ const Pod = struct {
             return .disarm;
         };
 
-        timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid);
+        const uplink_attached = timer_ctx.pod.client != null or timer_ctx.pod.observers.items.len > 0;
+        timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid, uplink_attached);
 
         if (timer_ctx.opts.write_meta) {
             const now_ms: i64 = std.time.milliTimestamp();
             if (now_ms - timer_ctx.last_meta_ms >= 1000) {
-                const live_cwd = timer_ctx.pod.lastOsc7Cwd();
-                writePodMetaSidecar(
-                    timer_ctx.pod.allocator,
-                    timer_ctx.pod.uuid[0..],
-                    timer_ctx.opts.name,
-                    live_cwd,
-                    timer_ctx.opts.labels,
-                    @intCast(c.getpid()),
-                    timer_ctx.pod.pty.child_pid,
-                    timer_ctx.opts.created_at,
-                ) catch |err| {
-                    debugLog("timerCallback: writePodMetaSidecar failed: {s}", .{@errorName(err)});
-                };
                 timer_ctx.last_meta_ms = now_ms;
+                const live_cwd = timer_ctx.pod.lastOsc7Cwd();
+                // Only the cwd is live in the sidecar; skip the disk write
+                // when it hasn't changed since the last successful write.
+                // Still rewrite every 5 minutes regardless: sidecars can live
+                // in /tmp where tmpfiles cleaners reap by mtime, and a forced
+                // rewrite also recreates an externally deleted file.
+                const cwd_hash = std.hash.Wyhash.hash(0, live_cwd orelse "");
+                const keepalive_due = now_ms - timer_ctx.last_meta_write_ms >= 5 * std.time.ms_per_min;
+                if (timer_ctx.last_meta_cwd_hash == null or timer_ctx.last_meta_cwd_hash.? != cwd_hash or keepalive_due) {
+                    if (writePodMetaSidecar(
+                        timer_ctx.pod.allocator,
+                        timer_ctx.pod.uuid[0..],
+                        timer_ctx.opts.name,
+                        live_cwd,
+                        timer_ctx.opts.labels,
+                        @intCast(c.getpid()),
+                        timer_ctx.pod.pty.child_pid,
+                        timer_ctx.opts.created_at,
+                    )) |_| {
+                        timer_ctx.last_meta_cwd_hash = cwd_hash;
+                        timer_ctx.last_meta_write_ms = now_ms;
+                    } else |err| {
+                        debugLog("timerCallback: writePodMetaSidecar failed: {s}", .{@errorName(err)});
+                    }
+                }
             }
         }
 
@@ -1039,7 +1074,14 @@ const Pod = struct {
 
     fn acceptObserver(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
         var obs_conn = conn;
-        setBlocking(conn.fd);
+        // Observers are secondary/diagnostic clients. Keep their fd
+        // non-blocking so a stalled observer that stops draining returns
+        // EAGAIN on write instead of blocking the PTY hot path forever; the
+        // write-failure paths below (and broadcastToObservers) then drop it.
+        // The main VT client fd is ALSO non-blocking now (acceptVtClient) with
+        // bounded writeFrameBounded writes; output survives in the backlog
+        // ring and replays on reconnect.
+        setNonBlocking(conn.fd);
 
         // Replay current backlog to new observer unless password mode is
         // active; password-mode output is live-only and never recorded.
@@ -1063,7 +1105,12 @@ const Pod = struct {
         self.observers.append(obs_conn) catch {
             var tmp = obs_conn;
             tmp.close();
+            return;
         };
+
+        // Refresh cwd/fg info right away — detached polling is slow.
+        self.uplink.forceRefresh();
+        self.uplink.tick(self.pty.child_pid, true);
     }
 
     fn broadcastToObservers(self: *Pod, data: []const u8) void {
@@ -1086,7 +1133,7 @@ const Pod = struct {
             self.backlog.append(data);
         }
         if (self.client) |*client| {
-            pod_protocol.writeFrame(client, .output, data) catch {
+            pod_protocol.writeFrameBounded(client, .output, data, CLIENT_WRITE_TIMEOUT_MS) catch {
                 debugLog("processPtyOutput: writeFrame FAILED, closing client fd={d}", .{client.fd});
                 client.close();
                 self.client = null;
@@ -1139,7 +1186,10 @@ const Pod = struct {
         // Replace existing client if any.
         if (self.client) |*old| old.close();
 
-        setBlocking(conn.fd);
+        // Non-blocking: writes go through writeFrameBounded so a wedged SES
+        // costs at most CLIENT_WRITE_TIMEOUT_MS before the drop-and-replay
+        // path takes over, instead of freezing the pod (and shell) forever.
+        setNonBlocking(conn.fd);
         self.client = conn;
 
         // Send acknowledgment so client knows we're ready.
@@ -1159,7 +1209,7 @@ const Pod = struct {
         var off: usize = 0;
         while (off < n) {
             const chunk = @min(@as(usize, 16 * 1024), n - off);
-            pod_protocol.writeFrame(&self.client.?, .output, backlog_tmp[off .. off + chunk]) catch |err| {
+            pod_protocol.writeFrameBounded(&self.client.?, .output, backlog_tmp[off .. off + chunk], CLIENT_WRITE_TIMEOUT_MS) catch |err| {
                 debugLog("acceptVtClient: backlog replay failed at offset={d}: {s}", .{ off, @errorName(err) });
                 if (self.client) |*current| current.close();
                 self.client = null;
@@ -1167,12 +1217,17 @@ const Pod = struct {
             };
             off += chunk;
         }
-        pod_protocol.writeFrame(&self.client.?, .backlog_end, &[_]u8{}) catch |err| {
+        pod_protocol.writeFrameBounded(&self.client.?, .backlog_end, &[_]u8{}, CLIENT_WRITE_TIMEOUT_MS) catch |err| {
             debugLog("acceptVtClient: backlog_end write failed: {s}", .{@errorName(err)});
             if (self.client) |*current| current.close();
             self.client = null;
             return;
         };
+
+        // Refresh cwd/fg info right away — detached polling is slow, so the
+        // session authority may hold values up to one slow tick stale.
+        self.uplink.forceRefresh();
+        self.uplink.tick(self.pty.child_pid, true);
 
         // Keep backlog after replay so repeated detach/reattach cycles can
         // still restore scrollback for panes that stayed idle between
@@ -1202,7 +1257,7 @@ const Pod = struct {
         }
 
         // Read the fixed struct.
-        const evt = wire.readStruct(wire.ShpShellEvent, conn.fd) catch {
+        const evt = wire.readStructTimeout(wire.ShpShellEvent, conn.fd, POD_CTL_IO_TIMEOUT_MS) catch {
             var tmp = conn;
             tmp.close();
             return;
@@ -1217,7 +1272,7 @@ const Pod = struct {
             return;
         }
         if (trail_len > 0) {
-            wire.readExact(conn.fd, trail_buf[0..trail_len]) catch {
+            wire.readExactTimeout(conn.fd, trail_buf[0..trail_len], POD_CTL_IO_TIMEOUT_MS) catch {
                 var tmp = conn;
                 tmp.close();
                 return;
@@ -1230,7 +1285,7 @@ const Pod = struct {
         // Forward as binary shell_event on the POD uplink (channel ④).
         if (!self.uplink.ensureConnected()) return;
         const uplink_fd = self.uplink.fd orelse return;
-        wire.writeControlWithTrail(uplink_fd, .shell_event, std.mem.asBytes(&evt), trail_buf[0..trail_len]) catch {
+        wire.writeControlWithTrailTimeout(uplink_fd, .shell_event, std.mem.asBytes(&evt), trail_buf[0..trail_len], CLIENT_WRITE_TIMEOUT_MS) catch {
             self.uplink.disconnect();
         };
     }

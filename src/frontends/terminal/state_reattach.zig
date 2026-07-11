@@ -18,6 +18,29 @@ const SessionFloat = session_model.SessionFloat;
 const AdoptInfo = struct { pane_id: u16 };
 const ExistingPaneViews = std.AutoHashMap([32]u8, *Pane);
 
+/// Adopt a pane with a bounded retry. A reattach that loses this race drops
+/// the pane from the rebuilt layout permanently: it lingers unowned in SES
+/// until the orphan sweep kills it, which the user experiences as "reattach
+/// sometimes loses panes". Transient transport failures (an interleaved push
+/// confusing a sync reader, a briefly saturated daemon) deserve another
+/// attempt; a definitive refusal (SES error: pane gone or owned by another
+/// live client) or a dead connection does not.
+fn adoptPaneWithRetry(self: anytype, uuid: [32]u8) !core.FrontendRuntime.PaneAttachResult {
+    var attempt: usize = 1;
+    while (true) : (attempt += 1) {
+        return self.runtime.adoptPane(uuid) catch |err| {
+            switch (err) {
+                error.SesError, error.NotConnected => return err,
+                else => {},
+            }
+            if (attempt >= 3) return err;
+            terminal_main.debugLogUuid(&uuid, "adoptPaneWithRetry: attempt {d} failed: {s}; retrying", .{ attempt, @errorName(err) });
+            std.Thread.sleep(50 * std.time.ns_per_ms);
+            continue;
+        };
+    }
+}
+
 fn applyDeferredPaneExits(self: anytype) void {
     var pending: std.ArrayList([32]u8) = .empty;
     defer pending.deinit(self.allocator);
@@ -276,7 +299,7 @@ fn ensureAdoptInfo(
             }
         }
     }
-    if (self.runtime.adoptPane(uuid)) |adopt_res| {
+    if (adoptPaneWithRetry(self, uuid)) |adopt_res| {
         const info = AdoptInfo{ .pane_id = adopt_res.pane_id };
         uuid_pane_map.put(uuid, info) catch |err| {
             terminal_main.debugLog("ensureAdoptInfo: failed to cache adopted pane uuid={s}: {s}", .{ uuid[0..8], @errorName(err) });
@@ -578,35 +601,11 @@ fn restoreFloatPane(
     return pane;
 }
 
-fn countSessionLayoutPanes(node: ?*const SessionLayoutNode) usize {
-    const root = node orelse return 0;
-    return switch (root.*) {
-        .pane => 1,
-        .split => |split| countSessionLayoutPanes(split.first) + countSessionLayoutPanes(split.second),
-    };
-}
+const countSessionLayoutPanes = @import("reattach_reconcile.zig").countSessionLayoutPanes;
 
-fn layoutMatchesSnapshot(layout: *const layout_mod.Layout, node: ?*const LayoutNode, snapshot_node: ?*const SessionLayoutNode) bool {
-    const live = node orelse return snapshot_node == null;
-    const expected = snapshot_node orelse {
-        core.logging.warn("terminal", "reattach incremental snapshot check failed: live layout has extra node", .{});
-        return false;
-    };
-
-    return switch (live.*) {
-        .pane => |pane_uuid| switch (expected.*) {
-            .pane => |expected_uuid| std.mem.eql(u8, &pane_uuid, &expected_uuid),
-            .split => false,
-        },
-        .split => |split| switch (expected.*) {
-            .pane => false,
-            .split => |expected_split| split.dir == @as(layout_mod.SplitDir, if (expected_split.dir == .horizontal) .horizontal else .vertical) and
-                std.math.approxEqAbs(f32, split.ratio, expected_split.ratio, 0.0001) and
-                layoutMatchesSnapshot(layout, split.first, expected_split.first) and
-                layoutMatchesSnapshot(layout, split.second, expected_split.second),
-        },
-    };
-}
+// Pure snapshot→view structural comparison lives in `reattach_reconcile` so it
+// can be characterized in isolation (PLAN 1.8).
+const layoutMatchesSnapshot = @import("reattach_reconcile.zig").layoutMatchesSnapshot;
 
 fn hasLocalFloatView(self: anytype, pane_uuid: [32]u8) bool {
     for (self.view.float_views.items) |pane| {
@@ -660,7 +659,7 @@ fn canApplySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot
 
         const live_tab = &self.view.tab_views.items[idx];
         if (live_tab.layout.splits.count() != countSessionLayoutPanes(snapshot_tab.root)) return false;
-        if (!layoutMatchesSnapshot(&live_tab.layout, live_tab.layout.root, snapshot_tab.root)) return false;
+        if (!layoutMatchesSnapshot(live_tab.layout.root, snapshot_tab.root)) return false;
     }
 
     return true;
@@ -782,6 +781,10 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
 pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     terminal_main.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
 
+    // Reattach rebuilds panes (freeing their screens); tear down any active
+    // scrollback search first so it can't hold a dangling screen (PLAN 3.3).
+    if (self.isSearchActive()) self.exitSearchMode();
+
     // Set flag to prevent SIGHUP from interrupting reattach
     self.runtime.beginReattach();
     defer self.runtime.endReattach();
@@ -861,7 +864,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             continue;
         }
 
-        const adopt_result = self.runtime.adoptPane(uuid) catch |e| {
+        const adopt_result = adoptPaneWithRetry(self, uuid) catch |e| {
             terminal_main.debugLog("reattachSession: adoptPane failed for uuid={s}: {s}", .{ uuid[0..8], @errorName(e) });
             failed_adoptions += 1;
             continue;
@@ -1110,13 +1113,10 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         terminal_main.debugLog("reattachSession: completeReattach FAILED: {s}", .{@errorName(e)});
     }
 
-    // Snapshot restore is only the session's last known view. Per-CWD sticky
-    // floats are stronger than that: they are global process identities keyed
-    // by cwd+key. Another session can touch/steal them and make them disappear
-    // from this session snapshot, so reconcile the restored view against all
-    // CWDs present in the restored panes before the user toggles a missing key
-    // and accidentally spawns a duplicate.
-    self.adoptStickyPanes();
+    // Do not run broad sticky reconciliation during explicit reattach. Attach
+    // must restore exactly the detached session snapshot: every remembered
+    // sticky/per-CWD float is restored above by UUID, while unrelated free
+    // sticky panes in the same CWD must not be pulled into this session.
 
     // Sync-phase reads can consume async pane_exited messages before the IPC
     // loop starts. Apply those exits now so dead panes/floats are not kept
@@ -1316,7 +1316,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             defer if (node_needs_cleanup) self.allocator.destroy(node);
 
             // Found matching pane, adopt it only after local prerequisites are ready.
-            const result = self.runtime.adoptPane(p.uuid) catch |err| {
+            const result = adoptPaneWithRetry(self, p.uuid) catch |err| {
                 terminal_main.debugLogUuid(&p.uuid, "attachOrphanedPane adoptPane failed: {s}", .{@errorName(err)});
                 return false;
             };

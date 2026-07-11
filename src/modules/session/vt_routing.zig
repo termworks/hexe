@@ -6,7 +6,12 @@ const ses = @import("main.zig");
 const polling_mod = @import("polling.zig");
 const store_mod = @import("store.zig");
 
-const POD_VT_ACK_TIMEOUT_MS: i32 = 100;
+const POD_VT_ACK_TIMEOUT_MS: i32 = 1000;
+
+// Dialed fds must be non-blocking: every wire timeout only engages on
+// error.WouldBlock, so a blocking pod VT fd turns a wedged pod into an
+// indefinitely blocked SES event loop (every session frozen at once). Shared
+// helper: core.ipc.setNonBlocking.
 
 /// Connect the VT data channel to a POD socket.
 /// On success, stores the fd in the pane and populates routing tables.
@@ -23,6 +28,12 @@ pub fn connectPodVt(
         return false;
     };
     const fd = client.fd;
+
+    core.ipc.setNonBlocking(fd) catch |err| {
+        core.logging.logError("ses", "failed to set POD VT fd nonblocking", err);
+        posix.close(fd);
+        return false;
+    };
 
     wire.sendHandshake(fd, wire.POD_HANDSHAKE_SES_VT) catch {
         posix.close(fd);
@@ -50,6 +61,7 @@ pub fn connectPodVt(
         polling.pending_remove_poll_fds.append(allocator, old_fd) catch |err| {
             core.logging.logError("ses", "failed to queue old POD VT fd removal", err);
         };
+        store.noteClosedFd(old_fd);
         posix.close(old_fd);
     }
     pane.pod_vt_fd = fd;
@@ -66,6 +78,11 @@ pub fn connectPodVt(
         pane.pod_vt_fd = null;
         posix.close(fd);
         return false;
+    };
+    // Best-effort fast-path index for pod→mux output routing; lookups
+    // validate against the pane and fall back to a scan on a miss.
+    store.pane_id_to_uuid.put(pane_id, uuid) catch |err| {
+        core.logging.logError("ses", "failed to index pane id to uuid", err);
     };
 
     polling.pending_poll_fds.append(allocator, fd) catch |err| {

@@ -70,7 +70,8 @@ test "WebHost advertises browser capabilities without terminal dependencies" {
 
     try std.testing.expectEqual(@as(@TypeOf(caps.frontend_kind), .web), caps.frontend_kind);
     try std.testing.expect(caps.cell_render);
-    try std.testing.expect(caps.pixel_render);
+    // No pixel renderer exists yet — not advertised (honesty, PLAN 3.2).
+    try std.testing.expect(!caps.pixel_render);
     try std.testing.expect(caps.mouse);
     try std.testing.expect(caps.clipboard);
     try std.testing.expect(caps.reconnect);

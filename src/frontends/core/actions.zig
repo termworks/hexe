@@ -23,6 +23,12 @@ pub const HostSurfaceAction = enum {
     system_notify,
     keycast_toggle,
     sprite_toggle,
+    sync_toggle,
+    tab_rename,
+    pane_zoom,
+    config_reload,
+    copy_enter,
+    search_enter,
 };
 
 /// Frontend-neutral action request distilled from a config keybinding.
@@ -153,6 +159,12 @@ pub fn actionRequestFromBindAction(action: BindAction) ActionRequest {
         .system_notify => .{ .host_surface = .system_notify },
         .keycast_toggle => .{ .host_surface = .keycast_toggle },
         .sprite_toggle => .{ .host_surface = .sprite_toggle },
+        .sync_toggle => .{ .host_surface = .sync_toggle },
+        .tab_rename => .{ .host_surface = .tab_rename },
+        .pane_zoom => .{ .host_surface = .pane_zoom },
+        .config_reload => .{ .host_surface = .config_reload },
+        .copy_enter => .{ .host_surface = .copy_enter },
+        .search_enter => .{ .host_surface = .search_enter },
         .split_h => .split_h,
         .split_v => .split_v,
         .split_resize => |dir| if (directionFromBindKeyKind(dir)) |value|
@@ -351,7 +363,7 @@ test "directionFromBindKeyKind normalizes cardinal directions" {
 
 test "directionFromBindKeyKind rejects non-direction keys" {
     try std.testing.expect(directionFromBindKeyKind(.space) == null);
-    try std.testing.expect(directionFromBindKeyKind(.{ .char = 'x' }) == null);
+    try std.testing.expect(directionFromBindKeyKind(.char) == null);
 }
 
 test "actionRequestFromBindAction preserves payloads" {
@@ -367,6 +379,30 @@ test "actionRequestFromBindAction categorizes host-surface actions" {
     try std.testing.expectEqual(
         HostSurfaceAction.system_notify,
         actionRequestFromBindAction(.system_notify).host_surface,
+    );
+    try std.testing.expectEqual(
+        HostSurfaceAction.sync_toggle,
+        actionRequestFromBindAction(.sync_toggle).host_surface,
+    );
+    try std.testing.expectEqual(
+        HostSurfaceAction.tab_rename,
+        actionRequestFromBindAction(.tab_rename).host_surface,
+    );
+    try std.testing.expectEqual(
+        HostSurfaceAction.pane_zoom,
+        actionRequestFromBindAction(.pane_zoom).host_surface,
+    );
+    try std.testing.expectEqual(
+        HostSurfaceAction.config_reload,
+        actionRequestFromBindAction(.config_reload).host_surface,
+    );
+    try std.testing.expectEqual(
+        HostSurfaceAction.copy_enter,
+        actionRequestFromBindAction(.copy_enter).host_surface,
+    );
+    try std.testing.expectEqual(
+        HostSurfaceAction.search_enter,
+        actionRequestFromBindAction(.search_enter).host_surface,
     );
 }
 
@@ -394,7 +430,10 @@ test "applyViewAction handles pure tab navigation in shared view" {
     try std.testing.expectEqual(ActionApplyResult.ignored, try applyViewAction(&view, .tab_next));
     try std.testing.expectEqual(ActionApplyResult.applied, try applyViewAction(&view, .tab_prev));
     try std.testing.expectEqual(@as(usize, 0), view.active_tab);
-    try std.testing.expectEqual(ActionApplyResult.unsupported, try applyViewAction(&view, .pane_close));
+    // pane_close now has a handler arm; without a remove_pane_uuid context it
+    // is understood-but-not-actionable, i.e. `.ignored` (it used to be
+    // `.unsupported` when the action had no arm at all).
+    try std.testing.expectEqual(ActionApplyResult.ignored, try applyViewAction(&view, .pane_close));
 }
 
 test "applyViewAction closes the active tab in shared view" {

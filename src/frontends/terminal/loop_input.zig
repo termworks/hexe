@@ -376,12 +376,49 @@ fn runLayoutOpenDetached(state: *State) void {
 }
 
 fn replaceFromLocalLayout(state: *State) void {
-    var cfg = core.session_config.parseSessionLua(state.allocator, ".hexe.lua") catch {
+    // Single-execution parse: the old canonical-then-legacy fallback ran the
+    // .hexe.lua file twice, so its Lua side effects fired twice.
+    const parsed = core.session_config.parseSessionLuaOnce(state.allocator, ".hexe.lua") catch {
         state.notifications.showFor("failed to parse .hexe.lua", 1500);
         return;
     };
-    defer cfg.deinit(state.allocator);
+    switch (parsed) {
+        .layout => |layout_value| {
+            var layout = layout_value;
+            defer layout.deinit(state.allocator);
+            applyLocalCanonicalLayout(state, &layout);
+        },
+        .legacy => |cfg_value| {
+            var cfg = cfg_value;
+            defer cfg.deinit(state.allocator);
+            applyLocalLegacyConfig(state, &cfg);
+        },
+    }
+}
 
+fn applyLocalCanonicalLayout(state: *State, layout: *core.LayoutDef) void {
+    if (state.runtime.setSessionName(layout.name)) {
+        const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
+            core.logging.logError("terminal", "replaceFromLocalLayout: failed to sync session identity", err);
+            break :blk null;
+        };
+        if (identity_change) |change| {
+            var owned_change = change;
+            defer owned_change.deinit(state.allocator);
+        }
+    }
+
+    state.replaceWithLayoutDef(layout) catch {
+        state.notifications.showFor("failed to apply local layout", 1500);
+        return;
+    };
+
+    state.notifications.showFor("local layout loaded", 1200);
+    state.needs_render = true;
+    state.force_full_render = true;
+}
+
+fn applyLocalLegacyConfig(state: *State, cfg: *core.SessionConfig) void {
     if (cfg.name) |desired_name| {
         if (state.runtime.setSessionName(desired_name)) {
             const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
@@ -395,7 +432,7 @@ fn replaceFromLocalLayout(state: *State) void {
         }
     }
 
-    state.replaceWithSessionConfig(cfg, null) catch {
+    state.replaceWithSessionConfig(cfg.*, null) catch {
         state.notifications.showFor("failed to apply local layout", 1500);
         return;
     };
@@ -568,6 +605,132 @@ fn appendFloatRenameText(state: *State, text: []const u8) void {
         return;
     };
     state.needs_render = true;
+}
+
+fn handleCopyModeParsedEvent(state: *State, parsed: ParsedEventHead) bool {
+    if (!state.isCopyModeActive()) return false;
+    const event = parsed.event orelse return true;
+    return switch (event) {
+        .mouse => false,
+        .key_release => true,
+        .key_press => |k| blk: {
+            switch (k.codepoint) {
+                vaxis.Key.escape, 'q' => state.exitCopyMode(),
+                vaxis.Key.enter, 'y' => state.copyYank(),
+                vaxis.Key.left, 'h' => state.copyMove(-1, 0),
+                vaxis.Key.right, 'l' => state.copyMove(1, 0),
+                vaxis.Key.up, 'k' => state.copyMove(0, -1),
+                vaxis.Key.down, 'j' => state.copyMove(0, 1),
+                'v', ' ' => state.copyToggleSelect(),
+                else => {},
+            }
+            // Swallow every key while copy-mode is active.
+            break :blk true;
+        },
+        else => true,
+    };
+}
+
+fn handleTabRenameParsedEvent(state: *State, parsed: ParsedEventHead) bool {
+    if (!state.isTabRenameActive()) return false;
+
+    const event = parsed.event orelse return true;
+    return switch (event) {
+        .mouse => false,
+        .paste => |txt| blk: {
+            defer state.allocator.free(txt);
+            state.appendTabRenameText(txt);
+            break :blk true;
+        },
+        .key_release => true,
+        .key_press => |k| blk: {
+            switch (k.codepoint) {
+                vaxis.Key.escape => {
+                    state.cancelTabRename();
+                    break :blk true;
+                },
+                vaxis.Key.enter => {
+                    state.commitTabRename();
+                    break :blk true;
+                },
+                vaxis.Key.backspace => {
+                    state.backspaceTabRename();
+                    break :blk true;
+                },
+                else => {},
+            }
+
+            if (k.text) |txt| {
+                state.appendTabRenameText(txt);
+                break :blk true;
+            }
+
+            const cp = k.base_layout_codepoint orelse k.codepoint;
+            if (cp >= 32 and cp < 127) {
+                const b: u8 = @intCast(cp);
+                state.appendTabRenameText(&.{b});
+            }
+            break :blk true;
+        },
+        else => true,
+    };
+}
+
+fn handleSearchModeParsedEvent(state: *State, parsed: ParsedEventHead) bool {
+    if (!state.isSearchActive()) return false;
+
+    const event = parsed.event orelse return true;
+    return switch (event) {
+        .mouse => false,
+        .paste => |txt| blk: {
+            defer state.allocator.free(txt);
+            if (state.search_mode.phase == .typing) state.searchAppend(txt);
+            break :blk true;
+        },
+        .key_release => true,
+        .key_press => |k| blk: {
+            // After the query is run, keys navigate matches instead of editing.
+            if (state.search_mode.phase == .results) {
+                switch (k.codepoint) {
+                    vaxis.Key.escape, 'q' => state.exitSearchMode(),
+                    'n', vaxis.Key.enter => state.searchNext(),
+                    'N', 'p' => state.searchPrev(),
+                    else => {},
+                }
+                break :blk true;
+            }
+
+            // Typing phase: edit the query.
+            switch (k.codepoint) {
+                vaxis.Key.escape => {
+                    state.exitSearchMode();
+                    break :blk true;
+                },
+                vaxis.Key.enter => {
+                    state.searchRun();
+                    break :blk true;
+                },
+                vaxis.Key.backspace => {
+                    state.searchBackspace();
+                    break :blk true;
+                },
+                else => {},
+            }
+
+            if (k.text) |txt| {
+                state.searchAppend(txt);
+                break :blk true;
+            }
+
+            const cp = k.base_layout_codepoint orelse k.codepoint;
+            if (cp >= 32 and cp < 127) {
+                const b: u8 = @intCast(cp);
+                state.searchAppend(&.{b});
+            }
+            break :blk true;
+        },
+        else => true,
+    };
 }
 
 fn handleFloatRenameParsedEvent(state: *State, parsed: ParsedEventHead) bool {
@@ -779,6 +942,21 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
         const parsed = firstOrParseAt(state, inp, i, first_parsed);
         if (parsed) |res| {
             if (handleFloatRenameParsedEvent(state, res)) {
+                i += res.n;
+                continue;
+            }
+
+            if (handleTabRenameParsedEvent(state, res)) {
+                i += res.n;
+                continue;
+            }
+
+            if (handleCopyModeParsedEvent(state, res)) {
+                i += res.n;
+                continue;
+            }
+
+            if (handleSearchModeParsedEvent(state, res)) {
                 i += res.n;
                 continue;
             }

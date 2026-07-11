@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const ses = @import("main.zig");
 const store_mod = @import("store.zig");
+const sticky_panes = @import("sticky_panes.zig");
 
 pub const Pane = store_mod.Pane;
 
@@ -37,6 +38,20 @@ pub fn cleanupOrphanedPanes(self: anytype) void {
         if (pane.state == .orphaned or pane.state == .sticky) {
             if (pane.orphaned_at) |orphaned_time| {
                 if (now - orphaned_time > timeout_secs) {
+                    // Keyed sticky floats are permanent identities (pwd+key)
+                    // the user reclaims by keypress; they must never be
+                    // reaped on a timer while their pod is still alive. The
+                    // /proc liveness probe runs only here, after the timeout
+                    // check, so the 1s sweep does no I/O for healthy panes.
+                    if (pane.sticky_key != null and pane.sticky_pwd != null and
+                        sticky_panes.isPidAlive(pane.pod_pid) and
+                        sticky_panes.podPidMatchesPane(pane.pod_pid, pane.uuid))
+                    {
+                        // A live pid alone is not enough: after pid reuse the
+                        // pid may belong to an unrelated process, and the
+                        // ghost pane would be exempted forever.
+                        continue;
+                    }
                     to_remove.append(self.allocator, entry.key_ptr.*) catch |err| {
                         core.logging.logError("ses", "failed to collect timed-out orphan pane", err);
                         continue;
@@ -100,7 +115,7 @@ pub fn cleanupDetachedSessions(self: anytype) void {
 
         for (session.pane_uuids) |pane_uuid| {
             if (self.store.panes.get(pane_uuid)) |pane| {
-                if (std.c.kill(pane.pod_pid, 0) == 0) {
+                if (sticky_panes.isPidAlive(pane.pod_pid)) {
                     has_live_panes = true;
                     break;
                 }
@@ -116,33 +131,31 @@ pub fn cleanupDetachedSessions(self: anytype) void {
         }
     }
 
-    var name_to_newest = std.StringHashMap(struct { session_id: [16]u8, detached_at: i64 }).init(self.allocator);
+    // Name dedupe must never destroy a session that still has live panes:
+    // killing user processes to resolve a name collision is worse than the
+    // collision. Sessions with no live panes were already collected above, so
+    // only index the survivors and log remaining duplicates.
+    var dead_ids = std.AutoHashMap([16]u8, void).init(self.allocator);
+    defer dead_ids.deinit();
+    for (to_remove.items) |dead_id| {
+        dead_ids.put(dead_id, {}) catch |err| {
+            core.logging.logError("ses", "failed to index dead detached session", err);
+        };
+    }
+
+    var name_to_newest = std.StringHashMap([16]u8).init(self.allocator);
     defer name_to_newest.deinit();
 
     iter = self.store.detached_sessions.iterator();
     while (iter.next()) |entry| {
+        if (dead_ids.contains(entry.key_ptr.*)) continue;
         const session = entry.value_ptr;
         const name = session.session_snapshot.session_name;
 
-        if (name_to_newest.get(name)) |existing| {
-            if (session.detached_at > existing.detached_at) {
-                to_remove.append(self.allocator, existing.session_id) catch |err| {
-                    core.logging.logError("ses", "failed to collect older duplicate detached session", err);
-                    continue;
-                };
-                name_to_newest.put(name, .{ .session_id = entry.key_ptr.*, .detached_at = session.detached_at }) catch |err| {
-                    core.logging.logError("ses", "failed to update detached session duplicate index", err);
-                    continue;
-                };
-            } else {
-                to_remove.append(self.allocator, entry.key_ptr.*) catch |err| {
-                    core.logging.logError("ses", "failed to collect older duplicate detached session", err);
-                    continue;
-                };
-            }
-            ses.debugLog("cleanup: removing older duplicate session '{s}'", .{name});
+        if (name_to_newest.get(name)) |_| {
+            core.logging.warn("ses", "duplicate live detached sessions named '{s}'; keeping both", .{name});
         } else {
-            name_to_newest.put(name, .{ .session_id = entry.key_ptr.*, .detached_at = session.detached_at }) catch |err| {
+            name_to_newest.put(name, entry.key_ptr.*) catch |err| {
                 core.logging.logError("ses", "failed to index detached session by name", err);
                 continue;
             };

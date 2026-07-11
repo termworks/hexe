@@ -6,6 +6,26 @@ pub const SessionSplitDir = enum {
     vertical,
 };
 
+/// Canonical split-direction rule shared by every parser (Lua config, session
+/// snapshot JSON, layout templates, terminal apply). Accepts both the short
+/// ("v"/"h") and long ("vertical"/"horizontal") forms; anything else — including
+/// malformed input — is horizontal. Previously each site rolled its own check
+/// and they disagreed (some defaulted to vertical and rejected the short form,
+/// so `dir="h"` decoded as vertical in snapshot JSON), flipping a layout's
+/// orientation depending on which component parsed it.
+pub fn isVerticalSplitDir(s: []const u8) bool {
+    return std.mem.eql(u8, s, "v") or std.mem.eql(u8, s, "vertical");
+}
+
+test "isVerticalSplitDir accepts short and long forms with a horizontal default" {
+    try std.testing.expect(isVerticalSplitDir("v"));
+    try std.testing.expect(isVerticalSplitDir("vertical"));
+    try std.testing.expect(!isVerticalSplitDir("h"));
+    try std.testing.expect(!isVerticalSplitDir("horizontal"));
+    try std.testing.expect(!isVerticalSplitDir("")); // malformed -> horizontal
+    try std.testing.expect(!isVerticalSplitDir("nonsense"));
+}
+
 pub const SessionPaneKind = enum {
     split,
     float,
@@ -604,7 +624,7 @@ fn fromMuxRoot(allocator: std.mem.Allocator, root: std.json.ObjectMap) !SessionS
             .pane_uuid = pane_uuid,
             .parent_tab = if (parent_tab_int) |idx| @intCast(idx) else null,
             .visible = boolField(float_obj, "visible") orelse true,
-            .tab_visible = if (intField(float_obj, "tab_visible")) |mask| @intCast(mask) else 0,
+            .tab_visible = u64Field(float_obj, "tab_visible") orelse 0,
             .sticky = boolField(float_obj, "sticky") orelse false,
             .is_pwd = boolField(float_obj, "is_pwd") orelse false,
             .float_key = if (intField(float_obj, "float_key")) |key| @intCast(key) else 0,
@@ -722,7 +742,7 @@ fn fromCanonicalRoot(allocator: std.mem.Allocator, root: std.json.ObjectMap) !Se
             .pane_uuid = try parseUuid(stringField(float_obj, "pane_uuid") orelse return error.InvalidStateJson),
             .parent_tab = intField(float_obj, "parent_tab"),
             .visible = boolField(float_obj, "visible") orelse true,
-            .tab_visible = if (intField(float_obj, "tab_visible")) |mask| @intCast(mask) else 0,
+            .tab_visible = u64Field(float_obj, "tab_visible") orelse 0,
             .sticky = boolField(float_obj, "sticky") orelse false,
             .is_pwd = boolField(float_obj, "is_pwd") orelse false,
             .float_key = if (intField(float_obj, "float_key")) |key| @intCast(key) else 0,
@@ -822,7 +842,7 @@ fn parseLayoutNode(
 
         node.* = .{
             .split = .{
-                .dir = if (std.mem.eql(u8, dir_str, "horizontal")) .horizontal else .vertical,
+                .dir = if (isVerticalSplitDir(dir_str)) .vertical else .horizontal,
                 .ratio = floatField(obj, "ratio") orelse 0.5,
                 .first = first,
                 .second = second,
@@ -869,6 +889,19 @@ fn intField(obj: std.json.ObjectMap, key: []const u8) ?usize {
     };
 }
 
+/// Full-range u64 field. std.json parses integers > i64 max (e.g. a
+/// `tab_visible` bitmask of `maxInt(u64)` = "visible on every tab") as
+/// `.number_string`, which `intField` would miss — losing float visibility on
+/// restore. Handle both encodings.
+fn u64Field(obj: std.json.ObjectMap, key: []const u8) ?u64 {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .integer => |i| if (i >= 0) @intCast(i) else null,
+        .number_string => |s| std.fmt.parseInt(u64, s, 10) catch null,
+        else => null,
+    };
+}
+
 fn floatField(obj: std.json.ObjectMap, key: []const u8) ?f32 {
     const value = obj.get(key) orelse return null;
     return switch (value) {
@@ -888,4 +921,691 @@ fn boolField(obj: std.json.ObjectMap, key: []const u8) ?bool {
 
 fn writeJsonString(writer: anytype, value: []const u8) !void {
     try writer.print("{f}", .{std.json.fmt(value, .{})});
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Serialization / restore round-trip tests (PLAN 1.8 — attach/reattach/restore)
+//
+// SessionSnapshot.toJson/fromJson is the canonical serialization behind BOTH
+// crash-recovery restore (persist.zig) and detach→reattach handoff. These pin
+// that a snapshot survives a round-trip intact, including nested split layouts,
+// floats with all flags, and the pane map.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+fn tsPane(allocator: std.mem.Allocator, uuid: [32]u8) !*SessionLayoutNode {
+    const n = try allocator.create(SessionLayoutNode);
+    n.* = .{ .pane = uuid };
+    return n;
+}
+
+fn tsSplit(allocator: std.mem.Allocator, dir: SessionSplitDir, ratio: f32, first: *SessionLayoutNode, second: *SessionLayoutNode) !*SessionLayoutNode {
+    const n = try allocator.create(SessionLayoutNode);
+    n.* = .{ .split = .{ .dir = dir, .ratio = ratio, .first = first, .second = second } };
+    return n;
+}
+
+fn expectOptUuidEq(a: ?[32]u8, b: ?[32]u8) !void {
+    if (a == null) {
+        try testing.expect(b == null);
+        return;
+    }
+    try testing.expect(b != null);
+    try testing.expectEqualSlices(u8, &a.?, &b.?);
+}
+
+fn expectLayoutEq(a: ?*const SessionLayoutNode, b: ?*const SessionLayoutNode) !void {
+    if (a == null) {
+        try testing.expect(b == null);
+        return;
+    }
+    try testing.expect(b != null);
+    switch (a.?.*) {
+        .pane => |ua| {
+            try testing.expect(b.?.* == .pane);
+            try testing.expectEqualSlices(u8, &ua, &b.?.pane);
+        },
+        .split => |sa| {
+            try testing.expect(b.?.* == .split);
+            const sb = b.?.split;
+            try testing.expectEqual(sa.dir, sb.dir);
+            try testing.expectApproxEqAbs(sa.ratio, sb.ratio, 0.0005);
+            try expectLayoutEq(sa.first, sb.first);
+            try expectLayoutEq(sa.second, sb.second);
+        },
+    }
+}
+
+fn expectSnapshotEq(a: *const SessionSnapshot, b: *const SessionSnapshot) !void {
+    try testing.expectEqualSlices(u8, &a.uuid, &b.uuid);
+    try testing.expectEqualStrings(a.session_name, b.session_name);
+    if (a.base_root) |ar| {
+        try testing.expect(b.base_root != null);
+        try testing.expectEqualStrings(ar, b.base_root.?);
+    } else try testing.expect(b.base_root == null);
+    try testing.expectEqual(a.tab_counter, b.tab_counter);
+    try testing.expectEqual(a.active_tab, b.active_tab);
+    try expectOptUuidEq(a.active_float_uuid, b.active_float_uuid);
+    try expectOptUuidEq(a.focused_pane_uuid, b.focused_pane_uuid);
+
+    try testing.expectEqual(a.tabs.items.len, b.tabs.items.len);
+    for (a.tabs.items, b.tabs.items) |ta, tb| {
+        try testing.expectEqualSlices(u8, &ta.uuid, &tb.uuid);
+        try testing.expectEqualStrings(ta.name, tb.name);
+        try expectOptUuidEq(ta.focused_pane_uuid, tb.focused_pane_uuid);
+        try expectLayoutEq(ta.root, tb.root);
+    }
+
+    try testing.expectEqual(a.floats.items.len, b.floats.items.len);
+    for (a.floats.items, b.floats.items) |fa, fb| {
+        try testing.expectEqualSlices(u8, &fa.pane_uuid, &fb.pane_uuid);
+        try testing.expectEqual(fa.parent_tab, fb.parent_tab);
+        try testing.expectEqual(fa.visible, fb.visible);
+        try testing.expectEqual(fa.tab_visible, fb.tab_visible);
+        try testing.expectEqual(fa.sticky, fb.sticky);
+        try testing.expectEqual(fa.is_pwd, fb.is_pwd);
+        try testing.expectEqual(fa.float_key, fb.float_key);
+        try testing.expectEqual(fa.width_pct, fb.width_pct);
+        try testing.expectEqual(fa.height_pct, fb.height_pct);
+        try testing.expectEqual(fa.pos_x_pct, fb.pos_x_pct);
+        try testing.expectEqual(fa.pos_y_pct, fb.pos_y_pct);
+        try testing.expectEqual(fa.pad_x, fb.pad_x);
+        try testing.expectEqual(fa.pad_y, fb.pad_y);
+    }
+
+    try testing.expectEqual(a.panes.count(), b.panes.count());
+    var it = a.panes.iterator();
+    while (it.next()) |entry| {
+        const bp = b.panes.get(entry.key_ptr.*) orelse return error.MissingPane;
+        try testing.expectEqual(entry.value_ptr.kind, bp.kind);
+        try testing.expectEqual(entry.value_ptr.parent_tab, bp.parent_tab);
+        try testing.expectEqual(entry.value_ptr.sticky, bp.sticky);
+        try testing.expectEqual(entry.value_ptr.is_pwd, bp.is_pwd);
+        try testing.expectEqual(entry.value_ptr.float_key, bp.float_key);
+    }
+}
+
+fn buildRichSnapshot(allocator: std.mem.Allocator) !SessionSnapshot {
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "alpha-session");
+    errdefer snap.deinit();
+    snap.base_root = try allocator.dupe(u8, "/home/x/proj");
+    snap.tab_counter = 3;
+    snap.active_tab = 1;
+    snap.active_float_uuid = [_]u8{'f'} ** 32;
+    snap.focused_pane_uuid = [_]u8{'b'} ** 32;
+
+    // Tab 0: a single pane.
+    const p0 = [_]u8{'0'} ** 32;
+    try snap.tabs.append(allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try allocator.dupe(u8, "main"),
+        .root = try tsPane(allocator, p0),
+        .focused_pane_uuid = p0,
+        .allocator = allocator,
+    });
+
+    // Tab 1: nested split h[ a, v[ b, c ] ].
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+    const inner = try tsSplit(allocator, .vertical, 0.4, try tsPane(allocator, pb), try tsPane(allocator, pc));
+    const outer = try tsSplit(allocator, .horizontal, 0.6, try tsPane(allocator, pa), inner);
+    try snap.tabs.append(allocator, .{
+        .uuid = [_]u8{'u'} ** 32,
+        .name = try allocator.dupe(u8, "work"),
+        .root = outer,
+        .focused_pane_uuid = pb,
+        .allocator = allocator,
+    });
+
+    // A sticky, per-CWD float with non-default geometry.
+    try snap.floats.append(allocator, .{
+        .pane_uuid = [_]u8{'f'} ** 32,
+        .parent_tab = 1,
+        .visible = true,
+        .tab_visible = std.math.maxInt(u64),
+        .sticky = true,
+        .is_pwd = true,
+        .float_key = 'g',
+        .width_pct = 70,
+        .height_pct = 50,
+        .pos_x_pct = 40,
+        .pos_y_pct = 30,
+        .pad_x = 2,
+        .pad_y = 1,
+    });
+
+    // Pane map entries (split + float kinds).
+    try snap.panes.put(pa, .{ .uuid = pa, .kind = .split, .parent_tab = 1 });
+    try snap.panes.put([_]u8{'f'} ** 32, .{ .uuid = [_]u8{'f'} ** 32, .kind = .float, .sticky = true, .is_pwd = true, .float_key = 'g' });
+
+    return snap;
+}
+
+test "SessionSnapshot: toJson -> fromJson round-trips a rich session intact" {
+    const allocator = testing.allocator;
+    var snap = try buildRichSnapshot(allocator);
+    defer snap.deinit();
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+
+    try expectSnapshotEq(&snap, &restored);
+
+    // Serializing the restored copy yields identical bytes (stable form).
+    const json2 = try restored.toJson(allocator);
+    defer allocator.free(json2);
+    try testing.expectEqualStrings(json, json2);
+}
+
+test "SessionSnapshot: clone is a deep, independent copy" {
+    const allocator = testing.allocator;
+    var snap = try buildRichSnapshot(allocator);
+    defer snap.deinit();
+
+    var cloned = try snap.clone(allocator);
+    defer cloned.deinit();
+    try expectSnapshotEq(&snap, &cloned);
+
+    // Mutating the clone's layout must not touch the original.
+    cloned.tabs.items[1].root.?.split.ratio = 0.99;
+    try testing.expectApproxEqAbs(@as(f32, 0.6), snap.tabs.items[1].root.?.split.ratio, 0.0005);
+}
+
+test "SessionSnapshot: minimal (no tabs/floats/panes) round-trips" {
+    const allocator = testing.allocator;
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'z'} ** 32, "empty");
+    defer snap.deinit();
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+    try expectSnapshotEq(&snap, &restored);
+    try testing.expectEqual(@as(usize, 0), restored.tabs.items.len);
+    try testing.expectEqual(@as(usize, 0), restored.floats.items.len);
+}
+
+test "SessionSnapshot: deep-nested split layout survives round-trip" {
+    const allocator = testing.allocator;
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'d'} ** 32, "deep");
+    defer snap.deinit();
+
+    // Left-leaning chain: h[ h[ h[ p1, p2 ], p3 ], p4 ].
+    const p1 = [_]u8{'1'} ** 32;
+    const p2 = [_]u8{'2'} ** 32;
+    const p3 = [_]u8{'3'} ** 32;
+    const p4 = [_]u8{'4'} ** 32;
+    const l1 = try tsSplit(allocator, .horizontal, 0.3, try tsPane(allocator, p1), try tsPane(allocator, p2));
+    const l2 = try tsSplit(allocator, .vertical, 0.55, l1, try tsPane(allocator, p3));
+    const root = try tsSplit(allocator, .horizontal, 0.7, l2, try tsPane(allocator, p4));
+    try snap.tabs.append(allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try allocator.dupe(u8, "deep"),
+        .root = root,
+        .allocator = allocator,
+    });
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+    try expectSnapshotEq(&snap, &restored);
+}
+
+test "SessionSnapshot.fromJson: rejects malformed / non-object state" {
+    const allocator = testing.allocator;
+    try testing.expectError(error.SyntaxError, SessionSnapshot.fromJson(allocator, "not json"));
+    try testing.expectError(error.UnexpectedEndOfInput, SessionSnapshot.fromJson(allocator, "{"));
+    try testing.expectError(error.InvalidStateJson, SessionSnapshot.fromJson(allocator, "[]"));
+    try testing.expectError(error.InvalidStateJson, SessionSnapshot.fromJson(allocator, "42"));
+}
+
+test "SessionSnapshot.fromJson: canonical root missing required fields is rejected" {
+    const allocator = testing.allocator;
+    // Has "panes" (→ canonical path) but no uuid.
+    try testing.expectError(
+        error.InvalidStateJson,
+        SessionSnapshot.fromJson(allocator, "{\"panes\":[],\"tabs\":[],\"floats\":[]}"),
+    );
+}
+
+test "SessionSnapshot.fromJson: tolerates unknown/extra fields (forward compat)" {
+    const allocator = testing.allocator;
+    var snap = try buildRichSnapshot(allocator);
+    defer snap.deinit();
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+
+    // Splice an unknown top-level field in; a future writer may add fields.
+    const injected = try std.mem.concat(allocator, u8, &.{ "{\"future_field\":true,", json[1..] });
+    defer allocator.free(injected);
+
+    var restored = try SessionSnapshot.fromJson(allocator, injected);
+    defer restored.deinit();
+    try expectSnapshotEq(&snap, &restored);
+}
+
+test "SessionSnapshot.fromJson: small tab_visible integer round-trips (non-number_string path)" {
+    const allocator = testing.allocator;
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "s");
+    defer snap.deinit();
+    try snap.floats.append(allocator, .{ .pane_uuid = [_]u8{'f'} ** 32, .tab_visible = 5, .float_key = 'a' });
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+    try testing.expectEqual(@as(u64, 5), restored.floats.items[0].tab_visible);
+}
+
+test "layoutContainsPaneUuid: finds panes at any depth" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+    const inner = try tsSplit(allocator, .vertical, 0.5, try tsPane(allocator, pb), try tsPane(allocator, pc));
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), inner);
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(layoutContainsPaneUuid(root, pa));
+    try testing.expect(layoutContainsPaneUuid(root, pb));
+    try testing.expect(layoutContainsPaneUuid(root, pc));
+    try testing.expect(!layoutContainsPaneUuid(root, [_]u8{'z'} ** 32));
+}
+
+test "splitPaneInLayout: splits a leaf into a split of two panes" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pnew = [_]u8{'n'} ** 32;
+    const root = try tsPane(allocator, pa);
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(try splitPaneInLayout(allocator, root, pa, pnew, .vertical));
+    try testing.expect(root.* == .split);
+    try testing.expectEqual(SessionSplitDir.vertical, root.split.dir);
+    try testing.expect(layoutContainsPaneUuid(root, pa));
+    try testing.expect(layoutContainsPaneUuid(root, pnew));
+    // Splitting a non-existent source is a no-op that reports false.
+    try testing.expect(!try splitPaneInLayout(allocator, root, [_]u8{'z'} ** 32, [_]u8{'q'} ** 32, .horizontal));
+}
+
+test "replacePaneUuidInLayout: renames a pane in place" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pnew = [_]u8{'x'} ** 32;
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(replacePaneUuidInLayout(root, pb, pnew));
+    try testing.expect(!layoutContainsPaneUuid(root, pb));
+    try testing.expect(layoutContainsPaneUuid(root, pnew));
+    try testing.expect(!replacePaneUuidInLayout(root, [_]u8{'z'} ** 32, pnew));
+}
+
+test "layoutNodeToJson/fromJson: split tree survives a node round-trip" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+    const inner = try tsSplit(allocator, .vertical, 0.35, try tsPane(allocator, pb), try tsPane(allocator, pc));
+    const root = try tsSplit(allocator, .horizontal, 0.65, try tsPane(allocator, pa), inner);
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+
+    const json = try layoutNodeToJson(allocator, root);
+    defer allocator.free(json);
+    const restored = try layoutNodeFromJson(allocator, json);
+    defer freeLayoutClone(allocator, restored);
+    try expectLayoutEq(root, restored);
+
+    // A null node round-trips to null.
+    const null_json = try layoutNodeToJson(allocator, null);
+    defer allocator.free(null_json);
+    try testing.expect((try layoutNodeFromJson(allocator, null_json)) == null);
+}
+
+test "SessionSnapshot.fromJson: mux-root (frontend reattach) format parses id-based layout + floats" {
+    const allocator = testing.allocator;
+    const su = "s" ** 32;
+    const tu = "t" ** 32;
+    const au = "a" ** 32;
+    const bu = "b" ** 32;
+    const fju = "f" ** 32;
+
+    // The frontend sends this shape on reattach: id-based `splits` per tab, an
+    // id-referencing layout `tree`, and no top-level `panes` key (→ fromMuxRoot).
+    const json = "{\"uuid\":\"" ++ su ++ "\",\"session_name\":\"reattach\",\"active_tab\":0,\"tab_counter\":1," ++
+        "\"tabs\":[{\"uuid\":\"" ++ tu ++ "\",\"name\":\"T\"," ++
+        "\"splits\":[{\"uuid\":\"" ++ au ++ "\",\"id\":1},{\"uuid\":\"" ++ bu ++ "\",\"id\":2}]," ++
+        "\"focused_split_id\":1," ++
+        "\"tree\":{\"type\":\"split\",\"dir\":\"h\",\"ratio\":0.5,\"first\":{\"type\":\"pane\",\"id\":1},\"second\":{\"type\":\"pane\",\"id\":2}}}]," ++
+        "\"floats\":[{\"uuid\":\"" ++ fju ++ "\",\"visible\":true,\"tab_visible\":18446744073709551615,\"sticky\":true,\"float_key\":103,\"float_width_pct\":72}]}";
+
+    var snap = try SessionSnapshot.fromJson(allocator, json);
+    defer snap.deinit();
+
+    try testing.expectEqualStrings("reattach", snap.session_name);
+    try testing.expectEqualSlices(u8, su, &snap.uuid);
+
+    try testing.expectEqual(@as(usize, 1), snap.tabs.items.len);
+    const tab = snap.tabs.items[0];
+    try testing.expectEqualStrings("T", tab.name);
+    // focused_split_id 1 resolves to pane "a".
+    try testing.expectEqualSlices(u8, au, &tab.focused_pane_uuid.?);
+
+    // The id-based tree resolves ids → pane uuids.
+    const root = tab.root orelse return error.TestUnexpectedResult;
+    try testing.expect(root.* == .split);
+    try testing.expectEqual(SessionSplitDir.horizontal, root.split.dir);
+    try testing.expectEqualSlices(u8, au, &root.split.first.pane);
+    try testing.expectEqualSlices(u8, bu, &root.split.second.pane);
+
+    // Float visibility bitmask survives the frontend reattach parse too.
+    try testing.expectEqual(@as(usize, 1), snap.floats.items.len);
+    try testing.expectEqual(@as(u64, std.math.maxInt(u64)), snap.floats.items[0].tab_visible);
+    try testing.expect(snap.floats.items[0].sticky);
+    try testing.expectEqual(@as(u8, 103), snap.floats.items[0].float_key);
+    try testing.expectEqual(@as(u8, 72), snap.floats.items[0].width_pct);
+
+    // Pane map derived from splits + floats: a, b (split) and f (float).
+    try testing.expectEqual(@as(usize, 3), snap.panes.count());
+    const fkey: [32]u8 = fju.*;
+    try testing.expectEqual(SessionPaneKind.float, (snap.panes.get(fkey) orelse return error.TestUnexpectedResult).kind);
+}
+
+test "removePaneFromLayout: removing a leaf collapses its parent split to the sibling" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    var maybe_root: ?*SessionLayoutNode = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer freeLayoutClone(allocator, maybe_root);
+
+    try testing.expect(try removePaneFromLayout(allocator, &maybe_root, pa));
+    const r = maybe_root orelse return error.TestUnexpectedResult;
+    try testing.expect(r.* == .pane); // collapsed to the surviving sibling
+    try testing.expectEqualSlices(u8, &pb, &r.pane);
+}
+
+test "removePaneFromLayout: nested tree collapses the inner split" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+    // h[ a, v[ b, c ] ]
+    const inner = try tsSplit(allocator, .vertical, 0.4, try tsPane(allocator, pb), try tsPane(allocator, pc));
+    var maybe_root: ?*SessionLayoutNode = try tsSplit(allocator, .horizontal, 0.6, try tsPane(allocator, pa), inner);
+    defer freeLayoutClone(allocator, maybe_root);
+
+    try testing.expect(try removePaneFromLayout(allocator, &maybe_root, pb));
+    // → h[ a, c ]: outer split intact, inner collapsed to c.
+    const r = maybe_root orelse return error.TestUnexpectedResult;
+    try testing.expect(r.* == .split);
+    try testing.expectEqualSlices(u8, &pa, &r.split.first.pane);
+    try testing.expect(r.split.second.* == .pane);
+    try testing.expectEqualSlices(u8, &pc, &r.split.second.pane);
+}
+
+test "removePaneFromLayout: removing the only pane empties the layout" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    var maybe_root: ?*SessionLayoutNode = try tsPane(allocator, pa);
+    defer freeLayoutClone(allocator, maybe_root);
+    try testing.expect(try removePaneFromLayout(allocator, &maybe_root, pa));
+    try testing.expect(maybe_root == null);
+}
+
+test "removePaneFromLayout: removing a missing pane leaves the tree unchanged" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    var maybe_root: ?*SessionLayoutNode = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer freeLayoutClone(allocator, maybe_root);
+    try testing.expect(!(try removePaneFromLayout(allocator, &maybe_root, [_]u8{'z'} ** 32)));
+    const r = maybe_root orelse return error.TestUnexpectedResult;
+    try testing.expect(r.* == .split);
+    try testing.expect(layoutContainsPaneUuid(r, pa));
+    try testing.expect(layoutContainsPaneUuid(r, pb));
+}
+
+test "setSplitRatioByAnchors: sets and clamps the ratio between two sibling panes" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(setSplitRatioByAnchors(root, pa, pb, 0.75));
+    try testing.expectApproxEqAbs(@as(f32, 0.75), root.split.ratio, 0.0005);
+    _ = setSplitRatioByAnchors(root, pa, pb, 0.99); // clamp high
+    try testing.expectApproxEqAbs(@as(f32, 0.9), root.split.ratio, 0.0005);
+    _ = setSplitRatioByAnchors(root, pa, pb, 0.01); // clamp low
+    try testing.expectApproxEqAbs(@as(f32, 0.1), root.split.ratio, 0.0005);
+    // A missing/non-sibling anchor is rejected.
+    try testing.expect(!setSplitRatioByAnchors(root, pa, [_]u8{'z'} ** 32, 0.5));
+}
+
+test "SessionSnapshot: names with JSON-special + unicode chars survive round-trip" {
+    const allocator = testing.allocator;
+    // Quotes, backslash, newline, tab, control char, unicode, emoji.
+    const nasty = "a\"b\\c\nd\te\x01f\u{00e9}g\u{4e2d}h\u{1f600}";
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, nasty);
+    defer snap.deinit();
+    snap.base_root = try allocator.dupe(u8, "/pa\"th\\with\nnewline");
+    try snap.tabs.append(allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try allocator.dupe(u8, "tab\"with\\stuff\t\u{263a}"),
+        .root = try tsPane(allocator, [_]u8{'p'} ** 32),
+        .allocator = allocator,
+    });
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+
+    try testing.expectEqualStrings(nasty, restored.session_name);
+    try testing.expectEqualStrings("/pa\"th\\with\nnewline", restored.base_root.?);
+    try testing.expectEqualStrings("tab\"with\\stuff\t\u{263a}", restored.tabs.items[0].name);
+}
+
+test "SessionSnapshot: float geometry boundary values round-trip" {
+    const allocator = testing.allocator;
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "s");
+    defer snap.deinit();
+    // Extremes: 0 and 255 for u8 geometry, tab_visible = 0 and 1.
+    try snap.floats.append(allocator, .{ .pane_uuid = [_]u8{'1'} ** 32, .tab_visible = 0, .width_pct = 0, .height_pct = 255, .pos_x_pct = 255, .pos_y_pct = 0, .pad_x = 255, .pad_y = 0, .float_key = 255 });
+    try snap.floats.append(allocator, .{ .pane_uuid = [_]u8{'2'} ** 32, .tab_visible = 1, .width_pct = 100, .float_key = 0 });
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+
+    try testing.expectEqual(@as(u8, 0), restored.floats.items[0].width_pct);
+    try testing.expectEqual(@as(u8, 255), restored.floats.items[0].height_pct);
+    try testing.expectEqual(@as(u8, 255), restored.floats.items[0].float_key);
+    try testing.expectEqual(@as(u64, 0), restored.floats.items[0].tab_visible);
+    try testing.expectEqual(@as(u64, 1), restored.floats.items[1].tab_visible);
+    try testing.expectEqual(@as(u8, 100), restored.floats.items[1].width_pct);
+}
+
+test "SessionSnapshot: empty session name and large counters round-trip" {
+    const allocator = testing.allocator;
+    var snap = try SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "");
+    defer snap.deinit();
+    snap.tab_counter = 4_000_000_000;
+    snap.active_tab = 999;
+
+    const json = try snap.toJson(allocator);
+    defer allocator.free(json);
+    var restored = try SessionSnapshot.fromJson(allocator, json);
+    defer restored.deinit();
+    try testing.expectEqualStrings("", restored.session_name);
+    try testing.expectEqual(@as(usize, 4_000_000_000), restored.tab_counter);
+    try testing.expectEqual(@as(usize, 999), restored.active_tab);
+}
+
+test "SessionSnapshot.fromJson: corrupt canonical inputs error, never crash" {
+    const allocator = testing.allocator;
+    const T = struct {
+        fn expectErr(a: std.mem.Allocator, json: []const u8) !void {
+            // Any error is fine; the point is it must not crash or succeed.
+            if (SessionSnapshot.fromJson(a, json)) |*snap| {
+                var s = snap.*;
+                s.deinit();
+                return error.UnexpectedSuccess;
+            } else |_| {}
+        }
+    };
+    // Has "panes" → canonical path. Each is structurally broken.
+    try T.expectErr(allocator, "{\"panes\":[],\"session_name\":\"x\",\"tabs\":[],\"floats\":[]}"); // no uuid
+    // uuid wrong length (31 chars).
+    try T.expectErr(allocator, "{\"panes\":[],\"uuid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"session_name\":\"x\",\"tabs\":[],\"floats\":[]}");
+    // tabs is an object, not an array.
+    try T.expectErr(allocator, "{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\",\"tabs\":{},\"floats\":[]}");
+    // A split tree node missing its "second" child.
+    try T.expectErr(allocator, "{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\"," ++
+        "\"tabs\":[{\"uuid\":\"" ++ ("t" ** 32) ++ "\",\"name\":\"T\",\"root\":{\"type\":\"split\",\"dir\":\"h\",\"ratio\":0.5,\"first\":{\"type\":\"pane\",\"uuid\":\"" ++ ("p" ** 32) ++ "\"}}}],\"floats\":[]}");
+    // A canonical pane node with no uuid.
+    try T.expectErr(allocator, "{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\"," ++
+        "\"tabs\":[{\"uuid\":\"" ++ ("t" ** 32) ++ "\",\"name\":\"T\",\"root\":{\"type\":\"pane\"}}],\"floats\":[]}");
+}
+
+test "SessionSnapshot.fromJson: wrong field types degrade gracefully (no crash)" {
+    const allocator = testing.allocator;
+    // active_tab / tab_counter as strings → default to 0 (intField returns null).
+    // ratio as a string in a split → floatField returns null → default 0.5.
+    const json = "{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\"," ++
+        "\"active_tab\":\"nope\",\"tab_counter\":\"lots\"," ++
+        "\"tabs\":[{\"uuid\":\"" ++ ("t" ** 32) ++ "\",\"name\":\"T\",\"root\":{\"type\":\"split\",\"dir\":\"h\",\"ratio\":\"half\",\"first\":{\"type\":\"pane\",\"uuid\":\"" ++ ("p" ** 32) ++ "\"},\"second\":{\"type\":\"pane\",\"uuid\":\"" ++ ("q" ** 32) ++ "\"}}}],\"floats\":[]}";
+    var snap = try SessionSnapshot.fromJson(allocator, json);
+    defer snap.deinit();
+    try testing.expectEqual(@as(usize, 0), snap.active_tab);
+    try testing.expectEqual(@as(usize, 0), snap.tab_counter);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), snap.tabs.items[0].root.?.split.ratio, 0.0005);
+}
+
+test "SessionSnapshot.fromJson: deep nested split (recursion) does not crash" {
+    const allocator = testing.allocator;
+    // Build a 40-deep left-nested split JSON.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll("{\"panes\":[],\"uuid\":\"" ++ ("a" ** 32) ++ "\",\"session_name\":\"x\",\"tabs\":[{\"uuid\":\"" ++ ("t" ** 32) ++ "\",\"name\":\"T\",\"root\":");
+    const depth = 40;
+    var i: usize = 0;
+    while (i < depth) : (i += 1) {
+        try w.writeAll("{\"type\":\"split\",\"dir\":\"h\",\"ratio\":0.5,\"first\":{\"type\":\"pane\",\"uuid\":\"" ++ ("p" ** 32) ++ "\"},\"second\":");
+    }
+    try w.writeAll("{\"type\":\"pane\",\"uuid\":\"" ++ ("q" ** 32) ++ "\"}");
+    i = 0;
+    while (i < depth) : (i += 1) try w.writeAll("}");
+    try w.writeAll("}],\"floats\":[]}");
+
+    var snap = try SessionSnapshot.fromJson(allocator, buf.items);
+    defer snap.deinit();
+    try testing.expect(snap.tabs.items[0].root.?.* == .split);
+}
+
+test "setSplitRatioByAnchors: selects the correct split in a multi-level tree" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pc = [_]u8{'c'} ** 32;
+    // h[ v[ a, b ], c ] — outer horizontal, inner vertical.
+    const inner = try tsSplit(allocator, .vertical, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    const root = try tsSplit(allocator, .horizontal, 0.5, inner, try tsPane(allocator, pc));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    // (a, b) are siblings under the inner split → only that ratio changes.
+    try testing.expect(setSplitRatioByAnchors(root, pa, pb, 0.8));
+    try testing.expectApproxEqAbs(@as(f32, 0.8), inner.split.ratio, 0.0005);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), root.split.ratio, 0.0005); // outer unchanged
+    // (a, c) span the outer split (a in first subtree, c in second) → outer changes.
+    try testing.expect(setSplitRatioByAnchors(root, pa, pc, 0.3));
+    try testing.expectApproxEqAbs(@as(f32, 0.3), root.split.ratio, 0.0005);
+}
+
+test "replacePaneUuidInLayout: replaces the first match only" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const px = [_]u8{'x'} ** 32;
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(replacePaneUuidInLayout(root, pa, px));
+    try testing.expectEqualSlices(u8, &px, &root.split.first.pane);
+    try testing.expectEqualSlices(u8, &pb, &root.split.second.pane); // unaffected
+}
+
+test "splitPaneInLayout: splitting a pane nested inside a split recurses correctly" {
+    const allocator = testing.allocator;
+    const pa = [_]u8{'a'} ** 32;
+    const pb = [_]u8{'b'} ** 32;
+    const pnew = [_]u8{'n'} ** 32;
+    // h[ a, b ]; split b → h[ a, v[ b, new ] ].
+    const root = try tsSplit(allocator, .horizontal, 0.5, try tsPane(allocator, pa), try tsPane(allocator, pb));
+    defer {
+        root.deinit(allocator);
+        allocator.destroy(root);
+    }
+    try testing.expect(try splitPaneInLayout(allocator, root, pb, pnew, .vertical));
+    try testing.expectEqualSlices(u8, &pa, &root.split.first.pane); // a untouched
+    try testing.expect(root.split.second.* == .split);
+    try testing.expectEqual(SessionSplitDir.vertical, root.split.second.split.dir);
+    try testing.expect(layoutContainsPaneUuid(root, pb));
+    try testing.expect(layoutContainsPaneUuid(root, pnew));
+}
+
+test "SessionSnapshot.fromJson mux-root: every float field is read (distinct values)" {
+    const allocator = testing.allocator;
+    const su = "s" ** 32;
+    const tu = "t" ** 32;
+    const au = "a" ** 32;
+    const fu = "f" ** 32;
+    // Frontend reattach format uses `float_*`-prefixed geometry keys; a field
+    // the parser forgets would silently reset to its default on reattach.
+    const json = "{\"uuid\":\"" ++ su ++ "\",\"session_name\":\"r\",\"active_tab\":0," ++
+        "\"tabs\":[{\"uuid\":\"" ++ tu ++ "\",\"name\":\"T\",\"splits\":[{\"uuid\":\"" ++ au ++ "\",\"id\":1}],\"tree\":{\"type\":\"pane\",\"id\":1}}]," ++
+        "\"floats\":[{\"uuid\":\"" ++ fu ++ "\",\"parent_tab\":0,\"visible\":false,\"tab_visible\":7," ++
+        "\"sticky\":true,\"is_pwd\":true,\"float_key\":103," ++
+        "\"float_width_pct\":11,\"float_height_pct\":22,\"float_pos_x_pct\":33,\"float_pos_y_pct\":44,\"float_pad_x\":55,\"float_pad_y\":66}]}";
+
+    var snap = try SessionSnapshot.fromJson(allocator, json);
+    defer snap.deinit();
+    try testing.expectEqual(@as(usize, 1), snap.floats.items.len);
+    const f = snap.floats.items[0];
+    try testing.expectEqual(@as(?usize, 0), f.parent_tab);
+    try testing.expect(!f.visible);
+    try testing.expectEqual(@as(u64, 7), f.tab_visible);
+    try testing.expect(f.sticky);
+    try testing.expect(f.is_pwd);
+    try testing.expectEqual(@as(u8, 103), f.float_key);
+    try testing.expectEqual(@as(u8, 11), f.width_pct);
+    try testing.expectEqual(@as(u8, 22), f.height_pct);
+    try testing.expectEqual(@as(u8, 33), f.pos_x_pct);
+    try testing.expectEqual(@as(u8, 44), f.pos_y_pct);
+    try testing.expectEqual(@as(u8, 55), f.pad_x);
+    try testing.expectEqual(@as(u8, 66), f.pad_y);
 }

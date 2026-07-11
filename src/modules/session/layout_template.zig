@@ -119,7 +119,7 @@ pub fn buildTemplateLayoutNode(
 
     node.* = .{
         .split = .{
-            .dir = if (std.mem.eql(u8, dir_str, "horizontal")) .horizontal else .vertical,
+            .dir = if (session_model.isVerticalSplitDir(dir_str)) .vertical else .horizontal,
             .ratio = ratio,
             .first = first,
             .second = second,

@@ -3,6 +3,7 @@ const posix = std.posix;
 const core = @import("core");
 const wire = core.wire;
 const ses = @import("main.zig");
+const server = @import("server.zig");
 const client_panes = @import("client_panes.zig");
 const snapshot_mod = @import("snapshot.zig");
 const sticky_panes = @import("sticky_panes.zig");
@@ -205,6 +206,7 @@ pub fn detachSessionDirect(self: anytype, client: *store_mod.Client, session_id:
                 self.polling.pending_remove_poll_fds.append(self.allocator, vt_fd) catch |err| {
                     core.logging.logError("ses", "failed to queue detached POD VT fd removal", err);
                 };
+                self.store.noteClosedFd(vt_fd);
                 posix.close(vt_fd);
                 pane.pod_vt_fd = null;
             }
@@ -305,6 +307,7 @@ pub fn detachSession(self: anytype, client_id: usize, session_id: [16]u8) bool {
                     self.polling.pending_remove_poll_fds.append(self.allocator, vt_fd) catch |err| {
                         core.logging.logError("ses", "failed to queue atomic detach POD VT fd removal", err);
                     };
+                    self.store.noteClosedFd(vt_fd);
                     posix.close(vt_fd);
                     pane.pod_vt_fd = null;
                 }
@@ -331,6 +334,7 @@ pub fn reattachSession(self: anytype, session_id: [16]u8, client_id: usize) !?Re
     if (self.getClient(client_id)) |client| {
         client.updateSessionSnapshot(try detached_state.session_snapshot.clone(self.allocator));
         client.pending_reattach_session_id = session_id;
+        client.pending_reattach_started_at = std.time.timestamp();
     }
 
     return .{
@@ -371,6 +375,7 @@ pub fn cancelPendingReattach(self: anytype, session_id: [16]u8, client_id: usize
             self.polling.pending_remove_poll_fds.append(self.allocator, vt_fd) catch |err| {
                 core.logging.logError("ses", "failed to queue canceled reattach POD VT fd removal", err);
             };
+            self.store.noteClosedFd(vt_fd);
             posix.close(vt_fd);
             pane.pod_vt_fd = null;
         }
@@ -411,12 +416,12 @@ pub fn forceDetachAttachedSession(self: anytype, session_id: [16]u8) bool {
     }
 
     if (owner.mux_ctl_fd) |mfd| {
-        wire.writeControl(mfd, .session_stolen, &.{}) catch |err| {
+        wire.writeControlTimeout(mfd, .session_stolen, &.{}, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
             core.logging.logError("ses", "failed to notify owner session was stolen", err);
         };
     }
 
-    store_mod.closeClientFds(owner);
+    store_mod.closeClientFds(&self.store, owner);
     owner.deinit();
     _ = self.store.clients.orderedRemove(idx);
 

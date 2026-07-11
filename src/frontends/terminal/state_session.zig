@@ -46,9 +46,19 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
         return;
     }
 
-    // Run on_start hooks (fire and forget)
-    for (config.on_start) |cmd| {
-        runShellCommand(cmd);
+    // Run on_start hooks (fire and forget), gated by the trust ledger so an
+    // untrusted project `.hexe.lua` can't silently auto-run shell hooks when a
+    // session opens in its directory (PLAN 1.9).
+    if (projectCommandsAllowed(config)) {
+        for (config.on_start) |cmd| {
+            runShellCommand(cmd);
+        }
+    } else if (config.on_start.len > 0) {
+        core.logging.warn(
+            "terminal",
+            "skipping {d} on_start hook(s) from untrusted .hexe.lua — run `hexe allow` to trust it",
+            .{config.on_start.len},
+        );
     }
 
     var created_any = false;
@@ -85,6 +95,21 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
 /// Apply an enabled SES layout definition to a new session startup.
 pub fn applyLayoutDef(self: anytype, layout: *const LayoutDef) !void {
     terminal_main.debugLog("applyLayoutDef: '{s}' tabs={d} floats={d}", .{ layout.name, layout.tabs.len, layout.floats.len });
+
+    // Hook parity with applySessionConfig: the canonical hexe.setup path used
+    // to silently drop on_start, so the same .hexe.lua ran its hooks or not
+    // depending on which parser won. Same trust-ledger gate (PLAN 1.9).
+    if (projectCommandsAllowedForPath(layout.source_path)) {
+        for (layout.on_start) |cmd| {
+            runShellCommand(cmd);
+        }
+    } else if (layout.on_start.len > 0) {
+        core.logging.warn(
+            "terminal",
+            "skipping {d} on_start hook(s) from untrusted .hexe.lua — run `hexe allow` to trust it",
+            .{layout.on_start.len},
+        );
+    }
 
     if (layout.tabs.len == 0) {
         try self.createTab();
@@ -141,6 +166,36 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
     self.runtime.setFocusedPaneUuid(null);
 
     try applySessionConfig(self, config, tab_filter);
+}
+
+/// Replace current runtime tabs/floats with a canonical layout definition.
+pub fn replaceWithLayoutDef(self: anytype, layout: *const LayoutDef) !void {
+    // Remove floating panes.
+    for (self.view.float_views.items) |pane| {
+        self.clearTransientPaneState(pane);
+        self.clearFloatUi(pane.uuid);
+        pane.deinit();
+        self.allocator.destroy(pane);
+    }
+    self.view.float_views.clearRetainingCapacity();
+    self.setActiveFloatingIndex(null);
+    self.runtime.setFocusedPaneUuid(null);
+
+    // Remove all tabs.
+    for (self.view.tab_views.items) |*tab| {
+        var split_it = tab.layout.splits.valueIterator();
+        while (split_it.next()) |pane_ptr| {
+            self.clearTransientPaneState(pane_ptr.*);
+        }
+        tab.deinit();
+    }
+    self.view.tab_views.clearRetainingCapacity();
+    self.runtime.clearTabMeta();
+    self.runtime.clearTabFocusMemory();
+    self.setActiveTabIndex(0);
+    self.runtime.setFocusedPaneUuid(null);
+
+    try applyLayoutDef(self, layout);
 }
 
 fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
@@ -380,7 +435,7 @@ fn buildLayoutTree(self: anytype, layout: *Layout, split_def: LayoutSplitDef) !*
             node.* = .{ .pane = pane.uuid };
         },
         .split => |split| {
-            const dir: SplitDir = if (std.mem.eql(u8, split.dir, "h")) .horizontal else .vertical;
+            const dir = layoutSplitDir(split.dir);
             const first = try buildLayoutTree(self, layout, split.first.*);
             errdefer {
                 destroyLayoutTreeNodes(self.allocator, first);
@@ -399,6 +454,11 @@ fn buildLayoutTree(self: anytype, layout: *Layout, split_def: LayoutSplitDef) !*
     }
 
     return node;
+}
+
+fn layoutSplitDir(dir: []const u8) SplitDir {
+    if (core.session_model.isVerticalSplitDir(dir)) return .vertical;
+    return .horizontal;
 }
 
 fn destroyLayoutTreeNodes(allocator: std.mem.Allocator, node: *LayoutNode) void {
@@ -598,8 +658,40 @@ fn writePaneCommand(self: anytype, pane: *Pane, cmd: []const u8) void {
     };
 }
 
+fn envFlagSet(name: []const u8) bool {
+    const v = std.posix.getenv(name) orelse return false;
+    return v.len > 0 and !std.mem.eql(u8, v, "0");
+}
+
+/// Whether project-sourced `on_start`/`on_stop` hooks may run for this config.
+/// Secure default: an identifiable `.hexe.lua` must be trusted via `hexe allow`.
+fn projectCommandsAllowed(config: SessionConfig) bool {
+    return projectCommandsAllowedForPath(config.source_path);
+}
+
+fn projectCommandsAllowedForPath(source_path: ?[]const u8) bool {
+    if (envFlagSet("HEXE_NO_PROJECT_COMMANDS")) return false; // hard opt-out
+    if (envFlagSet("HEXE_TRUST_ALL_PROJECTS")) return true; // CI/dev escape hatch
+    // No identifiable source file (not an auto-loaded project config): allow.
+    const src = source_path orelse return true;
+    return core.trust.isTrusted(std.heap.page_allocator, src);
+}
+
 fn runShellCommand(cmd: []const u8) void {
     if (cmd.len == 0) return;
+
+    // These commands come from a project-local `.hexe.lua` (on_start/on_stop),
+    // so opening a session in an untrusted repo runs its shell hooks — the
+    // direnv auto-trust problem. Default behavior is preserved (they run), but
+    // HEXE_NO_PROJECT_COMMANDS=1 disables project-sourced command execution for
+    // untrusted-directory workflows. A full per-directory trust ledger is the
+    // proper long-term fix (see PLAN.md 1.9).
+    if (std.posix.getenv("HEXE_NO_PROJECT_COMMANDS")) |v| {
+        if (v.len > 0 and !std.mem.eql(u8, v, "0")) {
+            core.logging.warn("terminal", "skipping project on_start/on_stop command (HEXE_NO_PROJECT_COMMANDS set)", .{});
+            return;
+        }
+    }
 
     // Use page_allocator for a null-terminated copy since this is fire-and-forget
     const allocator = std.heap.page_allocator;

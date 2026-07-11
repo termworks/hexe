@@ -487,8 +487,7 @@ test "PaneInfoPayload deinit clears optional owned strings" {
 }
 
 test "readPaneCwdPayload reads shared cwd response body" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -515,8 +514,7 @@ test "readPaneCwdPayload reads shared cwd response body" {
 }
 
 test "readPaneInfoPayload extracts shared pane name and foreground process" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -583,8 +581,7 @@ test "readPaneInfoPayload extracts shared pane name and foreground process" {
 }
 
 test "readPaneUuidPayload extracts pane uuid and drains trailing bytes" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -604,8 +601,7 @@ test "readPaneUuidPayload extracts pane uuid and drains trailing bytes" {
 }
 
 test "readShellEventPayload extracts command lifecycle metadata" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -648,8 +644,7 @@ test "readShellEventPayload extracts command lifecycle metadata" {
 }
 
 test "readSendKeysPayload extracts target uuid and bytes" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -676,8 +671,7 @@ test "readSendKeysPayload extracts target uuid and bytes" {
 }
 
 test "readNotifyPayload extracts owned notification message" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -699,8 +693,7 @@ test "readNotifyPayload extracts owned notification message" {
 }
 
 test "readTargetedNotifyPayload extracts target, duration, and message" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -729,8 +722,7 @@ test "readTargetedNotifyPayload extracts target, duration, and message" {
 }
 
 test "readFocusMovePayload maps wire direction to frontend direction" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -753,8 +745,7 @@ test "readFocusMovePayload maps wire direction to frontend direction" {
 }
 
 test "readExitIntentPayload extracts target uuid" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -773,8 +764,7 @@ test "readExitIntentPayload extracts target uuid" {
 }
 
 test "readPopConfirmPayload extracts popup target and message" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 
@@ -803,8 +793,7 @@ test "readPopConfirmPayload extracts popup target and message" {
 }
 
 test "readPopChoosePayload extracts title and owned item list" {
-    var pipe_fds: [2]posix.fd_t = undefined;
-    try posix.pipe(&pipe_fds);
+    const pipe_fds = try posix.pipe();
     defer posix.close(pipe_fds[0]);
     defer posix.close(pipe_fds[1]);
 

@@ -318,6 +318,14 @@ pub const FrontendRuntime = struct {
         return self.client.drainPendingPaneInfoResponse();
     }
 
+    /// Apply a session_stolen push that a synchronous reader consumed on
+    /// behalf of the IPC loop. Returns true when one was pending.
+    pub fn applyPendingSessionStolen(self: *FrontendRuntime) bool {
+        if (!self.client.drainPendingSessionStolen()) return false;
+        self.markSessionStolen();
+        return true;
+    }
+
     pub fn sendPing(self: *FrontendRuntime) bool {
         return self.client.sendPing();
     }
@@ -397,6 +405,10 @@ pub const FrontendRuntime = struct {
         return self.client.getPaneInfoSnapshot(uuid);
     }
 
+    pub fn probePaneExistence(self: *FrontendRuntime, uuid: [32]u8) FrontendClient.PaneExistenceProbe {
+        return self.client.probePaneExistence(uuid);
+    }
+
     pub fn updatePaneAux(
         self: *FrontendRuntime,
         uuid: [32]u8,
@@ -438,6 +450,16 @@ pub const FrontendRuntime = struct {
 
     pub fn getPaneAux(self: *FrontendRuntime, uuid: [32]u8) !PaneAuxInfo {
         return try self.client.getPaneAux(uuid);
+    }
+
+    /// Oldest async push captured by a synchronous reader (see SesClient
+    /// pending_pushes); caller frees the payload via freeCtlPushPayload.
+    pub fn popPendingCtlPush(self: *FrontendRuntime) ?FrontendClient.QueuedPush {
+        return self.client.popPendingPush();
+    }
+
+    pub fn freeCtlPushPayload(self: *FrontendRuntime, payload: []u8) void {
+        self.client.allocator.free(payload);
     }
 
     pub fn adoptPane(
@@ -822,6 +844,14 @@ pub const FrontendRuntime = struct {
         name: []const u8,
     ) !void {
         try self.client.sessionAddTab(tab_uuid, pane_uuid, tab_index, name);
+    }
+
+    pub fn sessionRenameTab(self: *FrontendRuntime, tab_uuid: [32]u8, name: []const u8) !void {
+        try self.client.sessionRenameTab(tab_uuid, name);
+    }
+
+    pub fn setTabName(self: *FrontendRuntime, index: usize, name: []const u8) bool {
+        return self.projection.setTabName(index, name);
     }
 
     pub fn sessionRemoveTab(self: *FrontendRuntime, tab_uuid: [32]u8, active_tab: ?usize) !void {

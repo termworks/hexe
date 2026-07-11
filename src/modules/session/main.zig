@@ -183,6 +183,20 @@ pub fn run(args: SesArgs) !void {
         try daemonize(log_file_path);
     }
 
+    // Authoritative single-instance guard. The connect-probe above is a fast
+    // pre-check but is a TOCTOU race: two daemons starting at once can both
+    // pass it and both bind the socket (ipc.Server deletes+rebinds), splitting
+    // session state across two daemons. An exclusive flock arbitrates the
+    // race — the loser exits before binding. Acquired after daemonize so the
+    // lock is held by the real long-lived daemon process (flock survives fork
+    // and is released on process exit).
+    if (!acquireInstanceLock()) {
+        if (!args.daemon) {
+            std.debug.print("ses daemon already starting (instance lock held)\n", .{});
+        }
+        return;
+    }
+
     core.logging.setLogLevel(args.log_level);
     debugLog("daemon={} level={s} logfile={s}", .{
         args.daemon,
@@ -679,6 +693,52 @@ fn daemonize(log_file: ?[]const u8) !void {
 }
 
 var global_server: std.atomic.Value(?*server.Server) = std.atomic.Value(?*server.Server).init(null);
+
+// Held for the daemon's whole lifetime; flock releases automatically on exit.
+// Intentionally never closed — the open fd is what holds the exclusive lock.
+var instance_lock_fd: ?posix.fd_t = null;
+
+/// Take the per-instance exclusive lock next to the SES socket. Returns true if
+/// we own it (or if lock infrastructure is unavailable — fail open rather than
+/// refuse to start), false only when another live daemon already holds it.
+fn acquireInstanceLock() bool {
+    const alloc = std.heap.page_allocator;
+    const socket_path = ipc.getSesSocketPath(alloc) catch return true;
+    defer alloc.free(socket_path);
+    if (socket_path.len == 0) return true;
+
+    const lock_path = std.fmt.allocPrintSentinel(alloc, "{s}.lock", .{socket_path}, 0) catch return true;
+    defer alloc.free(lock_path);
+
+    // Ensure the runtime dir exists (mirrors ipc.Server socket dir creation).
+    if (std.fs.path.dirname(lock_path)) |dir| std.fs.cwd().makePath(dir) catch {};
+
+    // CLOEXEC is load-bearing: a flock is owned by the open file DESCRIPTION,
+    // which fork+exec'd children share. Without it every spawned pod inherits
+    // the lock fd, so after a daemon crash the pods keep the instance lock
+    // held and no replacement daemon can ever start (silent exit here) until
+    // every pod dies — "hexe won't start" after any crash with live panes.
+    const fd = posix.open(lock_path, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true }, 0o600) catch |err| {
+        debugLog("acquireInstanceLock: open '{s}' failed: {s} (allowing start)", .{ lock_path, @errorName(err) });
+        return true;
+    };
+
+    posix.flock(fd, posix.LOCK.EX | posix.LOCK.NB) catch |err| switch (err) {
+        error.WouldBlock => {
+            // Another live daemon owns the instance.
+            posix.close(fd);
+            return false;
+        },
+        else => {
+            debugLog("acquireInstanceLock: flock failed: {s} (allowing start)", .{@errorName(err)});
+            posix.close(fd);
+            return true;
+        },
+    };
+
+    instance_lock_fd = fd;
+    return true;
+}
 
 fn setupSignalHandlers(srv: *server.Server) void {
     global_server.store(srv, .release);

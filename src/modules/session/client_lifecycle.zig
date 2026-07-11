@@ -21,8 +21,8 @@ pub fn getClient(self: anytype, client_id: usize) ?*store_mod.Client {
     return null;
 }
 
-fn closeClientMuxFds(client: *store_mod.Client) void {
-    store_mod.closeClientFds(client);
+fn closeClientMuxFds(store: *store_mod.SessionStore, client: *store_mod.Client) void {
+    store_mod.closeClientFds(store, client);
 }
 
 fn killCollectedPanes(self: anytype, pane_uuids: []const [32]u8, comptime context: []const u8) void {
@@ -115,7 +115,7 @@ pub fn removeClient(self: anytype, client_id: usize) void {
                 killCollectedPanes(self, pane_uuids_list.items, "killPane failed in removeClient");
             }
 
-            closeClientMuxFds(client);
+            closeClientMuxFds(&self.store, client);
             self.releaseClientLocks(client.id);
             client.deinit();
             client_index = i;
@@ -134,7 +134,7 @@ pub fn removeClientGraceful(self: anytype, client_id: usize) void {
     var client_index: ?usize = null;
     for (self.store.clients.items, 0..) |*client, i| {
         if (client.id == client_id) {
-            closeClientMuxFds(client);
+            closeClientMuxFds(&self.store, client);
             self.releaseClientLocks(client.id);
             client.deinit();
             client_index = i;
@@ -178,7 +178,7 @@ pub fn shutdownClient(self: anytype, client_id: usize, preserve_sticky: bool) vo
                 };
             }
 
-            closeClientMuxFds(client);
+            closeClientMuxFds(&self.store, client);
             self.releaseClientLocks(client.id);
             client.deinit();
             client_index = i;

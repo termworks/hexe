@@ -86,6 +86,16 @@ pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, pars
             pane.scrollToBottom();
             state.needs_render = true;
         }
+        // Broadcast mode (pane.sync_toggle): fan the same input out to every
+        // split pane in the active tab, tmux `synchronize-panes` style.
+        if (state.sync_input) {
+            var it = state.currentLayout().splitIterator();
+            while (it.next()) |p| {
+                if (p.*.isScrolled()) p.*.scrollToBottom();
+                state.writePaneInput(p.*, bytes);
+            }
+            return;
+        }
         state.writePaneInput(pane, bytes);
     }
 }

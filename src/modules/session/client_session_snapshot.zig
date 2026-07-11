@@ -73,6 +73,9 @@ pub fn updateFocus(
             snapshot.active_float_uuid = pane_uuid;
         },
     }
+    // Attached-session crash recovery persists this snapshot: without a
+    // dirty mark the periodic save skips it and a crash restores stale layout.
+    self.store.markDirty();
 }
 
 pub fn addTab(
@@ -129,6 +132,36 @@ pub fn addTab(
     snapshot.active_tab = insert_index;
     snapshot.active_float_uuid = null;
     snapshot.focused_pane_uuid = pane_uuid;
+    self.store.markDirty();
+}
+
+pub fn renameTab(
+    self: anytype,
+    client_id: usize,
+    tab_uuid: [32]u8,
+    name: []const u8,
+) void {
+    const client = self.getClient(client_id) orelse {
+        core.logging.warn("ses", "client snapshot tab rename skipped: client {d} is not registered", .{client_id});
+        return;
+    };
+    const snapshot = ensureClientSessionSnapshot(self.allocator, client) catch |err| {
+        core.logging.logError("ses", "failed to ensure client session snapshot for tab rename", err);
+        return;
+    };
+    for (snapshot.tabs.items) |*tab| {
+        if (std.mem.eql(u8, &tab.uuid, &tab_uuid)) {
+            const owned = snapshot.allocator.dupe(u8, name) catch |err| {
+                core.logging.logError("ses", "failed to allocate renamed tab name", err);
+                return;
+            };
+            snapshot.allocator.free(tab.name);
+            tab.name = owned;
+            self.store.markDirty();
+            return;
+        }
+    }
+    core.logging.warn("ses", "client snapshot tab rename skipped: tab UUID is not in snapshot", .{});
 }
 
 pub fn removeTab(
@@ -160,6 +193,7 @@ pub fn removeTab(
 
     var removed = snapshot.tabs.orderedRemove(idx);
     removed.deinit();
+    self.store.markDirty();
 
     var remove_pane_uuids: std.ArrayList([32]u8) = .empty;
     defer remove_pane_uuids.deinit(self.allocator);
@@ -282,6 +316,7 @@ pub fn splitPane(
 
     setSnapshotActiveTab(snapshot, active_tab);
     setSnapshotSplitFocus(snapshot, tab_index, focused_pane_uuid);
+    self.store.markDirty();
 }
 
 pub fn replaceSplitPane(
@@ -318,6 +353,7 @@ pub fn replaceSplitPane(
 
     setSnapshotActiveTab(snapshot, active_tab);
     setSnapshotSplitFocus(snapshot, tab_index, focused_pane_uuid);
+    self.store.markDirty();
 }
 
 pub fn setSplitRatio(
@@ -342,6 +378,7 @@ pub fn setSplitRatio(
     }
 
     setSnapshotActiveTab(snapshot, active_tab);
+    self.store.markDirty();
 }
 
 pub fn syncFloat(
@@ -423,6 +460,7 @@ pub fn syncFloat(
             }
         }
     }
+    self.store.markDirty();
 }
 
 pub fn removeFloat(self: anytype, client_id: usize, pane_uuid: [32]u8) void {
@@ -465,4 +503,5 @@ pub fn removeFloat(self: anytype, client_id: usize, pane_uuid: [32]u8) void {
                 null;
         }
     }
+    self.store.markDirty();
 }

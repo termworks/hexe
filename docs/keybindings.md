@@ -72,6 +72,8 @@ Actions trigger terminal frontend operations. Session-structure mutations are ap
 | `hexe.action.clipboard.request()` | Paste from clipboard |
 | `hexe.action.system.notify()` | Send a system notification |
 | `hexe.action.overlay.sprite_toggle()` | Toggle sprite overlay |
+| `hexe.action.copy.enter()` | Enter keyboard copy-mode |
+| `hexe.action.search.enter()` | Search the focused pane's scrollback (type · `Enter` · `n`/`N` · `Esc`) |
 
 **Actions that take parameters:**
 

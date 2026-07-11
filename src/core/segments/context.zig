@@ -10,10 +10,18 @@ pub const Segment = struct {
 /// Segment render function signature
 pub const SegmentFn = *const fn (ctx: *Context) ?[]const Segment;
 
+/// Monotonic source for Context.instance_id.
+var next_instance_id = std.atomic.Value(u64).init(1);
+
 /// Context passed to all segments during rendering.
 /// Populated from PaneQuery (mux mode) or CLI args (prompt mode).
 pub const Context = struct {
     allocator: std.mem.Allocator,
+
+    /// Unique per Context instance; distinguishes contexts that reuse the
+    /// same stack slot (e.g. per-float title contexts built in a loop) so
+    /// per-context caches can't alias.
+    instance_id: u64 = 0,
 
     // Environment
     cwd: []const u8 = "",
@@ -74,6 +82,7 @@ pub const Context = struct {
     pub fn init(allocator: std.mem.Allocator) Context {
         return .{
             .allocator = allocator,
+            .instance_id = next_instance_id.fetchAdd(1, .monotonic),
             .cached_segments = std.StringHashMap([]const Segment).init(allocator),
         };
     }

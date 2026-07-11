@@ -131,6 +131,7 @@ pub const MsgType = enum(u16) {
     // live split close is represented by kill_pane, dead pane cleanup by SES.
     session_replace_split_pane = 0x013F,
     session_set_split_ratio = 0x0140,
+    session_rename_tab = 0x0141, // MUX → SES: rename a tab in the canonical snapshot
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -453,6 +454,13 @@ pub const Error = extern struct {
 /// Followed by: name bytes (name_len). name_len=0 means clear.
 pub const UpdatePaneName = extern struct {
     uuid: [32]u8 align(1),
+    name_len: u16 align(1),
+};
+
+/// SessionRenameTab: MUX renames a tab in the canonical session snapshot.
+/// Followed by: name bytes (name_len).
+pub const SessionRenameTab = extern struct {
+    tab_uuid: [32]u8 align(1),
     name_len: u16 align(1),
 };
 
@@ -841,6 +849,47 @@ pub fn writeControlMsgWithRequestId(fd: posix.fd_t, msg_type: MsgType, request_i
     }
 }
 
+/// Control-message writers with an explicit stall budget, for single-threaded
+/// event loops: a wedged peer (e.g. a SIGSTOPped frontend with a full socket
+/// buffer) must cost the daemon a bounded stall, not the 10s writeAll default.
+pub fn writeControlTimeout(fd: posix.fd_t, msg_type: MsgType, payload: []const u8, timeout_ms: i32) !void {
+    try writeControlWithRequestIdTimeout(fd, msg_type, 0, payload, timeout_ms);
+}
+
+pub fn writeControlWithRequestIdTimeout(fd: posix.fd_t, msg_type: MsgType, request_id: u32, payload: []const u8, timeout_ms: i32) !void {
+    try writeControlMsgWithRequestIdTimeout(fd, msg_type, request_id, payload, &.{}, timeout_ms);
+}
+
+pub fn writeControlWithTrailTimeout(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, trail: []const u8, timeout_ms: i32) !void {
+    try writeControlMsgWithRequestIdTimeout(fd, msg_type, 0, fixed, &.{trail}, timeout_ms);
+}
+
+pub fn writeControlWithTrailAndRequestIdTimeout(fd: posix.fd_t, msg_type: MsgType, request_id: u32, fixed: []const u8, trail: []const u8, timeout_ms: i32) !void {
+    try writeControlMsgWithRequestIdTimeout(fd, msg_type, request_id, fixed, &.{trail}, timeout_ms);
+}
+
+pub fn writeControlMsgTimeout(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, trails: []const []const u8, timeout_ms: i32) !void {
+    try writeControlMsgWithRequestIdTimeout(fd, msg_type, 0, fixed, trails, timeout_ms);
+}
+
+pub fn writeControlMsgWithRequestIdTimeout(fd: posix.fd_t, msg_type: MsgType, request_id: u32, fixed: []const u8, trails: []const []const u8, timeout_ms: i32) !void {
+    var total: usize = fixed.len;
+    for (trails) |t| total += t.len;
+
+    var hdr: ControlHeader = .{
+        .msg_type = @intFromEnum(msg_type),
+        .request_id = request_id,
+        .payload_len = @intCast(total),
+    };
+    try writeAllTimeout(fd, std.mem.asBytes(&hdr), timeout_ms);
+    if (fixed.len > 0) {
+        try writeAllTimeout(fd, fixed, timeout_ms);
+    }
+    for (trails) |t| {
+        if (t.len > 0) try writeAllTimeout(fd, t, timeout_ms);
+    }
+}
+
 /// Read a ControlHeader from fd. Blocks until 6 bytes arrive.
 pub fn readControlHeader(fd: posix.fd_t) !ControlHeader {
     var buf: [@sizeOf(ControlHeader)]u8 = undefined;
@@ -879,6 +928,16 @@ pub fn tryReadControlHeader(fd: posix.fd_t) !ControlHeader {
 pub fn readStruct(comptime T: type, fd: posix.fd_t) !T {
     var buf: [@sizeOf(T)]u8 = undefined;
     try readExact(fd, &buf);
+    return std.mem.bytesToValue(T, &buf);
+}
+
+/// readStruct with an explicit stall budget. Event-loop handlers must use
+/// this (or readExactTimeout) with a SHORT budget: a single-threaded daemon
+/// blocked on one stalled peer's payload stalls every other session's I/O
+/// for the whole timeout.
+pub fn readStructTimeout(comptime T: type, fd: posix.fd_t, timeout_ms: i32) !T {
+    var buf: [@sizeOf(T)]u8 = undefined;
+    try readExactTimeout(fd, &buf, timeout_ms);
     return std.mem.bytesToValue(T, &buf);
 }
 
@@ -1007,48 +1066,12 @@ pub fn waitReadableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {
 }
 
 pub fn waitWritableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {
-    _ = fd;
     if (timeout_ms <= 0) return error.Timeout;
-    try waitDelayTimeout(timeout_ms);
-}
-
-fn waitDelayTimeout(timeout_ms: i32) !void {
-    if (timeout_ms <= 0) return error.Timeout;
-
-    try xev.detect();
-    var loop = try xev.Loop.init(.{});
-    defer loop.deinit();
-    var timer = try xev.Timer.init();
-    defer timer.deinit();
-
-    const DelayContext = struct {
-        done: bool = false,
-    };
-    var ctx: DelayContext = .{};
-    var completion: xev.Completion = .{};
-
-    const cb = struct {
-        fn call(
-            cctx: ?*DelayContext,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            result: xev.Timer.RunError!void,
-        ) xev.CallbackAction {
-            const c = cctx orelse return .disarm;
-            _ = result catch |err| {
-                log.debug("waitDelayTimeout: timer error: {}", .{err});
-                c.done = true;
-                return .disarm;
-            };
-            c.done = true;
-            return .disarm;
-        }
-    }.call;
-
-    timer.run(&loop, &completion, @intCast(timeout_ms), DelayContext, &ctx, cb);
-    while (!ctx.done) {
-        try loop.run(.once);
-    }
+    var pfds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+    const n = try posix.poll(&pfds, timeout_ms);
+    if (n == 0) return error.Timeout;
+    const bad = posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL;
+    if (pfds[0].revents & bad != 0) return error.ConnectionClosed;
 }
 
 pub fn writeAll(fd: posix.fd_t, data: []const u8) !void {
@@ -1063,8 +1086,7 @@ pub fn writeAllTimeout(fd: posix.fd_t, data: []const u8, timeout_ms: i32) !void 
             error.WouldBlock => {
                 const remaining_ms = deadline_ms - std.time.milliTimestamp();
                 if (remaining_ms <= 0) return error.Timeout;
-                const backoff_ms: i32 = @intCast(@min(remaining_ms, 10));
-                waitWritableTimeout(fd, backoff_ms) catch |wait_err| return wait_err;
+                waitWritableTimeout(fd, @intCast(@min(remaining_ms, @as(i64, std.math.maxInt(i32))))) catch |wait_err| return wait_err;
                 continue;
             },
             else => return err,

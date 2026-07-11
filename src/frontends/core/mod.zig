@@ -87,3 +87,10 @@ pub const vtFrameKindFromRaw = vt_events.vtFrameKindFromRaw;
 pub const VtFrameReadResult = vt_events.VtFrameReadResult;
 pub const drainMuxVtFrames = vt_events.drainMuxVtFrames;
 pub const readMuxVtFrame = vt_events.readMuxVtFrame;
+
+test {
+    // Force test collection from every re-exported submodule: a plain
+    // `pub const x = @import(...)` does not pull in the imported file's test
+    // blocks, so without this the frontend-core test target runs zero tests.
+    @import("std").testing.refAllDeclsRecursive(@This());
+}

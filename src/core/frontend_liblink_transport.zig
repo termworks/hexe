@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const c = std.c;
 const liblink = @import("liblink");
+const ipc = @import("ipc.zig");
 
 const log = std.log.scoped(.frontend_liblink_transport);
 
@@ -147,7 +148,7 @@ fn bridgeSession(bridge: *Bridge, kind: ChannelKind) !void {
         local_fd_ptr.* = -1;
     }
 
-    try setNonBlocking(local_fd);
+    try ipc.setNonBlocking(local_fd);
 
     var conn = try connectRemoteRaw(bridge);
     defer conn.deinit();
@@ -246,11 +247,6 @@ fn makeSocketPair() ![2]posix.fd_t {
     const rc = c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &fds);
     if (rc != 0) return posix.unexpectedErrno(posix.errno(rc));
     return .{ fds[0], fds[1] };
-}
-
-fn setNonBlocking(fd: posix.fd_t) !void {
-    const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
-    _ = try posix.fcntl(fd, posix.F.SETFL, flags | @as(usize, 0o4000));
 }
 
 fn writeAllNonBlocking(fd: posix.fd_t, data: []const u8) !void {

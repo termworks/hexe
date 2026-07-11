@@ -465,13 +465,15 @@ pub fn drawFloatingBorder(
                 const total_len: u16 = @min(unclamped_len, inner_w);
                 const place = floatTitlePlacement(x, y, w, h, pos, total_len);
 
-                // Draw each segment with its style
+                // Draw each segment with its style. Reslice each segment's
+                // bytes from our own copy of `segments` (segments.text(i)) so
+                // the slice never points into a moved-from return value.
                 var cur_x = place.x;
                 const max_x = x + w -| 2;
-                for (segments.items[0..segments.count]) |seg| {
+                for (segments.items[0..segments.count], 0..) |seg, seg_i| {
                     if (cur_x >= max_x) break;
                     const remain = max_x - cur_x;
-                    const clipped = text_width.clipTextToWidth(seg.text, remain);
+                    const clipped = text_width.clipTextToWidth(segments.text(seg_i), remain);
                     if (clipped.len == 0) continue;
                     const seg_style = applyFloatTitleStyleDefaults(toShpStyle(seg), color);
                     cur_x = statusbar.drawStyledText(renderer, cur_x, place.y, clipped, seg_style);
