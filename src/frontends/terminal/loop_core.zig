@@ -12,6 +12,7 @@ const loop_updates = @import("loop_updates.zig");
 const terminal_main = @import("main.zig");
 
 const LoopTimerContext = struct {
+    last_fire: i64 = 0,
     state: *State,
     ticker: xev.Timer,
     last_pane_sync: i64,
@@ -43,6 +44,7 @@ fn loopTimerCallback(
         _ = timer_ctx.state.runtime.sendPing();
     }
 
+    timer_ctx.last_fire = std.time.milliTimestamp();
     // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
     timer_ctx.ticker.run(loop, completion, 100, LoopTimerContext, timer_ctx, loopTimerCallback);
     return .disarm;
@@ -126,6 +128,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         .heartbeat_interval = heartbeat_interval,
     };
     var timer_completion: xev.Completion = .{};
+    timer_ctx.last_fire = std.time.milliTimestamp();
     loop_timer.run(loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
 
     // Reusable lists for dead pane tracking (avoid per-iteration allocations).
@@ -148,7 +151,23 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         loop_watchers.ensureSesCtlWatcherArmed(state, &resources.ses_ctl_watcher, &resources.ses_ctl_buffer);
         loop_watchers.ensureStdinWatcherArmed(state, &resources.stdin_watcher, &resources.stdin_buffer, &hooks);
 
+        const dbg_t0 = std.time.milliTimestamp();
         try loop.run(.once);
+        const dbg_t1 = std.time.milliTimestamp();
+        if (dbg_t1 - dbg_t0 > 300) terminal_main.debugLog("SLOW loop.run: {d}ms", .{dbg_t1 - dbg_t0});
+
+        // Ticker watchdog: the 100ms re-arm chain can die silently (xev
+        // io_uring submission loss under load). We are AFTER loop.run, so
+        // every ready CQE was just processed — if the ticker still looks
+        // silent for 5s, its chain has provably no pending CQE and the
+        // completion is safe to reuse for a fresh arm. A dead ticker
+        // otherwise starves renders, pane sync, and key timers whenever no
+        // fd event happens to wake the loop.
+        if (dbg_t1 - timer_ctx.last_fire > 5000) {
+            terminal_main.debugLog("loop ticker silent {d}ms; resurrecting", .{dbg_t1 - timer_ctx.last_fire});
+            timer_ctx.last_fire = dbg_t1;
+            timer_ctx.ticker.run(loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
+        }
         if (runtime_events.applyRuntimeStopRequest(state, hooks)) break;
         if (!state.running) break;
         runtime_events.applyDeferredCwdResponse(state);
@@ -190,6 +209,10 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
 
         loop_updates.updateOverlaysPopupsAndKeyTimers(state, now2);
 
+        const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);
+        const dbg_t3 = std.time.milliTimestamp();
+        if (dbg_t3 - dbg_t2 > 300) terminal_main.debugLog("SLOW renderIfDue: {d}ms", .{dbg_t3 - dbg_t2});
+        if (dbg_t2 - dbg_t1 > 300) terminal_main.debugLog("SLOW mid-steps: {d}ms", .{dbg_t2 - dbg_t1});
     }
 }

@@ -712,6 +712,7 @@ pub const Server = struct {
             .last_stats_update = std.time.milliTimestamp(),
             .last_cleanup = std.time.milliTimestamp(),
         };
+        periodic_ctx.last_fire = std.time.milliTimestamp();
         ticker.run(&loop, &timer_completion, 100, PeriodicContext, &periodic_ctx, periodicCallback);
 
         while (self.running) {
@@ -726,10 +727,24 @@ pub const Server = struct {
             // queued closes; age them out (two-iteration lifetime) so a
             // reused fd number is not shielded forever.
             self.ses_state.store.rotateClosedFdLog();
+            const dbg_t0 = std.time.milliTimestamp();
             loop.run(.once) catch |err| {
                 ses.debugLog("event loop error (continuing): {s}", .{@errorName(err)});
                 continue;
             };
+            const dbg_t1 = std.time.milliTimestamp();
+            if (dbg_t1 - dbg_t0 > 300) ses.debugLog("SLOW ses loop.run: {d}ms", .{dbg_t1 - dbg_t0});
+
+            // Ticker watchdog: the re-arm chain can die silently (xev
+            // io_uring submission loss under load). All ready CQEs were just
+            // processed, so 5s of silence proves no pending CQE — the
+            // completion is safe to reuse. A dead ticker means no persist,
+            // no queue flush, no cleanup sweeps: a slowly dying daemon.
+            if (dbg_t1 - periodic_ctx.last_fire > 5000) {
+                ses.debugLog("periodic ticker silent {d}ms; resurrecting", .{dbg_t1 - periodic_ctx.last_fire});
+                periodic_ctx.last_fire = dbg_t1;
+                ticker.run(&loop, &timer_completion, 100, PeriodicContext, &periodic_ctx, periodicCallback);
+            }
         }
 
         // Final flush: mutations made since the last periodic save (e.g. a
@@ -1157,6 +1172,7 @@ pub const Server = struct {
     };
 
     const PeriodicContext = struct {
+        last_fire: i64 = 0,
         server: *Server,
         ticker: xev.Timer,
         last_save: i64,
@@ -1284,6 +1300,7 @@ pub const Server = struct {
         };
 
         const now_ms = std.time.milliTimestamp();
+        periodic.last_fire = now_ms;
 
         periodic.server.flushMuxVtQueues();
         periodic.server.flushPodVtQueues();
