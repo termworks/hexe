@@ -753,7 +753,16 @@ pub const Server = struct {
         }
         for (self.pending_ctl_close_fds.items) |pending| {
             ses.debugLog("processPendingCtlCloses: fd={d}", .{pending.fd});
-            if (!self.disarmCtlWatcherMatching(pending.fd, pending.watcher)) continue;
+            if (!self.disarmCtlWatcherMatching(pending.fd, pending.watcher)) {
+                // Watcher already removed from the map elsewhere; its callback
+                // returned .disarm (CQE consumed), so it must be freed here —
+                // no stale CQE will ever fire for it.
+                if (pending.watcher) |w| self.deferDestroyCtlWatcher(w);
+                continue;
+            }
+            // Callback returned .disarm before queueing: CQE consumed, safe
+            // to free after this loop batch.
+            if (pending.watcher) |w| self.deferDestroyCtlWatcher(w);
 
             // The fd was already closed by a direct path (client removal,
             // detach, killPane) after this entry was queued. The number may
@@ -1058,13 +1067,25 @@ pub const Server = struct {
     }
 
     fn disarmCtlWatcher(self: *Server, fd: posix.fd_t) void {
-        if (self.ctl_watchers.fetchRemove(fd)) |kv| {
-            // Defer destruction: xev may still reference the completion struct
-            self.deferred_destroy_ctl.append(self.allocator, kv.value) catch |err| {
-                core.logging.logError("ses", "failed to defer CTL watcher destruction", err);
-                // If append fails, leak rather than use-after-free
-            };
-        }
+        // Remove from map but do NOT free — the io_uring POLL_ADD may still be
+        // pending, and the ring holds a pointer to node.completion that it
+        // WRITES into when the CQE finally arrives (fd event, or the fd's
+        // last close completing the poll). Freeing after one loop iteration
+        // was a use-after-free that crashed the daemon inside Loop.tick.
+        // The stale CQE reaches ctlWatcherCallback, which detects the map
+        // miss and frees the orphaned node then (same model as VT watchers).
+        _ = self.ctl_watchers.fetchRemove(fd);
+    }
+
+    /// Defer a CTL watcher's destruction to `flushDeferredDestroys`. Only
+    /// valid once its callback has consumed the final CQE (returned .disarm):
+    /// xev may still reference the completion until the loop batch finishes,
+    /// but no further CQE can arrive.
+    fn deferDestroyCtlWatcher(self: *Server, watcher: *CtlWatcher) void {
+        self.deferred_destroy_ctl.append(self.allocator, watcher) catch |err| {
+            core.logging.logError("ses", "failed to defer CTL watcher destruction", err);
+            // On append failure, leak rather than risk a UAF.
+        };
     }
 
     fn disarmCtlWatcherMatching(self: *Server, fd: posix.fd_t, expected: ?*CtlWatcher) bool {
@@ -1175,6 +1196,16 @@ pub const Server = struct {
     ) xev.CallbackAction {
         const watch = ctx orelse return .disarm;
         const server: *Server = @ptrCast(@alignCast(watch.srv));
+
+        // Disarmed while the poll was still pending: this CQE is the last
+        // reference to the orphaned node. Defer its destruction (xev may
+        // still touch the completion until the loop batch ends).
+        const current = server.ctl_watchers.get(watch.fd);
+        if (current == null or current.? != watch) {
+            server.deferDestroyCtlWatcher(watch);
+            return .disarm;
+        }
+
         _ = result catch |err| {
             core.logging.logError("ses", "CTL watcher event failed", err);
             server.queueCtlClose(watch.fd, watch);
