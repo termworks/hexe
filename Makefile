@@ -12,6 +12,9 @@ smoke:
 	zig build
 	python3 -u scripts/smoke_reconnect.py
 	python3 -u scripts/smoke_detach_reattach.py
+	python3 -u scripts/smoke_fullscreen_reattach.py
+	python3 -u scripts/smoke_paste.py
+	python3 -u scripts/smoke_kill.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"
