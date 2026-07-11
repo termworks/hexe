@@ -1,5 +1,106 @@
 # Changelog
 
+## [0.0.20] - 2026-07-11
+
+### <!-- 0 -->⛰️  Features
+
+- Auto-reconnect and restore session on ses loss
+- Project .hexe.lua trust ledger + hexe allow
+- Highlight all visible search matches
+- Multibyte-correct search prompt rendering
+- Highlight current search match cells (3.3)
+- Expose search.enter lua action + docs
+- Wire scrollback search UI + lifecycle (3.3)
+- Scrollback search core + state (3.3)
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Refuse ambiguous uuid prefix on kill path
+- Purge fd bookkeeping before force-detach close
+- Note cli fd closes; cloexec txlog fds
+- Route pane frames through vt queue, no direct writes
+- Nonblocking bounded uplink writes + shp read budgets
+- Reconnect under fresh id to avoid self-steal
+- Cloexec on sockets and instance lock fd
+- Pid-identity guard for sweep/kill; heal VT-only loss
+- Canonical on_start hooks + single .hexe.lua execution
+- Bounded response writes to wedged clients
+- 500ms handler read budgets, was 2-10s loop stalls
+- Bounded uplink writes so wedged ses cannot freeze pod
+- Replay pushes swallowed by sync readers
+- Bounded retry on transient adoptPane failures
+- Dirty-mark snapshot mutations for crash persist
+- Probe pod socket, not just pid, before restore
+- Empty reattach id must not match arbitrary session
+- Restore float tab_visible bitmask; snapshot round-trip tests
+- Stop advertising unimplemented pixel_render
+- Backpressure mux->pod VT writes
+
+### <!-- 2 -->🚜 Refactor
+
+- Extract float-style parsers from api_bridge
+- Extract layout parsers from api_bridge
+- Extract record C-API from api_bridge
+- Extract layout commands from com.zig
+- Extract SesClient pane queries
+- Extract statusbar lua-eval prims
+- Extract SesClient sync readers
+- Extract SesClient pane commands
+- Extract SesClient session commands
+- Extract SesClient response store
+- Split server.zig handlers
+
+### <!-- 3 -->📚 Documentation
+
+- Finalize dispositions (1.2/1.8/2.1/2.4/2.5)
+- Trust ledger (1.9) done + usage
+- Resolve 2.6 config_v2 decision + scope
+- 3.1 remote attach wired end-to-end
+- Highlight all visible matches done
+- Search prompt utf8 done, 3.3 complete
+- Search match highlight done
+- Scrollback search done (3.3)
+- Record api_bridge module split
+- Record com + api_bridge splits
+- Frontend_client split done (-41%)
+- Record SesClient reader extraction
+- Mark 2.4 backpressure landed
+
+### <!-- 6 -->🧪 Testing
+
+- Frontend-death park/reattach smoke
+- Live daemon-crash reconnect smoke harness
+- RemovePaneFromSessionSnapshot float + tiled-collapse paths
+- NormalizeAfterPaneRemoval + firstLayoutPaneUuid/paneUuidInList
+- RemovePaneFromDetachedSessions prune + empty-delete
+- Sanitize/sanitizeWithFallback edge cases
+- ResolveSessionName empty/whitespace/cascade edges
+- ReplaceSplitPane/setSplitRatio/removeFloat (client snapshot complete)
+- Mux-root reads every float field (distinct values)
+- Client-snapshot invalid-input error/no-op paths
+- Adversarial sticky_pwd/socket JSON escaping
+- Multi-level layout op selection (ratio/replace/split)
+- FromJson corrupt/malformed input robustness
+- Adversarial snapshot round-trips (escaping/boundaries)
+- Client snapshot syncFloat (update-in-place) + removeTab reindex
+- Client snapshot addTab/renameTab/splitPane + parent_tab reindex
+- Detach/Reattach/SessionReattached round-trips
+- AllocPaneId + two-generation closed-fd shield
+- Saved-layout template restore (build/count/cwds)
+- Pane-remove collapse + split-ratio anchors
+- Frontend-reattach (mux-root) snapshot parse
+- Persist crash-recovery snapshot round-trip
+- Extract + characterize countSessionLayoutPanes
+- Layout-tree ops (split/replace/contains/node-json)
+- Snapshot restore robustness (malformed/partial/forward-compat)
+- Extract + characterize reattach reconciliation (1.8)
+- Characterize segment parser (2.6 safety net)
+- Exit search before freeing borrowed screen
+
+### Build
+
+- Make smoke target for live e2e tests
+
 ## [0.0.17] - 2026-06-10
 
 ### <!-- 0 -->⛰️  Features
