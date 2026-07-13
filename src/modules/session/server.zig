@@ -1347,6 +1347,13 @@ pub const Server = struct {
     /// Dispatch a newly accepted connection based on its handshake bytes.
     /// Handshake format: [channel_type, protocol_version]
     fn dispatchNewConnection(self: *Server, conn: ipc.Connection) void {
+        // Drain queued watcher removals BEFORE this fd number can collide
+        // with them: a pane kill queues its dead fd for watcher disarm, and
+        // if a new connection reuses the number before the queue drains, the
+        // stale removal would disarm the NEW connection's watcher — the
+        // daemon then never reads that client's registration ("attach
+        // sometimes times out").
+        self.processPendingWatcherUpdates();
         setNonBlocking(conn.fd);
 
         // Reject peers running as a different UID. This prevents a sibling
