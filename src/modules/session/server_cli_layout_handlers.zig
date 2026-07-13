@@ -545,6 +545,7 @@ fn killAttachedSessionAt(self: *Server, idx: usize) usize {
 
     // Re-find by index validity: killPane does not mutate the clients list.
     const client = &self.ses_state.store.clients.items[idx];
+    self.ses_state.releaseClientLocks(client.id);
     store_mod.closeClientFds(&self.ses_state.store, client);
     client.deinit();
     _ = self.ses_state.store.clients.orderedRemove(idx);

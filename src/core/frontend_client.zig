@@ -1137,8 +1137,23 @@ pub const SesClient = struct {
         const resp_type = read.msgType();
         self.debugLog("reattachSession: final response type={d}", .{hdr.msg_type});
         if (resp_type == .@"error") {
-            self.debugLog("reattachSession: server returned error", .{});
+            // Read the error text: a "session_locked" refusal is TRANSIENT
+            // (another client is between resolve and commit); callers retry
+            // instead of giving up — otherwise two simultaneous attaches
+            // both walked away empty-handed.
+            var busy = false;
+            if (read.readStruct(self, fd, wire.Error)) |err_hdr| {
+                var msg_buf: [64]u8 = undefined;
+                const n: usize = @min(err_hdr.msg_len, msg_buf.len);
+                if (n > 0) {
+                    if (read.readExact(self, fd, msg_buf[0..n])) {
+                        busy = std.mem.startsWith(u8, msg_buf[0..n], "session_locked");
+                        self.debugLog("reattachSession: server error: {s}", .{msg_buf[0..n]});
+                    } else |_| {}
+                }
+            } else |_| {}
             read.skipRemaining(self, fd);
+            if (busy) return error.SessionBusy;
             return null;
         }
         if (resp_type != .session_reattached) {

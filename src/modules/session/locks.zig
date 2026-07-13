@@ -11,7 +11,9 @@ pub const SessionLockState = enum {
 pub const SessionLock = struct {
     client_id: usize,
     state: SessionLockState,
-    locked_at: i64, // Timestamp for timeout detection
+    locked_at: i64, // Timestamp for timeout detection (expiry: 5s — attach
+    // commits within milliseconds; a longer window holds every reattach of
+    // the session hostage when a lock leaks)
 };
 
 /// Concurrent attach/detach serialization per session_id.
@@ -39,7 +41,7 @@ pub const SessionLocks = struct {
         if (self.session_locks.get(session_id)) |existing_lock| {
             const now = std.time.timestamp();
             const lock_age = now - existing_lock.locked_at;
-            if (lock_age > 30) {
+            if (lock_age > 5) {
                 ses.debugLog("acquireSessionLock: expired lock detected, removing (age={d}s)", .{lock_age});
                 _ = self.session_locks.remove(session_id);
             } else {

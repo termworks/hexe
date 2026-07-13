@@ -192,6 +192,15 @@ pub fn handleBinaryReattach(self: *Server, fd: posix.fd_t, payload_len: u32, buf
 
         if (attached_uuid_count == 1) {
             const session_id = attached_uuid_match.?;
+            // A concurrent reattach holds the lock between its resolve and
+            // its commit-register. Force-detaching the half-attached winner
+            // here used to kill BOTH racers (winner stolen mid-commit, loser
+            // then blocked by the winner's lock). Refuse with a retryable
+            // error instead; the client retries after the winner commits.
+            if (self.ses_state.isSessionLocked(session_id)) {
+                self.sendBinaryError(fd, "session_locked: another client is attaching this session");
+                return;
+            }
             if (!forceDetachWithPurge(self, session_id)) {
                 core.logging.warn("ses", "reattach failed to force-detach attached session by uuid session={s}", .{id_prefix});
                 self.sendBinaryError(fd, "reattach_failed");
@@ -239,6 +248,10 @@ pub fn handleBinaryReattach(self: *Server, fd: posix.fd_t, payload_len: u32, buf
 
         if (attached_name_count == 1) {
             const session_id = attached_name_matches[0].session_id;
+            if (self.ses_state.isSessionLocked(session_id)) {
+                self.sendBinaryError(fd, "session_locked: another client is attaching this session");
+                return;
+            }
             if (!forceDetachWithPurge(self, session_id)) {
                 core.logging.warn("ses", "reattach failed to force-detach attached session by name session={s}", .{id_prefix});
                 self.sendBinaryError(fd, "reattach_failed");
