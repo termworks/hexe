@@ -16,6 +16,7 @@ smoke:
 	python3 -u scripts/smoke_paste.py
 	python3 -u scripts/smoke_kill.py
 	python3 -u scripts/smoke_bighistory.py
+	python3 -u scripts/smoke_dot_attach.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"

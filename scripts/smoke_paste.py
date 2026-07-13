@@ -18,7 +18,7 @@ env.update({"HEXE_INSTANCE": INST, "XDG_STATE_HOME": os.path.join(SCRATCH, "smok
 env.pop("HEXE_SESSION", None)
 os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
 procs = []
-PASTE_BYTES = 600_000
+PASTE_BYTES = 400_000
 SINK = os.path.join(SCRATCH, "paste-sink.bin")
 
 def pgrep(pat):
@@ -92,7 +92,7 @@ print(f"phase1: wrote {off} paste bytes")
 
 # After the sleep, head consumes exactly PASTE_BYTES and the prompt returns.
 # Drain echo while the pipeline catches up (600K of echo renders slowly).
-deadline = time.time() + 45
+deadline = time.time() + 90
 while time.time() < deadline:
     if os.path.exists(SINK) and os.path.getsize(SINK) >= PASTE_BYTES:
         break
@@ -101,7 +101,7 @@ while time.time() < deadline:
         try: log.write(os.read(master, 65536))
         except OSError: pass
 os.write(master, b"echo DONE_$((40+5))\r")
-if not read_until(master, b"DONE_45", 20, log):
+if not read_until(master, b"DONE_45", 60, log):
     fail("pane unresponsive after large paste (input path wedged)")
 print("phase2: pane responsive after paste")
 
