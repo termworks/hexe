@@ -91,17 +91,32 @@ while off < len(blob):
 print(f"phase1: wrote {off} paste bytes")
 
 # After the sleep, head consumes exactly PASTE_BYTES and the prompt returns.
-# Drain echo while the pipeline catches up (600K of echo renders slowly).
-deadline = time.time() + 90
-while time.time() < deadline:
-    if os.path.exists(SINK) and os.path.getsize(SINK) >= PASTE_BYTES:
+# Debug-build VT parsing is slow, so wait on PROGRESS, not a fixed window:
+# fail only if the sink stops growing for 30s (a genuine wedge).
+last_size = -1
+last_progress = time.time()
+while True:
+    size = os.path.getsize(SINK) if os.path.exists(SINK) else 0
+    if size >= PASTE_BYTES:
         break
+    if size != last_size:
+        last_size = size
+        last_progress = time.time()
+    elif time.time() - last_progress > 30:
+        fail(f"paste pipeline stalled at {size}/{PASTE_BYTES} bytes for 30s")
     r, _, _ = select.select([master], [], [], 0.3)
     if master in r:
         try: log.write(os.read(master, 65536))
         except OSError: pass
-os.write(master, b"echo DONE_$((40+5))\r")
-if not read_until(master, b"DONE_45", 60, log):
+
+# The pane must answer once the echo backlog drains; same progress rule.
+answered = False
+for attempt in range(4):
+    os.write(master, b"echo DONE_$((40+5))\r")
+    if read_until(master, b"DONE_45", 30, log):
+        answered = True
+        break
+if not answered:
     fail("pane unresponsive after large paste (input path wedged)")
 print("phase2: pane responsive after paste")
 
