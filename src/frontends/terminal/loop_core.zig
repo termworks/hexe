@@ -136,6 +136,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
     defer dead_splits.deinit(allocator);
 
     var last_reconnect_attempt: i64 = 0;
+    var loop_err_burst: usize = 0;
 
     // Main loop.
     while (state.running) {
@@ -152,7 +153,20 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         loop_watchers.ensureStdinWatcherArmed(state, &resources.stdin_watcher, &resources.stdin_buffer, &hooks);
 
         const dbg_t0 = std.time.milliTimestamp();
-        try loop.run(.once);
+        // A loop error must not tear the frontend down (it used to propagate
+        // straight out of the main loop = the window just vanished) and must
+        // not spin: back off if a completion keeps getting rejected.
+        var loop_ok = true;
+        loop.run(.once) catch |err| {
+            loop_ok = false;
+            loop_err_burst +|= 1;
+            terminal_main.debugLog("event loop error (continuing): {s}", .{@errorName(err)});
+        };
+        if (loop_ok) {
+            loop_err_burst = 0;
+        } else if (loop_err_burst > 8) {
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+        }
         const dbg_t1 = std.time.milliTimestamp();
         if (dbg_t1 - dbg_t0 > 300) terminal_main.debugLog("SLOW loop.run: {d}ms", .{dbg_t1 - dbg_t0});
 

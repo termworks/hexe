@@ -579,6 +579,7 @@ const Pod = struct {
         };
         ticker.run(&loop, &timer_completion, 100, TimerContext, &timer_ctx, timerCallback);
 
+        var loop_err_burst: usize = 0;
         while (true) {
             var waiting_for_initial_vt_attach = false;
             if (self.pty.pollStatus() != null) {
@@ -598,7 +599,20 @@ const Pod = struct {
             if (should_stop and !waiting_for_initial_vt_attach) break;
             if (callback_error) |err| return err;
 
-            try loop.run(.once);
+            // A loop error must NEVER kill the pod — that kills the user's
+            // shell. Log, back off (a persistently rejected completion would
+            // otherwise pin a core), and keep serving the PTY.
+            var loop_ok = true;
+            loop.run(.once) catch |err| {
+                loop_ok = false;
+                loop_err_burst +|= 1;
+                debugLog("pod event loop error (continuing): {s}", .{@errorName(err)});
+            };
+            if (loop_ok) {
+                loop_err_burst = 0;
+            } else if (loop_err_burst > 8) {
+                std.Thread.sleep(20 * std.time.ns_per_ms);
+            }
 
             if (should_stop and !waiting_for_initial_vt_attach) break;
             if (callback_error) |err| return err;

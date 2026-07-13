@@ -594,6 +594,17 @@ test "enqueuePodVtFrame backpressures only once backlog exists" {
 
 /// Server that handles mux connections
 /// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
+/// Whether an fd can be polled by the event loop. Watchers are armed by fd
+/// NUMBER; if a number was freed and reused by a REGULAR FILE (the state
+/// file, txlog, or log), arming it makes epoll reject the completion — and
+/// the loop then re-errors on it forever, pinning a core at 100% with a
+/// daemon that no longer makes progress. Refuse the arm instead.
+fn fdIsPollable(fd: posix.fd_t) bool {
+    const st = posix.fstat(fd) catch return false;
+    const kind = st.mode & posix.S.IFMT;
+    return kind == posix.S.IFSOCK or kind == posix.S.IFIFO or kind == posix.S.IFCHR;
+}
+
 pub const Server = struct {
     allocator: std.mem.Allocator,
     socket: ipc.Server,
@@ -715,6 +726,7 @@ pub const Server = struct {
         periodic_ctx.last_fire = std.time.milliTimestamp();
         ticker.run(&loop, &timer_completion, 100, PeriodicContext, &periodic_ctx, periodicCallback);
 
+        var loop_err_burst: usize = 0;
         while (self.running) {
             // Free watcher nodes that were disarmed in a previous iteration.
             // We defer destruction by one loop iteration so xev can finish
@@ -728,12 +740,29 @@ pub const Server = struct {
             // reused fd number is not shielded forever.
             self.ses_state.store.rotateClosedFdLog();
             const dbg_t0 = std.time.milliTimestamp();
+            var loop_ok = true;
             loop.run(.once) catch |err| {
+                loop_ok = false;
+                loop_err_burst +|= 1;
                 ses.debugLog("event loop error (continuing): {s}", .{@errorName(err)});
-                continue;
             };
+            if (loop_ok) loop_err_burst = 0;
             const dbg_t1 = std.time.milliTimestamp();
             if (dbg_t1 - dbg_t0 > 300) ses.debugLog("SLOW ses loop.run: {d}ms", .{dbg_t1 - dbg_t0});
+
+            // Spin guard: a completion the backend keeps rejecting (e.g. a
+            // watcher armed on an fd the kernel will not poll) makes
+            // loop.run return an error IMMEDIATELY, every time — the old
+            // "log and continue" then burned a whole core forever while the
+            // daemon made no progress (observed: 1.8M errors in seconds).
+            // Back off so the daemon stays responsive and the log stays
+            // readable; the arm guards above prevent the usual cause.
+            if (loop_err_burst > 0) {
+                if (loop_err_burst % 1000 == 0) {
+                    core.logging.warn("ses", "event loop erroring repeatedly ({d} in a row); backing off", .{loop_err_burst});
+                }
+                if (loop_err_burst > 8) std.Thread.sleep(20 * std.time.ns_per_ms);
+            }
 
             // Ticker watchdog: the re-arm chain can die silently (xev
             // io_uring submission loss under load). All ready CQEs were just
@@ -1064,6 +1093,10 @@ pub const Server = struct {
     fn armCtlWatcher(self: *Server, fd: posix.fd_t) bool {
         if (self.loop_ptr == null) return true;
         if (self.ctl_watchers.contains(fd)) return true;
+        if (!fdIsPollable(fd)) {
+            core.logging.warn("ses", "refusing to arm CTL watcher on non-pollable fd={d} (stale arm for a reused fd number)", .{fd});
+            return false;
+        }
 
         const node = self.allocator.create(CtlWatcher) catch |err| {
             core.logging.logError("ses", "failed to allocate CTL watcher", err);
@@ -1120,6 +1153,10 @@ pub const Server = struct {
         if (self.vt_watchers.contains(fd)) {
             ses.debugLog("armVtWatcher: SKIP fd={d} (already armed)", .{fd});
             return true;
+        }
+        if (!fdIsPollable(fd)) {
+            core.logging.warn("ses", "refusing to arm VT watcher on non-pollable fd={d} (stale arm for a reused fd number)", .{fd});
+            return false;
         }
         ses.debugLog("armVtWatcher: ARMED fd={d} dir={s}", .{ fd, @tagName(direction) });
 
