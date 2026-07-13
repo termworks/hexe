@@ -43,6 +43,28 @@ fn dupeTrimmedConfigString(allocator: std.mem.Allocator, value: []const u8, comp
 }
 
 /// Output definition for status modules (style + format pair)
+/// Free a slice unless it is EMPTY. Config fields default to empty literals
+/// (`&.{}` / `""`) which live in rodata, not on the heap — and the terminal
+/// frontend allocates with page_allocator, which panics ("incorrect
+/// alignment") when handed such a pointer. Any config section the user leaves
+/// empty (or a session with no user config at all) therefore crashed at exit.
+fn freeSlice(a: std.mem.Allocator, slice: anytype) void {
+    if (slice.len == 0) return;
+    a.free(slice);
+}
+
+/// Free a string field ONLY if it is heap-owned. Config structs default their
+/// string fields to comptime LITERALS (rodata). Freeing one of those is
+/// undefined behavior — with the terminal frontend's page_allocator it panics
+/// ("incorrect alignment") during teardown, so any session whose config left
+/// such a field at its default crashed on exit. A pointer-identity check
+/// against the default is exact and cheap.
+fn freeOwnedStr(a: std.mem.Allocator, slice: []const u8, comptime default: []const u8) void {
+    if (slice.len == 0) return;
+    if (slice.ptr == default.ptr) return; // still the comptime default: not ours
+    a.free(@constCast(slice));
+}
+
 pub const OutputDef = struct {
     style: []const u8 = "",
     format: []const u8 = "$output",
@@ -63,8 +85,8 @@ pub const SpinnerDef = struct {
     started_at_ms: u64 = 0,
 
     pub fn deinit(self: *SpinnerDef, allocator: std.mem.Allocator) void {
-        allocator.free(self.kind);
-        if (self.colors.len > 0) allocator.free(self.colors);
+        freeOwnedStr(allocator, self.kind, "knight_rider");
+        if (self.colors.len > 0) freeSlice(allocator, self.colors);
         self.* = .{};
     }
 };
@@ -94,20 +116,20 @@ pub const WhenDef = struct {
 
     pub fn deinit(self: *WhenDef, allocator: std.mem.Allocator) void {
         if (self.all) |items| {
-            for (items) |s| allocator.free(@constCast(s));
-            allocator.free(items);
+            for (items) |s| freeSlice(allocator, @constCast(s));
+            freeSlice(allocator, items);
         }
         if (self.any) |items| {
             for (items) |*w| {
                 var mw = @constCast(w);
                 mw.deinit(allocator);
             }
-            allocator.free(items);
+            freeSlice(allocator, items);
         }
-        if (self.bash) |s| allocator.free(@constCast(s));
-        if (self.lua) |s| allocator.free(@constCast(s));
-        if (self.env) |s| allocator.free(@constCast(s));
-        if (self.env_not) |s| allocator.free(@constCast(s));
+        if (self.bash) |s| freeSlice(allocator, @constCast(s));
+        if (self.lua) |s| freeSlice(allocator, @constCast(s));
+        if (self.env) |s| freeSlice(allocator, @constCast(s));
+        if (self.env_not) |s| freeSlice(allocator, @constCast(s));
         self.* = .{};
     }
 };
@@ -206,24 +228,24 @@ pub const FloatStyle = struct {
     pub fn deinit(self: *FloatStyle, allocator: std.mem.Allocator) void {
         const freeSegment = struct {
             fn call(seg: *Segment, a: std.mem.Allocator) void {
-                a.free(@constCast(seg.name));
+                freeSlice(a, @constCast(seg.name));
                 if (seg.outputs.len > 0) {
                     for (seg.outputs) |*out| {
-                        a.free(@constCast(out.style));
-                        a.free(@constCast(out.format));
+                        freeOwnedStr(a, out.style, "");
+                        freeOwnedStr(a, out.format, "$output");
                     }
-                    a.free(seg.outputs);
+                    freeSlice(a, seg.outputs);
                 }
-                if (seg.command) |cmd| a.free(@constCast(cmd));
-                if (seg.builtin) |b| a.free(@constCast(b));
-                if (seg.progress_show_when) |s| a.free(@constCast(s));
-                if (seg.on_click) |cmd| a.free(@constCast(cmd));
-                if (seg.on_right_click) |cmd| a.free(@constCast(cmd));
-                if (seg.on_middle_click) |cmd| a.free(@constCast(cmd));
-                if (seg.button_active_bash) |cmd| a.free(@constCast(cmd));
-                if (seg.button_left_style) |s| a.free(@constCast(s));
-                if (seg.button_middle_style) |s| a.free(@constCast(s));
-                if (seg.button_right_style) |s| a.free(@constCast(s));
+                if (seg.command) |cmd| freeSlice(a, @constCast(cmd));
+                if (seg.builtin) |b| freeSlice(a, @constCast(b));
+                if (seg.progress_show_when) |s| freeSlice(a, @constCast(s));
+                if (seg.on_click) |cmd| freeSlice(a, @constCast(cmd));
+                if (seg.on_right_click) |cmd| freeSlice(a, @constCast(cmd));
+                if (seg.on_middle_click) |cmd| freeSlice(a, @constCast(cmd));
+                if (seg.button_active_bash) |cmd| freeSlice(a, @constCast(cmd));
+                if (seg.button_left_style) |s| freeSlice(a, @constCast(s));
+                if (seg.button_middle_style) |s| freeSlice(a, @constCast(s));
+                if (seg.button_right_style) |s| freeSlice(a, @constCast(s));
                 if (seg.when) |*w| {
                     var when = @constCast(w);
                     when.deinit(a);
@@ -232,13 +254,13 @@ pub const FloatStyle = struct {
                     var spinner = @constCast(sp);
                     spinner.deinit(a);
                 }
-                a.free(@constCast(seg.active_style));
-                a.free(@constCast(seg.inactive_style));
-                a.free(@constCast(seg.separator));
-                a.free(@constCast(seg.separator_style));
-                a.free(@constCast(seg.tab_title));
-                a.free(@constCast(seg.left_arrow));
-                a.free(@constCast(seg.right_arrow));
+                freeSlice(a, @constCast(seg.active_style));
+                freeSlice(a, @constCast(seg.inactive_style));
+                freeSlice(a, @constCast(seg.separator));
+                freeSlice(a, @constCast(seg.separator_style));
+                freeSlice(a, @constCast(seg.tab_title));
+                freeSlice(a, @constCast(seg.left_arrow));
+                freeSlice(a, @constCast(seg.right_arrow));
             }
         }.call;
 
@@ -249,7 +271,7 @@ pub const FloatStyle = struct {
             for (self.title_segments) |*seg_ptr| {
                 freeSegment(@constCast(seg_ptr), allocator);
             }
-            allocator.free(self.title_segments);
+            freeSlice(allocator, self.title_segments);
         }
         self.* = .{};
     }
@@ -300,7 +322,7 @@ pub const FloatMatchRule = struct {
     visual: FloatVisualRule = .{},
 
     pub fn deinit(self: *FloatMatchRule, allocator: std.mem.Allocator) void {
-        allocator.free(@constCast(self.pattern));
+        freeSlice(allocator, @constCast(self.pattern));
         self.visual.deinit(allocator);
         self.* = undefined;
     }
@@ -420,8 +442,8 @@ pub const LayoutPaneDef = struct {
     command: ?[]const u8 = null,
 
     pub fn deinit(self: *LayoutPaneDef, allocator: std.mem.Allocator) void {
-        if (self.cwd) |c| allocator.free(@constCast(c));
-        if (self.command) |c| allocator.free(@constCast(c));
+        if (self.cwd) |c| freeSlice(allocator, @constCast(c));
+        if (self.command) |c| freeSlice(allocator, @constCast(c));
     }
 };
 
@@ -442,7 +464,7 @@ pub const LayoutSplitDef = union(enum) {
                 pane.deinit(allocator);
             },
             .split => |*s| {
-                allocator.free(@constCast(s.dir));
+                freeSlice(allocator, @constCast(s.dir));
                 s.first.deinit(allocator);
                 allocator.destroy(s.first);
                 s.second.deinit(allocator);
@@ -459,7 +481,7 @@ pub const LayoutTabDef = struct {
     root: ?LayoutSplitDef = null,
 
     pub fn deinit(self: *LayoutTabDef, allocator: std.mem.Allocator) void {
-        allocator.free(@constCast(self.name));
+        freeSlice(allocator, @constCast(self.name));
         if (self.root) |*r| {
             var root = @constCast(r);
             root.deinit(allocator);
@@ -482,8 +504,8 @@ pub const LayoutFloatDef = struct {
     isolation: ?IsolationConfig = null,
 
     pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
-        if (self.command) |c| allocator.free(@constCast(c));
-        if (self.title) |t| allocator.free(@constCast(t));
+        if (self.command) |c| freeSlice(allocator, @constCast(c));
+        if (self.title) |t| freeSlice(allocator, @constCast(t));
         if (self.isolation) |*iso| {
             var isolation = @constCast(iso);
             isolation.deinit(allocator);
@@ -509,25 +531,25 @@ pub const LayoutDef = struct {
     source_path: ?[]const u8 = null,
 
     pub fn deinit(self: *LayoutDef, allocator: std.mem.Allocator) void {
-        allocator.free(@constCast(self.name));
-        for (self.on_start) |cmd| allocator.free(cmd);
-        if (self.on_start.len > 0) allocator.free(self.on_start);
-        for (self.on_stop) |cmd| allocator.free(cmd);
-        if (self.on_stop.len > 0) allocator.free(self.on_stop);
-        if (self.source_path) |sp| allocator.free(sp);
+        freeSlice(allocator, @constCast(self.name));
+        for (self.on_start) |cmd| freeSlice(allocator, cmd);
+        if (self.on_start.len > 0) freeSlice(allocator, self.on_start);
+        for (self.on_stop) |cmd| freeSlice(allocator, cmd);
+        if (self.on_stop.len > 0) freeSlice(allocator, self.on_stop);
+        if (self.source_path) |sp| freeSlice(allocator, sp);
         for (self.tabs) |*tab| {
             var t = @constCast(tab);
             t.deinit(allocator);
         }
         if (self.tabs.len > 0) {
-            allocator.free(self.tabs);
+            freeSlice(allocator, self.tabs);
         }
         for (self.floats) |*float| {
             var f = @constCast(float);
             f.deinit(allocator);
         }
         if (self.floats.len > 0) {
-            allocator.free(self.floats);
+            freeSlice(allocator, self.floats);
         }
     }
 };
@@ -545,10 +567,10 @@ pub const IsolationConfig = struct {
     pids: ?[]const u8 = null,
 
     pub fn deinit(self: *IsolationConfig, allocator: std.mem.Allocator) void {
-        allocator.free(self.profile);
-        if (self.memory) |m| allocator.free(@constCast(m));
-        if (self.cpu) |c| allocator.free(@constCast(c));
-        if (self.pids) |p| allocator.free(@constCast(p));
+        freeOwnedStr(allocator, self.profile, "default");
+        if (self.memory) |m| freeSlice(allocator, @constCast(m));
+        if (self.cpu) |c| freeSlice(allocator, @constCast(c));
+        if (self.pids) |p| freeSlice(allocator, @constCast(p));
     }
 };
 
@@ -563,7 +585,7 @@ pub const SesConfig = struct {
             l.deinit(allocator);
         }
         if (self.layouts.len > 0) {
-            allocator.free(self.layouts);
+            freeSlice(allocator, self.layouts);
         }
     }
 
@@ -581,7 +603,7 @@ pub const SesConfig = struct {
             log.warn("failed to resolve ses config path: {s}", .{@errorName(err)});
             return config;
         };
-        defer allocator.free(config_path);
+        defer freeSlice(allocator, config_path);
 
         runtime.loadConfig(config_path) catch |err| {
             log.warn("failed to load ses config {s}: {s}", .{ config_path, @errorName(err) });
@@ -604,7 +626,7 @@ pub const SesConfig = struct {
             log.warn("failed to allocate local ses config path: {s}", .{@errorName(err)});
             return config;
         };
-        defer allocator.free(local_path);
+        defer freeSlice(allocator, local_path);
 
         // Check if local config exists
         std.fs.cwd().access(local_path, .{}) catch {
@@ -851,7 +873,7 @@ pub const Config = struct {
         const path = lua_runtime.getConfigPath(allocator, "init.lua") catch {
             return config;
         };
-        defer allocator.free(path);
+        defer freeSlice(allocator, path);
 
         const runtime_ptr = allocator.create(LuaRuntime) catch {
             config.status = .@"error";
@@ -903,7 +925,7 @@ pub const Config = struct {
             log.warn("failed to allocate local terminal config path: {s}", .{@errorName(err)});
             return config;
         };
-        defer allocator.free(local_path);
+        defer freeSlice(allocator, local_path);
 
         log.debug("checking for local config: {s}", .{local_path});
 
@@ -1024,7 +1046,7 @@ pub const Config = struct {
     pub fn deinit(self: *Config) void {
         if (self._allocator) |alloc| {
             if (self.status_message) |msg| {
-                alloc.free(msg);
+                freeSlice(alloc, msg);
             }
             if (self.input.binds.len > 0) {
                 for (self.input.binds) |b| {
@@ -1033,7 +1055,7 @@ pub const Config = struct {
                         mw.deinit(alloc);
                     }
                 }
-                alloc.free(self.input.binds);
+                freeSlice(alloc, self.input.binds);
             }
 
             if (self._lua_runtime) |rt| {
@@ -1049,7 +1071,7 @@ pub const Config = struct {
                     var mutable_rule = @constCast(rule);
                     mutable_rule.deinit(alloc);
                 }
-                alloc.free(self.float_match_rules);
+                freeSlice(alloc, self.float_match_rules);
             }
         }
     }
@@ -1353,7 +1375,7 @@ fn parseStringList(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]
                     if (dup) |d| {
                         out.append(allocator, d) catch |err| {
                             log.warn("failed to append config string-list item: {}", .{err});
-                            allocator.free(d);
+                            freeSlice(allocator, d);
                         };
                     }
                 }
@@ -1373,7 +1395,7 @@ fn parseStringList(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]
         };
         const slice = allocator.alloc([]u8, 1) catch |err| {
             log.warn("failed to allocate string list wrapper for {s}: {s}", .{ key, @errorName(err) });
-            allocator.free(one);
+            freeSlice(allocator, one);
             return null;
         };
         slice[0] = one;
@@ -1634,9 +1656,9 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
     }) |removed| {
         if (runtime.fieldType(-1, removed[0]) != .nil) {
             const msg = std.fmt.allocPrint(allocator, "config: segment field '{s}' is removed; use {s}", .{ removed[0], removed[1] }) catch "config: removed segment field";
-            defer if (!std.mem.eql(u8, msg, "config: removed segment field")) allocator.free(msg);
+            defer if (!std.mem.eql(u8, msg, "config: removed segment field")) freeSlice(allocator, msg);
             setParseError(allocator, msg);
-            allocator.free(name);
+            freeSlice(allocator, name);
             return null;
         }
     }
@@ -1679,9 +1701,9 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         }
         if (runtime.fieldType(-1, "value") != .nil) {
             setParseError(allocator, "config: segment field 'progress.value' is removed; use progress.render");
-            allocator.free(name);
-            if (builtin_name) |b| allocator.free(@constCast(b));
-            if (show_when_code) |s| allocator.free(@constCast(s));
+            freeSlice(allocator, name);
+            if (builtin_name) |b| freeSlice(allocator, @constCast(b));
+            if (show_when_code) |s| freeSlice(allocator, @constCast(s));
             return null;
         }
     }
@@ -1723,19 +1745,19 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         }) |removed| {
             if (runtime.fieldType(-1, removed[0]) != .nil) {
                 const msg = std.fmt.allocPrint(allocator, "config: segment field 'button.{s}' is removed; use button.{s}", .{ removed[0], removed[1] }) catch "config: removed segment button field";
-                defer if (!std.mem.eql(u8, msg, "config: removed segment button field")) allocator.free(msg);
+                defer if (!std.mem.eql(u8, msg, "config: removed segment button field")) freeSlice(allocator, msg);
                 setParseError(allocator, msg);
-                allocator.free(name);
-                if (render_code) |rc| allocator.free(rc);
-                if (builtin_name) |b| allocator.free(@constCast(b));
-                if (show_when_code) |s| allocator.free(@constCast(s));
-                if (on_click) |c| allocator.free(@constCast(c));
-                if (on_right_click) |c| allocator.free(@constCast(c));
-                if (on_middle_click) |c| allocator.free(@constCast(c));
-                if (button_active_bash) |c| allocator.free(@constCast(c));
-                if (button_left_style) |c| allocator.free(@constCast(c));
-                if (button_middle_style) |c| allocator.free(@constCast(c));
-                if (button_right_style) |c| allocator.free(@constCast(c));
+                freeSlice(allocator, name);
+                if (render_code) |rc| freeSlice(allocator, rc);
+                if (builtin_name) |b| freeSlice(allocator, @constCast(b));
+                if (show_when_code) |s| freeSlice(allocator, @constCast(s));
+                if (on_click) |c| freeSlice(allocator, @constCast(c));
+                if (on_right_click) |c| freeSlice(allocator, @constCast(c));
+                if (on_middle_click) |c| freeSlice(allocator, @constCast(c));
+                if (button_active_bash) |c| freeSlice(allocator, @constCast(c));
+                if (button_left_style) |c| freeSlice(allocator, @constCast(c));
+                if (button_middle_style) |c| freeSlice(allocator, @constCast(c));
+                if (button_right_style) |c| freeSlice(allocator, @constCast(c));
                 return null;
             }
         }
@@ -1754,17 +1776,17 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         }
         if (runtime.fieldType(-1, "value") != .nil) {
             setParseError(allocator, "config: segment field 'button.value' is removed; use button.render");
-            allocator.free(name);
-            if (render_code) |rc| allocator.free(rc);
-            if (builtin_name) |b| allocator.free(@constCast(b));
-            if (show_when_code) |s| allocator.free(@constCast(s));
-            if (on_click) |c| allocator.free(@constCast(c));
-            if (on_right_click) |c| allocator.free(@constCast(c));
-            if (on_middle_click) |c| allocator.free(@constCast(c));
-            if (button_active_bash) |c| allocator.free(@constCast(c));
-            if (button_left_style) |c| allocator.free(@constCast(c));
-            if (button_middle_style) |c| allocator.free(@constCast(c));
-            if (button_right_style) |c| allocator.free(@constCast(c));
+            freeSlice(allocator, name);
+            if (render_code) |rc| freeSlice(allocator, rc);
+            if (builtin_name) |b| freeSlice(allocator, @constCast(b));
+            if (show_when_code) |s| freeSlice(allocator, @constCast(s));
+            if (on_click) |c| freeSlice(allocator, @constCast(c));
+            if (on_right_click) |c| freeSlice(allocator, @constCast(c));
+            if (on_middle_click) |c| freeSlice(allocator, @constCast(c));
+            if (button_active_bash) |c| freeSlice(allocator, @constCast(c));
+            if (button_left_style) |c| freeSlice(allocator, @constCast(c));
+            if (button_middle_style) |c| freeSlice(allocator, @constCast(c));
+            if (button_right_style) |c| freeSlice(allocator, @constCast(c));
             return null;
         }
     }
@@ -1785,8 +1807,8 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
 
     if (runtime.fieldType(-1, "outputs") != .nil) {
         setParseError(allocator, "config: segment field 'outputs' is removed; return styled blocks from 'render'");
-        allocator.free(name);
-        if (render_code) |rc| allocator.free(rc);
+        freeSlice(allocator, name);
+        if (render_code) |rc| freeSlice(allocator, rc);
         return null;
     }
 
@@ -1799,9 +1821,9 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
             .progress => "config: progress segment requires 'render' or 'builtin'",
         };
         setParseError(allocator, err_msg);
-        allocator.free(name);
-        if (builtin_name) |b| allocator.free(@constCast(b));
-        if (show_when_code) |s| allocator.free(@constCast(s));
+        freeSlice(allocator, name);
+        if (builtin_name) |b| freeSlice(allocator, @constCast(b));
+        if (show_when_code) |s| freeSlice(allocator, @constCast(s));
         return null;
     }
 
@@ -2003,7 +2025,7 @@ fn parseWhenTable(runtime: *LuaRuntime, allocator: std.mem.Allocator, allow_hexe
     if (ty == .string) {
         if (runtime.getStringAlloc(-1, "when")) |s| {
             const arr = allocator.alloc([]const u8, 1) catch {
-                allocator.free(s);
+                freeSlice(allocator, s);
                 return null;
             };
             arr[0] = s;
@@ -2064,7 +2086,7 @@ fn parseTokenArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[][]cons
                 if (dup) |d| {
                     list.append(allocator, d) catch |err| {
                         log.warn("failed to append config when token: {}", .{err});
-                        allocator.free(d);
+                        freeSlice(allocator, d);
                     };
                 }
             }
@@ -2102,14 +2124,14 @@ fn parseAnyArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[]const Wh
                 };
                 const arr = allocator.alloc([]const u8, 1) catch |err| {
                     log.warn("failed to allocate when string wrapper #{}: {s}", .{ i, @errorName(err) });
-                    allocator.free(dup);
+                    freeSlice(allocator, dup);
                     continue;
                 };
                 arr[0] = dup;
                 list.append(allocator, .{ .all = arr }) catch |err| {
                     log.warn("failed to append when string expression #{}: {s}", .{ i, @errorName(err) });
-                    allocator.free(dup);
-                    allocator.free(arr);
+                    freeSlice(allocator, dup);
+                    freeSlice(allocator, arr);
                 };
             }
         } else if (elem_ty == .table) {
