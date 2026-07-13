@@ -99,9 +99,17 @@ fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntim
     var sessions: [64]DetachedSessionInfo = undefined;
     const count = try runtime.listSessions(&sessions);
 
+    // Attached sessions match too: closing a window and immediately running
+    // `attach .` races the daemon's disconnect detection — the session is
+    // still "attached" for a moment, and matching only detached records made
+    // dot-attach fail intermittently. Attaching to an attached session goes
+    // through the normal force-detach steal. The requester's own freshly
+    // registered session must be excluded or it would steal itself.
+    const own_uuid: [32]u8 = runtime.sessionUuid();
     var matches: [64]usize = undefined;
     var match_count: usize = 0;
     for (sessions[0..count], 0..) |session, idx| {
+        if (std.mem.eql(u8, &session.session_id, &own_uuid)) continue;
         const base_root = session.base_root[0..session.base_root_len];
         if (base_root.len > 0 and std.mem.eql(u8, base_root, cwd)) {
             matches[match_count] = idx;
@@ -110,7 +118,7 @@ fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntim
     }
 
     if (match_count == 0) {
-        std.debug.print("No detached session rooted at: {s}\n", .{cwd});
+        std.debug.print("No session rooted at: {s}\n", .{cwd});
         return error.SessionNotFound;
     }
 
@@ -120,11 +128,12 @@ fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntim
         return .{ .target = target, .owned = target };
     }
 
-    std.debug.print("Detached sessions rooted at {s}:\n", .{cwd});
+    std.debug.print("Sessions rooted at {s}:\n", .{cwd});
     for (matches[0..match_count], 0..) |session_idx, display_idx| {
         const session = sessions[session_idx];
         const name = session.session_name[0..session.session_name_len];
-        std.debug.print("  {d}) [{s}] {s} ({d} panes)\n", .{ display_idx + 1, session.session_id[0..8], name, session.pane_count });
+        const state_tag: []const u8 = if (session.attached) " (attached)" else "";
+        std.debug.print("  {d}) [{s}] {s} ({d} panes){s}\n", .{ display_idx + 1, session.session_id[0..8], name, session.pane_count, state_tag });
     }
     std.debug.print("Select session [1-{d}]: ", .{match_count});
     const selected = readAttachSelection(match_count) orelse return error.InvalidSelection;
@@ -175,22 +184,23 @@ pub fn run(terminal_args: TerminalArgs) !void {
             break :blk 0;
         };
         if (sess_count > 0) {
-            std.debug.print("Detached sessions (attach by name or UUID prefix):\n", .{});
+            std.debug.print("Sessions (attach by name or UUID prefix; attached ones are stolen):\n", .{});
             const instance = std.posix.getenv("HEXE_INSTANCE");
             for (sessions[0..sess_count]) |s| {
                 const name = s.session_name[0..s.session_name_len];
                 const base_root = s.base_root[0..s.base_root_len];
                 const uuid_prefix = s.session_id[0..8];
+                const state_mark: []const u8 = if (s.attached) " [attached]" else "";
                 if (instance) |inst| {
                     if (inst.len > 0) {
-                        std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}\n", .{ uuid_prefix, name, s.pane_count, base_root });
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}{s}\n", .{ uuid_prefix, name, s.pane_count, base_root, state_mark });
                         std.debug.print("    → hexe terminal attach --instance {s} {s}\n", .{ inst, uuid_prefix });
                     } else {
-                        std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}\n", .{ uuid_prefix, name, s.pane_count, base_root });
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}{s}\n", .{ uuid_prefix, name, s.pane_count, base_root, state_mark });
                         std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
                     }
                 } else {
-                    std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}\n", .{ uuid_prefix, name, s.pane_count, base_root });
+                    std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}{s}\n", .{ uuid_prefix, name, s.pane_count, base_root, state_mark });
                     std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
                 }
             }

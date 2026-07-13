@@ -1210,6 +1210,7 @@ pub const SesClient = struct {
             var info: DetachedSessionInfo = undefined;
             info.session_id = entry.session_id;
             info.pane_count = entry.pane_count;
+            info.attached = entry.attached != 0;
             // Read name.
             const name_len = @min(@as(usize, entry.name_len), 32);
             if (entry.name_len > 0) {
@@ -1395,6 +1396,8 @@ pub const DetachedSessionInfo = struct {
     base_root: [std.fs.max_path_bytes]u8 = undefined,
     base_root_len: usize = 0,
     pane_count: usize,
+    /// Currently attached to a live frontend (attaching will steal it).
+    attached: bool = false,
 };
 
 test "SesClient: queues multiple pending CWD responses FIFO" {

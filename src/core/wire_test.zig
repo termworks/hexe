@@ -322,3 +322,24 @@ test "wire round-trip: SessionReattached (snapshot + pane uuids trail)" {
     try wire.readExact(pair.b, got_uuids[0..uuid_bytes.len]);
     try testing.expectEqualSlices(u8, uuid_bytes, got_uuids[0..uuid_bytes.len]);
 }
+
+test "wire round-trip: SessionEntry carries the attached flag" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    var sent: wire.SessionEntry = .{
+        .session_id = [_]u8{'e'} ** 32,
+        .pane_count = 3,
+        .name_len = 5,
+        .base_root_len = 4,
+        .attached = 1,
+    };
+    try wire.writeControl(pair.a, .sessions_list, std.mem.asBytes(&sent));
+
+    const hdr = try wire.readControlHeader(pair.b);
+    try testing.expectEqual(@as(u32, @sizeOf(wire.SessionEntry)), hdr.payload_len);
+    const got = try wire.readStruct(wire.SessionEntry, pair.b);
+    try testing.expectEqualSlices(u8, std.mem.asBytes(&sent), std.mem.asBytes(&got));
+    try testing.expectEqual(@as(u8, 1), got.attached);
+}

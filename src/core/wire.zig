@@ -442,6 +442,12 @@ pub const SessionEntry = extern struct {
     pane_count: u16 align(1),
     name_len: u16 align(1),
     base_root_len: u16 align(1),
+    /// 1 when the session is currently attached to a live frontend. Listed so
+    /// `attach .` can resolve a session whose frontend just died but whose
+    /// disconnect the daemon has not processed yet (attaching force-detaches
+    /// the stale owner) — without this the dot-attach raced disconnect
+    /// detection and "sometimes" found nothing.
+    attached: u8 align(1) = 0,
     // Followed by: name bytes, then base_root bytes.
 };
 
