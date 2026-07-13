@@ -138,6 +138,12 @@ fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntim
     var match_count: usize = 0;
     for (sessions[0..count], 0..) |session, idx| {
         if (std.mem.eql(u8, &session.session_id, &own_uuid)) continue;
+        // A ZERO-pane session is never a meaningful attach target: attached
+        // ones are frontends still booting (they register before creating a
+        // pane — e.g. a concurrent `attach .` racer), and detached ones are
+        // leftovers of aborted attaches. Matching them forced the ambiguity
+        // picker on phantom candidates.
+        if (session.pane_count == 0) continue;
         const base_root = session.base_root[0..session.base_root_len];
         if (base_root.len == 0 or !std.mem.eql(u8, base_root, cwd)) continue;
         // Dedup by session id: during park/steal transitions one session can
@@ -416,36 +422,50 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     var restored_existing_target = false;
 
-    // Handle --attach: try session first, then orphaned pane.
+    // Handle --attach: try session first, then orphaned pane. The whole
+    // resolve+attach is retried a few times: the daemon's session state is
+    // in flux around kills, steals, and parks (a session can move between
+    // attached/detached, or a concurrent attach may hold the commit lock),
+    // and a single-shot attempt turned those transient windows into flaky
+    // "sometimes it doesn't attach" failures. Each retry re-resolves from a
+    // FRESH session list.
     if (terminal_args.attach) |uuid_prefix| {
-        var resolved_attach = resolveDotAttachTarget(allocator, state.runtime, uuid_prefix) catch |err| {
-            debugLog("attach: failed to resolve target {s}: {s}", .{ uuid_prefix, @errorName(err) });
-            if (err == error.InvalidSelection) {
-                ttyPrint("Invalid selection\n", .{});
-            }
-            return;
-        };
-        defer resolved_attach.deinit(allocator);
+        var attach_attempt: usize = 0;
+        attach_retry: while (true) : (attach_attempt += 1) {
+            if (attach_attempt > 0) std.Thread.sleep(600 * std.time.ns_per_ms);
+            const last_try = attach_attempt + 1 >= 4;
+            var resolved_attach = resolveDotAttachTarget(allocator, state.runtime, uuid_prefix) catch |err| {
+                debugLog("attach: failed to resolve target {s}: {s} (attempt {d})", .{ uuid_prefix, @errorName(err), attach_attempt + 1 });
+                if (err == error.SessionNotFound and !last_try) continue :attach_retry;
+                if (err == error.InvalidSelection) {
+                    ttyPrint("Invalid selection\n", .{});
+                }
+                return;
+            };
+            defer resolved_attach.deinit(allocator);
 
-        debugLog("attach: trying to reattach with prefix={s}", .{resolved_attach.target});
-        if (state.reattachSession(resolved_attach.target)) {
-            debugLog("attach: reattachSession succeeded", .{});
-            state.notifications.show("Session reattached");
-            restored_existing_target = true;
-            // Reattach may change state.uuid — update env for subsequent panes.
-            const reattached_uuid = state.runtime.sessionUuid();
-            @memcpy(session_id_z[0..32], &reattached_uuid);
-            _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
-        } else if (state.attachOrphanedPane(resolved_attach.target)) {
-            debugLog("attach: attachOrphanedPane succeeded", .{});
-            state.notifications.show("Attached to orphaned pane");
-            restored_existing_target = true;
-        } else {
-            // Session/pane not found - EXIT with error, don't create new session
-            debugLog("attach: both reattach methods failed, exiting", .{});
-            ttyPrint("Session or pane '{s}' not found\n", .{resolved_attach.target});
-            ttyPrint("Use 'hexe terminal list' to see available sessions\n", .{});
-            return; // Exit without entering main loop
+            debugLog("attach: trying to reattach with prefix={s}", .{resolved_attach.target});
+            if (state.reattachSession(resolved_attach.target)) {
+                debugLog("attach: reattachSession succeeded", .{});
+                state.notifications.show("Session reattached");
+                restored_existing_target = true;
+                // Reattach may change state.uuid — update env for subsequent panes.
+                const reattached_uuid = state.runtime.sessionUuid();
+                @memcpy(session_id_z[0..32], &reattached_uuid);
+                _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
+            } else if (state.attachOrphanedPane(resolved_attach.target)) {
+                debugLog("attach: attachOrphanedPane succeeded", .{});
+                state.notifications.show("Attached to orphaned pane");
+                restored_existing_target = true;
+            } else {
+                debugLog("attach: both reattach methods failed (attempt {d})", .{attach_attempt + 1});
+                if (!last_try) continue :attach_retry;
+                // Session/pane not found - EXIT with error, don't create new session
+                ttyPrint("Session or pane '{s}' not found\n", .{resolved_attach.target});
+                ttyPrint("Use 'hexe terminal list' to see available sessions\n", .{});
+                return; // Exit without entering main loop
+            }
+            break :attach_retry;
         }
     } else if (terminal_args.session_config_path) |config_path| {
         // Launch from session config (.hexe.lua)
