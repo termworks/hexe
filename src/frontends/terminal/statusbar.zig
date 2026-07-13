@@ -1620,14 +1620,14 @@ pub fn draw(
     var left_order: [24]usize = undefined;
     for (0..left_count) |i| left_order[i] = i;
 
-    for (1..left_count) |i| {
+    if (left_count > 1) for (1..left_count) |i| {
         const key = left_order[i];
         var j: usize = i;
         while (j > 0 and left_modules[left_order[j - 1]].mod.priority > left_modules[key].mod.priority) : (j -= 1) {
             left_order[j] = left_order[j - 1];
         }
         left_order[j] = key;
-    }
+    };
     var left_used: u16 = 0;
     for (left_order[0..left_count]) |idx| {
         if (left_used + left_modules[idx].width <= left_budget) {
@@ -1661,14 +1661,14 @@ pub fn draw(
     // Sort right by priority and mark visible
     var right_order: [24]usize = undefined;
     for (0..right_count) |i| right_order[i] = i;
-    for (1..right_count) |i| {
+    if (right_count > 1) for (1..right_count) |i| {
         const key = right_order[i];
         var j: usize = i;
         while (j > 0 and right_modules[right_order[j - 1]].mod.priority > right_modules[key].mod.priority) : (j -= 1) {
             right_order[j] = right_order[j - 1];
         }
         right_order[j] = key;
-    }
+    };
     var right_used: u16 = 0;
     for (right_order[0..right_count]) |idx| {
         if (right_used + right_modules[idx].width <= right_budget) {
@@ -2039,14 +2039,14 @@ pub fn hitTestAction(
 
     var left_order: [24]usize = undefined;
     for (0..left_count) |i| left_order[i] = i;
-    for (1..left_count) |i| {
+    if (left_count > 1) for (1..left_count) |i| {
         const key = left_order[i];
         var j: usize = i;
         while (j > 0 and left_modules[left_order[j - 1]].mod.priority > left_modules[key].mod.priority) : (j -= 1) {
             left_order[j] = left_order[j - 1];
         }
         left_order[j] = key;
-    }
+    };
     var left_used: u16 = 0;
     for (left_order[0..left_count]) |idx| {
         if (left_used + left_modules[idx].width <= left_budget) {
@@ -2065,14 +2065,14 @@ pub fn hitTestAction(
     }
     var right_order: [24]usize = undefined;
     for (0..right_count) |i| right_order[i] = i;
-    for (1..right_count) |i| {
+    if (right_count > 1) for (1..right_count) |i| {
         const key = right_order[i];
         var j: usize = i;
         while (j > 0 and right_modules[right_order[j - 1]].mod.priority > right_modules[key].mod.priority) : (j -= 1) {
             right_order[j] = right_order[j - 1];
         }
         right_order[j] = key;
-    }
+    };
     var right_used: u16 = 0;
     for (right_order[0..right_count]) |idx| {
         if (right_used + right_modules[idx].width <= right_budget) {
