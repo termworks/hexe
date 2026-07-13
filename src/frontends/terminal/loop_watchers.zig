@@ -117,6 +117,16 @@ pub fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []
     watcher.current = node;
     // Fresh connection: any partial-frame progress belonged to the old one.
     state.mux_vt_reader.reset();
+    // The WRITE queue must be dropped too. A backpressured flush leaves a
+    // PARTIALLY WRITTEN frame at its head; replaying that remainder onto a
+    // NEW socket starts the multiplexed stream mid-frame, so SES desyncs and
+    // every keystroke for this mux is misparsed — after a daemon crash and
+    // auto-reconnect the panes looked alive but ignored all input (worst on
+    // busy sessions, which have the most in-flight VT traffic).
+    if (state.mux_vt_write_queue.queuedBytes() > 0) {
+        terminal_main.debugLog("dropping {d} queued VT bytes from the previous connection", .{state.mux_vt_write_queue.queuedBytes()});
+    }
+    state.mux_vt_write_queue.clear();
     const file = xev.File.initFd(vt_fd);
     file.poll(watcher.loop, &node.completion, .read, SesVtSlot, &node.slot, sesVtCallback);
 }
