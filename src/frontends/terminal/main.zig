@@ -79,6 +79,30 @@ const ResolvedAttachTarget = struct {
     }
 };
 
+/// Print to the controlling terminal directly. The frontend redirects
+/// stderr to /dev/null (or the logfile) at startup so the TUI stays clean —
+/// which made every attach-resolution message, INCLUDING the ambiguity
+/// picker prompt, invisible: the process then blocked reading stdin behind a
+/// prompt nobody could see ("attach just hangs"). Interactive output goes to
+/// /dev/tty, which survives the redirect.
+fn ttyPrint(comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    if (std.fs.openFileAbsolute("/dev/tty", .{ .mode = .write_only })) |tty| {
+        defer tty.close();
+        tty.writeAll(msg) catch {};
+        return;
+    } else |_| {}
+    // No controlling terminal (setsid'd): stdin is the terminal for any
+    // interactive session — writing to a tty through its stdin fd is valid.
+    if (std.posix.isatty(std.posix.STDIN_FILENO)) {
+        var off: usize = 0;
+        while (off < msg.len) {
+            off += std.posix.write(std.posix.STDIN_FILENO, msg[off..]) catch return;
+        }
+    }
+}
+
 fn readAttachSelection(max: usize) ?usize {
     var in_buf: [64]u8 = undefined;
     var stdin = std.fs.File.stdin().reader(&in_buf);
@@ -106,19 +130,37 @@ fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntim
     // through the normal force-detach steal. The requester's own freshly
     // registered session must be excluded or it would steal itself.
     const own_uuid: [32]u8 = runtime.sessionUuid();
+    debugLog("dotAttach: cwd={s} listed={d} own={s}", .{ cwd, count, own_uuid[0..8] });
+    for (sessions[0..count]) |sess| {
+        debugLog("dotAttach: cand id={s} att={} root={s}", .{ sess.session_id[0..8], sess.attached, sess.base_root[0..sess.base_root_len] });
+    }
     var matches: [64]usize = undefined;
     var match_count: usize = 0;
     for (sessions[0..count], 0..) |session, idx| {
         if (std.mem.eql(u8, &session.session_id, &own_uuid)) continue;
         const base_root = session.base_root[0..session.base_root_len];
-        if (base_root.len > 0 and std.mem.eql(u8, base_root, cwd)) {
-            matches[match_count] = idx;
-            match_count += 1;
+        if (base_root.len == 0 or !std.mem.eql(u8, base_root, cwd)) continue;
+        // Dedup by session id: during park/steal transitions one session can
+        // briefly appear both as a stale attached client and as its detached
+        // record. Two entries for one session must not trigger the picker
+        // (which would look like a hang). Prefer the detached record.
+        var duplicate = false;
+        for (matches[0..match_count]) |existing_idx| {
+            if (std.mem.eql(u8, &sessions[existing_idx].session_id, &session.session_id)) {
+                if (sessions[existing_idx].attached and !session.attached) {
+                    matches[std.mem.indexOfScalar(usize, matches[0..match_count], existing_idx).?] = idx;
+                }
+                duplicate = true;
+                break;
+            }
         }
+        if (duplicate) continue;
+        matches[match_count] = idx;
+        match_count += 1;
     }
 
     if (match_count == 0) {
-        std.debug.print("No session rooted at: {s}\n", .{cwd});
+        ttyPrint("No session rooted at: {s}\n", .{cwd});
         return error.SessionNotFound;
     }
 
@@ -128,14 +170,20 @@ fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntim
         return .{ .target = target, .owned = target };
     }
 
-    std.debug.print("Sessions rooted at {s}:\n", .{cwd});
+    ttyPrint("Sessions rooted at {s}:\n", .{cwd});
     for (matches[0..match_count], 0..) |session_idx, display_idx| {
         const session = sessions[session_idx];
         const name = session.session_name[0..session.session_name_len];
         const state_tag: []const u8 = if (session.attached) " (attached)" else "";
-        std.debug.print("  {d}) [{s}] {s} ({d} panes){s}\n", .{ display_idx + 1, session.session_id[0..8], name, session.pane_count, state_tag });
+        ttyPrint("  {d}) [{s}] {s} ({d} panes){s}\n", .{ display_idx + 1, session.session_id[0..8], name, session.pane_count, state_tag });
     }
-    std.debug.print("Select session [1-{d}]: ", .{match_count});
+    // Never block waiting for a selection that cannot come: on a non-tty
+    // stdin (scripts, pipelines) the old blocking read looked like a hang.
+    if (!std.posix.isatty(std.posix.STDIN_FILENO)) {
+        ttyPrint("Multiple sessions match; attach by UUID prefix instead.\n", .{});
+        return error.InvalidSelection;
+    }
+    ttyPrint("Select session [1-{d}]: ", .{match_count});
     const selected = readAttachSelection(match_count) orelse return error.InvalidSelection;
     const session = sessions[matches[selected]];
     const target = try allocator.dupe(u8, session.session_id[0..8]);
@@ -373,7 +421,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
         var resolved_attach = resolveDotAttachTarget(allocator, state.runtime, uuid_prefix) catch |err| {
             debugLog("attach: failed to resolve target {s}: {s}", .{ uuid_prefix, @errorName(err) });
             if (err == error.InvalidSelection) {
-                std.debug.print("Invalid selection\n", .{});
+                ttyPrint("Invalid selection\n", .{});
             }
             return;
         };
@@ -395,8 +443,8 @@ pub fn run(terminal_args: TerminalArgs) !void {
         } else {
             // Session/pane not found - EXIT with error, don't create new session
             debugLog("attach: both reattach methods failed, exiting", .{});
-            std.debug.print("Session or pane '{s}' not found\n", .{resolved_attach.target});
-            std.debug.print("Use 'hexe terminal list' to see available sessions\n", .{});
+            ttyPrint("Session or pane '{s}' not found\n", .{resolved_attach.target});
+            ttyPrint("Use 'hexe terminal list' to see available sessions\n", .{});
             return; // Exit without entering main loop
         }
     } else if (terminal_args.session_config_path) |config_path| {

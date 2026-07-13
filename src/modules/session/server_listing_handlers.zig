@@ -66,7 +66,11 @@ pub fn handleBinaryListSessions(self: *Server, fd: posix.fd_t, buf: []u8) void {
     // force-detach reattach path.
     var attached_count: usize = 0;
     for (self.ses_state.store.clients.items) |client| {
-        if (client.session_id != null) attached_count += 1;
+        // Only keepalive clients (real muxes) are attachable sessions;
+        // probes and CLI helpers also register but must never appear here —
+        // a `hexe terminal list` running in the same directory would
+        // otherwise become a phantom match for `attach .`.
+        if (client.session_id != null and client.keepalive) attached_count += 1;
     }
     const entry_count = @min(sessions.len, std.math.maxInt(u16));
     const total_count = @min(entry_count + attached_count, std.math.maxInt(u16));
@@ -120,6 +124,7 @@ pub fn handleBinaryListSessions(self: *Server, fd: posix.fd_t, buf: []u8) void {
     var appended_attached: usize = 0;
     for (self.ses_state.store.clients.items) |client| {
         if (entry_count + appended_attached >= total_count) break;
+        if (!client.keepalive) continue;
         const sid = client.session_id orelse continue;
         const name = client.session_name orelse "";
         const base_root = client.base_root orelse "";

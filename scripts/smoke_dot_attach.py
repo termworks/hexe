@@ -133,6 +133,38 @@ for i in range(ROUNDS):
     print(f"round {i + 1} ({mode}): attach . OK, marker intact")
     fe, master = new_fe, new_master
 
+# Phase 2: genuine ambiguity — a second session rooted in the same directory.
+fe2, master2 = spawn_frontend([HEXE, "mux", "new", "-n", "dotsess2"])
+time.sleep(2.5)
+if fe2.poll() is not None:
+    fail("second session didn't start")
+
+# 2a: interactive picker must appear and accept a selection (tty stdin).
+picker_fe, picker_master = spawn_frontend([HEXE, "mux", "attach", "."])
+if not read_until(picker_master, b"Select session", 12, log):
+    fail("ambiguous dot-attach did not show the picker")
+os.write(picker_master, b"1\r")
+time.sleep(2.5)
+if picker_fe.poll() is not None:
+    fail(f"picker selection failed rc={picker_fe.returncode}")
+os.write(picker_master, b"echo PICKED_$((40+8))\r")
+if not read_until(picker_master, b"PICKED_48", 10, log):
+    fail("picked session is not interactive")
+print("phase2a: ambiguity picker works under a tty")
+os.kill(picker_fe.pid, signal.SIGKILL)
+picker_fe.wait()
+os.close(picker_master)
+time.sleep(1.5)
+
+# 2b: with NO tty on stdin, ambiguity must exit promptly — never hang.
+t0 = time.time()
+r = subprocess.run([HEXE, "mux", "attach", "."], stdin=subprocess.DEVNULL,
+                   capture_output=True, text=True, env=env, cwd=WORKDIR, timeout=20)
+elapsed = time.time() - t0
+if elapsed > 15:
+    fail(f"non-tty ambiguous attach took {elapsed:.1f}s (hang)")
+print(f"phase2b: non-tty ambiguous attach exits promptly ({elapsed:.1f}s, rc={r.returncode})")
+
 cleanup()
 log.close()
-print(f"SMOKE PASS: attach-by-dot reliable across {ROUNDS} kill/steal rounds")
+print(f"SMOKE PASS: attach-by-dot reliable across {ROUNDS} kill/steal rounds + ambiguity")
