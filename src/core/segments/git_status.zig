@@ -1,4 +1,5 @@
 const std = @import("std");
+const cmd_mod = @import("../cmd.zig");
 const Segment = @import("context.zig").Segment;
 const Context = @import("context.zig").Context;
 const Style = @import("../style.zig").Style;
@@ -221,18 +222,17 @@ fn runGitStatus(cwd: []const u8, status: *GitStatus) void {
     const alloc = std.heap.page_allocator;
 
     // Run git status --porcelain=v2 --branch
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "git", "--no-optional-locks", "-C", cwd, "status", "--porcelain=v2", "--branch" },
-    }) catch return;
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-
-    // Check exit code
-    const exit_ok = switch (result.term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
+    // BOUNDED: git in a huge/locked repo (or on a slow filesystem) used to
+    // block the render loop until it finished.
+    const stdout = cmd_mod.runArgvCaptured(
+        alloc,
+        &.{ "git", "--no-optional-locks", "-C", cwd, "status", "--porcelain=v2", "--branch" },
+        64 * 1024,
+        cmd_mod.DEFAULT_TIMEOUT_MS,
+    ) orelse return;
+    defer alloc.free(stdout);
+    const result = .{ .stdout = stdout };
+    const exit_ok = true; // runArgvCaptured returns null unless the command exited 0
     if (!exit_ok) return;
 
     // Parse output
@@ -310,18 +310,14 @@ fn parseChangeStatus(xy: []const u8, status: *GitStatus) void {
 fn checkStash(cwd: []const u8, status: *GitStatus) void {
     const alloc = std.heap.page_allocator;
 
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "git", "-C", cwd, "stash", "list" },
-    }) catch return;
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-
-    const exit_ok = switch (result.term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
-    if (!exit_ok) return;
+    const stdout = cmd_mod.runArgvCaptured(
+        alloc,
+        &.{ "git", "-C", cwd, "stash", "list" },
+        16 * 1024,
+        cmd_mod.DEFAULT_TIMEOUT_MS,
+    ) orelse return;
+    defer alloc.free(stdout);
+    const result = .{ .stdout = stdout };
 
     // Count lines
     var count: u16 = 0;

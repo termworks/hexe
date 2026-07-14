@@ -261,6 +261,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_wire_tests = b.addRunArtifact(wire_tests);
 
+    // Bounded external-command execution (statusbar segments etc.).
+    const cmd_test_module = b.createModule(.{
+        .root_source_file = b.path("src/core/cmd.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cmd_test_module.addImport("logly", logly_mod);
+    const cmd_tests = b.addTest(.{
+        .root_module = cmd_test_module,
+    });
+    const run_cmd_tests = b.addRunArtifact(cmd_tests);
+
     // Core VT behavior tests.
     const vt_test_module = b.createModule(.{
         .root_source_file = b.path("src/core/vt_test.zig"),
@@ -412,6 +424,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);
+    test_step.dependOn(&run_cmd_tests.step);
     test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const cmd_mod = @import("../cmd.zig");
 const Segment = @import("context.zig").Segment;
 const Context = @import("context.zig").Context;
 const Style = @import("../style.zig").Style;
@@ -23,12 +24,14 @@ pub fn render(ctx: *Context) ?[]const Segment {
 
     // Check if sudo credentials are cached (like starship does)
     // Run: sudo -n true (non-interactive, exits 0 if cached)
-    const result = std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
-        .argv = &.{ "sudo", "-n", "true" },
-    }) catch return null;
-    defer std.heap.page_allocator.free(result.stdout);
-    defer std.heap.page_allocator.free(result.stderr);
+    // BOUNDED: `sudo -n true` can block (PAM modules, network-backed auth);
+    // it runs in the render path, so it must never hang the UI.
+    const cached = cmd_mod.runArgvSucceeds(
+        std.heap.page_allocator,
+        &.{ "sudo", "-n", "true" },
+        cmd_mod.DEFAULT_TIMEOUT_MS,
+    );
+    const result = .{ .term = std.process.Child.Term{ .Exited = @as(u8, if (cached) 0 else 1) } };
 
     const success = switch (result.term) {
         .Exited => |code| code == 0,

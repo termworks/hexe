@@ -1419,22 +1419,19 @@ pub fn styleColorToRender(col: shp.Color) Color {
 
 pub fn runSegment(module: *const core.Segment, buf: []u8) ![]const u8 {
     if (module.command) |cmd| {
-        const result = std.process.Child.run(.{
-            .allocator = std.heap.page_allocator,
-            .argv = &.{ "/bin/sh", "-c", cmd },
-        }) catch |err| {
-            core.logging.logError("terminal", "failed to run statusbar shell segment", err);
-            return "";
-        };
-        defer std.heap.page_allocator.free(result.stdout);
-        defer std.heap.page_allocator.free(result.stderr);
+        // BOUNDED: this runs inside the render path. Child.run blocks until
+        // the command exits, so a segment command that hangs (or is merely
+        // slow) froze the whole terminal — no rendering, no input.
+        const out = core.cmd.runCaptured(
+            std.heap.page_allocator,
+            cmd,
+            @max(buf.len, 1),
+            core.cmd.DEFAULT_TIMEOUT_MS,
+        ) orelse return "";
+        defer std.heap.page_allocator.free(out);
 
-        var len = result.stdout.len;
-        while (len > 0 and (result.stdout[len - 1] == '\n' or result.stdout[len - 1] == '\r')) {
-            len -= 1;
-        }
-        const copy_len = @min(len, buf.len);
-        @memcpy(buf[0..copy_len], result.stdout[0..copy_len]);
+        const copy_len = @min(out.len, buf.len);
+        @memcpy(buf[0..copy_len], out[0..copy_len]);
         return buf[0..copy_len];
     }
 

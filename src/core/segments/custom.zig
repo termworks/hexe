@@ -1,4 +1,5 @@
 const std = @import("std");
+const core_cmd = @import("../cmd.zig");
 const Segment = @import("context.zig").Segment;
 const Context = @import("context.zig").Context;
 const Style = @import("../style.zig").Style;
@@ -33,41 +34,28 @@ pub fn renderCustom(ctx: *Context, config: CustomConfig) ?[]const Segment {
     return ctx.addSegment(text, style) catch return null;
 }
 
-/// Run a condition command, return true if exit code is 0
+/// Run a condition command, return true if it exits 0 within its budget.
+/// BOUNDED: the old `child.wait()` blocked the render loop forever on a
+/// command that never exits.
 fn runCondition(cmd: []const u8) bool {
-    var child = std.process.Child.init(.{
-        .argv = &.{ "/bin/sh", "-c", cmd },
-    }, std.heap.page_allocator);
-
-    child.spawn() catch return false;
-    const result = child.wait() catch return false;
-
-    return result.Exited == 0;
+    return core_cmd.runSucceeds(std.heap.page_allocator, cmd, core_cmd.DEFAULT_TIMEOUT_MS);
 }
 
-/// Run a command and capture its stdout
+/// Run a command and capture its stdout (bounded).
+///
+/// The previous implementation blocked on `stdout.read()` — a hanging command
+/// froze the terminal — AND returned a slice into its own STACK buffer, which
+/// dangled the moment it returned. Output is now heap-owned by the context's
+/// arena-backed segment storage.
 fn runCommand(ctx: *Context, cmd: []const u8) ?[]const u8 {
-    _ = ctx;
-
-    var child = std.process.Child.init(.{
-        .argv = &.{ "/bin/sh", "-c", cmd },
-        .stdout_behavior = .Pipe,
-        .stderr_behavior = .Ignore,
-    }, std.heap.page_allocator);
-
-    child.spawn() catch return null;
-
-    // Read stdout
-    var stdout_buf: [1024]u8 = undefined;
-    const stdout = child.stdout orelse return null;
-    const len = stdout.read(&stdout_buf) catch return null;
-
-    _ = child.wait() catch return null;
-
-    if (len == 0) return null;
-
-    // Trim whitespace
-    return std.mem.trim(u8, stdout_buf[0..len], " \t\n\r");
+    const out = core_cmd.runCaptured(
+        std.heap.page_allocator,
+        cmd,
+        1024,
+        core_cmd.DEFAULT_TIMEOUT_MS,
+    ) orelse return null;
+    defer std.heap.page_allocator.free(out);
+    return ctx.allocator.dupe(u8, out) catch null;
 }
 
 /// Format the output with the format string
