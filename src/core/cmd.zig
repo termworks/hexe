@@ -83,11 +83,15 @@ fn deadlineExpired(deadline_ms: i64) bool {
     return std.time.milliTimestamp() >= deadline_ms;
 }
 
-/// Kill the child and reap it. std's `Child.kill()` waits internally, so the
-/// caller must NOT also call `wait()` — that double-reap aborts.
+/// Kill the child and reap it. The caller must NOT also call `wait()` — that
+/// double-reap aborts.
+///
+/// Deliberately not std's `Child.kill()`: it sends SIGTERM and then blocks in
+/// waitpid, so a command that ignores SIGTERM would hang us on the very command
+/// we are killing for taking too long. SIGKILL cannot be ignored.
 fn killAndReap(child: *std.process.Child, cmd: []const u8) void {
     logging.warn("cmd", "command exceeded its time budget and was killed: {s}", .{cmd});
-    _ = child.kill() catch {};
+    async_cmd.killAndReapBounded(child, 100);
 }
 
 /// Run an explicit argv, capturing stdout, with a hard deadline. Same
@@ -110,7 +114,7 @@ pub fn runArgvCaptured(
         return null;
     };
     var buf = allocator.alloc(u8, max_bytes) catch {
-        _ = child.kill() catch {};
+        async_cmd.killAndReapBounded(&child, 100);
         return null;
     };
     var len: usize = 0;

@@ -431,10 +431,10 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         std.Thread.sleep(5 * std.time.ns_per_ms); // Sleep 5ms between checks
     }
 
-    // Timeout - kill the process
-    _ = child.kill() catch |err| {
-        core.logging.logError("terminal", "failed to kill timed-out statusbar bash condition", err);
-    };
+    // Timeout - kill the process. Not Child.kill(): it blocks in waitpid after
+    // a catchable SIGTERM, so a condition that ignored SIGTERM would wedge us
+    // here forever — on the render path.
+    core.async_cmd.killAndReapBounded(&child, 100);
     map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch |err| {
         core.logging.logError("terminal", "failed to cache statusbar bash timeout", err);
     };

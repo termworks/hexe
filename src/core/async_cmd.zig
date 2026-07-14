@@ -81,6 +81,49 @@ pub const Result = struct {
 /// shell and exit almost immediately, so this only bounds a pathological case.
 pub const MAX_DETACHED: usize = 256;
 
+/// Kill a child and reap it WITHOUT ever blocking. Returns true if it was
+/// reaped here.
+///
+/// Never use std's `Child.kill()` for this: it sends SIGTERM and then blocks in
+/// `waitpid(pid, 0)`. A command that ignores SIGTERM — a shell with
+/// `trap '' TERM`, anything wedged in uninterruptible I/O — makes that wait
+/// never return. On an event loop that is a permanent freeze caused by the very
+/// command we are trying to get rid of; at shutdown it is a process that will
+/// not exit. SIGKILL cannot be caught or ignored, and the reap below never
+/// waits: an uncollected corpse is picked up by a later poll(), or by init once
+/// we are gone.
+pub fn killNoWait(child: *std.process.Child) bool {
+    posix.kill(child.id, posix.SIG.KILL) catch {};
+    if (child.stdout) |out| {
+        out.close();
+        child.stdout = null;
+    }
+    if (child.stderr) |err| {
+        err.close();
+        child.stderr = null;
+    }
+    if (child.stdin) |in| {
+        in.close();
+        child.stdin = null;
+    }
+    // NOHANG: waitpid must never be called again on a pid reaped here — std's
+    // waitpid treats ECHILD as unreachable and would panic.
+    return posix.waitpid(child.id, posix.W.NOHANG).pid != 0;
+}
+
+/// Kill and reap within a small budget. For SHORT-LIVED processes (the shp
+/// prompt, CLI helpers) that are about to exit anyway and have no event loop to
+/// come back on. SIGKILL is uncatchable, so this collects the corpse in a few
+/// ms; if it somehow does not, we give up rather than block.
+pub fn killAndReapBounded(child: *std.process.Child, budget_ms: i64) void {
+    if (killNoWait(child)) return;
+    const deadline = std.time.milliTimestamp() + budget_ms;
+    while (std.time.milliTimestamp() < deadline) {
+        if (posix.waitpid(child.id, posix.W.NOHANG).pid != 0) return;
+        std.Thread.sleep(2 * std.time.ns_per_ms);
+    }
+}
+
 pub const AsyncCmdCache = struct {
     allocator: std.mem.Allocator,
     entries: std.StringHashMap(*Entry),
@@ -101,8 +144,10 @@ pub const AsyncCmdCache = struct {
         while (it.next()) |entry_ptr| {
             const e = entry_ptr.*;
             if (e.child) |*c| {
+                // Must not block: a command that ignores SIGTERM would other-
+                // wise keep the whole process from ever exiting.
                 var child = c.*;
-                _ = child.kill() catch {};
+                _ = killNoWait(&child);
             }
             e.out_buf.deinit(self.allocator);
             if (e.env) |*env| env.deinit();
@@ -150,9 +195,10 @@ pub const AsyncCmdCache = struct {
             return false;
         };
         self.detached.append(self.allocator, child) catch {
-            // Can't track it: reap synchronously rather than leak a zombie. The
-            // shell has already backgrounded the real work, so this is quick.
-            _ = child.wait() catch {};
+            // Can't track it (OOM). Try to collect it without blocking; if it is
+            // not done yet, leave it — init reaps it after we exit. Blocking in
+            // wait() here would put the event loop at the mercy of the command.
+            _ = posix.waitpid(child.id, posix.W.NOHANG);
             return true;
         };
         return true;
@@ -251,11 +297,16 @@ pub const AsyncCmdCache = struct {
                 }
             }
 
-            // Overran its hard deadline: kill it (kill() reaps). 124 is what
-            // timeout(1) reports, so callers read it as "timed out".
+            // Overran its hard deadline: SIGKILL it. 124 is what timeout(1)
+            // reports, so callers read it as "timed out".
             if (now - e.started_ms > HARD_DEADLINE_MS) {
                 logging.warn("async-cmd", "background command exceeded {d}ms and was killed: {s}", .{ HARD_DEADLINE_MS, e.key });
-                _ = child.kill() catch {};
+                var corpse = child.*;
+                if (!killNoWait(&corpse)) {
+                    // Not collectable this instant. Hand it to the reaper rather
+                    // than block the loop waiting for it (or leak a zombie).
+                    self.detached.append(self.allocator, corpse) catch {};
+                }
                 self.finish(e, false, 124);
                 continue;
             }
@@ -646,6 +697,53 @@ test "AsyncCmdCache: spawnDetached never blocks and leaves no zombies" {
         }
     }.f;
     try testing.expect(pumpUntil(&cache, 15_000, all_reaped));
+}
+
+test "AsyncCmdCache: a command that IGNORES SIGTERM is still killed, without blocking" {
+    // The nastiest case for the deadline path. std's Child.kill() sends SIGTERM
+    // and then blocks in waitpid(pid, 0) — against a process that traps SIGTERM
+    // that wait NEVER returns, so the event loop would freeze on the very
+    // command it was trying to kill, and the process could never exit either.
+    var cache = AsyncCmdCache.init(testing.allocator);
+
+    const argv = [_][]const u8{ "/bin/bash", "-c", "trap '' TERM; sleep 300" };
+    _ = cache.valueArgv("sigterm-proof", &argv, 60_000);
+
+    // Let it actually start and install the trap.
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        cache.poll();
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    const e = cache.entries.get("sigterm-proof").?;
+    try testing.expect(e.child != null); // in flight, ignoring SIGTERM
+    const pid = e.child.?.id;
+
+    // Shutdown must not block, even though SIGTERM is useless against it.
+    const t0 = std.time.milliTimestamp();
+    cache.deinit();
+    const elapsed = std.time.milliTimestamp() - t0;
+    try testing.expect(elapsed < 1000); // Child.kill() here would never return
+
+    // And it must really be dead — killed, not merely abandoned.
+    var waited: usize = 0;
+    var gone = false;
+    while (waited < 200) : (waited += 1) {
+        if (posix.kill(pid, 0)) |_| {} else |err| {
+            if (err == error.ProcessNotFound) {
+                gone = true;
+                break;
+            }
+        }
+        // A reaped-but-unwaited child is a zombie: signal 0 still "succeeds".
+        // Reap it here (we are its parent) to settle the question.
+        if (posix.waitpid(pid, posix.W.NOHANG).pid != 0) {
+            gone = true;
+            break;
+        }
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
+    try testing.expect(gone);
 }
 
 test "AsyncCmdCache: spawnDetached refuses to grow without bound" {
