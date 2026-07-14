@@ -359,19 +359,14 @@ fn runLayoutOpenDetached(state: *State) void {
         env_map.remove("HEXE_STATUS_FOCUSED_PANE_UUID");
     }
 
-    var child = std.process.Child.init(&.{ "/bin/bash", "-lc", "(hexe lay open .) >/dev/null 2>&1 &" }, state.allocator);
-    if (env_map_opt) |*env_map| child.env_map = env_map;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch {
+    // Fire and forget: the helper is already backgrounded by the shell, and the
+    // loop must not block waiting for `bash -lc` to come up. poll() reaps it.
+    const argv = [_][]const u8{ "/bin/bash", "-lc", "(hexe lay open .) >/dev/null 2>&1 &" };
+    const env: ?*const std.process.EnvMap = if (env_map_opt) |*m| m else null;
+    if (!state.async_cmds.spawnDetached(&argv, env)) {
         state.notifications.showFor("layout open spawn failed", 1400);
         return;
-    };
-    _ = child.wait() catch |err| {
-        core.logging.logError("terminal", "layout open helper wait failed", err);
-    };
+    }
     actions.performDetach(state);
 }
 

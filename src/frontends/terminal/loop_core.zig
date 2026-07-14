@@ -141,6 +141,10 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
     // Main loop.
     while (state.running) {
         if (runtime_events.applyRuntimeStopRequest(state, hooks)) break;
+        // Drive background commands (statusbar segments, git, sudo, `when`
+        // conditions): drain their output, reap finished ones, kill overruns.
+        // Never blocks — that is the whole point.
+        state.async_cmds.poll();
         maybeReconnectSes(state, &last_reconnect_attempt);
         runtime_events.applyDeferredPaneExits(state);
         runtime_events.applyDeferredCwdResponse(state);

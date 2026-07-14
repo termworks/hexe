@@ -55,20 +55,15 @@ fn runStatusbarAction(state: *State, command: []const u8) void {
         }
     }
 
-    var child = std.process.Child.init(&.{ "/bin/bash", "-lc", wrapped }, state.allocator);
-    if (env_map_opt) |*env_map| child.env_map = env_map;
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch {
+    // Fire and forget. The loop must not wait here: a click on a statusbar
+    // segment would otherwise freeze the UI for however long `bash -lc` takes
+    // to start (it sources the login profile), and forever if bash hangs.
+    const argv = [_][]const u8{ "/bin/bash", "-lc", wrapped };
+    const env: ?*const std.process.EnvMap = if (env_map_opt) |*m| m else null;
+    if (!state.async_cmds.spawnDetached(&argv, env)) {
         state.notifications.showFor("status action spawn failed", 1400);
-        state.needs_render = true;
-        return;
-    };
-    _ = child.wait() catch |err| {
-        core.logging.logError("terminal", "status action wait failed", err);
-    };
+    }
+    state.needs_render = true;
 }
 
 fn mouseModsMask(btn: u16) u8 {

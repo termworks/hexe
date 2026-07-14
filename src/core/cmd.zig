@@ -16,6 +16,64 @@
 const std = @import("std");
 const posix = std.posix;
 const logging = @import("logging.zig");
+const async_cmd = @import("async_cmd.zig");
+
+/// The terminal frontend registers a cache here at startup. When it is set,
+/// the *Cached helpers below become fully NON-BLOCKING: they serve the last
+/// completed result and let the event loop drive the command in the
+/// background. Short-lived processes (the `shp` prompt, CLI helpers) never
+/// register one and keep the bounded synchronous path — they must produce a
+/// value and exit, so blocking briefly is exactly right for them.
+pub var async_cache: ?*async_cmd.AsyncCmdCache = null;
+
+pub fn setAsyncCache(cache: *async_cmd.AsyncCmdCache) void {
+    async_cache = cache;
+}
+
+/// Non-blocking in the terminal (cached, refreshed in the background);
+/// bounded-synchronous everywhere else. Returned memory is owned by the cache
+/// when async — callers must NOT free it; when synchronous the caller owns it.
+/// Use `valueIsOwned()` to know which, or prefer copying into a local buffer.
+pub fn cachedValue(cmd: []const u8, refresh_ms: i64) ?[]const u8 {
+    if (async_cache) |cache| return cache.value(cmd, refresh_ms);
+    return null; // no cache: caller falls back to its own bounded path
+}
+
+pub fn cachedSucceeded(cmd: []const u8, refresh_ms: i64) ?bool {
+    if (async_cache) |cache| return cache.succeeded(cmd, refresh_ms);
+    return null;
+}
+
+pub fn cachedValueArgv(key: []const u8, argv: []const []const u8, refresh_ms: i64) ?[]const u8 {
+    if (async_cache) |cache| return cache.valueArgv(key, argv, refresh_ms);
+    return null;
+}
+
+pub fn cachedSucceededArgv(key: []const u8, argv: []const []const u8, refresh_ms: i64) ?bool {
+    if (async_cache) |cache| return cache.succeededArgv(key, argv, refresh_ms);
+    return null;
+}
+
+pub fn cachedSucceededWithEnv(cmd: []const u8, env: *const std.process.EnvMap, refresh_ms: i64) ?bool {
+    if (async_cache) |cache| return cache.succeededWithEnv(cmd, env, refresh_ms);
+    return null;
+}
+
+/// Full outcome (stdout + exit code) of a background command. Null when no
+/// async cache is registered, so the caller keeps its bounded synchronous path.
+pub fn cachedResult(cmd: []const u8, refresh_ms: i64) ?async_cmd.Result {
+    if (async_cache) |cache| return cache.result(cmd, refresh_ms);
+    return null;
+}
+
+pub fn cachedResultArgv(key: []const u8, argv: []const []const u8, refresh_ms: i64) ?async_cmd.Result {
+    if (async_cache) |cache| return cache.resultArgv(key, argv, refresh_ms);
+    return null;
+}
+
+pub fn hasAsyncCache() bool {
+    return async_cache != null;
+}
 
 /// Default budget for a segment command. Segments re-run on a timer, so this
 /// is per render, not per session — it must stay small.

@@ -26,11 +26,10 @@ pub fn render(ctx: *Context) ?[]const Segment {
     // Run: sudo -n true (non-interactive, exits 0 if cached)
     // BOUNDED: `sudo -n true` can block (PAM modules, network-backed auth);
     // it runs in the render path, so it must never hang the UI.
-    const cached = cmd_mod.runArgvSucceeds(
-        std.heap.page_allocator,
-        &.{ "sudo", "-n", "true" },
-        cmd_mod.DEFAULT_TIMEOUT_MS,
-    );
+    // ASYNC in the terminal: `sudo -n true` can stall on PAM/network modules.
+    const argv = [_][]const u8{ "sudo", "-n", "true" };
+    const cached = cmd_mod.cachedSucceededArgv("sudo-n-true", &argv, 2000) orelse
+        cmd_mod.runArgvSucceeds(std.heap.page_allocator, &argv, cmd_mod.DEFAULT_TIMEOUT_MS);
     const result = .{ .term = std.process.Child.Term{ .Exited = @as(u8, if (cached) 0 else 1) } };
 
     const success = switch (result.term) {

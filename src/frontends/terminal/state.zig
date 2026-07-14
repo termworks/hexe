@@ -313,6 +313,11 @@ pub const State = struct {
     csi_reply_in_progress: bool,
 
     mux_vt_write_queue: VtWriteQueue,
+    /// Background runner for every external command the render path needs
+    /// (statusbar segments, float titles, `when` conditions, git, sudo).
+    /// Driven once per event-loop iteration; the render path only ever reads
+    /// its last completed values, so a slow command can never stall a frame.
+    async_cmds: core.async_cmd.AsyncCmdCache,
     /// Resumable non-blocking reader for the SES VT stream. Reset whenever
     /// the VT connection is replaced (loop_watchers arms a new node).
     mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
@@ -480,6 +485,7 @@ pub const State = struct {
             .csi_reply_in_progress = false,
 
             .mux_vt_write_queue = .{},
+            .async_cmds = core.async_cmd.AsyncCmdCache.init(allocator),
             .mux_vt_write_overflow_notified = false,
 
             .terminal_query_in_flight = false,
@@ -973,6 +979,7 @@ pub const State = struct {
         self.csi_reply_target_enqueued_ms.deinit(self.allocator);
         self.csi_reply_buf.deinit(self.allocator);
         self.mux_vt_write_queue.deinit(self.allocator);
+        self.async_cmds.deinit();
         self.bracketed_paste_buf.deinit(self.allocator);
         self.renderer.deinit();
         self.notifications.deinit();
@@ -1093,6 +1100,10 @@ pub const State = struct {
     /// direct writes are forbidden.
     pub fn registerSharedVtQueue(self: *State) void {
         @import("pane.zig").setSharedVtWriteQueue(&self.mux_vt_write_queue, self.allocator);
+        // Register the async command runner too: from here on, every segment
+        // command in the render path is served from cache and executed in the
+        // background instead of blocking the loop.
+        core.cmd.setAsyncCache(&self.async_cmds);
     }
 
     pub fn writePaneInput(self: *State, pane: *Pane, data: []const u8) void {

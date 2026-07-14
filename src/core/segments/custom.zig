@@ -1,5 +1,8 @@
 const std = @import("std");
 const core_cmd = @import("../cmd.zig");
+
+/// Background refresh interval for custom segment commands/conditions.
+const refresh_ms: i64 = 1000;
 const Segment = @import("context.zig").Segment;
 const Context = @import("context.zig").Context;
 const Style = @import("../style.zig").Style;
@@ -38,6 +41,9 @@ pub fn renderCustom(ctx: *Context, config: CustomConfig) ?[]const Segment {
 /// BOUNDED: the old `child.wait()` blocked the render loop forever on a
 /// command that never exits.
 fn runCondition(cmd: []const u8) bool {
+    // ASYNC in the terminal: the last known status, refreshed in the
+    // background. Bounded-synchronous elsewhere (shp must decide now).
+    if (core_cmd.cachedSucceeded(cmd, refresh_ms)) |ok| return ok;
     return core_cmd.runSucceeds(std.heap.page_allocator, cmd, core_cmd.DEFAULT_TIMEOUT_MS);
 }
 
@@ -48,6 +54,13 @@ fn runCondition(cmd: []const u8) bool {
 /// dangled the moment it returned. Output is now heap-owned by the context's
 /// arena-backed segment storage.
 fn runCommand(ctx: *Context, cmd: []const u8) ?[]const u8 {
+    // ASYNC in the terminal (see runCondition). The cache owns its buffer, so
+    // copy into the context's storage before returning.
+    if (core_cmd.cachedValue(cmd, refresh_ms)) |cached| {
+        return ctx.allocator.dupe(u8, cached) catch null;
+    }
+    if (core_cmd.hasAsyncCache()) return null; // first run in flight
+
     const out = core_cmd.runCaptured(
         std.heap.page_allocator,
         cmd,

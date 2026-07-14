@@ -387,7 +387,18 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         core.logging.logError("terminal", "failed to set statusbar bash env cwd", err);
     };
 
-    // Spawn process with timeout support
+    // ASYNC in the terminal: a `when` condition must never stall a frame. The
+    // cache runs it in the background with this context env and serves the
+    // last known status (the existing TTL cache above still short-circuits
+    // most calls; this removes the blocking wait from the ones that miss).
+    if (core.cmd.cachedSucceededWithEnv(code, &env_map, @intCast(ttl_ms))) |ok| {
+        map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch |err| {
+            core.logging.logError("terminal", "failed to cache statusbar bash condition result", err);
+        };
+        return ok;
+    }
+
+    // Spawn process with timeout support (fallback: no async cache registered)
     var child = std.process.Child.init(&.{ "/bin/bash", "-c", code }, std.heap.page_allocator);
     child.env_map = &env_map;
     child.stdin_behavior = .Ignore;
@@ -402,6 +413,7 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     };
 
     // Wait for process with timeout using non-blocking waitpid polling.
+    // (Fallback path only — the async cache above handles the terminal.)
     const timeout_ms = getConditionTimeout();
     const start_ms = std.time.milliTimestamp();
 
@@ -1417,11 +1429,24 @@ pub fn styleColorToRender(col: shp.Color) Color {
     };
 }
 
+/// How often a statusbar shell segment is re-run in the background. Segments
+/// are cosmetic; a second of staleness is invisible, a blocked frame is not.
+const segment_refresh_ms: i64 = 1000;
+
 pub fn runSegment(module: *const core.Segment, buf: []u8) ![]const u8 {
     if (module.command) |cmd| {
-        // BOUNDED: this runs inside the render path. Child.run blocks until
-        // the command exits, so a segment command that hangs (or is merely
-        // slow) froze the whole terminal — no rendering, no input.
+        // ASYNC: this runs inside the render path, so it must never wait on a
+        // child process. The cache serves the last completed output and the
+        // event loop drives the command in the background; a slow or hanging
+        // command costs a stale segment value, never a frozen frame.
+        if (core.cmd.cachedValue(cmd, segment_refresh_ms)) |out| {
+            const copy_len = @min(out.len, buf.len);
+            @memcpy(buf[0..copy_len], out[0..copy_len]);
+            return buf[0..copy_len];
+        }
+        if (core.cmd.hasAsyncCache()) return ""; // first run in flight; nothing yet
+
+        // No cache registered (shp prompt, CLI): bounded synchronous fallback.
         const out = core.cmd.runCaptured(
             std.heap.page_allocator,
             cmd,
@@ -1429,7 +1454,6 @@ pub fn runSegment(module: *const core.Segment, buf: []u8) ![]const u8 {
             core.cmd.DEFAULT_TIMEOUT_MS,
         ) orelse return "";
         defer std.heap.page_allocator.free(out);
-
         const copy_len = @min(out.len, buf.len);
         @memcpy(buf[0..copy_len], out[0..copy_len]);
         return buf[0..copy_len];
