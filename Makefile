@@ -26,6 +26,7 @@ smoke:
 smoke-heavy:
 	zig build -Doptimize=ReleaseFast
 	python3 -u scripts/smoke_heavy.py
+	python3 -u scripts/smoke_heavy2.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"

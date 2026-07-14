@@ -54,7 +54,26 @@ shutil.copytree(REAL_CFG, os.path.join(CFGDIR, "hexe"), dirs_exist_ok=True)
 lay_path = os.path.join(CFGDIR, "hexe", "layout.lua")
 if os.path.exists(lay_path):
     lay = open(lay_path).read()
-    lay = re.sub(r'command = "[^"]*"', 'command = "/bin/sh"', lay)
+    # Swap ONLY float commands (inside hexe.float(...) blocks) to /bin/sh, so
+    # the test needs no external tools; leave segment commands alone.
+    def swap_float_cmds(text):
+        out = []
+        i = 0
+        while True:
+            j = text.find("hexe.float(", i)
+            if j < 0:
+                out.append(text[i:])
+                break
+            k = text.find("hexe.float(", j + 1)
+            if k < 0:
+                k = len(text)
+            block = text[j:k]
+            block = re.sub(r'command = "[^"]*"', 'command = "/bin/sh"', block)
+            out.append(text[i:j])
+            out.append(block)
+            i = k
+        return "".join(out)
+    lay = swap_float_cmds(lay)
     open(lay_path, "w").write(lay)
 init_path = os.path.join(CFGDIR, "hexe", "init.lua")
 init = open(init_path).read()
@@ -148,6 +167,24 @@ def sh(master, line, settle=0.5):
     os.write(master, line.encode() + b"\r")
     time.sleep(settle)
 
+def vim_types(m, text, timeout_s=40):
+    """Type `text` into a fullscreen vim and confirm it rendered.
+
+    One-shot inserts race vim's first repaint after a reattach under load;
+    retry the insert (ESC first so a half-drawn vim cannot strand us in a
+    weird mode).
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        os.write(m, b"\x1b")
+        time.sleep(0.3)
+        os.write(m, b"i" + text.encode() + b"\x1b")
+        ok, _ = read_until(m, text.encode(), 8)
+        if ok:
+            return True
+        time.sleep(1.0)
+    return False
+
 def fail(msg):
     print(f"FAIL (seed={SEED}): {msg}")
     cleanup()
@@ -217,10 +254,7 @@ key(master, "v")
 time.sleep(1.5)
 sh(master, f"{FULLSCREEN} -n {VIM_SPLIT}", settle=5.0)
 drain(master, 1.0)
-os.write(master, b"ihello-split-vim\x1b")  # insert text, back to normal mode
-time.sleep(0.8)
-ok, _ = read_until(master, b"hello-split-vim", 20)
-if not ok:
+if not vim_types(master, "hello-split-vim"):
     fail("fullscreen app in split did not render")
 print("build: 3 panes (huge buffer + paste | output flood | fullscreen vim)")
 
@@ -243,10 +277,7 @@ key(master, "2")
 if not wait_shell_ready(master, "F2"):
     fail("float 2 shell never became ready")
 sh(master, f"{FULLSCREEN} -n {VIM_FLOAT}", settle=5.0)
-os.write(master, b"ihello-float-vim\x1b")
-time.sleep(0.8)
-ok, _ = read_until(master, b"hello-float-vim", 20)
-if not ok:
+if not vim_types(master, "hello-float-vim"):
     fail("fullscreen app in float did not render")
 key(master, "2")  # hide it
 time.sleep(1.0)
@@ -259,10 +290,7 @@ if pods_built < 5:
 def verify_fat_session(fe, master, tag):
     """Every component must be alive after a transition."""
     # The focused split pane (vim) must still accept input.
-    os.write(master, b"ovim-alive-check\x1b")
-    time.sleep(0.8)
-    ok, _ = read_until(master, b"vim-alive-check", 20)
-    if not ok:
+    if not vim_types(master, "vim-alive-check"):
         return f"{tag}: fullscreen vim in split unresponsive"
     # Undo the insert so repeated rounds stay clean.
     os.write(master, b"u")
@@ -270,10 +298,7 @@ def verify_fat_session(fe, master, tag):
     # The float with the fullscreen app must still be there and alive.
     key(master, "2")
     time.sleep(1.5)
-    os.write(master, b"ofloat-alive-check\x1b")
-    time.sleep(0.8)
-    ok, _ = read_until(master, b"float-alive-check", 20)
-    if not ok:
+    if not vim_types(master, "float-alive-check"):
         return f"{tag}: fullscreen vim in float unresponsive"
     os.write(master, b"u")
     time.sleep(0.3)
