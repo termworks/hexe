@@ -345,7 +345,14 @@ for i in range(ROUNDS):
             fail(f"round {i + 1} ({mode}): steal exited rc={nfe.returncode}")
         deadline = time.time() + 10
         while time.time() < deadline and fe.poll() is None:
-            time.sleep(0.2)
+            # Keep draining the stolen frontend's pty. A real terminal always
+            # reads; if we stop, its 64KB buffer fills, the frontend blocks in
+            # write() on its way out, and it can never reach exit. That is an
+            # artifact of the harness, not of hexe — and it made this round fail
+            # at random whenever the machine was loaded enough for the departing
+            # frontend to have a screenful still queued. (The detach round above
+            # has always drained; this one did not.)
+            drain(master, 0.2)
         if fe.poll() is None:
             fail(f"round {i + 1} ({mode}): stolen frontend did not exit")
         os.close(master)
