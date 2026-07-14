@@ -582,17 +582,43 @@ test "timeout(1) rejects an ms suffix — the duration must be fractional second
     try testing.expectEqual(@as(i32, 125), bad_r.code); // timeout refused the arg
     try testing.expectEqualStrings("", bad_r.output); // and echo never ran
 
-    // The fractional-seconds form actually runs the command.
+    // The fractional-seconds form actually runs the command. The duration has to
+    // be generous: `bash -lc` is a LOGIN shell and spends ~50-80ms sourcing the
+    // profile before it runs anything, which is why hexe.exec's old 80ms default
+    // could not even complete an `echo`.
     const good_landed = struct {
         fn f(c: *AsyncCmdCache) bool {
-            const a = [_][]const u8{ "timeout", "0.080s", "/bin/bash", "-lc", "echo ran" };
+            const a = [_][]const u8{ "timeout", "5.000s", "/bin/bash", "-lc", "echo ran" };
             return c.resultArgv("good-s", &a, 10_000).done;
         }
     }.f;
-    try testing.expect(pumpUntil(&cache, 5000, good_landed));
-    const good = [_][]const u8{ "timeout", "0.080s", "/bin/bash", "-lc", "echo ran" };
+    try testing.expect(pumpUntil(&cache, 9000, good_landed));
+    const good = [_][]const u8{ "timeout", "5.000s", "/bin/bash", "-lc", "echo ran" };
     const good_r = cache.resultArgv("good-s", &good, 10_000);
     try testing.expectEqualStrings("ran", good_r.output);
+}
+
+test "hexe.exec's default timeout leaves room for a login shell to start" {
+    // Regression guard for the pair of bugs above: the default must be long
+    // enough that `bash -lc` can source the profile AND run the command, or
+    // every hexe.exec call comes back empty on a busy machine.
+    var buf: [32]u8 = undefined;
+    const arg = try std.fmt.bufPrint(&buf, "{d}.{d:0>3}s", .{ @as(u64, 2000) / 1000, @as(u64, 2000) % 1000 });
+    try testing.expectEqualStrings("2.000s", arg);
+
+    var cache = AsyncCmdCache.init(testing.allocator);
+    defer cache.deinit();
+    const argv = [_][]const u8{ "timeout", "2.000s", "/bin/bash", "-lc", "echo alive" };
+    const landed = struct {
+        fn f(c: *AsyncCmdCache) bool {
+            const a = [_][]const u8{ "timeout", "2.000s", "/bin/bash", "-lc", "echo alive" };
+            return c.resultArgv("default-timeout", &a, 10_000).done;
+        }
+    }.f;
+    try testing.expect(pumpUntil(&cache, 9000, landed));
+    const r = cache.resultArgv("default-timeout", &argv, 10_000);
+    try testing.expect(r.ok);
+    try testing.expectEqualStrings("alive", r.output);
 }
 
 test "AsyncCmdCache: spawnDetached never blocks and leaves no zombies" {

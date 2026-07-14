@@ -113,10 +113,18 @@ fn execArgv(timeout_arg: []const u8, cmd: []const u8) [5][]const u8 {
     return .{ "timeout", timeout_arg, "/bin/bash", "-lc", cmd };
 }
 
+/// Default kill threshold. The command runs under `bash -lc`, and a login shell
+/// needs ~50-80ms just to source the user's profile before it even starts the
+/// command — so the old 80ms default timed out on a bare `echo`. Nothing waits
+/// on this anymore (the background cache has its own 10s hard deadline), so a
+/// tight timeout buys nothing and only makes working commands look broken.
+const DEFAULT_TIMEOUT_MS: u64 = 2000;
+const DEFAULT_CACHE_MS: u64 = 500;
+
 /// Lua API: hexe.exec(cmd, opts?)
 ///
 /// opts:
-/// - timeout / timeout_ms: kill threshold in ms (default: 80)
+/// - timeout / timeout_ms: kill threshold in ms (default: 2000)
 /// - cache / cache_ms: cache TTL in ms (default: 500)
 ///
 /// Returns table:
@@ -138,8 +146,8 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
         lua.raiseError();
     };
 
-    var timeout_ms: u64 = 80;
-    var cache_ms: u64 = 500;
+    var timeout_ms: u64 = DEFAULT_TIMEOUT_MS;
+    var cache_ms: u64 = DEFAULT_CACHE_MS;
     parseOpts(lua, &timeout_ms, &cache_ms);
 
     const allocator = std.heap.page_allocator;
