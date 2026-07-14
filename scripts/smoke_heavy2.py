@@ -340,6 +340,11 @@ def verify_all(tag):
     # Tab switching works and the other tab is alive.
     key(master, "next", settle=1.5)
     safe_write(master, b"\x1b", "esc")  # normal mode in case a vim has focus
+    # The ESC must be allowed to stand alone. ESC immediately followed by "e" is
+    # how alt+e is encoded, so without this pause the two can arrive in one read
+    # and be coalesced into a keybind — swallowing the "e" and leaving the shell
+    # with "cho TAB_OK". That made this probe fail at random under load.
+    time.sleep(0.3)
     safe_write(master, b"echo TAB_OK\r", "tab probe")
     got_tab = read_until(master, b"TAB_OK", 20)
     key(master, "next", settle=1.5)
@@ -364,11 +369,29 @@ if err:
 print("phase A: survived resize storm (6 resizes under load)")
 
 # ── Phase B: float thrash + concurrent paste ───────────────────────────────
+# The float keys TOGGLE, so the open/closed state has to be tracked. Pressing
+# "1" blind does not "ensure a float is open" — half the time it closes one, and
+# then the paste below lands in whatever pane is focused. When that was a vim,
+# `cat > /dev/null <<'PEOF'` got read as vim normal-mode commands (the /dev/null
+# becoming a search) and 60KB of text was typed into the buffer. That looked
+# like a hexe freeze but was entirely self-inflicted.
+floats_open = {"1": False, "2": False, "3": False}
+
+def float_toggle(fk, settle=0.7):
+    key(master, fk, settle=settle)
+    floats_open[fk] = not floats_open[fk]
+
 for _ in range(6):
-    key(master, random.choice(["1", "2", "3"]), settle=0.4)
-key(master, "1", settle=1.0)  # ensure a float is open
-paste(master, 60_000)         # paste INTO the float while others flood
-key(master, "1", settle=1.0)  # close it
+    float_toggle(random.choice(["1", "2", "3"]), settle=0.4)
+
+for fk, is_open in list(floats_open.items()):
+    if is_open:
+        float_toggle(fk, settle=0.4)   # back to a known state: all closed
+float_toggle("1", settle=1.0)          # now float 1 really IS open and focused
+if not shell_ready(master, "PASTE_TGT"):
+    fail("float 1 did not come back after thrashing")
+paste(master, 60_000)                  # paste INTO the float while others flood
+float_toggle("1", settle=1.0)          # close it
 err = verify_all("float thrash")
 if err:
     fail(err)
