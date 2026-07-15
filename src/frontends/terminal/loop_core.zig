@@ -174,6 +174,13 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         const dbg_t1 = std.time.milliTimestamp();
         if (dbg_t1 - dbg_t0 > 300) terminal_main.debugLog("SLOW loop.run: {d}ms", .{dbg_t1 - dbg_t0});
 
+        // Belt-and-braces keyboard input: drain stdin directly every iteration,
+        // independent of the io_uring stdin watcher. A lost poll re-arm (under
+        // heavy pane output) used to leave the terminal painting output but deaf
+        // to the keyboard, unrecoverably. The loop is spun constantly here by
+        // that same output and the 100ms ticker, so this always services keys.
+        loop_watchers.pumpStdin(state, &resources.stdin_buffer, &hooks);
+
         // Ticker watchdog: the 100ms re-arm chain can die silently (xev
         // io_uring submission loss under load). We are AFTER loop.run, so
         // every ready CQE was just processed — if the ticker still looks
