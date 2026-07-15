@@ -59,8 +59,17 @@ fn queuePodFrame(pane_id: u16, vt_fd: std.posix.fd_t, frame_type: u8, payload: [
         if (!queued) return error.WriteFailed;
         return;
     }
-    // No queue registered (tests / probe contexts): direct bounded write.
-    try wire.writeMuxVt(vt_fd, pane_id, frame_type, payload);
+    // No queue registered (tests / probe contexts): one-shot through a temporary
+    // queue so the (epoch, seq) INPUT-frame prefix framing is byte-identical to
+    // the normal path — a v4 pod strips that prefix, so a raw writeMuxVt here
+    // would corrupt input. Zero epoch/seq is fine: this path never reconnects.
+    var tmp: vt_write_queue.Queue = .{};
+    defer tmp.deinit(std.heap.page_allocator);
+    const queued = tmp.enqueueFrame(std.heap.page_allocator, pane_id, frame_type, payload, max_pending_mux_vt_bytes) catch {
+        return error.WriteFailed;
+    };
+    if (!queued) return error.WriteFailed;
+    tmp.flushToFd(vt_fd) catch return error.WriteFailed;
 }
 
 pub const Pane = struct {

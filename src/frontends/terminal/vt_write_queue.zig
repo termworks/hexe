@@ -3,10 +3,23 @@ const posix = std.posix;
 const core = @import("core");
 
 const wire = core.wire;
+const pod_protocol = core.pod_protocol;
+
+/// mux→pod INPUT frames carry a 16-byte `[epoch:u64][seq:u64]` prefix at the
+/// front of their payload, so the pod can dedup replays after a VT reconnect
+/// (exactly-once input). SES forwards the payload opaquely; only the frontend
+/// writes this prefix and only the pod strips it. Keyed on frame_type == input,
+/// so resize/password framing is unchanged.
+pub const INPUT_SEQ_PREFIX_LEN: usize = 16;
+const INPUT_FRAME_TYPE: u8 = @intFromEnum(pod_protocol.FrameType.input);
 
 pub const Queue = struct {
     bytes: std.ArrayList(u8) = .empty,
     read_off: usize = 0,
+    /// Per-frontend-process input identity (0 until set by the owner). A frame's
+    /// (epoch, seq) is stamped when it is first enqueued; a replay reuses it.
+    epoch: u64 = 0,
+    next_seq: u64 = 0,
 
     pub fn deinit(self: *Queue, allocator: std.mem.Allocator) void {
         self.bytes.deinit(allocator);
@@ -79,15 +92,28 @@ pub const Queue = struct {
     ) !bool {
         self.compact();
 
-        const needed = @sizeOf(wire.MuxVtHeader) + payload.len;
+        // Only INPUT frames carry the (epoch, seq) prefix; resize/password are
+        // unchanged. A fresh seq is stamped here, at first enqueue.
+        const is_input = frame_type == INPUT_FRAME_TYPE;
+        const prefix_len: usize = if (is_input) INPUT_SEQ_PREFIX_LEN else 0;
+        const wire_payload_len = prefix_len + payload.len;
+
+        const needed = @sizeOf(wire.MuxVtHeader) + wire_payload_len;
         if (self.queuedBytes() + needed > max_pending_bytes) return false;
 
         var hdr = wire.MuxVtHeader{
             .pane_id = pane_id,
             .frame_type = frame_type,
-            .len = @intCast(payload.len),
+            .len = @intCast(wire_payload_len),
         };
         try self.bytes.appendSlice(allocator, std.mem.asBytes(&hdr));
+        if (is_input) {
+            self.next_seq += 1;
+            var prefix: [INPUT_SEQ_PREFIX_LEN]u8 = undefined;
+            std.mem.writeInt(u64, prefix[0..8], self.epoch, .little);
+            std.mem.writeInt(u64, prefix[8..16], self.next_seq, .little);
+            try self.bytes.appendSlice(allocator, &prefix);
+        }
         try self.bytes.appendSlice(allocator, payload);
         return true;
     }
@@ -119,20 +145,47 @@ pub const Queue = struct {
     }
 };
 
-test "enqueueFrame encodes mux vt header and payload" {
+test "enqueueFrame stamps an (epoch, seq) prefix on INPUT frames" {
     const testing = std.testing;
+    const H = @sizeOf(wire.MuxVtHeader);
+
+    var queue: Queue = .{};
+    defer queue.deinit(testing.allocator);
+    queue.epoch = 0xABCD;
+
+    // frame_type 2 == input → header.len covers the 16-byte prefix + payload.
+    try testing.expect(try queue.enqueueFrame(testing.allocator, 42, INPUT_FRAME_TYPE, "abc", 1024));
+    try testing.expectEqual(@as(usize, H + INPUT_SEQ_PREFIX_LEN + 3), queue.queuedBytes());
+
+    const hdr = std.mem.bytesToValue(wire.MuxVtHeader, queue.bytes.items[0..H]);
+    try testing.expectEqual(@as(u16, 42), hdr.pane_id);
+    try testing.expectEqual(INPUT_FRAME_TYPE, hdr.frame_type);
+    try testing.expectEqual(@as(u32, INPUT_SEQ_PREFIX_LEN + 3), hdr.len);
+
+    const epoch = std.mem.readInt(u64, queue.bytes.items[H..][0..8], .little);
+    const seq = std.mem.readInt(u64, queue.bytes.items[H + 8 ..][0..8], .little);
+    try testing.expectEqual(@as(u64, 0xABCD), epoch);
+    try testing.expectEqual(@as(u64, 1), seq); // first frame → seq 1
+    try testing.expectEqualStrings("abc", queue.bytes.items[H + INPUT_SEQ_PREFIX_LEN ..]);
+
+    // A second input frame advances the seq.
+    try testing.expect(try queue.enqueueFrame(testing.allocator, 42, INPUT_FRAME_TYPE, "d", 1024));
+    try testing.expectEqual(@as(u64, 2), queue.next_seq);
+}
+
+test "enqueueFrame does NOT prefix non-input frames (resize/password)" {
+    const testing = std.testing;
+    const H = @sizeOf(wire.MuxVtHeader);
 
     var queue: Queue = .{};
     defer queue.deinit(testing.allocator);
 
-    try testing.expect(try queue.enqueueFrame(testing.allocator, 42, 2, "abc", 1024));
-    try testing.expectEqual(@as(usize, @sizeOf(wire.MuxVtHeader) + 3), queue.queuedBytes());
-
-    const hdr = std.mem.bytesToValue(wire.MuxVtHeader, queue.bytes.items[0..@sizeOf(wire.MuxVtHeader)]);
-    try testing.expectEqual(@as(u16, 42), hdr.pane_id);
-    try testing.expectEqual(@as(u8, 2), hdr.frame_type);
-    try testing.expectEqual(@as(u32, 3), hdr.len);
-    try testing.expectEqualStrings("abc", queue.bytes.items[@sizeOf(wire.MuxVtHeader)..]);
+    // frame_type 3 == resize → no prefix, framing unchanged.
+    try testing.expect(try queue.enqueueFrame(testing.allocator, 7, 3, "\x00\x50\x00\x18", 1024));
+    try testing.expectEqual(@as(usize, H + 4), queue.queuedBytes());
+    const hdr = std.mem.bytesToValue(wire.MuxVtHeader, queue.bytes.items[0..H]);
+    try testing.expectEqual(@as(u32, 4), hdr.len);
+    try testing.expectEqual(@as(u64, 0), queue.next_seq); // seq untouched by non-input
 }
 
 test "resetForReconnect keeps complete unsent frames, drops a partial one" {

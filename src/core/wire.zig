@@ -13,12 +13,20 @@ pub const MAX_PAYLOAD_LEN: usize = @import("constants.zig").Sizes.max_payload_le
 
 /// Current protocol version. Increment when making breaking changes.
 /// Sent as second byte after handshake byte.
-pub const PROTOCOL_VERSION: u8 = 3;
+/// Version 4 adds a per-input-frame (epoch, seq) prefix on the mux→pod payload
+/// for exactly-once input delivery across a VT reconnect (dedup at the pod).
+/// An older pod would misread that 16-byte prefix as literal input, so the
+/// version gate below rejects a v3 pod when a v4 SES dials it.
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Minimum supported protocol version.
 /// Version 2 adds password-mode VT frames; accepting older frontends would
 /// silently disable POD-side backlog/observer privacy guarantees.
-pub const MIN_PROTOCOL_VERSION: u8 = 3;
+/// Version 4 changes the mux→pod input payload framing (see above), so a mixed
+/// v3/v4 deployment cannot interoperate — MIN tracks CURRENT, matching existing
+/// policy (pods from an older binary are unreachable after an upgrade until
+/// restarted).
+pub const MIN_PROTOCOL_VERSION: u8 = 4;
 pub const RUNTIME_EPOCH = build_options.runtime_epoch;
 pub const SERVER_HELLO_MAGIC = "HEXEHEL1";
 

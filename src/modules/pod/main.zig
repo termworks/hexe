@@ -44,6 +44,11 @@ inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
 /// so on timeout the connection is dropped and SES heals via backlog replay.
 const CLIENT_WRITE_TIMEOUT_MS: i32 = 2_000;
 
+/// mux→pod INPUT frames from the SES main client carry a 16-byte
+/// `[epoch:u64][seq:u64]` (little-endian) prefix for exactly-once dedup across a
+/// frontend VT reconnect. Must match vt_write_queue.INPUT_SEQ_PREFIX_LEN.
+const INPUT_SEQ_PREFIX_LEN: usize = 16;
+
 fn setNonBlocking(fd: posix.fd_t) void {
     const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| {
         debugLog("setNonBlocking: fcntl GETFL failed for fd={d}: {s}", .{ fd, @errorName(err) });
@@ -419,6 +424,14 @@ const Pod = struct {
     reader: pod_protocol.Reader,
     pty_paused: bool = false,
     password_mode: bool = false,
+
+    // Exactly-once input dedup across a frontend VT reconnect. Each mux→pod
+    // input frame carries (epoch, seq); a replayed frame keeps its original
+    // values. Same epoch → drop seq <= last_seq (already applied). Different
+    // epoch → a new frontend (reattach): reset. See applyInputFrame.
+    input_epoch: u64 = 0,
+    input_last_seq: u64 = 0,
+    input_epoch_set: bool = false,
 
     uplink: PodUplink,
 
@@ -1216,7 +1229,11 @@ const Pod = struct {
     fn handleFrame(self: *Pod, frame: pod_protocol.Frame) void {
         switch (frame.frame_type) {
             .input => {
-                self.queuePtyWrite(frame.payload);
+                // mux→pod input from the SES main client carries a 16-byte
+                // (epoch, seq) prefix for exactly-once dedup across reconnects.
+                // applyInputFrame strips it and applies the real bytes. (The aux
+                // input path, handleAuxInput, is a separate un-prefixed channel.)
+                self.applyInputFrame(frame.payload);
             },
             .resize => {
                 if (frame.payload.len >= 4) {
@@ -1233,6 +1250,23 @@ const Pod = struct {
             },
             else => {},
         }
+    }
+
+    /// Apply a mux→pod input frame, stripping its 16-byte (epoch, seq) prefix.
+    ///
+    /// Phase 1: strip and apply (dedup is a no-op). The dedup rule lands in a
+    /// later phase, once the frontend stamps a real per-process epoch — enabling
+    /// it before that would make a reattach's restarted seq collide with this
+    /// pod's high last_seq and drop all input.
+    fn applyInputFrame(self: *Pod, payload: []const u8) void {
+        if (payload.len < INPUT_SEQ_PREFIX_LEN) {
+            // Malformed (a v4 frontend always prefixes). Drop rather than write
+            // partial/garbage bytes to the shell.
+            debugLog("applyInputFrame: input frame too short ({d} bytes), dropping", .{payload.len});
+            return;
+        }
+        const real = payload[INPUT_SEQ_PREFIX_LEN..];
+        if (real.len > 0) self.queuePtyWrite(real);
     }
 
     /// Accept a VT client — replays backlog, then streams live output.

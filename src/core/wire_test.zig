@@ -220,10 +220,14 @@ test "wire: timeout-bounded header read rejects partial nonblocking frame" {
     try testing.expectError(error.Timeout, wire.readControlHeaderTimeout(pair.b, 10));
 }
 
-test "wire: protocol version 3 is minimum supported" {
-    try testing.expect(!wire.isProtocolVersionSupported(2));
-    try testing.expect(wire.isProtocolVersionSupported(3));
-    try testing.expect(!wire.isProtocolVersionDeprecated(2));
+test "wire: protocol version 4 is minimum supported" {
+    // v4 changed mux→pod input framing (per-frame (epoch,seq) prefix), so v3 and
+    // earlier are no longer interoperable. MIN tracks CURRENT.
+    try testing.expect(!wire.isProtocolVersionSupported(3));
+    try testing.expect(wire.isProtocolVersionSupported(4));
+    try testing.expect(!wire.isProtocolVersionDeprecated(3));
+    try testing.expectEqual(@as(u8, 4), wire.PROTOCOL_VERSION);
+    try testing.expectEqual(@as(u8, 4), wire.MIN_PROTOCOL_VERSION);
 }
 
 test "wire round-trip: Error payload + trail" {
