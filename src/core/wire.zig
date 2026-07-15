@@ -1,6 +1,5 @@
 const std = @import("std");
 const posix = std.posix;
-const xev = @import("xev").Dynamic;
 const build_options = @import("build_options");
 const log = std.log.scoped(.wire);
 
@@ -1022,71 +1021,23 @@ pub fn tryReadMuxVtHeader(fd: posix.fd_t) !MuxVtHeader {
 pub const DEFAULT_IO_TIMEOUT_MS: i32 = 10_000;
 
 /// Wait for fd readability with timeout. Returns error.Timeout on expiry.
+/// Wait until `fd` is readable, or the budget runs out.
+///
+/// This used to build a whole new xev.Loop (an io_uring instance) plus a Timer,
+/// and run it — on EVERY partial read. That is a nested event loop re-entered
+/// from inside a callback of the outer one, an io_uring_setup + mmap + teardown
+/// per EAGAIN on the hot CTL/VT path, and a hard failure near the fd limit
+/// (EMFILE would turn a merely-slow read into a dropped connection).
+///
+/// A single poll() does the same job. `waitWritableTimeout` below always did.
 fn waitForReadable(fd: posix.fd_t, timeout_ms: i32) !void {
-    try xev.detect();
-
-    var loop = try xev.Loop.init(.{});
-    defer loop.deinit();
-
-    var timer = try xev.Timer.init();
-    defer timer.deinit();
-
-    const WaitContext = struct {
-        ready: bool = false,
-        timed_out: bool = false,
-    };
-
-    var ctx: WaitContext = .{};
-    var file_completion: xev.Completion = .{};
-    var timer_completion: xev.Completion = .{};
-
-    const waitCallback = struct {
-        fn call(
-            cb_ctx: ?*WaitContext,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: xev.File,
-            result: xev.PollError!xev.PollEvent,
-        ) xev.CallbackAction {
-            const c = cb_ctx orelse return .disarm;
-            _ = result catch |err| {
-                log.debug("waitForReadable: poll error: {}", .{err});
-                c.ready = true;
-                return .disarm;
-            };
-            c.ready = true;
-            return .disarm;
-        }
-    }.call;
-
-    const timeoutCallback = struct {
-        fn call(
-            cb_ctx: ?*WaitContext,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            result: xev.Timer.RunError!void,
-        ) xev.CallbackAction {
-            const c = cb_ctx orelse return .disarm;
-            _ = result catch |err| {
-                log.debug("waitForReadable: timer error: {}", .{err});
-                c.timed_out = true;
-                return .disarm;
-            };
-            c.timed_out = true;
-            return .disarm;
-        }
-    }.call;
-
-    const watcher = xev.File.initFd(fd);
-    watcher.poll(&loop, &file_completion, .read, WaitContext, &ctx, waitCallback);
-    timer.run(&loop, &timer_completion, @intCast(@max(timeout_ms, 0)), WaitContext, &ctx, timeoutCallback);
-
-    while (!ctx.ready and !ctx.timed_out) {
-        try loop.run(.once);
-    }
-
-    if (ctx.ready) return;
-    return error.Timeout;
+    if (timeout_ms <= 0) return error.Timeout;
+    var pfds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const n = try posix.poll(&pfds, timeout_ms);
+    if (n == 0) return error.Timeout;
+    // POLLHUP/POLLERR also mean "stop waiting" — the read that follows will
+    // surface EOF or the real error rather than spinning here.
+    return;
 }
 
 pub fn waitReadableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {
