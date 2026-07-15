@@ -18,6 +18,23 @@ pub const Queue = struct {
         self.read_off = 0;
     }
 
+    /// Prepare the queue for a brand-new SES VT connection.
+    ///
+    /// The hazard a reconnect must avoid is replaying a PARTIALLY WRITTEN frame:
+    /// if `read_off > 0`, the head frame's first bytes already went to the OLD
+    /// socket, so its remainder would start the new multiplexed stream mid-frame
+    /// and desync every pane's input — those bytes must be dropped.
+    ///
+    /// But when `read_off == 0` NOTHING was partially sent: every queued frame is
+    /// complete and was never written anywhere (the common case is a keystroke
+    /// enqueued while the channel was down, since flushPendingMuxVtWrites returns
+    /// early with no vt_fd and never advances read_off). Those frames are safe to
+    /// KEEP — they flush intact, in order, to the new socket. Clearing them here
+    /// was silently dropping keystrokes typed during the reconnect window.
+    pub fn resetForReconnect(self: *Queue) void {
+        if (self.read_off > 0) self.clear();
+    }
+
     pub fn queuedBytes(self: *const Queue) usize {
         if (self.read_off >= self.bytes.items.len) return 0;
         return self.bytes.items.len - self.read_off;
@@ -116,6 +133,31 @@ test "enqueueFrame encodes mux vt header and payload" {
     try testing.expectEqual(@as(u8, 2), hdr.frame_type);
     try testing.expectEqual(@as(u32, 3), hdr.len);
     try testing.expectEqualStrings("abc", queue.bytes.items[@sizeOf(wire.MuxVtHeader)..]);
+}
+
+test "resetForReconnect keeps complete unsent frames, drops a partial one" {
+    const testing = std.testing;
+
+    // Case 1: a keystroke enqueued while the channel was down — nothing was ever
+    // flushed (read_off == 0), so the frame must SURVIVE the reconnect and go to
+    // the new socket. Dropping it here was the lost-keystroke-on-reconnect bug.
+    var q1: Queue = .{};
+    defer q1.deinit(testing.allocator);
+    try testing.expect(try q1.enqueueFrame(testing.allocator, 1, 2, "hi", 1024));
+    const before = q1.queuedBytes();
+    try testing.expect(before > 0);
+    q1.resetForReconnect();
+    try testing.expectEqual(before, q1.queuedBytes()); // preserved
+
+    // Case 2: a frame was PARTIALLY written to the old socket (read_off > 0). Its
+    // remainder would desync the new multiplexed stream, so the queue is dropped.
+    var q2: Queue = .{};
+    defer q2.deinit(testing.allocator);
+    try testing.expect(try q2.enqueueFrame(testing.allocator, 1, 2, "abcdef", 1024));
+    q2.read_off = 3; // simulate a backpressured mid-frame flush
+    q2.resetForReconnect();
+    try testing.expectEqual(@as(usize, 0), q2.queuedBytes()); // dropped
+    try testing.expectEqual(@as(usize, 0), q2.read_off);
 }
 
 test "flushToFd drains queued bytes" {

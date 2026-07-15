@@ -297,6 +297,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_ipc_tests = b.addRunArtifact(ipc_tests);
 
+    // Frontend mux-VT write queue: reconnect must not drop complete keystrokes.
+    const vtwq_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/vt_write_queue.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vtwq_test_module.addImport("core", core_module);
+    const vtwq_tests = b.addTest(.{
+        .root_module = vtwq_test_module,
+    });
+    const run_vtwq_tests = b.addRunArtifact(vtwq_tests);
+
     // Core VT behavior tests.
     const vt_test_module = b.createModule(.{
         .root_source_file = b.path("src/core/vt_test.zig"),
@@ -451,6 +463,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_cmd_tests.step);
     test_step.dependOn(&run_async_cmd_tests.step);
     test_step.dependOn(&run_ipc_tests.step);
+    test_step.dependOn(&run_vtwq_tests.step);
     test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);

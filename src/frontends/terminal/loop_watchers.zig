@@ -135,16 +135,17 @@ pub fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []
     watcher.armed = true;
     // Fresh connection: any partial-frame progress belonged to the old one.
     state.mux_vt_reader.reset();
-    // The WRITE queue must be dropped too. A backpressured flush leaves a
-    // PARTIALLY WRITTEN frame at its head; replaying that remainder onto a
-    // NEW socket starts the multiplexed stream mid-frame, so SES desyncs and
-    // every keystroke for this mux is misparsed — after a daemon crash and
-    // auto-reconnect the panes looked alive but ignored all input (worst on
-    // busy sessions, which have the most in-flight VT traffic).
+    // The WRITE queue needs care on reconnect. A backpressured flush can leave a
+    // PARTIALLY WRITTEN frame at its head; replaying that remainder onto a NEW
+    // socket starts the multiplexed stream mid-frame, so SES desyncs and every
+    // keystroke for this mux is misparsed. But COMPLETE, never-sent frames (a
+    // keystroke typed while the channel was down) are safe to keep — dropping
+    // them was losing input typed during the reconnect window. resetForReconnect
+    // clears only when a partial write actually happened.
     if (state.mux_vt_write_queue.queuedBytes() > 0) {
-        terminal_main.debugLog("dropping {d} queued VT bytes from the previous connection", .{state.mux_vt_write_queue.queuedBytes()});
+        terminal_main.debugLog("reconnect: {d} queued VT bytes pending (preserved unless mid-frame)", .{state.mux_vt_write_queue.queuedBytes()});
     }
-    state.mux_vt_write_queue.clear();
+    state.mux_vt_write_queue.resetForReconnect();
     const file = xev.File.initFd(vt_fd);
     file.poll(watcher.loop, &node.completion, .read, SesVtSlot, &node.slot, sesVtCallback);
 }

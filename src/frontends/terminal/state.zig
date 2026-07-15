@@ -1065,7 +1065,12 @@ pub const State = struct {
     }
 
     fn handleMuxVtWriteFailure(self: *State, fd: posix.fd_t) void {
-        self.mux_vt_write_queue.clear();
+        // The write to the dying socket failed. Preserve any COMPLETE, unsent
+        // frames (resetForReconnect drops only a partially-written head frame):
+        // a keystroke typed just as the daemon died was being cleared here and
+        // silently lost. The preserved frames re-flush to the new socket once
+        // the loop reconnects, so the keystroke actually runs.
+        self.mux_vt_write_queue.resetForReconnect();
         _ = self.runtime.closeVtFdIf(fd);
         self.notifications.showFor("Lost connection to ses daemon (VT) — reconnecting...", 5000);
         self.needs_render = true;
