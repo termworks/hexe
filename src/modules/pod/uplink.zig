@@ -134,18 +134,24 @@ pub const PodUplink = struct {
             return false;
         };
         @memcpy(handshake[2..18], &uuid_bin);
-        wire.writeAll(fd, &handshake) catch |err| {
-            log.warn("failed to send POD uplink handshake: {}", .{err});
+
+        // Non-blocking is load-bearing: the wire write timeouts only engage
+        // on WouldBlock. On a blocking fd a wedged SES that stops draining
+        // this channel parks the write in the kernel FOREVER, freezing the
+        // pod's event loop — and the user's shell — for good.
+        //
+        // This MUST happen before the handshake write below, not after it: that
+        // write is small, but "small" is not "cannot block" — if SES's receive
+        // buffer for this connection is already full, an 18-byte write on a
+        // blocking fd hangs exactly as hard as a big one.
+        core.ipc.setNonBlocking(fd) catch |err| {
+            log.warn("failed to set POD uplink non-blocking: {}", .{err});
             posix.close(fd);
             return false;
         };
 
-        // Non-blocking is load-bearing: the wire write timeouts only engage
-        // on WouldBlock. On a blocking fd a wedged SES that stops draining
-        // this channel parks the next tick() write in the kernel FOREVER,
-        // freezing the pod's event loop — and the user's shell — for good.
-        core.ipc.setNonBlocking(fd) catch |err| {
-            log.warn("failed to set POD uplink non-blocking: {}", .{err});
+        wire.writeAllTimeout(fd, &handshake, UPLINK_WRITE_TIMEOUT_MS) catch |err| {
+            log.warn("failed to send POD uplink handshake: {}", .{err});
             posix.close(fd);
             return false;
         };

@@ -1247,8 +1247,10 @@ const Pod = struct {
         setNonBlocking(conn.fd);
         self.client = conn;
 
-        // Send acknowledgment so client knows we're ready.
-        wire.writeControl(conn.fd, .ok, &.{}) catch {
+        // Send acknowledgment so client knows we're ready. Bounded like every
+        // other write to this peer — plain writeControl carries the 10s wire
+        // default, which is 10s of frozen shell on the attach path.
+        wire.writeControlTimeout(conn.fd, .ok, &.{}, CLIENT_WRITE_TIMEOUT_MS) catch {
             debugLog("acceptVtClient: failed to send ack, closing fd={d}", .{conn.fd});
             var tmp = conn;
             tmp.close();
