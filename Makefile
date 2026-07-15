@@ -30,6 +30,7 @@ smoke-heavy:
 	python3 -u scripts/smoke_heavy2.py
 	python3 -u scripts/smoke_input_flood.py
 	python3 -u scripts/smoke_wedged.py
+	python3 -u scripts/smoke_input_exactly_once.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"

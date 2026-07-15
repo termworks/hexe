@@ -1,5 +1,15 @@
 # PLAN: exactly-once input delivery across VT reconnect
 
+> STATUS: IMPLEMENTED (commits 3a101e6 proto/v4, bb6af7e feature). All four
+> phases landed and verified: 375/385 unit tests, a live exactly-once smoke
+> (6 rounds racing a daemon SIGKILL against a keystroke — never lost, never
+> duplicated), and the daemon-crash-keystroke minimal repro 5/5. One real
+> refinement found during Phase 3 verification: the ring must be replayed on
+> `backlog_end` (pod reconnected → routing ready), NOT on VT-arm — replaying
+> earlier raced SES's pod re-adoption and hit "unknown pane" drops. See the
+> loop_watchers `.backlog_end` arm.
+
+
 ## Goal / invariant
 Input typed around a VT-channel reconnect — frontend slow/SIGSTOP, VT-overflow
 channel drop, or daemon crash+restart — is delivered to the shell **exactly once**:
