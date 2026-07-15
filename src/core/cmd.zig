@@ -71,6 +71,14 @@ pub fn cachedResultArgv(key: []const u8, argv: []const []const u8, refresh_ms: i
     return null;
 }
 
+/// Hand a spawned child to the background reaper. True if it was adopted; false
+/// means there is no cache (a short-lived process) and the caller must reap it
+/// itself.
+pub fn reapLater(child: std.process.Child) bool {
+    if (async_cache) |cache| return cache.adoptForReaping(child);
+    return false;
+}
+
 pub fn hasAsyncCache() bool {
     return async_cache != null;
 }

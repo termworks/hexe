@@ -204,6 +204,15 @@ pub const AsyncCmdCache = struct {
         return true;
     }
 
+    /// Take ownership of an already-spawned child purely so poll() will reap it.
+    /// For a caller that cannot afford to wait on it (an event loop) but must
+    /// not leak a zombie either.
+    pub fn adoptForReaping(self: *AsyncCmdCache, child: std.process.Child) bool {
+        if (self.detached.items.len >= MAX_DETACHED) return false;
+        self.detached.append(self.allocator, child) catch return false;
+        return true;
+    }
+
     fn reapDetached(self: *AsyncCmdCache) void {
         var i: usize = 0;
         while (i < self.detached.items.len) {

@@ -9,6 +9,11 @@ const responses = @import("ses_client_responses.zig");
 const commands = @import("ses_client_commands.zig");
 const reads = @import("ses_client_reads.zig");
 const queries = @import("ses_client_queries.zig");
+const cmd_mod = @import("cmd.zig");
+
+/// How long to wait for the ses-daemon starter to fork off and exit before we
+/// stop waiting on it. It normally exits in milliseconds.
+const SES_STARTER_WAIT_MS: i64 = 3_000;
 
 pub const LocalIpcTransport = struct {
     autostart_ses: bool = true,
@@ -1312,10 +1317,31 @@ pub const SesClient = struct {
             return err;
         };
         self.traceLog("startSes: spawned pid={d}", .{child.id});
-        _ = child.wait() catch |err| {
-            logging.logError("frontend-client", "failed to wait for ses daemon starter", err);
-        };
-        self.traceLog("startSes: child exited", .{});
+
+        // The starter daemonizes and exits immediately, so this normally returns
+        // at once — but a plain child.wait() here is an UNBOUNDED wait on the
+        // frontend's event loop. A daemon binary that fails to fork off (a
+        // crash-loop, a wrapper that keeps stdio, a build that runs in the
+        // foreground) would freeze the UI forever, and this runs from the 2s
+        // reconnect retry, not just at startup.
+        const deadline = std.time.milliTimestamp() + SES_STARTER_WAIT_MS;
+        while (std.time.milliTimestamp() < deadline) {
+            if (std.posix.waitpid(child.id, std.posix.W.NOHANG).pid != 0) {
+                self.traceLog("startSes: child exited", .{});
+                return;
+            }
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
+
+        // Still running. Don't wait on it and don't leave a zombie: hand it to
+        // the background reaper. (Short-lived processes have no reaper — they
+        // exit momentarily anyway, so a blocking wait is fine there.)
+        logging.warn("frontend-client", "ses daemon starter has not exited after {d}ms; not waiting on it", .{SES_STARTER_WAIT_MS});
+        if (!cmd_mod.reapLater(child)) {
+            _ = child.wait() catch |err| {
+                logging.logError("frontend-client", "failed to wait for ses daemon starter", err);
+            };
+        }
     }
 
     /// Check if connected to ses.
