@@ -454,9 +454,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_pod_buffering_tests = b.addRunArtifact(pod_buffering_tests);
 
+    // Exactly-once input dedup (std-only, roots directly at the module file).
+    const pod_input_dedup_test_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/pod/input_dedup.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const pod_input_dedup_tests = b.addTest(.{
+        .root_module = pod_input_dedup_test_module,
+    });
+    const run_pod_input_dedup_tests = b.addRunArtifact(pod_input_dedup_tests);
+
     const test_step = b.step("test", "Run hexe test suites");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_pod_buffering_tests.step);
+    test_step.dependOn(&run_pod_input_dedup_tests.step);
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);

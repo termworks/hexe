@@ -135,17 +135,13 @@ pub fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []
     watcher.armed = true;
     // Fresh connection: any partial-frame progress belonged to the old one.
     state.mux_vt_reader.reset();
-    // The WRITE queue needs care on reconnect. A backpressured flush can leave a
-    // PARTIALLY WRITTEN frame at its head; replaying that remainder onto a NEW
-    // socket starts the multiplexed stream mid-frame, so SES desyncs and every
-    // keystroke for this mux is misparsed. But COMPLETE, never-sent frames (a
-    // keystroke typed while the channel was down) are safe to keep — dropping
-    // them was losing input typed during the reconnect window. resetForReconnect
-    // clears only when a partial write actually happened.
-    if (state.mux_vt_write_queue.queuedBytes() > 0) {
-        terminal_main.debugLog("reconnect: {d} queued VT bytes pending (preserved unless mid-frame)", .{state.mux_vt_write_queue.queuedBytes()});
-    }
-    state.mux_vt_write_queue.resetForReconnect();
+    // Drop the live queue (its head frame may be half-written to the dead
+    // socket; the ring holds the intact frames). The replay itself is deferred
+    // to backlog_end, NOT done here: right after the VT channel comes up, SES has
+    // not yet reconnected the pod (pod_vt_fd), so input sent now is dropped as
+    // "unknown pane". backlog_end fires only after the pod reconnected and
+    // replayed through pod_vt_fd, so routing is ready — see the backlog_end arm.
+    state.mux_vt_write_queue.clear();
     const file = xev.File.initFd(vt_fd);
     file.poll(watcher.loop, &node.completion, .read, SesVtSlot, &node.slot, sesVtCallback);
 }
@@ -337,6 +333,15 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
                 pane.vt.invalidateRenderState();
                 state.needs_render = true;
                 state.force_full_render = true;
+                // The pod for this pane has reconnected and finished replaying
+                // its backlog, so mux→pod routing is now established. Re-send the
+                // input replay ring: any keystroke typed around the disconnect
+                // (dropped while the pod was reconnecting) is delivered now, and
+                // the pod deduplicates anything it already applied (by epoch,seq).
+                // A fresh reattaching frontend has a different epoch and an empty
+                // ring, so this is a no-op for it.
+                state.mux_vt_write_queue.rebuildForReconnect(state.allocator);
+                state.flushPendingMuxVtWrites();
             },
             .ignored => {},
         }

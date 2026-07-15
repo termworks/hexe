@@ -1065,12 +1065,11 @@ pub const State = struct {
     }
 
     fn handleMuxVtWriteFailure(self: *State, fd: posix.fd_t) void {
-        // The write to the dying socket failed. Preserve any COMPLETE, unsent
-        // frames (resetForReconnect drops only a partially-written head frame):
-        // a keystroke typed just as the daemon died was being cleared here and
-        // silently lost. The preserved frames re-flush to the new socket once
-        // the loop reconnects, so the keystroke actually runs.
-        self.mux_vt_write_queue.resetForReconnect();
+        // The write to the dying socket failed. Drop the live queue (its head
+        // frame may be half-written to the dead socket) but KEEP the replay ring
+        // — the reconnect rebuilds the live queue from it, so input typed as the
+        // daemon died is re-sent and the pod dedups anything already applied.
+        self.mux_vt_write_queue.clear();
         _ = self.runtime.closeVtFdIf(fd);
         self.notifications.showFor("Lost connection to ses daemon (VT) — reconnecting...", 5000);
         self.needs_render = true;
@@ -1104,6 +1103,12 @@ pub const State = struct {
     /// the State has a stable address. See pane.zig queuePodFrame for why
     /// direct writes are forbidden.
     pub fn registerSharedVtQueue(self: *State) void {
+        // A per-process input epoch, stable across THIS frontend's own reconnects
+        // but unique vs a fresh reattaching frontend. The pod uses it to tell a
+        // reconnect (dedup by seq) from a reattach (reset the input stream).
+        if (self.mux_vt_write_queue.epoch == 0) {
+            self.mux_vt_write_queue.epoch = std.crypto.random.int(u64) | 1; // never 0
+        }
         @import("pane.zig").setSharedVtWriteQueue(&self.mux_vt_write_queue, self.allocator);
         // Register the async command runner too: from here on, every segment
         // command in the render path is served from cache and executed in the

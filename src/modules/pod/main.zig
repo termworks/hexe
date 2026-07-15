@@ -21,6 +21,7 @@ fn verifyPeerCredentials(fd: posix.fd_t) bool {
 const pod_protocol = core.pod_protocol;
 const pod_meta = core.pod_meta;
 const wire = core.wire;
+const input_dedup_mod = @import("input_dedup.zig");
 const xev = @import("xev").Dynamic;
 const PodUplink = @import("uplink.zig").PodUplink;
 const buffering = @import("buffering.zig");
@@ -425,13 +426,8 @@ const Pod = struct {
     pty_paused: bool = false,
     password_mode: bool = false,
 
-    // Exactly-once input dedup across a frontend VT reconnect. Each mux→pod
-    // input frame carries (epoch, seq); a replayed frame keeps its original
-    // values. Same epoch → drop seq <= last_seq (already applied). Different
-    // epoch → a new frontend (reattach): reset. See applyInputFrame.
-    input_epoch: u64 = 0,
-    input_last_seq: u64 = 0,
-    input_epoch_set: bool = false,
+    // Exactly-once input dedup across a frontend VT reconnect. See applyInputFrame.
+    input_dedup: input_dedup_mod.InputDedup = .{},
 
     uplink: PodUplink,
 
@@ -1252,12 +1248,16 @@ const Pod = struct {
         }
     }
 
-    /// Apply a mux→pod input frame, stripping its 16-byte (epoch, seq) prefix.
+    /// Apply a mux→pod input frame, deduplicating replays across a VT reconnect.
     ///
-    /// Phase 1: strip and apply (dedup is a no-op). The dedup rule lands in a
-    /// later phase, once the frontend stamps a real per-process epoch — enabling
-    /// it before that would make a reattach's restarted seq collide with this
-    /// pod's high last_seq and drop all input.
+    /// The 16-byte prefix is `[epoch:u64][seq:u64]` (little-endian). The pod is
+    /// the dedup authority because it is the only process that survives every
+    /// reconnect trigger (frontend slow, VT-overflow drop, daemon crash):
+    ///   - different epoch → a NEW frontend (reattach): adopt it, apply.
+    ///   - seq <= last_seq  → already applied (a replay): DROP.
+    ///   - else             → apply, advance last_seq.
+    /// This makes input exactly-once: the frontend re-sends its replay ring on
+    /// reconnect, and anything already delivered here is dropped.
     fn applyInputFrame(self: *Pod, payload: []const u8) void {
         if (payload.len < INPUT_SEQ_PREFIX_LEN) {
             // Malformed (a v4 frontend always prefixes). Drop rather than write
@@ -1265,7 +1265,11 @@ const Pod = struct {
             debugLog("applyInputFrame: input frame too short ({d} bytes), dropping", .{payload.len});
             return;
         }
+        const epoch = std.mem.readInt(u64, payload[0..8], .little);
+        const seq = std.mem.readInt(u64, payload[8..16], .little);
         const real = payload[INPUT_SEQ_PREFIX_LEN..];
+
+        if (!self.input_dedup.accept(epoch, seq)) return; // replayed duplicate
         if (real.len > 0) self.queuePtyWrite(real);
     }
 

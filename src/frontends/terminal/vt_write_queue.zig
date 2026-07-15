@@ -13,6 +13,13 @@ const pod_protocol = core.pod_protocol;
 pub const INPUT_SEQ_PREFIX_LEN: usize = 16;
 const INPUT_FRAME_TYPE: u8 = @intFromEnum(pod_protocol.FrameType.input);
 
+/// How many bytes of recently-sent frames to retain for replay-on-reconnect.
+/// This is the exactly-once safety window: frames sent within the last ~64 KB
+/// of pane→pod traffic can be re-delivered after a reconnect (the pod dedups the
+/// ones it already applied). 64 KB is thousands of keystrokes — far more than
+/// anyone types during the sub-second reconnect window.
+pub const REPLAY_CAP_BYTES: usize = 64 * 1024;
+
 pub const Queue = struct {
     bytes: std.ArrayList(u8) = .empty,
     read_off: usize = 0,
@@ -21,8 +28,17 @@ pub const Queue = struct {
     epoch: u64 = 0,
     next_seq: u64 = 0,
 
+    /// Replay ring: the full wire bytes of recently-enqueued frames, retained
+    /// AFTER they leave the live queue. On a VT reconnect the whole ring is
+    /// re-sent so nothing typed around the disconnect is lost; the pod dedups
+    /// (by the input prefix's seq) anything it already applied. Bounded by
+    /// REPLAY_CAP_BYTES, oldest whole frames pruned first.
+    replay: std.ArrayList(u8) = .empty,
+    replay_head: usize = 0,
+
     pub fn deinit(self: *Queue, allocator: std.mem.Allocator) void {
         self.bytes.deinit(allocator);
+        self.replay.deinit(allocator);
         self.* = .{};
     }
 
@@ -31,26 +47,62 @@ pub const Queue = struct {
         self.read_off = 0;
     }
 
-    /// Prepare the queue for a brand-new SES VT connection.
+    /// Rebuild the live queue for a brand-new SES VT connection from the replay
+    /// ring, so input typed around the disconnect survives.
     ///
-    /// The hazard a reconnect must avoid is replaying a PARTIALLY WRITTEN frame:
-    /// if `read_off > 0`, the head frame's first bytes already went to the OLD
-    /// socket, so its remainder would start the new multiplexed stream mid-frame
-    /// and desync every pane's input — those bytes must be dropped.
-    ///
-    /// But when `read_off == 0` NOTHING was partially sent: every queued frame is
-    /// complete and was never written anywhere (the common case is a keystroke
-    /// enqueued while the channel was down, since flushPendingMuxVtWrites returns
-    /// early with no vt_fd and never advances read_off). Those frames are safe to
-    /// KEEP — they flush intact, in order, to the new socket. Clearing them here
-    /// was silently dropping keystrokes typed during the reconnect window.
-    pub fn resetForReconnect(self: *Queue) void {
-        if (self.read_off > 0) self.clear();
+    /// The live queue is dropped (a partially-written head frame's first bytes
+    /// already went to the OLD socket; replaying its remainder would desync the
+    /// new multiplexed stream). The ring holds the FULL, intact frames, so we
+    /// re-send those instead — the old partial bytes die with the old socket,
+    /// and the pod deduplicates any frame it already applied via the (epoch,seq)
+    /// prefix. Replayed frames go out BEFORE any new input (the loop enqueues
+    /// new keystrokes after this), preserving order.
+    pub fn rebuildForReconnect(self: *Queue, allocator: std.mem.Allocator) void {
+        self.clear();
+        const pending = self.replay.items[self.replay_head..];
+        if (pending.len == 0) return;
+        self.bytes.appendSlice(allocator, pending) catch {
+            // OOM: fall back to dropping — worse than a replay, but never a crash.
+            self.clear();
+        };
     }
 
     pub fn queuedBytes(self: *const Queue) usize {
         if (self.read_off >= self.bytes.items.len) return 0;
         return self.bytes.items.len - self.read_off;
+    }
+
+    /// Append a just-built frame (its full wire bytes) to the replay ring and
+    /// prune whole oldest frames until under the cap.
+    fn retainForReplay(self: *Queue, allocator: std.mem.Allocator, frame: []const u8) void {
+        // A single frame larger than the whole window can never be retained (a
+        // multi-MB paste chunk); note it rather than silently pretend it's safe.
+        if (frame.len > REPLAY_CAP_BYTES) {
+            core.logging.warn("terminal", "input frame ({d} B) exceeds replay window; not retained for reconnect", .{frame.len});
+            return;
+        }
+        self.replay.appendSlice(allocator, frame) catch return; // OOM: skip retain
+        // Prune whole frames from the front while over the cap.
+        while (self.replay.items.len - self.replay_head > REPLAY_CAP_BYTES) {
+            const total = frameTotalLen(self.replay.items[self.replay_head..]) orelse break;
+            self.replay_head += total;
+        }
+        // Compact the front offset occasionally so it can't grow unbounded.
+        if (self.replay_head > REPLAY_CAP_BYTES) {
+            const remaining = self.replay.items.len - self.replay_head;
+            std.mem.copyForwards(u8, self.replay.items[0..remaining], self.replay.items[self.replay_head..]);
+            self.replay.items.len = remaining;
+            self.replay_head = 0;
+        }
+    }
+
+    /// Byte length of the frame at the front of `buf` (MuxVtHeader + payload),
+    /// or null if the buffer is too short to hold even a header.
+    fn frameTotalLen(buf: []const u8) ?usize {
+        const H = @sizeOf(wire.MuxVtHeader);
+        if (buf.len < H) return null;
+        const hdr = std.mem.bytesToValue(wire.MuxVtHeader, buf[0..H]);
+        return H + hdr.len;
     }
 
     pub fn enqueueFrame(
@@ -101,6 +153,7 @@ pub const Queue = struct {
         const needed = @sizeOf(wire.MuxVtHeader) + wire_payload_len;
         if (self.queuedBytes() + needed > max_pending_bytes) return false;
 
+        const frame_start = self.bytes.items.len;
         var hdr = wire.MuxVtHeader{
             .pane_id = pane_id,
             .frame_type = frame_type,
@@ -115,6 +168,10 @@ pub const Queue = struct {
             try self.bytes.appendSlice(allocator, &prefix);
         }
         try self.bytes.appendSlice(allocator, payload);
+
+        // Retain the exact wire bytes for replay-on-reconnect (all frame types;
+        // the pod dedups input by seq and re-applies resize/password harmlessly).
+        self.retainForReplay(allocator, self.bytes.items[frame_start..]);
         return true;
     }
 
@@ -188,29 +245,57 @@ test "enqueueFrame does NOT prefix non-input frames (resize/password)" {
     try testing.expectEqual(@as(u64, 0), queue.next_seq); // seq untouched by non-input
 }
 
-test "resetForReconnect keeps complete unsent frames, drops a partial one" {
+test "rebuildForReconnect re-sends the replay ring as whole frames" {
     const testing = std.testing;
 
-    // Case 1: a keystroke enqueued while the channel was down — nothing was ever
-    // flushed (read_off == 0), so the frame must SURVIVE the reconnect and go to
-    // the new socket. Dropping it here was the lost-keystroke-on-reconnect bug.
-    var q1: Queue = .{};
-    defer q1.deinit(testing.allocator);
-    try testing.expect(try q1.enqueueFrame(testing.allocator, 1, 2, "hi", 1024));
-    const before = q1.queuedBytes();
-    try testing.expect(before > 0);
-    q1.resetForReconnect();
-    try testing.expectEqual(before, q1.queuedBytes()); // preserved
+    // A keystroke sent (fully flushed → dropped from the live queue) is still in
+    // the replay ring. On reconnect it must be re-queued whole for the new socket
+    // so it is not lost — even though the live queue was empty.
+    var q: Queue = .{};
+    defer q.deinit(testing.allocator);
+    q.epoch = 7;
+    try testing.expect(try q.enqueueFrame(testing.allocator, 1, INPUT_FRAME_TYPE, "hi", 1024));
+    // Simulate a full flush: the live queue drains, but the ring retains it.
+    q.read_off = q.bytes.items.len;
+    q.compact();
+    try testing.expectEqual(@as(usize, 0), q.queuedBytes()); // live queue empty
 
-    // Case 2: a frame was PARTIALLY written to the old socket (read_off > 0). Its
-    // remainder would desync the new multiplexed stream, so the queue is dropped.
-    var q2: Queue = .{};
-    defer q2.deinit(testing.allocator);
-    try testing.expect(try q2.enqueueFrame(testing.allocator, 1, 2, "abcdef", 1024));
-    q2.read_off = 3; // simulate a backpressured mid-frame flush
-    q2.resetForReconnect();
-    try testing.expectEqual(@as(usize, 0), q2.queuedBytes()); // dropped
-    try testing.expectEqual(@as(usize, 0), q2.read_off);
+    q.rebuildForReconnect(testing.allocator);
+    // The frame is back in the live queue, header + prefix + "hi".
+    const H = @sizeOf(wire.MuxVtHeader);
+    try testing.expectEqual(@as(usize, H + INPUT_SEQ_PREFIX_LEN + 2), q.queuedBytes());
+    const hdr = std.mem.bytesToValue(wire.MuxVtHeader, q.bytes.items[0..H]);
+    try testing.expectEqual(INPUT_FRAME_TYPE, hdr.frame_type);
+    // The replayed frame keeps its ORIGINAL seq (1) — essential for dedup.
+    const seq = std.mem.readInt(u64, q.bytes.items[H + 8 ..][0..8], .little);
+    try testing.expectEqual(@as(u64, 1), seq);
+}
+
+test "replay ring prunes oldest whole frames past the cap" {
+    const testing = std.testing;
+
+    var q: Queue = .{};
+    defer q.deinit(testing.allocator);
+    // Enqueue far more than the cap; the ring must stay bounded and never split
+    // a frame across the prune boundary.
+    var i: usize = 0;
+    while (i < 20000) : (i += 1) {
+        _ = try q.enqueueFrame(testing.allocator, 1, INPUT_FRAME_TYPE, "x", 64 * 1024 * 1024);
+        // Keep the live queue from growing unbounded (irrelevant to the ring).
+        q.clear();
+    }
+    const retained = q.replay.items.len - q.replay_head;
+    try testing.expect(retained <= REPLAY_CAP_BYTES);
+    // The retained region must start on a frame boundary (parse cleanly to end).
+    var off: usize = q.replay_head;
+    var frames: usize = 0;
+    while (off < q.replay.items.len) {
+        const total = Queue.frameTotalLen(q.replay.items[off..]) orelse break;
+        off += total;
+        frames += 1;
+    }
+    try testing.expectEqual(q.replay.items.len, off); // no trailing partial frame
+    try testing.expect(frames > 0);
 }
 
 test "flushToFd drains queued bytes" {
