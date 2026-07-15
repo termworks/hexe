@@ -9,6 +9,17 @@ const ses = @import("main.zig");
 const server = @import("server.zig");
 const Server = server.Server;
 
+/// Total budget for writing a reattach response, however many panes it carries.
+const REATTACH_RESPONSE_WRITE_MS: i64 = 3_000;
+
+/// Milliseconds left until `deadline`, never negative (0 makes the next write
+/// fail fast with Timeout rather than blocking).
+fn remainingBudget(deadline: i64) i32 {
+    const left = deadline - std.time.milliTimestamp();
+    if (left <= 0) return 0;
+    return @intCast(@min(left, @as(i64, std.math.maxInt(i32))));
+}
+
 /// Force-detach with full server-side fd bookkeeping. The state layer's
 /// forceDetachAttachedSession closes the owner's fds (noted), but only the
 /// server knows about watchers, binary_ctl_fds, pending pops and the per-fd
@@ -388,23 +399,31 @@ pub fn completeReattach(self: *Server, fd: posix.fd_t, session_id: [16]u8, clien
         .payload_len = @intCast(total_payload),
     };
     ses.debugLog("completeReattach: writing response payload={d}", .{total_payload});
-    wire.writeAll(fd, std.mem.asBytes(&ctrl_hdr)) catch |err| {
+
+    // ONE deadline for the whole response, not one per write. These were plain
+    // writeAll (the 10s wire default) across 3 + pane_count calls, so a frontend
+    // that stopped reading mid-reattach — a suspended terminal, a slow ssh pipe —
+    // froze the daemon, and every other session with it, for 10s x (3 + panes):
+    // minutes with a fat session. Sharing a deadline keeps the total bounded no
+    // matter how many panes the session has.
+    const deadline = std.time.milliTimestamp() + REATTACH_RESPONSE_WRITE_MS;
+    wire.writeAllTimeout(fd, std.mem.asBytes(&ctrl_hdr), remainingBudget(deadline)) catch |err| {
         core.logging.logError("ses", "reattach response header write failed", err);
         self.ses_state.releaseSessionLock(session_id);
         return;
     };
-    wire.writeAll(fd, std.mem.asBytes(&resp)) catch |err| {
+    wire.writeAllTimeout(fd, std.mem.asBytes(&resp), remainingBudget(deadline)) catch |err| {
         core.logging.logError("ses", "reattach response body header write failed", err);
         self.ses_state.releaseSessionLock(session_id);
         return;
     };
-    wire.writeAll(fd, session_json) catch |err| {
+    wire.writeAllTimeout(fd, session_json, remainingBudget(deadline)) catch |err| {
         core.logging.logError("ses", "reattach response session json write failed", err);
         self.ses_state.releaseSessionLock(session_id);
         return;
     };
     for (reattach_result.pane_uuids) |uuid| {
-        wire.writeAll(fd, &uuid) catch |err| {
+        wire.writeAllTimeout(fd, &uuid, remainingBudget(deadline)) catch |err| {
             core.logging.logError("ses", "reattach response pane uuid write failed", err);
             self.ses_state.releaseSessionLock(session_id);
             return;

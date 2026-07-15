@@ -29,6 +29,14 @@ const xev = @import("xev").Dynamic;
 const VT_ROUTE_IO_TIMEOUT_MS: i32 = 500;
 const CTL_FRAME_IO_TIMEOUT_MS: i32 = 500;
 pub const HANDLER_IO_TIMEOUT_MS: i32 = 500;
+/// Whole-skip budget. The per-chunk timeouts above restart on every chunk, so
+/// only a total deadline actually bounds a peer that trickles a huge payload.
+const SKIP_TOTAL_TIMEOUT_MS: i64 = 2_000;
+/// Budget for reading a CLI request header. Previously this was the only read on
+/// the accept path still on the 10s wire default — any process that connected
+/// with the CLI handshake byte and then stalled froze EVERY session for 10s, and
+/// could do it again immediately.
+const CLI_HEADER_IO_TIMEOUT_MS: i32 = 500;
 const MUX_VT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
 // Symmetric cap for the MUX→POD (input) direction. A frame is always accepted
 // onto an empty queue (so a single large paste is never undeliverable);
@@ -2011,10 +2019,21 @@ pub const Server = struct {
     }
 
     /// Discard `len` bytes from fd.
+    ///
+    /// The per-chunk timeout alone is NOT a bound: readExactTimeout starts a
+    /// fresh deadline on every call, so a peer that trickles one chunk just
+    /// inside the budget never trips it. With a 4MB max payload and 4KB chunks
+    /// that is 1024 chunks x 500ms = ~8.5 MINUTES of frozen daemon. The total
+    /// deadline below is what actually bounds it.
     fn skipBytes(_: *Server, fd: posix.fd_t, len: u32) void {
         var remaining: usize = len;
         var buf: [4096]u8 = undefined;
+        const deadline = std.time.milliTimestamp() + SKIP_TOTAL_TIMEOUT_MS;
         while (remaining > 0) {
+            if (std.time.milliTimestamp() >= deadline) {
+                core.logging.warn("ses", "giving up skipping VT payload ({d} bytes left)", .{remaining});
+                return;
+            }
             const chunk = @min(remaining, buf.len);
             wire.readExactTimeout(fd, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
                 core.logging.logError("ses", "failed to skip VT payload", err);
@@ -2200,9 +2219,16 @@ pub const Server = struct {
         return true;
     }
 
+    /// Same trickle hazard as skipBytes: bound the WHOLE skip, not each chunk.
     pub fn skipBinaryPayload(self: *Server, fd: posix.fd_t, len: u32, buf: []u8) void {
         var remaining: usize = len;
+        const deadline = std.time.milliTimestamp() + SKIP_TOTAL_TIMEOUT_MS;
         while (remaining > 0) {
+            if (std.time.milliTimestamp() >= deadline) {
+                core.logging.warn("ses", "giving up skipping CTL payload ({d} bytes left)", .{remaining});
+                self.ctlStreamDesynced(fd, "payload skip timed out");
+                return;
+            }
             const chunk = @min(remaining, buf.len);
             wire.readExactTimeout(fd, buf[0..chunk], HANDLER_IO_TIMEOUT_MS) catch |err| {
                 core.logging.logError("ses", "failed to skip CTL payload", err);
@@ -2232,7 +2258,7 @@ pub const Server = struct {
     /// Handle a CLI tool request (handshake byte 0x04).
     /// CLI sends one control message; SES forwards to MUX and optionally waits for response.
     fn handleCliRequest(self: *Server, fd: posix.fd_t) void {
-        const hdr = wire.readControlHeader(fd) catch |err| {
+        const hdr = wire.readControlHeaderTimeout(fd, CLI_HEADER_IO_TIMEOUT_MS) catch |err| {
             core.logging.logError("ses", "cli request header read failed", err);
             self.closeCliRequest(fd, "header read failed");
             return;
