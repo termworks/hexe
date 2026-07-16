@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.1.0] - 2026-07-16
+
+### <!-- 0 -->⛰️  Features
+
+- Exactly-once input across VT reconnect
+- Mux->pod input epoch/seq prefix (v4)
+- Bounded alt-aware backlog replay window
+- Hexe terminal kill/close for sessions and panes
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Preserve queued keystrokes across VT reconnect
+- Pace VT flood and pump stdin so keys never starve
+- Bound daemon-start wait and pane-query RPCs
+- Order uplink nonblock before handshake, bound VT ack
+- Bound CLI header, payload skips, reattach writes
+- Bound connect() so a wedged peer can't hang a loop
+- Kill runaway commands without blocking
+- Exec default timeout fits a login shell
+- Exec sent an invalid duration to timeout
+- Run shell-outs off the render path
+- Bound segment commands, a hang froze the whole ui
+- Loop errors must not spin or kill the process
+- Saturating overlay geometry math
+- Never free literal defaults or empty slices
+- Empty statusbar section crashed first render
+- Never park empty sessions; attach retries resolve
+- Attach race guard, busy retry, lock leak fixes
+- Visible tty picker; dedupe and filter dot matches
+- Attach-dot matches attached sessions too
+- Drain watcher removals before fd reuse at accept
+- Loop ticker watchdogs and slow-loop logs
+- Nonblocking vt reader, gen rearm, quiet replay
+- Ctl watcher uaf on pending io_uring poll
+- Stop per-frame arena reset under live cells
+- Grow pty input buffer, torn paste froze pane
+
+### <!-- 3 -->📚 Documentation
+
+- Mark exactly-once input done; wire smoke
+
+### <!-- 6 -->🧪 Testing
+
+- Input-under-flood and wedged-component smokes
+- Drain pty while stolen frontend exits
+- Fix flaky float-thrash and tab probes
+- Multi-tab heavy smoke; resize storm, float thrash
+- Heavy session smoke; drop stale vt writes on reconnect
+- Progress-based paste smoke, no fixed budgets
+- Randomized attach chaos smoke with leak check
+- Randomized attach stress smoke
+- Dot-attach kill/steal reliability smoke
+- Big-history reattach smoke
+- Lossless large-paste smoke; smoke target grows
+- Fullscreen app detach/reattach smoke
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Cleanup
+- Cleanup
+- Cleanup
+
 ## [0.0.20] - 2026-07-11
 
 ### <!-- 0 -->⛰️  Features
