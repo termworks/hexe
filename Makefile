@@ -12,6 +12,25 @@ smoke:
 	zig build
 	python3 -u scripts/smoke_reconnect.py
 	python3 -u scripts/smoke_detach_reattach.py
+	python3 -u scripts/smoke_fullscreen_reattach.py
+	python3 -u scripts/smoke_paste.py
+	python3 -u scripts/smoke_kill.py
+	python3 -u scripts/smoke_bighistory.py
+	python3 -u scripts/smoke_dot_attach.py
+	python3 -u scripts/smoke_attach_stress.py
+	python3 -u scripts/smoke_attach_chaos.py
+	python3 -u scripts/smoke_slow_segments.py
+
+# Heavy-load scenario: splits + floats + fullscreen apps + huge buffers +
+# pastes, then chaos rounds. Needs a ReleaseFast build (Debug VT parsing is
+# ~50x slower and cannot keep up with a 5-pod session).
+smoke-heavy:
+	zig build -Doptimize=ReleaseFast
+	python3 -u scripts/smoke_heavy.py
+	python3 -u scripts/smoke_heavy2.py
+	python3 -u scripts/smoke_input_flood.py
+	python3 -u scripts/smoke_wedged.py
+	python3 -u scripts/smoke_input_exactly_once.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"

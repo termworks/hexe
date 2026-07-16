@@ -797,11 +797,24 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         return false;
     }
 
-    // Try to reattach session (server supports prefix matching).
+    // Try to reattach session (server supports prefix matching). A
+    // "session busy" refusal means another client is mid-attach on the same
+    // session (e.g. two windows attached at once): wait briefly and retry —
+    // the winner commits within milliseconds and the retry then steals it
+    // deterministically (last attach wins) instead of both racers dying.
     terminal_main.debugLog("reattachSession: calling runtime.reattachSessionProjection", .{});
-    const result = self.runtime.reattachSessionProjection(session_id_prefix) catch |e| {
-        terminal_main.debugLog("reattachSession: runtime.reattachSessionProjection failed: {s}", .{@errorName(e)});
-        return false;
+    var busy_attempts: usize = 0;
+    const result = while (true) {
+        break self.runtime.reattachSessionProjection(session_id_prefix) catch |e| {
+            if (e == error.SessionBusy and busy_attempts < 8) {
+                busy_attempts += 1;
+                terminal_main.debugLog("reattachSession: session busy, retry {d}", .{busy_attempts});
+                std.Thread.sleep(400 * std.time.ns_per_ms);
+                continue;
+            }
+            terminal_main.debugLog("reattachSession: runtime.reattachSessionProjection failed: {s}", .{@errorName(e)});
+            return false;
+        };
     };
     if (result == null) {
         terminal_main.debugLog("reattachSession: runtime.reattachSessionProjection returned null (session not found)", .{});

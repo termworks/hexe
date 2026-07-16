@@ -509,6 +509,14 @@ pub fn main() !void {
     try mux_attach.addArg(Arg.singleValueOption("user", 'u', null));
     try mux_attach.addArg(Arg.singleValueOption("identity", 'i', null));
 
+    var mux_kill = app.createCommand("kill", "Kill a session (attached or detached) or a single pane/float by name or uuid prefix");
+    try mux_kill.addArg(Arg.positional("id", null, null));
+    try mux_kill.addArg(Arg.singleValueOption("instance", 'I', null));
+
+    var mux_close = app.createCommand("close", "Alias of kill");
+    try mux_close.addArg(Arg.positional("id", null, null));
+    try mux_close.addArg(Arg.singleValueOption("instance", 'I', null));
+
     var mux_record = app.createCommand("record", "Attach to terminal frontend and record asciicast");
     try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
     try mux_record.addArg(Arg.booleanOption("capture-input", null, null));
@@ -567,7 +575,7 @@ pub fn main() !void {
     var mux_focus = app.createCommand("focus", "Move focus to adjacent pane");
     try mux_focus.addArg(Arg.positional("dir", null, null));
 
-    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
+    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_kill, mux_close, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
 
     var web_inspect = app.createCommand("inspect-snapshot", "Load a session snapshot through the web adapter");
     try web_inspect.addArg(Arg.positional("snapshot", null, null));
@@ -938,6 +946,18 @@ pub fn main() !void {
                     .identity = m.getSingleValue("identity") orelse "",
                 },
             );
+            return;
+        }
+        if (mux_matches.subcommandMatches("kill")) |m| {
+            const instance = m.getSingleValue("instance") orelse "";
+            if (instance.len > 0) setInstanceFromCli(instance);
+            try cli_cmds.runTerminalKill(allocator, m.getSingleValue("id") orelse "");
+            return;
+        }
+        if (mux_matches.subcommandMatches("close")) |m| {
+            const instance = m.getSingleValue("instance") orelse "";
+            if (instance.len > 0) setInstanceFromCli(instance);
+            try cli_cmds.runTerminalKill(allocator, m.getSingleValue("id") orelse "");
             return;
         }
         if (mux_matches.subcommandMatches("attach")) |m| {

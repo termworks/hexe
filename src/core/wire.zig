@@ -1,6 +1,5 @@
 const std = @import("std");
 const posix = std.posix;
-const xev = @import("xev").Dynamic;
 const build_options = @import("build_options");
 const log = std.log.scoped(.wire);
 
@@ -14,12 +13,20 @@ pub const MAX_PAYLOAD_LEN: usize = @import("constants.zig").Sizes.max_payload_le
 
 /// Current protocol version. Increment when making breaking changes.
 /// Sent as second byte after handshake byte.
-pub const PROTOCOL_VERSION: u8 = 3;
+/// Version 4 adds a per-input-frame (epoch, seq) prefix on the mux→pod payload
+/// for exactly-once input delivery across a VT reconnect (dedup at the pod).
+/// An older pod would misread that 16-byte prefix as literal input, so the
+/// version gate below rejects a v3 pod when a v4 SES dials it.
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Minimum supported protocol version.
 /// Version 2 adds password-mode VT frames; accepting older frontends would
 /// silently disable POD-side backlog/observer privacy guarantees.
-pub const MIN_PROTOCOL_VERSION: u8 = 3;
+/// Version 4 changes the mux→pod input payload framing (see above), so a mixed
+/// v3/v4 deployment cannot interoperate — MIN tracks CURRENT, matching existing
+/// policy (pods from an older binary are unreachable after an upgrade until
+/// restarted).
+pub const MIN_PROTOCOL_VERSION: u8 = 4;
 pub const RUNTIME_EPOCH = build_options.runtime_epoch;
 pub const SERVER_HELLO_MAGIC = "HEXEHEL1";
 
@@ -132,6 +139,7 @@ pub const MsgType = enum(u16) {
     session_replace_split_pane = 0x013F,
     session_set_split_ratio = 0x0140,
     session_rename_tab = 0x0141, // MUX → SES: rename a tab in the canonical snapshot
+    kill_target = 0x0142, // CLI → SES: kill a session (detached or attached) or a single pane/float by name/uuid prefix
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -441,6 +449,12 @@ pub const SessionEntry = extern struct {
     pane_count: u16 align(1),
     name_len: u16 align(1),
     base_root_len: u16 align(1),
+    /// 1 when the session is currently attached to a live frontend. Listed so
+    /// `attach .` can resolve a session whose frontend just died but whose
+    /// disconnect the daemon has not processed yet (attaching force-detaches
+    /// the stale owner) — without this the dot-attach raced disconnect
+    /// detection and "sometimes" found nothing.
+    attached: u8 align(1) = 0,
     // Followed by: name bytes, then base_root bytes.
 };
 
@@ -583,6 +597,27 @@ pub const KillSession = extern struct {
 /// If success=0, followed by error message bytes (error_len).
 pub const KillSessionResult = extern struct {
     success: u8 align(1),
+    killed_panes: u16 align(1),
+    error_len: u16 align(1),
+};
+
+/// KillTarget request: id_len bytes of session name / uuid prefix / pane uuid
+/// prefix follow. Resolution order: detached session, attached session, pane.
+pub const KillTarget = extern struct {
+    id_len: u16 align(1),
+};
+
+/// What kill_target resolved to.
+pub const KillTargetKind = enum(u8) {
+    none = 0,
+    detached_session = 1,
+    attached_session = 2,
+    pane = 3,
+};
+
+pub const KillTargetResult = extern struct {
+    success: u8 align(1),
+    kind: u8 align(1),
     killed_panes: u16 align(1),
     error_len: u16 align(1),
 };
@@ -994,71 +1029,23 @@ pub fn tryReadMuxVtHeader(fd: posix.fd_t) !MuxVtHeader {
 pub const DEFAULT_IO_TIMEOUT_MS: i32 = 10_000;
 
 /// Wait for fd readability with timeout. Returns error.Timeout on expiry.
+/// Wait until `fd` is readable, or the budget runs out.
+///
+/// This used to build a whole new xev.Loop (an io_uring instance) plus a Timer,
+/// and run it — on EVERY partial read. That is a nested event loop re-entered
+/// from inside a callback of the outer one, an io_uring_setup + mmap + teardown
+/// per EAGAIN on the hot CTL/VT path, and a hard failure near the fd limit
+/// (EMFILE would turn a merely-slow read into a dropped connection).
+///
+/// A single poll() does the same job. `waitWritableTimeout` below always did.
 fn waitForReadable(fd: posix.fd_t, timeout_ms: i32) !void {
-    try xev.detect();
-
-    var loop = try xev.Loop.init(.{});
-    defer loop.deinit();
-
-    var timer = try xev.Timer.init();
-    defer timer.deinit();
-
-    const WaitContext = struct {
-        ready: bool = false,
-        timed_out: bool = false,
-    };
-
-    var ctx: WaitContext = .{};
-    var file_completion: xev.Completion = .{};
-    var timer_completion: xev.Completion = .{};
-
-    const waitCallback = struct {
-        fn call(
-            cb_ctx: ?*WaitContext,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            _: xev.File,
-            result: xev.PollError!xev.PollEvent,
-        ) xev.CallbackAction {
-            const c = cb_ctx orelse return .disarm;
-            _ = result catch |err| {
-                log.debug("waitForReadable: poll error: {}", .{err});
-                c.ready = true;
-                return .disarm;
-            };
-            c.ready = true;
-            return .disarm;
-        }
-    }.call;
-
-    const timeoutCallback = struct {
-        fn call(
-            cb_ctx: ?*WaitContext,
-            _: *xev.Loop,
-            _: *xev.Completion,
-            result: xev.Timer.RunError!void,
-        ) xev.CallbackAction {
-            const c = cb_ctx orelse return .disarm;
-            _ = result catch |err| {
-                log.debug("waitForReadable: timer error: {}", .{err});
-                c.timed_out = true;
-                return .disarm;
-            };
-            c.timed_out = true;
-            return .disarm;
-        }
-    }.call;
-
-    const watcher = xev.File.initFd(fd);
-    watcher.poll(&loop, &file_completion, .read, WaitContext, &ctx, waitCallback);
-    timer.run(&loop, &timer_completion, @intCast(@max(timeout_ms, 0)), WaitContext, &ctx, timeoutCallback);
-
-    while (!ctx.ready and !ctx.timed_out) {
-        try loop.run(.once);
-    }
-
-    if (ctx.ready) return;
-    return error.Timeout;
+    if (timeout_ms <= 0) return error.Timeout;
+    var pfds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+    const n = try posix.poll(&pfds, timeout_ms);
+    if (n == 0) return error.Timeout;
+    // POLLHUP/POLLERR also mean "stop waiting" — the read that follows will
+    // surface EOF or the real error rather than spinning here.
+    return;
 }
 
 pub fn waitReadableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {

@@ -9,6 +9,11 @@ const responses = @import("ses_client_responses.zig");
 const commands = @import("ses_client_commands.zig");
 const reads = @import("ses_client_reads.zig");
 const queries = @import("ses_client_queries.zig");
+const cmd_mod = @import("cmd.zig");
+
+/// How long to wait for the ses-daemon starter to fork off and exit before we
+/// stop waiting on it. It normally exits in milliseconds.
+const SES_STARTER_WAIT_MS: i64 = 3_000;
 
 pub const LocalIpcTransport = struct {
     autostart_ses: bool = true,
@@ -186,6 +191,13 @@ pub const SesClient = struct {
     /// them loses user-visible events — a float_request drop hangs the
     /// `hexe float` CLI until timeout. The loop replays these in order.
     pending_pushes: std.ArrayList(QueuedPush) = .empty,
+    /// Bumped every time a NEW ctl/vt connection is established. io_uring
+    /// polls are registered against a file DESCRIPTION, and a reconnect often
+    /// reuses the same fd NUMBER — watchers must compare generations, not fd
+    /// numbers, to know when to re-arm (a poll on the old closed description
+    /// never fires, leaving the new connection silently unwatched).
+    ctl_conn_gen: u64 = 0,
+    vt_conn_gen: u64 = 0,
     next_ctl_request_id: u32 = 1,
 
     pub const QueuedPush = struct {
@@ -524,7 +536,8 @@ pub const SesClient = struct {
             return false;
         };
         self.ctl_fd = ctl_fd;
-        self.debugLog("ses ctl connected: fd={d}", .{ctl_fd});
+        self.ctl_conn_gen +%= 1;
+        self.debugLog("ses ctl connected: fd={d} gen={d}", .{ ctl_fd, self.ctl_conn_gen });
         return true;
     }
 
@@ -579,7 +592,8 @@ pub const SesClient = struct {
             return false;
         };
         self.vt_fd = vt_fd;
-        self.debugLog("ses vt connected: fd={d}", .{vt_fd});
+        self.vt_conn_gen +%= 1;
+        self.debugLog("ses vt connected: fd={d} gen={d}", .{ vt_fd, self.vt_conn_gen });
         return true;
     }
 
@@ -1128,8 +1142,23 @@ pub const SesClient = struct {
         const resp_type = read.msgType();
         self.debugLog("reattachSession: final response type={d}", .{hdr.msg_type});
         if (resp_type == .@"error") {
-            self.debugLog("reattachSession: server returned error", .{});
+            // Read the error text: a "session_locked" refusal is TRANSIENT
+            // (another client is between resolve and commit); callers retry
+            // instead of giving up — otherwise two simultaneous attaches
+            // both walked away empty-handed.
+            var busy = false;
+            if (read.readStruct(self, fd, wire.Error)) |err_hdr| {
+                var msg_buf: [64]u8 = undefined;
+                const n: usize = @min(err_hdr.msg_len, msg_buf.len);
+                if (n > 0) {
+                    if (read.readExact(self, fd, msg_buf[0..n])) {
+                        busy = std.mem.startsWith(u8, msg_buf[0..n], "session_locked");
+                        self.debugLog("reattachSession: server error: {s}", .{msg_buf[0..n]});
+                    } else |_| {}
+                }
+            } else |_| {}
             read.skipRemaining(self, fd);
+            if (busy) return error.SessionBusy;
             return null;
         }
         if (resp_type != .session_reattached) {
@@ -1201,6 +1230,7 @@ pub const SesClient = struct {
             var info: DetachedSessionInfo = undefined;
             info.session_id = entry.session_id;
             info.pane_count = entry.pane_count;
+            info.attached = entry.attached != 0;
             // Read name.
             const name_len = @min(@as(usize, entry.name_len), 32);
             if (entry.name_len > 0) {
@@ -1287,10 +1317,31 @@ pub const SesClient = struct {
             return err;
         };
         self.traceLog("startSes: spawned pid={d}", .{child.id});
-        _ = child.wait() catch |err| {
-            logging.logError("frontend-client", "failed to wait for ses daemon starter", err);
-        };
-        self.traceLog("startSes: child exited", .{});
+
+        // The starter daemonizes and exits immediately, so this normally returns
+        // at once — but a plain child.wait() here is an UNBOUNDED wait on the
+        // frontend's event loop. A daemon binary that fails to fork off (a
+        // crash-loop, a wrapper that keeps stdio, a build that runs in the
+        // foreground) would freeze the UI forever, and this runs from the 2s
+        // reconnect retry, not just at startup.
+        const deadline = std.time.milliTimestamp() + SES_STARTER_WAIT_MS;
+        while (std.time.milliTimestamp() < deadline) {
+            if (std.posix.waitpid(child.id, std.posix.W.NOHANG).pid != 0) {
+                self.traceLog("startSes: child exited", .{});
+                return;
+            }
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
+
+        // Still running. Don't wait on it and don't leave a zombie: hand it to
+        // the background reaper. (Short-lived processes have no reaper — they
+        // exit momentarily anyway, so a blocking wait is fine there.)
+        logging.warn("frontend-client", "ses daemon starter has not exited after {d}ms; not waiting on it", .{SES_STARTER_WAIT_MS});
+        if (!cmd_mod.reapLater(child)) {
+            _ = child.wait() catch |err| {
+                logging.logError("frontend-client", "failed to wait for ses daemon starter", err);
+            };
+        }
     }
 
     /// Check if connected to ses.
@@ -1386,6 +1437,8 @@ pub const DetachedSessionInfo = struct {
     base_root: [std.fs.max_path_bytes]u8 = undefined,
     base_root_len: usize = 0,
     pane_count: usize,
+    /// Currently attached to a live frontend (attaching will steal it).
+    attached: bool = false,
 };
 
 test "SesClient: queues multiple pending CWD responses FIFO" {

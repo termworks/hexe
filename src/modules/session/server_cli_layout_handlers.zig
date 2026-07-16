@@ -8,6 +8,7 @@ const wire = core.wire;
 const ses = @import("main.zig");
 const state = @import("state.zig");
 const server = @import("server.zig");
+const store_mod = @import("store.zig");
 const Server = server.Server;
 
 /// Handle kill_session CLI request.
@@ -417,4 +418,147 @@ pub fn handleApplyLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: [
     };
     self.pushClientSessionSnapshot(client_id);
     self.replyOrClose(fd, .ok, &.{});
+}
+
+/// Handle kill_target CLI request: kill a whole session (detached OR
+/// attached) or a single pane/float, resolved by name / uuid prefix.
+/// Resolution order: detached session, attached session, pane. Ambiguous
+/// uuid prefixes are refused rather than killing an arbitrary victim.
+pub fn handleKillTarget(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
+
+    if (payload_len < @sizeOf(wire.KillTarget)) {
+        self.skipBinaryPayload(fd, payload_len, buf);
+        replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "invalid payload");
+        return;
+    }
+    const kt = wire.readStructTimeout(wire.KillTarget, fd, server.HANDLER_IO_TIMEOUT_MS) catch {
+        self.ctlStreamDesynced(fd, "mid-message read failed");
+        return;
+    };
+    if (kt.id_len == 0 or kt.id_len > buf.len) {
+        replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "invalid id");
+        return;
+    }
+    wire.readExactTimeout(fd, buf[0..kt.id_len], server.HANDLER_IO_TIMEOUT_MS) catch {
+        self.ctlStreamDesynced(fd, "mid-message read failed");
+        return;
+    };
+    const id = buf[0..kt.id_len];
+    ses.debugLog("kill_target: id={s}", .{id});
+
+    // 1) Detached session by name or unique uuid prefix.
+    if (self.ses_state.findDetachedSessionByNameOrPrefix(id)) |session_id| {
+        const killed = self.ses_state.killDetachedSession(session_id) orelse 0;
+        replyKillTarget(self, fd, .{ .success = 1, .kind = @intFromEnum(wire.KillTargetKind.detached_session), .killed_panes = @intCast(killed), .error_len = 0 }, "");
+        return;
+    }
+
+    // 2) Attached session by exact name or unique session-uuid prefix.
+    if (findAttachedSessionTarget(self, id)) |resolution| switch (resolution) {
+        .ambiguous => {
+            replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "ambiguous id: multiple attached sessions match");
+            return;
+        },
+        .client_index => |idx| {
+            const killed = killAttachedSessionAt(self, idx);
+            replyKillTarget(self, fd, .{ .success = 1, .kind = @intFromEnum(wire.KillTargetKind.attached_session), .killed_panes = @intCast(killed), .error_len = 0 }, "");
+            return;
+        },
+    };
+
+    // 3) Single pane/float by unique uuid prefix (any state).
+    var pane_match: ?[32]u8 = null;
+    var pane_count: usize = 0;
+    var pit = self.ses_state.store.panes.keyIterator();
+    while (pit.next()) |key| {
+        if (id.len <= key.len and std.mem.startsWith(u8, key, id)) {
+            pane_match = key.*;
+            pane_count += 1;
+        }
+    }
+    if (pane_count > 1) {
+        replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "ambiguous id: multiple panes match");
+        return;
+    }
+    if (pane_match) |uuid| {
+        self.ses_state.killPane(uuid) catch {
+            replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "kill failed");
+            return;
+        };
+        replyKillTarget(self, fd, .{ .success = 1, .kind = @intFromEnum(wire.KillTargetKind.pane), .killed_panes = 1, .error_len = 0 }, "");
+        return;
+    }
+
+    replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "no session or pane matches");
+}
+
+const AttachedResolution = union(enum) {
+    ambiguous: void,
+    client_index: usize,
+};
+
+fn findAttachedSessionTarget(self: *Server, id: []const u8) ?AttachedResolution {
+    var match_index: ?usize = null;
+    var count: usize = 0;
+    for (self.ses_state.store.clients.items, 0..) |client, i| {
+        const sid = client.session_id orelse continue;
+        if (client.session_name) |name| {
+            if (std.ascii.eqlIgnoreCase(name, id)) return .{ .client_index = i };
+        }
+        const hex: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+        if (id.len <= hex.len and std.mem.startsWith(u8, &hex, id)) {
+            match_index = i;
+            count += 1;
+        }
+    }
+    if (count > 1) return .ambiguous;
+    if (match_index) |i| return .{ .client_index = i };
+    return null;
+}
+
+/// Kill every pane of an attached session, tell its frontend the session is
+/// gone (session_stolen makes the mux exit cleanly), and remove the client.
+fn killAttachedSessionAt(self: *Server, idx: usize) usize {
+    // Copy pane uuids first: killPane mutates the client's pane list.
+    var uuids: std.ArrayList([32]u8) = .empty;
+    defer uuids.deinit(self.allocator);
+    {
+        const client = &self.ses_state.store.clients.items[idx];
+        for (client.pane_uuids.items) |uuid| {
+            uuids.append(self.allocator, uuid) catch break;
+        }
+        if (client.mux_ctl_fd) |mfd| {
+            wire.writeControlTimeout(mfd, .session_stolen, &.{}, server.HANDLER_IO_TIMEOUT_MS) catch {};
+        }
+        self.purgeClientFdState(client.id);
+    }
+
+    var killed: usize = 0;
+    for (uuids.items) |uuid| {
+        self.ses_state.killPane(uuid) catch continue;
+        killed += 1;
+    }
+
+    // Re-find by index validity: killPane does not mutate the clients list.
+    const client = &self.ses_state.store.clients.items[idx];
+    self.ses_state.releaseClientLocks(client.id);
+    store_mod.closeClientFds(&self.ses_state.store, client);
+    client.deinit();
+    _ = self.ses_state.store.clients.orderedRemove(idx);
+    self.ses_state.store.dirty = true;
+    return killed;
+}
+
+fn replyKillTarget(self: *Server, fd: posix.fd_t, result: wire.KillTargetResult, err_msg: []const u8) void {
+    var r = result;
+    r.error_len = @intCast(err_msg.len);
+    if (err_msg.len > 0) {
+        self.replyOrCloseWithTrail(fd, .kill_target, std.mem.asBytes(&r), err_msg);
+    } else {
+        self.replyOrClose(fd, .kill_target, std.mem.asBytes(&r));
+    }
 }

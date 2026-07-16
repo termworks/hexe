@@ -31,6 +31,25 @@ pub fn setNonBlocking(fd: posix.fd_t) !void {
     _ = try posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK);
 }
 
+/// Clear O_NONBLOCK. `connect()` must hand back a blocking fd — that is what
+/// every caller has always got, and the ones that want otherwise call
+/// setNonBlocking themselves right after.
+pub fn setBlocking(fd: posix.fd_t) !void {
+    const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+    _ = try posix.fcntl(fd, posix.F.SETFL, flags & ~O_NONBLOCK);
+}
+
+/// How long a connect() may take before we give up.
+///
+/// A blocking connect() to a unix socket whose listen backlog is FULL parks in
+/// the kernel forever — there is no timeout on it. The backlog here is 16, and a
+/// peer that is wedged (or SIGSTOPped) stops calling accept(), so the backlog
+/// fills. Both event loops connect: SES dials pods from its 1s tick
+/// (connectPodVt, retried forever) and each POD dials SES from its own tick.
+/// So one stuck process could hang the daemon — and every session with it —
+/// with no way out. This is the bound that makes that impossible.
+pub const CONNECT_TIMEOUT_MS: i32 = 2000;
+
 /// Unix peer credentials returned by SO_PEERCRED.
 pub const PeerCredentials = extern struct {
     pid: i32,
@@ -222,10 +241,21 @@ pub const Client = struct {
     fd: posix.fd_t,
 
     pub fn connect(path: []const u8) !Client {
+        return connectTimeout(path, CONNECT_TIMEOUT_MS);
+    }
+
+    /// Connect with a hard time budget. The socket is made non-blocking only for
+    /// the duration of the connect and handed back BLOCKING, which is what every
+    /// caller has always received.
+    pub fn connectTimeout(path: []const u8, timeout_ms: i32) !Client {
         // Validate path length to avoid silent truncation
         if (path.len >= 108) return error.NameTooLong; // sockaddr_un.path max
 
-        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+        const fd = try posix.socket(
+            posix.AF.UNIX,
+            posix.SOCK.STREAM | posix.SOCK.CLOEXEC | posix.SOCK.NONBLOCK,
+            0,
+        );
         setCloexec(fd);
         errdefer posix.close(fd);
 
@@ -237,8 +267,26 @@ pub const Client = struct {
         const path_len = @min(path.len, addr.path.len - 1);
         @memcpy(addr.path[0..path_len], path[0..path_len]);
 
-        try posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        const deadline = std.time.milliTimestamp() + timeout_ms;
+        while (true) {
+            posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch |err| switch (err) {
+                // For AF_UNIX this is EAGAIN: the listener is alive but its
+                // accept backlog is FULL (a wedged peer that stopped calling
+                // accept). Unlike TCP it is not an "in progress" state — there
+                // is nothing to wait for writability on, the connect simply has
+                // to be retried. On a blocking fd the kernel does that retrying
+                // for us, forever, with no way to give up; that is the hang.
+                error.WouldBlock => {
+                    if (std.time.milliTimestamp() >= deadline) return error.ConnectionTimedOut;
+                    std.Thread.sleep(5 * std.time.ns_per_ms);
+                    continue;
+                },
+                else => return err,
+            };
+            break;
+        }
 
+        try setBlocking(fd);
         return Client{ .fd = fd };
     }
 
@@ -658,3 +706,64 @@ pub const PopResponse = struct {
         return buf.toOwnedSlice(allocator);
     }
 };
+
+const testing = std.testing;
+
+test "connect() is bounded when the peer's accept backlog is full" {
+    // The wedged-peer case, exactly: a listener that is alive (so the socket
+    // file exists and connect does not get refused) but never calls accept().
+    // Its backlog fills, and a BLOCKING connect() then parks in the kernel with
+    // no timeout — forever. That is reachable from both event loops (SES dials
+    // pods on its 1s tick; every pod dials SES), so it could hang the daemon and
+    // every session with it. connectTimeout must give up instead.
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/hexe-ipc-test-{d}.sock", .{std.os.linux.getpid()});
+    std.fs.deleteFileAbsolute(path) catch {};
+    defer std.fs.deleteFileAbsolute(path) catch {};
+
+    const lfd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
+    defer posix.close(lfd);
+    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..path.len], path);
+    try posix.bind(lfd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+    try posix.listen(lfd, 1); // tiny backlog, and we never accept
+
+    // Fill the backlog. Some of these succeed (they sit in the accept queue).
+    var held: [64]posix.fd_t = undefined;
+    var held_n: usize = 0;
+    defer for (held[0..held_n]) |fd| posix.close(fd);
+
+    var timed_out = false;
+    var attempts: usize = 0;
+    const t0 = std.time.milliTimestamp();
+    while (attempts < 64) : (attempts += 1) {
+        const conn = Client.connectTimeout(path, 300) catch |err| {
+            // Backlog full: the kernel makes us wait, and we refuse to.
+            if (err == error.ConnectionTimedOut) {
+                timed_out = true;
+                break;
+            }
+            break;
+        };
+        held[held_n] = conn.fd;
+        held_n += 1;
+    }
+    const elapsed = std.time.milliTimestamp() - t0;
+
+    try testing.expect(timed_out); // a blocking connect() would still be parked
+    try testing.expect(elapsed < 5000); // and it gave up promptly
+}
+
+test "connect() to a socket nobody is listening on fails fast, not slowly" {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/hexe-ipc-none-{d}.sock", .{std.os.linux.getpid()});
+    std.fs.deleteFileAbsolute(path) catch {};
+
+    const t0 = std.time.milliTimestamp();
+    const res = Client.connectTimeout(path, 2000);
+    const elapsed = std.time.milliTimestamp() - t0;
+
+    try testing.expectError(error.FileNotFound, res);
+    try testing.expect(elapsed < 500); // refused immediately; no timeout burned
+}

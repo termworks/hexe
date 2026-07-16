@@ -387,7 +387,18 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         core.logging.logError("terminal", "failed to set statusbar bash env cwd", err);
     };
 
-    // Spawn process with timeout support
+    // ASYNC in the terminal: a `when` condition must never stall a frame. The
+    // cache runs it in the background with this context env and serves the
+    // last known status (the existing TTL cache above still short-circuits
+    // most calls; this removes the blocking wait from the ones that miss).
+    if (core.cmd.cachedSucceededWithEnv(code, &env_map, @intCast(ttl_ms))) |ok| {
+        map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch |err| {
+            core.logging.logError("terminal", "failed to cache statusbar bash condition result", err);
+        };
+        return ok;
+    }
+
+    // Spawn process with timeout support (fallback: no async cache registered)
     var child = std.process.Child.init(&.{ "/bin/bash", "-c", code }, std.heap.page_allocator);
     child.env_map = &env_map;
     child.stdin_behavior = .Ignore;
@@ -402,6 +413,7 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     };
 
     // Wait for process with timeout using non-blocking waitpid polling.
+    // (Fallback path only — the async cache above handles the terminal.)
     const timeout_ms = getConditionTimeout();
     const start_ms = std.time.milliTimestamp();
 
@@ -419,10 +431,10 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         std.Thread.sleep(5 * std.time.ns_per_ms); // Sleep 5ms between checks
     }
 
-    // Timeout - kill the process
-    _ = child.kill() catch |err| {
-        core.logging.logError("terminal", "failed to kill timed-out statusbar bash condition", err);
-    };
+    // Timeout - kill the process. Not Child.kill(): it blocks in waitpid after
+    // a catchable SIGTERM, so a condition that ignored SIGTERM would wedge us
+    // here forever — on the render path.
+    core.async_cmd.killAndReapBounded(&child, 100);
     map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch |err| {
         core.logging.logError("terminal", "failed to cache statusbar bash timeout", err);
     };
@@ -1417,24 +1429,33 @@ pub fn styleColorToRender(col: shp.Color) Color {
     };
 }
 
+/// How often a statusbar shell segment is re-run in the background. Segments
+/// are cosmetic; a second of staleness is invisible, a blocked frame is not.
+const segment_refresh_ms: i64 = 1000;
+
 pub fn runSegment(module: *const core.Segment, buf: []u8) ![]const u8 {
     if (module.command) |cmd| {
-        const result = std.process.Child.run(.{
-            .allocator = std.heap.page_allocator,
-            .argv = &.{ "/bin/sh", "-c", cmd },
-        }) catch |err| {
-            core.logging.logError("terminal", "failed to run statusbar shell segment", err);
-            return "";
-        };
-        defer std.heap.page_allocator.free(result.stdout);
-        defer std.heap.page_allocator.free(result.stderr);
-
-        var len = result.stdout.len;
-        while (len > 0 and (result.stdout[len - 1] == '\n' or result.stdout[len - 1] == '\r')) {
-            len -= 1;
+        // ASYNC: this runs inside the render path, so it must never wait on a
+        // child process. The cache serves the last completed output and the
+        // event loop drives the command in the background; a slow or hanging
+        // command costs a stale segment value, never a frozen frame.
+        if (core.cmd.cachedValue(cmd, segment_refresh_ms)) |out| {
+            const copy_len = @min(out.len, buf.len);
+            @memcpy(buf[0..copy_len], out[0..copy_len]);
+            return buf[0..copy_len];
         }
-        const copy_len = @min(len, buf.len);
-        @memcpy(buf[0..copy_len], result.stdout[0..copy_len]);
+        if (core.cmd.hasAsyncCache()) return ""; // first run in flight; nothing yet
+
+        // No cache registered (shp prompt, CLI): bounded synchronous fallback.
+        const out = core.cmd.runCaptured(
+            std.heap.page_allocator,
+            cmd,
+            @max(buf.len, 1),
+            core.cmd.DEFAULT_TIMEOUT_MS,
+        ) orelse return "";
+        defer std.heap.page_allocator.free(out);
+        const copy_len = @min(out.len, buf.len);
+        @memcpy(buf[0..copy_len], out[0..copy_len]);
         return buf[0..copy_len];
     }
 
@@ -1620,14 +1641,14 @@ pub fn draw(
     var left_order: [24]usize = undefined;
     for (0..left_count) |i| left_order[i] = i;
 
-    for (1..left_count) |i| {
+    if (left_count > 1) for (1..left_count) |i| {
         const key = left_order[i];
         var j: usize = i;
         while (j > 0 and left_modules[left_order[j - 1]].mod.priority > left_modules[key].mod.priority) : (j -= 1) {
             left_order[j] = left_order[j - 1];
         }
         left_order[j] = key;
-    }
+    };
     var left_used: u16 = 0;
     for (left_order[0..left_count]) |idx| {
         if (left_used + left_modules[idx].width <= left_budget) {
@@ -1661,14 +1682,14 @@ pub fn draw(
     // Sort right by priority and mark visible
     var right_order: [24]usize = undefined;
     for (0..right_count) |i| right_order[i] = i;
-    for (1..right_count) |i| {
+    if (right_count > 1) for (1..right_count) |i| {
         const key = right_order[i];
         var j: usize = i;
         while (j > 0 and right_modules[right_order[j - 1]].mod.priority > right_modules[key].mod.priority) : (j -= 1) {
             right_order[j] = right_order[j - 1];
         }
         right_order[j] = key;
-    }
+    };
     var right_used: u16 = 0;
     for (right_order[0..right_count]) |idx| {
         if (right_used + right_modules[idx].width <= right_budget) {
@@ -2039,14 +2060,14 @@ pub fn hitTestAction(
 
     var left_order: [24]usize = undefined;
     for (0..left_count) |i| left_order[i] = i;
-    for (1..left_count) |i| {
+    if (left_count > 1) for (1..left_count) |i| {
         const key = left_order[i];
         var j: usize = i;
         while (j > 0 and left_modules[left_order[j - 1]].mod.priority > left_modules[key].mod.priority) : (j -= 1) {
             left_order[j] = left_order[j - 1];
         }
         left_order[j] = key;
-    }
+    };
     var left_used: u16 = 0;
     for (left_order[0..left_count]) |idx| {
         if (left_used + left_modules[idx].width <= left_budget) {
@@ -2065,14 +2086,14 @@ pub fn hitTestAction(
     }
     var right_order: [24]usize = undefined;
     for (0..right_count) |i| right_order[i] = i;
-    for (1..right_count) |i| {
+    if (right_count > 1) for (1..right_count) |i| {
         const key = right_order[i];
         var j: usize = i;
         while (j > 0 and right_modules[right_order[j - 1]].mod.priority > right_modules[key].mod.priority) : (j -= 1) {
             right_order[j] = right_order[j - 1];
         }
         right_order[j] = key;
-    }
+    };
     var right_used: u16 = 0;
     for (right_order[0..right_count]) |idx| {
         if (right_used + right_modules[idx].width <= right_budget) {

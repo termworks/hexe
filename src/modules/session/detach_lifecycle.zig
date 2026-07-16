@@ -421,6 +421,10 @@ pub fn forceDetachAttachedSession(self: anytype, session_id: [16]u8) bool {
         };
     }
 
+    // The owner may hold a session lock (e.g. it was mid-attach when it got
+    // force-detached); an orphaned lock blocks every reattach of that
+    // session until the 30s expiry — "attach mysteriously broken".
+    self.releaseClientLocks(owner.id);
     store_mod.closeClientFds(&self.store, owner);
     owner.deinit();
     _ = self.store.clients.orderedRemove(idx);

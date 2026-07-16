@@ -261,6 +261,54 @@ pub fn build(b: *std.Build) void {
     });
     const run_wire_tests = b.addRunArtifact(wire_tests);
 
+    // Bounded external-command execution (statusbar segments etc.).
+    const cmd_test_module = b.createModule(.{
+        .root_source_file = b.path("src/core/cmd.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cmd_test_module.addImport("logly", logly_mod);
+    const cmd_tests = b.addTest(.{
+        .root_module = cmd_test_module,
+    });
+    const run_cmd_tests = b.addRunArtifact(cmd_tests);
+
+    // Non-blocking (async) command cache used by the render path.
+    const async_cmd_test_module = b.createModule(.{
+        .root_source_file = b.path("src/core/async_cmd.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    async_cmd_test_module.addImport("logly", logly_mod);
+    const async_cmd_tests = b.addTest(.{
+        .root_module = async_cmd_test_module,
+    });
+    const run_async_cmd_tests = b.addRunArtifact(async_cmd_tests);
+
+    // Unix-socket transport: connect() must be bounded, never park forever.
+    const ipc_test_module = b.createModule(.{
+        .root_source_file = b.path("src/core/ipc.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ipc_test_module.addImport("logly", logly_mod);
+    const ipc_tests = b.addTest(.{
+        .root_module = ipc_test_module,
+    });
+    const run_ipc_tests = b.addRunArtifact(ipc_tests);
+
+    // Frontend mux-VT write queue: reconnect must not drop complete keystrokes.
+    const vtwq_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/vt_write_queue.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vtwq_test_module.addImport("core", core_module);
+    const vtwq_tests = b.addTest(.{
+        .root_module = vtwq_test_module,
+    });
+    const run_vtwq_tests = b.addRunArtifact(vtwq_tests);
+
     // Core VT behavior tests.
     const vt_test_module = b.createModule(.{
         .root_source_file = b.path("src/core/vt_test.zig"),
@@ -406,12 +454,28 @@ pub fn build(b: *std.Build) void {
     });
     const run_pod_buffering_tests = b.addRunArtifact(pod_buffering_tests);
 
+    // Exactly-once input dedup (std-only, roots directly at the module file).
+    const pod_input_dedup_test_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/pod/input_dedup.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const pod_input_dedup_tests = b.addTest(.{
+        .root_module = pod_input_dedup_test_module,
+    });
+    const run_pod_input_dedup_tests = b.addRunArtifact(pod_input_dedup_tests);
+
     const test_step = b.step("test", "Run hexe test suites");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_pod_buffering_tests.step);
+    test_step.dependOn(&run_pod_input_dedup_tests.step);
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);
+    test_step.dependOn(&run_cmd_tests.step);
+    test_step.dependOn(&run_async_cmd_tests.step);
+    test_step.dependOn(&run_ipc_tests.step);
+    test_step.dependOn(&run_vtwq_tests.step);
     test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);

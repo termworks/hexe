@@ -12,6 +12,7 @@ const loop_updates = @import("loop_updates.zig");
 const terminal_main = @import("main.zig");
 
 const LoopTimerContext = struct {
+    last_fire: i64 = 0,
     state: *State,
     ticker: xev.Timer,
     last_pane_sync: i64,
@@ -43,6 +44,7 @@ fn loopTimerCallback(
         _ = timer_ctx.state.runtime.sendPing();
     }
 
+    timer_ctx.last_fire = std.time.milliTimestamp();
     // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
     timer_ctx.ticker.run(loop, completion, 100, LoopTimerContext, timer_ctx, loopTimerCallback);
     return .disarm;
@@ -126,6 +128,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         .heartbeat_interval = heartbeat_interval,
     };
     var timer_completion: xev.Completion = .{};
+    timer_ctx.last_fire = std.time.milliTimestamp();
     loop_timer.run(loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
 
     // Reusable lists for dead pane tracking (avoid per-iteration allocations).
@@ -133,10 +136,15 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
     defer dead_splits.deinit(allocator);
 
     var last_reconnect_attempt: i64 = 0;
+    var loop_err_burst: usize = 0;
 
     // Main loop.
     while (state.running) {
         if (runtime_events.applyRuntimeStopRequest(state, hooks)) break;
+        // Drive background commands (statusbar segments, git, sudo, `when`
+        // conditions): drain their output, reap finished ones, kill overruns.
+        // Never blocks — that is the whole point.
+        state.async_cmds.poll();
         maybeReconnectSes(state, &last_reconnect_attempt);
         runtime_events.applyDeferredPaneExits(state);
         runtime_events.applyDeferredCwdResponse(state);
@@ -148,7 +156,43 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         loop_watchers.ensureSesCtlWatcherArmed(state, &resources.ses_ctl_watcher, &resources.ses_ctl_buffer);
         loop_watchers.ensureStdinWatcherArmed(state, &resources.stdin_watcher, &resources.stdin_buffer, &hooks);
 
-        try loop.run(.once);
+        const dbg_t0 = std.time.milliTimestamp();
+        // A loop error must not tear the frontend down (it used to propagate
+        // straight out of the main loop = the window just vanished) and must
+        // not spin: back off if a completion keeps getting rejected.
+        var loop_ok = true;
+        loop.run(.once) catch |err| {
+            loop_ok = false;
+            loop_err_burst +|= 1;
+            terminal_main.debugLog("event loop error (continuing): {s}", .{@errorName(err)});
+        };
+        if (loop_ok) {
+            loop_err_burst = 0;
+        } else if (loop_err_burst > 8) {
+            std.Thread.sleep(20 * std.time.ns_per_ms);
+        }
+        const dbg_t1 = std.time.milliTimestamp();
+        if (dbg_t1 - dbg_t0 > 300) terminal_main.debugLog("SLOW loop.run: {d}ms", .{dbg_t1 - dbg_t0});
+
+        // Belt-and-braces keyboard input: drain stdin directly every iteration,
+        // independent of the io_uring stdin watcher. A lost poll re-arm (under
+        // heavy pane output) used to leave the terminal painting output but deaf
+        // to the keyboard, unrecoverably. The loop is spun constantly here by
+        // that same output and the 100ms ticker, so this always services keys.
+        loop_watchers.pumpStdin(state, &resources.stdin_buffer, &hooks);
+
+        // Ticker watchdog: the 100ms re-arm chain can die silently (xev
+        // io_uring submission loss under load). We are AFTER loop.run, so
+        // every ready CQE was just processed — if the ticker still looks
+        // silent for 5s, its chain has provably no pending CQE and the
+        // completion is safe to reuse for a fresh arm. A dead ticker
+        // otherwise starves renders, pane sync, and key timers whenever no
+        // fd event happens to wake the loop.
+        if (dbg_t1 - timer_ctx.last_fire > 5000) {
+            terminal_main.debugLog("loop ticker silent {d}ms; resurrecting", .{dbg_t1 - timer_ctx.last_fire});
+            timer_ctx.last_fire = dbg_t1;
+            timer_ctx.ticker.run(loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
+        }
         if (runtime_events.applyRuntimeStopRequest(state, hooks)) break;
         if (!state.running) break;
         runtime_events.applyDeferredCwdResponse(state);
@@ -190,6 +234,10 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
 
         loop_updates.updateOverlaysPopupsAndKeyTimers(state, now2);
 
+        const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);
+        const dbg_t3 = std.time.milliTimestamp();
+        if (dbg_t3 - dbg_t2 > 300) terminal_main.debugLog("SLOW renderIfDue: {d}ms", .{dbg_t3 - dbg_t2});
+        if (dbg_t2 - dbg_t1 > 300) terminal_main.debugLog("SLOW mid-steps: {d}ms", .{dbg_t2 - dbg_t1});
     }
 }

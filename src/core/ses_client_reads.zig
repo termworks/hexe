@@ -22,6 +22,12 @@ const PendingPaneInfoResponse = SesClient.PendingPaneInfoResponse;
 const SYNC_RESPONSE_TIMEOUT_MS = frontend_client.SYNC_RESPONSE_TIMEOUT_MS;
 const COMMAND_ACK_TIMEOUT_MS = frontend_client.COMMAND_ACK_TIMEOUT_MS;
 
+/// Total budget for a pane info/cwd query. These run on ordinary keystroke
+/// paths, so the budget is deliberately tighter than a session-level RPC: a key
+/// that does nothing for 5s is already a bug report, and the caller degrades
+/// gracefully (falls back to its cached value) rather than hanging the frame.
+const PANE_QUERY_TIMEOUT_MS: i64 = 5_000;
+
 pub fn readExpectedPaneInfoResponse(self: *SesClient, fd: posix.fd_t, expected_uuid: [32]u8, expected_request_id: u32) !PaneInfoRead {
     if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
         var pending = pending_response;
@@ -37,8 +43,14 @@ pub fn readExpectedPaneInfoResponse(self: *SesClient, fd: posix.fd_t, expected_u
         return read;
     }
 
+    // A TOTAL deadline, not a per-header one. This loop used to call the plain
+    // readControlHeader (10s wire default) with no overall budget, so every
+    // interleaved push restarted the clock — the wait was unbounded in practice.
+    // It sits on ordinary keystroke paths (split, new tab, float toggle), so a
+    // busy daemon could freeze the UI indefinitely on a normal keypress.
+    const deadline_ms = std.time.milliTimestamp() + PANE_QUERY_TIMEOUT_MS;
     while (true) {
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try wire.readControlHeaderTimeout(fd, try remainingDeadlineMs(deadline_ms));
         const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         switch (msg_type) {
             .ok, .pane_exited, .session_state => {
@@ -127,8 +139,11 @@ pub fn readExpectedPaneCwdResponse(self: *SesClient, fd: posix.fd_t, expected_uu
         return read;
     }
 
+    // Same total deadline as readExpectedPaneInfoResponse above, for the same
+    // reason: this is on the get-cwd path that fires on ordinary keypresses.
+    const deadline_ms = std.time.milliTimestamp() + PANE_QUERY_TIMEOUT_MS;
     while (true) {
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try wire.readControlHeaderTimeout(fd, try remainingDeadlineMs(deadline_ms));
         const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         switch (msg_type) {
             .ok, .pane_exited, .session_state, .pane_info => {

@@ -29,6 +29,14 @@ const xev = @import("xev").Dynamic;
 const VT_ROUTE_IO_TIMEOUT_MS: i32 = 500;
 const CTL_FRAME_IO_TIMEOUT_MS: i32 = 500;
 pub const HANDLER_IO_TIMEOUT_MS: i32 = 500;
+/// Whole-skip budget. The per-chunk timeouts above restart on every chunk, so
+/// only a total deadline actually bounds a peer that trickles a huge payload.
+const SKIP_TOTAL_TIMEOUT_MS: i64 = 2_000;
+/// Budget for reading a CLI request header. Previously this was the only read on
+/// the accept path still on the 10s wire default — any process that connected
+/// with the CLI handshake byte and then stalled froze EVERY session for 10s, and
+/// could do it again immediately.
+const CLI_HEADER_IO_TIMEOUT_MS: i32 = 500;
 const MUX_VT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
 // Symmetric cap for the MUX→POD (input) direction. A frame is always accepted
 // onto an empty queue (so a single large paste is never undeliverable);
@@ -594,6 +602,17 @@ test "enqueuePodVtFrame backpressures only once backlog exists" {
 
 /// Server that handles mux connections
 /// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
+/// Whether an fd can be polled by the event loop. Watchers are armed by fd
+/// NUMBER; if a number was freed and reused by a REGULAR FILE (the state
+/// file, txlog, or log), arming it makes epoll reject the completion — and
+/// the loop then re-errors on it forever, pinning a core at 100% with a
+/// daemon that no longer makes progress. Refuse the arm instead.
+fn fdIsPollable(fd: posix.fd_t) bool {
+    const st = posix.fstat(fd) catch return false;
+    const kind = st.mode & posix.S.IFMT;
+    return kind == posix.S.IFSOCK or kind == posix.S.IFIFO or kind == posix.S.IFCHR;
+}
+
 pub const Server = struct {
     allocator: std.mem.Allocator,
     socket: ipc.Server,
@@ -712,8 +731,10 @@ pub const Server = struct {
             .last_stats_update = std.time.milliTimestamp(),
             .last_cleanup = std.time.milliTimestamp(),
         };
+        periodic_ctx.last_fire = std.time.milliTimestamp();
         ticker.run(&loop, &timer_completion, 100, PeriodicContext, &periodic_ctx, periodicCallback);
 
+        var loop_err_burst: usize = 0;
         while (self.running) {
             // Free watcher nodes that were disarmed in a previous iteration.
             // We defer destruction by one loop iteration so xev can finish
@@ -726,10 +747,41 @@ pub const Server = struct {
             // queued closes; age them out (two-iteration lifetime) so a
             // reused fd number is not shielded forever.
             self.ses_state.store.rotateClosedFdLog();
+            const dbg_t0 = std.time.milliTimestamp();
+            var loop_ok = true;
             loop.run(.once) catch |err| {
+                loop_ok = false;
+                loop_err_burst +|= 1;
                 ses.debugLog("event loop error (continuing): {s}", .{@errorName(err)});
-                continue;
             };
+            if (loop_ok) loop_err_burst = 0;
+            const dbg_t1 = std.time.milliTimestamp();
+            if (dbg_t1 - dbg_t0 > 300) ses.debugLog("SLOW ses loop.run: {d}ms", .{dbg_t1 - dbg_t0});
+
+            // Spin guard: a completion the backend keeps rejecting (e.g. a
+            // watcher armed on an fd the kernel will not poll) makes
+            // loop.run return an error IMMEDIATELY, every time — the old
+            // "log and continue" then burned a whole core forever while the
+            // daemon made no progress (observed: 1.8M errors in seconds).
+            // Back off so the daemon stays responsive and the log stays
+            // readable; the arm guards above prevent the usual cause.
+            if (loop_err_burst > 0) {
+                if (loop_err_burst % 1000 == 0) {
+                    core.logging.warn("ses", "event loop erroring repeatedly ({d} in a row); backing off", .{loop_err_burst});
+                }
+                if (loop_err_burst > 8) std.Thread.sleep(20 * std.time.ns_per_ms);
+            }
+
+            // Ticker watchdog: the re-arm chain can die silently (xev
+            // io_uring submission loss under load). All ready CQEs were just
+            // processed, so 5s of silence proves no pending CQE — the
+            // completion is safe to reuse. A dead ticker means no persist,
+            // no queue flush, no cleanup sweeps: a slowly dying daemon.
+            if (dbg_t1 - periodic_ctx.last_fire > 5000) {
+                ses.debugLog("periodic ticker silent {d}ms; resurrecting", .{dbg_t1 - periodic_ctx.last_fire});
+                periodic_ctx.last_fire = dbg_t1;
+                ticker.run(&loop, &timer_completion, 100, PeriodicContext, &periodic_ctx, periodicCallback);
+            }
         }
 
         // Final flush: mutations made since the last periodic save (e.g. a
@@ -753,7 +805,16 @@ pub const Server = struct {
         }
         for (self.pending_ctl_close_fds.items) |pending| {
             ses.debugLog("processPendingCtlCloses: fd={d}", .{pending.fd});
-            if (!self.disarmCtlWatcherMatching(pending.fd, pending.watcher)) continue;
+            if (!self.disarmCtlWatcherMatching(pending.fd, pending.watcher)) {
+                // Watcher already removed from the map elsewhere; its callback
+                // returned .disarm (CQE consumed), so it must be freed here —
+                // no stale CQE will ever fire for it.
+                if (pending.watcher) |w| self.deferDestroyCtlWatcher(w);
+                continue;
+            }
+            // Callback returned .disarm before queueing: CQE consumed, safe
+            // to free after this loop batch.
+            if (pending.watcher) |w| self.deferDestroyCtlWatcher(w);
 
             // The fd was already closed by a direct path (client removal,
             // detach, killPane) after this entry was queued. The number may
@@ -1040,6 +1101,10 @@ pub const Server = struct {
     fn armCtlWatcher(self: *Server, fd: posix.fd_t) bool {
         if (self.loop_ptr == null) return true;
         if (self.ctl_watchers.contains(fd)) return true;
+        if (!fdIsPollable(fd)) {
+            core.logging.warn("ses", "refusing to arm CTL watcher on non-pollable fd={d} (stale arm for a reused fd number)", .{fd});
+            return false;
+        }
 
         const node = self.allocator.create(CtlWatcher) catch |err| {
             core.logging.logError("ses", "failed to allocate CTL watcher", err);
@@ -1058,13 +1123,25 @@ pub const Server = struct {
     }
 
     fn disarmCtlWatcher(self: *Server, fd: posix.fd_t) void {
-        if (self.ctl_watchers.fetchRemove(fd)) |kv| {
-            // Defer destruction: xev may still reference the completion struct
-            self.deferred_destroy_ctl.append(self.allocator, kv.value) catch |err| {
-                core.logging.logError("ses", "failed to defer CTL watcher destruction", err);
-                // If append fails, leak rather than use-after-free
-            };
-        }
+        // Remove from map but do NOT free — the io_uring POLL_ADD may still be
+        // pending, and the ring holds a pointer to node.completion that it
+        // WRITES into when the CQE finally arrives (fd event, or the fd's
+        // last close completing the poll). Freeing after one loop iteration
+        // was a use-after-free that crashed the daemon inside Loop.tick.
+        // The stale CQE reaches ctlWatcherCallback, which detects the map
+        // miss and frees the orphaned node then (same model as VT watchers).
+        _ = self.ctl_watchers.fetchRemove(fd);
+    }
+
+    /// Defer a CTL watcher's destruction to `flushDeferredDestroys`. Only
+    /// valid once its callback has consumed the final CQE (returned .disarm):
+    /// xev may still reference the completion until the loop batch finishes,
+    /// but no further CQE can arrive.
+    fn deferDestroyCtlWatcher(self: *Server, watcher: *CtlWatcher) void {
+        self.deferred_destroy_ctl.append(self.allocator, watcher) catch |err| {
+            core.logging.logError("ses", "failed to defer CTL watcher destruction", err);
+            // On append failure, leak rather than risk a UAF.
+        };
     }
 
     fn disarmCtlWatcherMatching(self: *Server, fd: posix.fd_t, expected: ?*CtlWatcher) bool {
@@ -1084,6 +1161,10 @@ pub const Server = struct {
         if (self.vt_watchers.contains(fd)) {
             ses.debugLog("armVtWatcher: SKIP fd={d} (already armed)", .{fd});
             return true;
+        }
+        if (!fdIsPollable(fd)) {
+            core.logging.warn("ses", "refusing to arm VT watcher on non-pollable fd={d} (stale arm for a reused fd number)", .{fd});
+            return false;
         }
         ses.debugLog("armVtWatcher: ARMED fd={d} dir={s}", .{ fd, @tagName(direction) });
 
@@ -1136,6 +1217,7 @@ pub const Server = struct {
     };
 
     const PeriodicContext = struct {
+        last_fire: i64 = 0,
         server: *Server,
         ticker: xev.Timer,
         last_save: i64,
@@ -1175,6 +1257,16 @@ pub const Server = struct {
     ) xev.CallbackAction {
         const watch = ctx orelse return .disarm;
         const server: *Server = @ptrCast(@alignCast(watch.srv));
+
+        // Disarmed while the poll was still pending: this CQE is the last
+        // reference to the orphaned node. Defer its destruction (xev may
+        // still touch the completion until the loop batch ends).
+        const current = server.ctl_watchers.get(watch.fd);
+        if (current == null or current.? != watch) {
+            server.deferDestroyCtlWatcher(watch);
+            return .disarm;
+        }
+
         _ = result catch |err| {
             core.logging.logError("ses", "CTL watcher event failed", err);
             server.queueCtlClose(watch.fd, watch);
@@ -1253,6 +1345,7 @@ pub const Server = struct {
         };
 
         const now_ms = std.time.milliTimestamp();
+        periodic.last_fire = now_ms;
 
         periodic.server.flushMuxVtQueues();
         periodic.server.flushPodVtQueues();
@@ -1299,6 +1392,13 @@ pub const Server = struct {
     /// Dispatch a newly accepted connection based on its handshake bytes.
     /// Handshake format: [channel_type, protocol_version]
     fn dispatchNewConnection(self: *Server, conn: ipc.Connection) void {
+        // Drain queued watcher removals BEFORE this fd number can collide
+        // with them: a pane kill queues its dead fd for watcher disarm, and
+        // if a new connection reuses the number before the queue drains, the
+        // stale removal would disarm the NEW connection's watcher — the
+        // daemon then never reads that client's registration ("attach
+        // sometimes times out").
+        self.processPendingWatcherUpdates();
         setNonBlocking(conn.fd);
 
         // Reject peers running as a different UID. This prevents a sibling
@@ -1919,10 +2019,21 @@ pub const Server = struct {
     }
 
     /// Discard `len` bytes from fd.
+    ///
+    /// The per-chunk timeout alone is NOT a bound: readExactTimeout starts a
+    /// fresh deadline on every call, so a peer that trickles one chunk just
+    /// inside the budget never trips it. With a 4MB max payload and 4KB chunks
+    /// that is 1024 chunks x 500ms = ~8.5 MINUTES of frozen daemon. The total
+    /// deadline below is what actually bounds it.
     fn skipBytes(_: *Server, fd: posix.fd_t, len: u32) void {
         var remaining: usize = len;
         var buf: [4096]u8 = undefined;
+        const deadline = std.time.milliTimestamp() + SKIP_TOTAL_TIMEOUT_MS;
         while (remaining > 0) {
+            if (std.time.milliTimestamp() >= deadline) {
+                core.logging.warn("ses", "giving up skipping VT payload ({d} bytes left)", .{remaining});
+                return;
+            }
             const chunk = @min(remaining, buf.len);
             wire.readExactTimeout(fd, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
                 core.logging.logError("ses", "failed to skip VT payload", err);
@@ -2095,7 +2206,7 @@ pub const Server = struct {
             // Enumerated explicitly so adding a new MsgType is a compile error
             // here until it's categorized (PLAN.md 2.1 — no silently-dropped
             // messages). Behavior matches the former `else`: skip + error.
-            .registered, .pane_created, .destroy_pane, .session_state, .notify, .pop_confirm, .pop_choose, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .send_keys, .broadcast_notify, .targeted_notify, .status, .focus_move, .exit_intent, .float_request, .float_created, .pane_exited, .kill_session, .clear_sessions, .clear_orphaned_panes, .get_layout, .apply_layout, .get_session_state, .session_stolen, .bell, .shp_shell_event => {
+            .registered, .pane_created, .destroy_pane, .session_state, .notify, .pop_confirm, .pop_choose, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .send_keys, .broadcast_notify, .targeted_notify, .status, .focus_move, .exit_intent, .float_request, .float_created, .pane_exited, .kill_session, .kill_target, .clear_sessions, .clear_orphaned_panes, .get_layout, .apply_layout, .get_session_state, .session_stolen, .bell, .shp_shell_event => {
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
                 self.replyOrClose(fd, .@"error", &.{});
             },
@@ -2108,9 +2219,16 @@ pub const Server = struct {
         return true;
     }
 
+    /// Same trickle hazard as skipBytes: bound the WHOLE skip, not each chunk.
     pub fn skipBinaryPayload(self: *Server, fd: posix.fd_t, len: u32, buf: []u8) void {
         var remaining: usize = len;
+        const deadline = std.time.milliTimestamp() + SKIP_TOTAL_TIMEOUT_MS;
         while (remaining > 0) {
+            if (std.time.milliTimestamp() >= deadline) {
+                core.logging.warn("ses", "giving up skipping CTL payload ({d} bytes left)", .{remaining});
+                self.ctlStreamDesynced(fd, "payload skip timed out");
+                return;
+            }
             const chunk = @min(remaining, buf.len);
             wire.readExactTimeout(fd, buf[0..chunk], HANDLER_IO_TIMEOUT_MS) catch |err| {
                 core.logging.logError("ses", "failed to skip CTL payload", err);
@@ -2140,7 +2258,7 @@ pub const Server = struct {
     /// Handle a CLI tool request (handshake byte 0x04).
     /// CLI sends one control message; SES forwards to MUX and optionally waits for response.
     fn handleCliRequest(self: *Server, fd: posix.fd_t) void {
-        const hdr = wire.readControlHeader(fd) catch |err| {
+        const hdr = wire.readControlHeaderTimeout(fd, CLI_HEADER_IO_TIMEOUT_MS) catch |err| {
             core.logging.logError("ses", "cli request header read failed", err);
             self.closeCliRequest(fd, "header read failed");
             return;
@@ -2473,6 +2591,9 @@ pub const Server = struct {
             },
             .kill_session => {
                 server_cli_layout_handlers.handleKillSession(self, fd, hdr.payload_len, &buf);
+            },
+            .kill_target => {
+                server_cli_layout_handlers.handleKillTarget(self, fd, hdr.payload_len, &buf);
             },
             .clear_sessions => {
                 server_cli_layout_handlers.handleClearSessions(self, fd);

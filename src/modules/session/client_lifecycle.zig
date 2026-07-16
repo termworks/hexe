@@ -71,6 +71,13 @@ pub fn removeClient(self: anytype, client_id: usize) void {
                     if (!detach_lifecycle.cancelPendingReattach(self, session_id, client.id)) {
                         ses.debugLog("removeClient: pending reattach restore failed, leaving existing detached session untouched", .{});
                     }
+                } else if (client.session_id != null and client.pane_uuids.items.len == 0) {
+                    // A pane-less session has nothing worth parking. Every
+                    // aborted attach (crashed racer, Ctrl-C'd startup) used
+                    // to leave a permanent empty detached record rooted at
+                    // its cwd — accumulating phantom targets that forced
+                    // `attach .` into the ambiguity picker.
+                    ses.debugLog("removeClient: empty session, not parking", .{});
                 } else if (client.session_id) |session_id| {
                     // Use direct detach to avoid removing the client twice.
                     // If preserving fails, kill panes rather than leaving them

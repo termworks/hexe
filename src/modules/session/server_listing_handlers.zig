@@ -60,8 +60,21 @@ pub fn handleBinaryListSessions(self: *Server, fd: posix.fd_t, buf: []u8) void {
     };
     defer self.allocator.free(sessions);
 
+    // Attached sessions are listed too (flagged): `attach .` must be able to
+    // resolve a session whose frontend just died but whose disconnect the
+    // daemon has not yet processed. Attaching to one goes through the normal
+    // force-detach reattach path.
+    var attached_count: usize = 0;
+    for (self.ses_state.store.clients.items) |client| {
+        // Only keepalive clients (real muxes) are attachable sessions;
+        // probes and CLI helpers also register but must never appear here —
+        // a `hexe terminal list` running in the same directory would
+        // otherwise become a phantom match for `attach .`.
+        if (client.session_id != null and client.keepalive) attached_count += 1;
+    }
     const entry_count = @min(sessions.len, std.math.maxInt(u16));
-    var resp_hdr = wire.SessionsList{ .session_count = @intCast(entry_count) };
+    const total_count = @min(entry_count + attached_count, std.math.maxInt(u16));
+    var resp_hdr = wire.SessionsList{ .session_count = @intCast(total_count) };
     var payload: std.ArrayList(u8) = .empty;
     defer payload.deinit(self.allocator);
     var writer = payload.writer(self.allocator);
@@ -86,6 +99,7 @@ pub fn handleBinaryListSessions(self: *Server, fd: posix.fd_t, buf: []u8) void {
             .pane_count = @intCast(@min(s.pane_count, std.math.maxInt(u16))),
             .name_len = @intCast(s.session_name.len),
             .base_root_len = @intCast(s.base_root.len),
+            .attached = 0,
         };
         writer.writeAll(std.mem.asBytes(&entry)) catch |err| {
             core.logging.logError("ses", "failed to build detached sessions list entry", err);
@@ -106,6 +120,45 @@ pub fn handleBinaryListSessions(self: *Server, fd: posix.fd_t, buf: []u8) void {
                 return;
             };
         }
+    }
+    var appended_attached: usize = 0;
+    for (self.ses_state.store.clients.items) |client| {
+        if (entry_count + appended_attached >= total_count) break;
+        if (!client.keepalive) continue;
+        const sid = client.session_id orelse continue;
+        const name = client.session_name orelse "";
+        const base_root = client.base_root orelse "";
+        if (name.len > std.math.maxInt(u16) or base_root.len > std.math.maxInt(u16)) continue;
+        const hex_id: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+        var entry = wire.SessionEntry{
+            .session_id = hex_id,
+            .pane_count = @intCast(@min(client.pane_uuids.items.len, std.math.maxInt(u16))),
+            .name_len = @intCast(name.len),
+            .base_root_len = @intCast(base_root.len),
+            .attached = 1,
+        };
+        writer.writeAll(std.mem.asBytes(&entry)) catch |err| {
+            core.logging.logError("ses", "failed to build attached session list entry", err);
+            self.sendBinaryError(fd, "list_sessions: response alloc failed");
+            return;
+        };
+        if (name.len > 0) writer.writeAll(name) catch |err| {
+            core.logging.logError("ses", "failed to build attached session list name", err);
+            self.sendBinaryError(fd, "list_sessions: response alloc failed");
+            return;
+        };
+        if (base_root.len > 0) writer.writeAll(base_root) catch |err| {
+            core.logging.logError("ses", "failed to build attached session list base root", err);
+            self.sendBinaryError(fd, "list_sessions: response alloc failed");
+            return;
+        };
+        appended_attached += 1;
+    }
+    // The header pre-counted live clients; if any were skipped (no name/root)
+    // the count must match what was actually written.
+    if (appended_attached != attached_count) {
+        const actual: u16 = @intCast(@min(entry_count + appended_attached, std.math.maxInt(u16)));
+        std.mem.bytesAsValue(wire.SessionsList, payload.items[0..@sizeOf(wire.SessionsList)]).session_count = actual;
     }
     self.replyOrClose(fd, .sessions_list, payload.items);
 }

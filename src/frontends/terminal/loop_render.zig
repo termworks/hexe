@@ -562,6 +562,20 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // End frame: render current vaxis screen.
     try render_vx.renderFrame(&renderer.vx, stdout, cursor, state.force_full_render);
-    _ = renderer.frame_arena.reset(.retain_capacity);
     state.force_full_render = false;
+
+    // The frame arena backs grapheme slices stored INSIDE vx.screen cells,
+    // and cells persist across frames until rewritten. Resetting the arena
+    // every frame left every not-redrawn cell pointing at reused memory; the
+    // next diff/gwidth pass then ran the grapheme iterator over garbage —
+    // the intermittent segfault in utf8.Iterator after reattach. Reset ONLY
+    // together with a full screen clear, so no cell can outlive its bytes;
+    // the threshold keeps memory bounded by forcing a periodic repaint.
+    const frame_arena_compact_bytes: usize = 8 * 1024 * 1024;
+    if (renderer.frame_arena.queryCapacity() > frame_arena_compact_bytes) {
+        renderer.invalidate();
+        _ = renderer.frame_arena.reset(.retain_capacity);
+        state.force_full_render = true;
+        state.needs_render = true;
+    }
 }

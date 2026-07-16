@@ -21,6 +21,7 @@ fn verifyPeerCredentials(fd: posix.fd_t) bool {
 const pod_protocol = core.pod_protocol;
 const pod_meta = core.pod_meta;
 const wire = core.wire;
+const input_dedup_mod = @import("input_dedup.zig");
 const xev = @import("xev").Dynamic;
 const PodUplink = @import("uplink.zig").PodUplink;
 const buffering = @import("buffering.zig");
@@ -43,6 +44,11 @@ inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
 /// forever. Output is appended to the backlog ring BEFORE the uplink write,
 /// so on timeout the connection is dropped and SES heals via backlog replay.
 const CLIENT_WRITE_TIMEOUT_MS: i32 = 2_000;
+
+/// mux→pod INPUT frames from the SES main client carry a 16-byte
+/// `[epoch:u64][seq:u64]` (little-endian) prefix for exactly-once dedup across a
+/// frontend VT reconnect. Must match vt_write_queue.INPUT_SEQ_PREFIX_LEN.
+const INPUT_SEQ_PREFIX_LEN: usize = 16;
 
 fn setNonBlocking(fd: posix.fd_t) void {
     const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| {
@@ -387,6 +393,15 @@ fn redirectStderrToLog(log_path: []const u8) void {
 /// Write buffer capacity for non-blocking PTY writes.
 /// Large enough to absorb typical clipboard pastes without dropping data.
 const PTY_WRITE_BUF_CAP: usize = 256 * 1024;
+/// Reattach replay window: enough for the visible screen plus generous recent
+/// scrollback, small enough that a reattach never feels stuck. A torn head is
+/// the same status quo as a wrapped ring.
+const REPLAY_TAIL_CAP: usize = 1024 * 1024;
+/// Hard ceiling for the PTY input buffer. Dropping input bytes is NEVER okay
+/// short of this: a torn bracketed paste (lost ESC[201~) leaves the shell or
+/// app in paste mode swallowing every later keystroke — the pane looks
+/// permanently frozen. Grow instead; real pastes are a few MB at most.
+const PTY_WRITE_BUF_MAX: usize = 16 * 1024 * 1024;
 const POD_EXIT_ATTACH_GRACE_MS: i64 = 300;
 
 fn applyPasswordMode(backlog: *RingBuffer, password_mode: *bool, enabled: bool) void {
@@ -403,9 +418,16 @@ const Pod = struct {
     client: ?core.IpcConnection = null,
     observers: std.array_list.Managed(core.IpcConnection),
     backlog: RingBuffer,
+    /// Absolute offset of the byte AFTER the last one appended to `backlog`
+    /// (ring start offset = backlog_abs - backlog.len).
+    backlog_abs: u64 = 0,
+    alt_tracker: buffering.AltScreenTracker = .{},
     reader: pod_protocol.Reader,
     pty_paused: bool = false,
     password_mode: bool = false,
+
+    // Exactly-once input dedup across a frontend VT reconnect. See applyInputFrame.
+    input_dedup: input_dedup_mod.InputDedup = .{},
 
     uplink: PodUplink,
 
@@ -566,6 +588,7 @@ const Pod = struct {
         };
         ticker.run(&loop, &timer_completion, 100, TimerContext, &timer_ctx, timerCallback);
 
+        var loop_err_burst: usize = 0;
         while (true) {
             var waiting_for_initial_vt_attach = false;
             if (self.pty.pollStatus() != null) {
@@ -585,7 +608,20 @@ const Pod = struct {
             if (should_stop and !waiting_for_initial_vt_attach) break;
             if (callback_error) |err| return err;
 
-            try loop.run(.once);
+            // A loop error must NEVER kill the pod — that kills the user's
+            // shell. Log, back off (a persistently rejected completion would
+            // otherwise pin a core), and keep serving the PTY.
+            var loop_ok = true;
+            loop.run(.once) catch |err| {
+                loop_ok = false;
+                loop_err_burst +|= 1;
+                debugLog("pod event loop error (continuing): {s}", .{@errorName(err)});
+            };
+            if (loop_ok) {
+                loop_err_burst = 0;
+            } else if (loop_err_burst > 8) {
+                std.Thread.sleep(20 * std.time.ns_per_ms);
+            }
 
             if (should_stop and !waiting_for_initial_vt_attach) break;
             if (callback_error) |err| return err;
@@ -852,8 +888,13 @@ const Pod = struct {
 
             const data = read_buf[0..n];
             pty_ctx.pod.scanOutputMetadata(data);
+            pty_ctx.pod.alt_tracker.feed(data, pty_ctx.pod.backlog_abs);
             if (pty_ctx.pod.password_mode) return .rearm;
-            if (!pty_ctx.pod.backlog.appendNoDrop(data) or pty_ctx.pod.backlog.isFull()) {
+            const appended = pty_ctx.pod.backlog.appendNoDrop(data);
+            // Every ring append MUST bump backlog_abs — the replay window
+            // derives the ring's absolute start from it.
+            if (appended) pty_ctx.pod.backlog_abs += data.len;
+            if (!appended or pty_ctx.pod.backlog.isFull()) {
                 pty_ctx.pod.pty_paused = true;
                 pty_ctx.armed.* = false;
                 return .disarm;
@@ -904,8 +945,20 @@ const Pod = struct {
             remaining = remaining[n..];
         }
 
-        // Buffer whatever could not be written.
+        // Buffer whatever could not be written, growing as needed: a large
+        // paste into a slow reader (vim reads pastes in tiny chunks) easily
+        // exceeds the initial capacity, and dropping the tail used to tear
+        // the bracketed-paste framing and freeze the pane.
         if (remaining.len > 0) {
+            const needed = self.pty_wbuf_len + remaining.len;
+            if (needed > self.pty_wbuf.len and needed <= PTY_WRITE_BUF_MAX) {
+                const new_cap = @min(PTY_WRITE_BUF_MAX, @max(needed, self.pty_wbuf.len * 2));
+                if (self.allocator.realloc(self.pty_wbuf, new_cap)) |grown| {
+                    self.pty_wbuf = grown;
+                } else |err| {
+                    core.logging.logError("pod", "failed to grow pty write buffer", err);
+                }
+            }
             const space = self.pty_wbuf.len - self.pty_wbuf_len;
             const to_copy = @min(remaining.len, space);
             if (to_copy > 0) {
@@ -913,7 +966,7 @@ const Pod = struct {
                 self.pty_wbuf_len += to_copy;
             }
             if (to_copy < remaining.len) {
-                debugLog("queuePtyWrite: write buffer full, dropped {d} bytes", .{remaining.len - to_copy});
+                core.logging.warn("pod", "pty input buffer overflow: dropped {d} bytes — input framing may be torn", .{remaining.len - to_copy});
             }
             self.armPtyDrainTimer();
         }
@@ -1086,7 +1139,13 @@ const Pod = struct {
         // Replay current backlog to new observer unless password mode is
         // active; password-mode output is live-only and never recorded.
         const n = if (self.password_mode) 0 else self.backlog.copyOut(backlog_tmp);
-        var off: usize = 0;
+        var off: usize = buffering.replaySkipBytes(
+            self.alt_tracker.in_alt,
+            self.alt_tracker.alt_enter_offset,
+            self.backlog_abs -| self.backlog.len,
+            n,
+            REPLAY_TAIL_CAP,
+        );
         while (off < n) {
             const chunk = @min(@as(usize, 16 * 1024), n - off);
             pod_protocol.writeFrame(&obs_conn, .output, backlog_tmp[off .. off + chunk]) catch {
@@ -1129,8 +1188,13 @@ const Pod = struct {
 
     fn processPtyOutput(self: *Pod, data: []const u8) void {
         self.scanOutputMetadata(data);
+        // Track alt-screen enter/leave against ring offsets so reattach
+        // replay can start at the fullscreen app's initial paint instead of
+        // replaying megabytes of invisible history behind it.
+        self.alt_tracker.feed(data, self.backlog_abs);
         if (!self.password_mode) {
             self.backlog.append(data);
+            self.backlog_abs += data.len;
         }
         if (self.client) |*client| {
             pod_protocol.writeFrameBounded(client, .output, data, CLIENT_WRITE_TIMEOUT_MS) catch {
@@ -1161,7 +1225,11 @@ const Pod = struct {
     fn handleFrame(self: *Pod, frame: pod_protocol.Frame) void {
         switch (frame.frame_type) {
             .input => {
-                self.queuePtyWrite(frame.payload);
+                // mux→pod input from the SES main client carries a 16-byte
+                // (epoch, seq) prefix for exactly-once dedup across reconnects.
+                // applyInputFrame strips it and applies the real bytes. (The aux
+                // input path, handleAuxInput, is a separate un-prefixed channel.)
+                self.applyInputFrame(frame.payload);
             },
             .resize => {
                 if (frame.payload.len >= 4) {
@@ -1180,6 +1248,31 @@ const Pod = struct {
         }
     }
 
+    /// Apply a mux→pod input frame, deduplicating replays across a VT reconnect.
+    ///
+    /// The 16-byte prefix is `[epoch:u64][seq:u64]` (little-endian). The pod is
+    /// the dedup authority because it is the only process that survives every
+    /// reconnect trigger (frontend slow, VT-overflow drop, daemon crash):
+    ///   - different epoch → a NEW frontend (reattach): adopt it, apply.
+    ///   - seq <= last_seq  → already applied (a replay): DROP.
+    ///   - else             → apply, advance last_seq.
+    /// This makes input exactly-once: the frontend re-sends its replay ring on
+    /// reconnect, and anything already delivered here is dropped.
+    fn applyInputFrame(self: *Pod, payload: []const u8) void {
+        if (payload.len < INPUT_SEQ_PREFIX_LEN) {
+            // Malformed (a v4 frontend always prefixes). Drop rather than write
+            // partial/garbage bytes to the shell.
+            debugLog("applyInputFrame: input frame too short ({d} bytes), dropping", .{payload.len});
+            return;
+        }
+        const epoch = std.mem.readInt(u64, payload[0..8], .little);
+        const seq = std.mem.readInt(u64, payload[8..16], .little);
+        const real = payload[INPUT_SEQ_PREFIX_LEN..];
+
+        if (!self.input_dedup.accept(epoch, seq)) return; // replayed duplicate
+        if (real.len > 0) self.queuePtyWrite(real);
+    }
+
     /// Accept a VT client — replays backlog, then streams live output.
     fn acceptVtClient(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
         debugLog("acceptVtClient: fd={d} replacing={}", .{ conn.fd, self.client != null });
@@ -1192,8 +1285,10 @@ const Pod = struct {
         setNonBlocking(conn.fd);
         self.client = conn;
 
-        // Send acknowledgment so client knows we're ready.
-        wire.writeControl(conn.fd, .ok, &.{}) catch {
+        // Send acknowledgment so client knows we're ready. Bounded like every
+        // other write to this peer — plain writeControl carries the 10s wire
+        // default, which is 10s of frozen shell on the attach path.
+        wire.writeControlTimeout(conn.fd, .ok, &.{}, CLIENT_WRITE_TIMEOUT_MS) catch {
             debugLog("acceptVtClient: failed to send ack, closing fd={d}", .{conn.fd});
             var tmp = conn;
             tmp.close();
@@ -1206,7 +1301,17 @@ const Pod = struct {
         // Replay backlog unless password mode is active; while active, screen
         // contents are intentionally not persisted or replayed.
         const n = if (self.password_mode) 0 else self.backlog.copyOut(backlog_tmp);
-        var off: usize = 0;
+        // Bounded window: reattaching to tens of thousands of lines used to
+        // replay the whole 4MB ring, wedging the frontend. Start at the alt
+        // enter for fullscreen apps, else the last REPLAY_TAIL_CAP bytes.
+        var off: usize = buffering.replaySkipBytes(
+            self.alt_tracker.in_alt,
+            self.alt_tracker.alt_enter_offset,
+            self.backlog_abs -| self.backlog.len,
+            n,
+            REPLAY_TAIL_CAP,
+        );
+        if (off > 0) debugLog("acceptVtClient: replay skipping {d} of {d} backlog bytes (alt={})", .{ off, n, self.alt_tracker.in_alt });
         while (off < n) {
             const chunk = @min(@as(usize, 16 * 1024), n - off);
             pod_protocol.writeFrameBounded(&self.client.?, .output, backlog_tmp[off .. off + chunk], CLIENT_WRITE_TIMEOUT_MS) catch |err| {

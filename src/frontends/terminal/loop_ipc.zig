@@ -20,21 +20,31 @@ const CtlDispatchContext = struct {
     buffer: []u8,
 };
 
+// Every CTL frame payload the terminal reads, and every reply it writes, goes
+// through the three helpers below — and they all carried the 10-SECOND wire
+// default. The frame HEADER is read non-blockingly, but once a header landed the
+// payload read blocked: a daemon that wrote a header and then stalled (or a
+// truncated frame) froze the UI for 10s per frame, up to 32 frames per wakeup.
+// The payload is normally already sitting in the socket buffer behind its
+// header, so these budgets are generous; what they rule out is the hang.
+const CTL_READ_TIMEOUT_MS: i32 = 500;
+const CTL_WRITE_TIMEOUT_MS: i32 = 1_000;
+
 fn writeControlLogged(fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8, comptime context: []const u8) void {
-    wire.writeControl(fd, msg_type, payload) catch |err| {
+    wire.writeControlTimeout(fd, msg_type, payload, CTL_WRITE_TIMEOUT_MS) catch |err| {
         core.logging.logError("terminal", context, err);
     };
 }
 
 fn readStructLogged(comptime T: type, fd: posix.fd_t, comptime context: []const u8) ?T {
-    return wire.readStruct(T, fd) catch |err| {
+    return wire.readStructTimeout(T, fd, CTL_READ_TIMEOUT_MS) catch |err| {
         core.logging.logError("terminal", context, err);
         return null;
     };
 }
 
 fn readExactLogged(fd: posix.fd_t, dest: []u8, comptime context: []const u8) bool {
-    wire.readExact(fd, dest) catch |err| {
+    wire.readExactTimeout(fd, dest, CTL_READ_TIMEOUT_MS) catch |err| {
         core.logging.logError("terminal", context, err);
         return false;
     };

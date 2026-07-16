@@ -2,6 +2,7 @@ const std = @import("std");
 const zlua = @import("zlua");
 const Lua = zlua.Lua;
 const LuaState = zlua.LuaState;
+const cmd_mod = @import("cmd.zig");
 
 const EXEC_CACHE_TABLE_KEY = "__hexe_api_exec_cache";
 
@@ -59,10 +60,19 @@ fn parseOpts(lua: *Lua, timeout_ms: *u64, cache_ms: *u64) void {
 }
 
 fn pushExecResult(lua: *Lua, stdout: []const u8, stderr: []const u8, status: i32, cached: bool, timeout_hit: bool, elapsed_ms: u64) c_int {
+    return pushExecResultFull(lua, stdout, stderr, status, cached, timeout_hit, elapsed_ms, false);
+}
+
+/// `pending` = the command is running in the background and has never completed
+/// yet, so there is no value to report. It is never `ok`: a caller that treats
+/// pending as success would render an empty value as if it were real output.
+fn pushExecResultFull(lua: *Lua, stdout: []const u8, stderr: []const u8, status: i32, cached: bool, timeout_hit: bool, elapsed_ms: u64, pending: bool) c_int {
     const output = if (stdout.len > 0) stdout else stderr;
-    lua.createTable(0, 9);
-    lua.pushBoolean(status == 0 and !timeout_hit);
+    lua.createTable(0, 10);
+    lua.pushBoolean(status == 0 and !timeout_hit and !pending);
     lua.setField(-2, "ok");
+    lua.pushBoolean(pending);
+    lua.setField(-2, "pending");
     lua.pushInteger(status);
     lua.setField(-2, "code");
     _ = lua.pushString(stdout);
@@ -88,10 +98,33 @@ fn elapsedMsSince(start_ms: i64) u64 {
     return @intCast(now - start_ms);
 }
 
+/// timeout(1) takes an integer/float with an OPTIONAL suffix of s/m/h/d — there
+/// is no `ms`. Passing "80ms" makes timeout exit 125 without running the
+/// command at all, so this must render milliseconds as fractional seconds.
+fn timeoutArg(buf: []u8, timeout_ms: u64) []const u8 {
+    return std.fmt.bufPrint(buf, "{d}.{d:0>3}s", .{ timeout_ms / 1000, timeout_ms % 1000 }) catch "0.080s";
+}
+
+/// The argv hexe.exec runs. Note there is no `--preserve-status`: with it, a
+/// timed-out command reports 128+SIGTERM (143), so the 124 that means "timed
+/// out" would never be seen. Without it, timeout(1) reports 124 on timeout and
+/// the command's own status otherwise — exactly what callers expect.
+fn execArgv(timeout_arg: []const u8, cmd: []const u8) [5][]const u8 {
+    return .{ "timeout", timeout_arg, "/bin/bash", "-lc", cmd };
+}
+
+/// Default kill threshold. The command runs under `bash -lc`, and a login shell
+/// needs ~50-80ms just to source the user's profile before it even starts the
+/// command — so the old 80ms default timed out on a bare `echo`. Nothing waits
+/// on this anymore (the background cache has its own 10s hard deadline), so a
+/// tight timeout buys nothing and only makes working commands look broken.
+const DEFAULT_TIMEOUT_MS: u64 = 2000;
+const DEFAULT_CACHE_MS: u64 = 500;
+
 /// Lua API: hexe.exec(cmd, opts?)
 ///
 /// opts:
-/// - timeout / timeout_ms: kill threshold in ms (default: 80)
+/// - timeout / timeout_ms: kill threshold in ms (default: 2000)
 /// - cache / cache_ms: cache TTL in ms (default: 500)
 ///
 /// Returns table:
@@ -113,11 +146,42 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
         lua.raiseError();
     };
 
-    var timeout_ms: u64 = 80;
-    var cache_ms: u64 = 500;
+    var timeout_ms: u64 = DEFAULT_TIMEOUT_MS;
+    var cache_ms: u64 = DEFAULT_CACHE_MS;
     parseOpts(lua, &timeout_ms, &cache_ms);
 
     const allocator = std.heap.page_allocator;
+
+    // In a long-lived event loop (the terminal), NEVER wait on the command.
+    // A statusbar segment calling hexe.exec used to run Child.run right here on
+    // the render path: every stale-cache frame stalled for up to `timeout_ms`,
+    // and a command whose grandchild inherited the stdout pipe hung the frame
+    // forever — timeout(1) kills the direct child, but Child.run keeps reading
+    // the pipe until every writer closes it. So the frame never came back.
+    //
+    // The background cache runs the same argv (same timeout(1), same kill
+    // semantics) and this call just reports the last completed run.
+    //
+    // Short-lived processes (the shp prompt, CLI helpers) register no cache and
+    // keep the synchronous path below: they must produce a value and exit, so
+    // there is no later frame for an async result to land in.
+    if (cmd_mod.hasAsyncCache()) {
+        var timeout_arg_buf: [32]u8 = undefined;
+        const timeout_arg = timeoutArg(&timeout_arg_buf, timeout_ms);
+        const argv = execArgv(timeout_arg, cmd);
+        // The timeout is part of the key: the same command asked for with a
+        // different timeout is a different command, and argv is captured once.
+        const key = std.fmt.allocPrint(allocator, "exec\x1f{d}\x1f{s}", .{ timeout_ms, cmd }) catch cmd;
+        defer if (key.ptr != cmd.ptr) allocator.free(key);
+
+        // cache_ms == 0 means "no caching" — with a background runner that is a
+        // re-run as soon as the previous one lands, never a blocking re-run.
+        const refresh: i64 = std.math.cast(i64, cache_ms) orelse 0;
+        if (cmd_mod.cachedResultArgv(key, &argv, refresh)) |r| {
+            if (!r.done) return pushExecResultFull(lua, "", "", 0, false, false, 0, true);
+            return pushExecResultFull(lua, r.output, "", r.code, true, r.timed_out, 0, false);
+        }
+    }
     const now_ms: u64 = @intCast(std.time.milliTimestamp());
     const cache_key = std.fmt.allocPrint(allocator, "{s}\x1f{d}\x1f{d}", .{ cmd, timeout_ms, cache_ms }) catch {
         return pushExecResult(lua, "", "", 127, false, false, 0);
@@ -157,11 +221,12 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
 
     const start_ms = std.time.milliTimestamp();
     var timeout_arg_buf: [32]u8 = undefined;
-    const timeout_arg = std.fmt.bufPrint(&timeout_arg_buf, "{d}ms", .{timeout_ms}) catch "80ms";
+    const timeout_arg = timeoutArg(&timeout_arg_buf, timeout_ms);
+    const sync_argv = execArgv(timeout_arg, cmd);
 
     const result = std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{ "timeout", "--preserve-status", timeout_arg, "/bin/bash", "-lc", cmd },
+        .argv = &sync_argv,
     }) catch {
         return pushExecResult(lua, "", "", 127, false, false, elapsedMsSince(start_ms));
     };

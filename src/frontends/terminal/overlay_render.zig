@@ -93,7 +93,14 @@ pub fn renderOverlays(
     status_height: u16,
     focused_pane_bounds: ?Bounds,
 ) void {
-    const content_height = screen_height - status_height;
+    // Saturating: a status bar taller than the screen (tiny terminal, or a
+    // status height from config that exceeds the window) underflowed this u16
+    // and panicked the FIRST render — the frontend died before painting
+    // anything (silent corruption in ReleaseFast, where the panic is elided).
+    if (status_height > screen_height) {
+        core.logging.warn("terminal", "overlay: status_height {d} exceeds screen_height {d}", .{ status_height, screen_height });
+    }
+    const content_height = screen_height -| status_height;
 
     // Apply dimming if modal overlay is active (dims entire screen including status bar)
     if (overlays.shouldDim()) {
@@ -136,34 +143,36 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
         // Check if pane is big enough for the digit
         if (pl.width < box_w or pl.height < box_h) {
             // Fall back to single character for small panes
-            const cx = pl.x + pl.width / 2;
-            const cy = pl.y + pl.height / 2;
+            const cx = pl.x +| pl.width / 2;
+            const cy = pl.y +| pl.height / 2;
             putChar(renderer, cx, cy, pl.label, .{ .palette = 0 }, .{ .palette = 1 }, true);
             continue;
         }
 
         // Center the box in the pane
-        const box_x = pl.x + (pl.width -| box_w) / 2;
-        const box_y = pl.y + (pl.height -| box_h) / 2;
+        const box_x = pl.x +| (pl.width -| box_w) / 2;
+        const box_y = pl.y +| (pl.height -| box_h) / 2;
 
-        // Draw background box
+        // Draw background box. All coordinate math is saturating: a label
+        // whose pane bounds sit near u16 max (stale/garbage layout during a
+        // rebuild) must not overflow the render loop.
         for (0..box_h) |dy| {
             for (0..box_w) |dx| {
-                const x = box_x + @as(u16, @intCast(dx));
-                const y = box_y + @as(u16, @intCast(dy));
+                const x = box_x +| @as(u16, @intCast(dx));
+                const y = box_y +| @as(u16, @intCast(dy));
                 putChar(renderer, x, y, ' ', .{ .palette = 0 }, .{ .palette = 1 }, false);
             }
         }
 
         // Draw the digit pattern using full block characters
-        const digit_x = box_x + padding;
-        const digit_y = box_y + padding;
+        const digit_x = box_x +| padding;
+        const digit_y = box_y +| padding;
         for (0..digit_h) |dy| {
             for (0..digit_w) |dx| {
                 const ch = digit[dy][dx];
                 if (ch != ' ') {
-                    const x = digit_x + @as(u16, @intCast(dx));
-                    const y = digit_y + @as(u16, @intCast(dy));
+                    const x = digit_x +| @as(u16, @intCast(dx));
+                    const y = digit_y +| @as(u16, @intCast(dy));
                     putChar(renderer, x, y, ch, .{ .palette = 0 }, .{ .palette = 1 }, false);
                 }
             }

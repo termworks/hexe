@@ -1,4 +1,5 @@
 const std = @import("std");
+const cmd_mod = @import("../cmd.zig");
 const Segment = @import("context.zig").Segment;
 const Context = @import("context.zig").Context;
 const Style = @import("../style.zig").Style;
@@ -221,18 +222,27 @@ fn runGitStatus(cwd: []const u8, status: *GitStatus) void {
     const alloc = std.heap.page_allocator;
 
     // Run git status --porcelain=v2 --branch
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "git", "--no-optional-locks", "-C", cwd, "status", "--porcelain=v2", "--branch" },
-    }) catch return;
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
+    // BOUNDED: git in a huge/locked repo (or on a slow filesystem) used to
+    // block the render loop until it finished.
+    // ASYNC in the terminal: `git status` in a large or lock-contended repo
+    // can take seconds — it must never be on the render path's critical line.
+    // The cache serves the previous status while the next one runs.
+    var key_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "git-status:{s}", .{cwd}) catch return;
+    const argv = [_][]const u8{ "git", "--no-optional-locks", "-C", cwd, "status", "--porcelain=v2", "--branch" };
 
-    // Check exit code
-    const exit_ok = switch (result.term) {
-        .Exited => |code| code == 0,
-        else => false,
+    var owned_stdout: ?[]u8 = null;
+    defer if (owned_stdout) |o| alloc.free(o);
+
+    const stdout: []const u8 = blk: {
+        if (cmd_mod.cachedValueArgv(key, &argv, getCacheTTL())) |cached| break :blk cached;
+        if (cmd_mod.hasAsyncCache()) return; // first run in flight; keep last status
+        const sync = cmd_mod.runArgvCaptured(alloc, &argv, 64 * 1024, cmd_mod.DEFAULT_TIMEOUT_MS) orelse return;
+        owned_stdout = sync;
+        break :blk sync;
     };
+    const result = .{ .stdout = stdout };
+    const exit_ok = true;
     if (!exit_ok) return;
 
     // Parse output
@@ -310,18 +320,21 @@ fn parseChangeStatus(xy: []const u8, status: *GitStatus) void {
 fn checkStash(cwd: []const u8, status: *GitStatus) void {
     const alloc = std.heap.page_allocator;
 
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "git", "-C", cwd, "stash", "list" },
-    }) catch return;
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
+    var key_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "git-stash:{s}", .{cwd}) catch return;
+    const argv = [_][]const u8{ "git", "-C", cwd, "stash", "list" };
 
-    const exit_ok = switch (result.term) {
-        .Exited => |code| code == 0,
-        else => false,
+    var owned_stdout: ?[]u8 = null;
+    defer if (owned_stdout) |o| alloc.free(o);
+
+    const stdout: []const u8 = blk: {
+        if (cmd_mod.cachedValueArgv(key, &argv, getCacheTTL())) |cached| break :blk cached;
+        if (cmd_mod.hasAsyncCache()) return;
+        const sync = cmd_mod.runArgvCaptured(alloc, &argv, 16 * 1024, cmd_mod.DEFAULT_TIMEOUT_MS) orelse return;
+        owned_stdout = sync;
+        break :blk sync;
     };
-    if (!exit_ok) return;
+    const result = .{ .stdout = stdout };
 
     // Count lines
     var count: u16 = 0;

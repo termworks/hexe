@@ -290,3 +290,137 @@ test "containsClearSeq detects FF and CSI 3J" {
     try testing.expect(containsClearSeq("x\x1b[3Jy"));
     try testing.expect(!containsClearSeq("plain text"));
 }
+
+/// Tracks whether the child is on the alternate screen and where (in absolute
+/// stream offset) the current alt-screen session began. Reattach replay uses
+/// this to skip the invisible main-screen history behind a fullscreen app and
+/// start from the enter sequence — which is immediately followed by the app's
+/// full initial paint — instead of replaying megabytes of dead scrollback.
+pub const AltScreenTracker = struct {
+    state: State = .normal,
+    in_alt: bool = false,
+    /// Absolute stream offset of the ESC that started the current alt enter.
+    alt_enter_offset: ?u64 = null,
+    seq_start: u64 = 0,
+    cur_param: u32 = 0,
+    matched_param: bool = false,
+
+    const State = enum { normal, esc, csi, private };
+
+    fn isAltParam(p: u32) bool {
+        return p == 47 or p == 1047 or p == 1049;
+    }
+
+    /// Feed a chunk that begins at absolute stream offset `base`.
+    pub fn feed(self: *AltScreenTracker, data: []const u8, base: u64) void {
+        for (data, 0..) |byte, i| {
+            switch (self.state) {
+                .normal => if (byte == 0x1b) {
+                    self.state = .esc;
+                    self.seq_start = base + i;
+                },
+                .esc => self.state = if (byte == '[') .csi else .normal,
+                .csi => {
+                    if (byte == '?') {
+                        self.state = .private;
+                        self.cur_param = 0;
+                        self.matched_param = false;
+                    } else {
+                        self.state = .normal;
+                    }
+                },
+                .private => switch (byte) {
+                    '0'...'9' => self.cur_param = self.cur_param *% 10 +% (byte - '0'),
+                    ';' => {
+                        if (isAltParam(self.cur_param)) self.matched_param = true;
+                        self.cur_param = 0;
+                    },
+                    'h' => {
+                        if (isAltParam(self.cur_param) or self.matched_param) {
+                            self.in_alt = true;
+                            self.alt_enter_offset = self.seq_start;
+                        }
+                        self.state = .normal;
+                    },
+                    'l' => {
+                        if (isAltParam(self.cur_param) or self.matched_param) {
+                            self.in_alt = false;
+                            self.alt_enter_offset = null;
+                        }
+                        self.state = .normal;
+                    },
+                    else => self.state = .normal,
+                },
+            }
+        }
+    }
+
+    pub fn isIdle(self: *const AltScreenTracker) bool {
+        return self.state == .normal;
+    }
+};
+
+/// How many leading ring bytes to SKIP when replaying a backlog of `ring_len`
+/// bytes whose first byte sits at absolute offset `ring_start_abs`.
+/// On the alt screen with the enter still in the ring, start at the enter (the
+/// full initial paint follows it). Otherwise replay at most `tail_cap` bytes —
+/// a torn head is the same status quo as a wrapped ring, and fullscreen apps
+/// repaint over it while the tail covers screen + recent scrollback.
+pub fn replaySkipBytes(
+    in_alt: bool,
+    alt_enter_offset: ?u64,
+    ring_start_abs: u64,
+    ring_len: usize,
+    tail_cap: usize,
+) usize {
+    const cap_skip = if (ring_len > tail_cap) ring_len - tail_cap else 0;
+    if (in_alt) {
+        if (alt_enter_offset) |enter| {
+            if (enter >= ring_start_abs) {
+                const alt_skip: usize = @intCast(enter - ring_start_abs);
+                if (alt_skip < ring_len) return @max(alt_skip, cap_skip);
+            }
+        }
+    }
+    return cap_skip;
+}
+
+test "AltScreenTracker: enter/leave with 1049, offsets tracked" {
+    var t = AltScreenTracker{};
+    t.feed("hello\x1b[?1049h<paint>", 100);
+    try testing.expect(t.in_alt);
+    try testing.expectEqual(@as(?u64, 105), t.alt_enter_offset);
+    t.feed("\x1b[?1049l", 200);
+    try testing.expect(!t.in_alt);
+    try testing.expect(t.alt_enter_offset == null);
+}
+
+test "AltScreenTracker: sequence split across feeds; multi-param; non-alt ignored" {
+    var t = AltScreenTracker{};
+    t.feed("\x1b[?10", 0);
+    t.feed("49h", 5);
+    try testing.expect(t.in_alt);
+    try testing.expectEqual(@as(?u64, 0), t.alt_enter_offset);
+
+    // Cursor-visibility private mode must not toggle alt state.
+    t.feed("\x1b[?25l\x1b[?25h", 10);
+    try testing.expect(t.in_alt);
+
+    // Multi-param form with an alt param in the list.
+    var t2 = AltScreenTracker{};
+    t2.feed("\x1b[?1049;25h", 50);
+    try testing.expect(t2.in_alt);
+    try testing.expectEqual(@as(?u64, 50), t2.alt_enter_offset);
+}
+
+test "replaySkipBytes: alt enter inside ring wins; tail cap otherwise" {
+    // Ring holds [1000..5000); alt entered at 3000 -> skip 2000.
+    try testing.expectEqual(@as(usize, 2000), replaySkipBytes(true, 3000, 1000, 4000, 1_000_000));
+    // Alt enter fell off the ring -> tail cap applies.
+    try testing.expectEqual(@as(usize, 3000), replaySkipBytes(true, 500, 1000, 4000, 1000));
+    // Main screen: tail cap only.
+    try testing.expectEqual(@as(usize, 3000), replaySkipBytes(false, null, 1000, 4000, 1000));
+    try testing.expectEqual(@as(usize, 0), replaySkipBytes(false, null, 0, 500, 1000));
+    // Alt enter within ring but older than the cap: cap still wins.
+    try testing.expectEqual(@as(usize, 3000), replaySkipBytes(true, 1500, 1000, 4000, 1000));
+}

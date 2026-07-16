@@ -237,6 +237,14 @@ pub const FrontendRuntime = struct {
         return self.client.getVtFd();
     }
 
+    pub fn vtConnGen(self: *const FrontendRuntime) u64 {
+        return self.client.vt_conn_gen;
+    }
+
+    pub fn ctlConnGen(self: *const FrontendRuntime) u64 {
+        return self.client.ctl_conn_gen;
+    }
+
     pub fn getCtlFd(self: *FrontendRuntime) ?posix.fd_t {
         return self.client.getCtlFd();
     }
