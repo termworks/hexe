@@ -939,6 +939,32 @@ pub fn readControlHeaderTimeout(fd: posix.fd_t, timeout_ms: i32) !ControlHeader 
     return std.mem.bytesToValue(ControlHeader, &buf);
 }
 
+/// Read a ControlHeader with NO time budget — blocks until the bytes arrive.
+///
+/// For a caller waiting on an external event of genuinely unbounded duration:
+/// the `hexe mux float` CLI blocks here until the user CLOSES the float, which
+/// for an interactive float (yazi, an editor, a long build) is far longer than
+/// any I/O timeout. The plain readControlHeader (10s default) gave up after 10s
+/// and returned "No response", so `dir=$(hexe mux float … yazi …)` came back
+/// empty. This poll()s indefinitely on WouldBlock regardless of any SO_RCVTIMEO.
+pub fn readControlHeaderBlocking(fd: posix.fd_t) !ControlHeader {
+    var buf: [@sizeOf(ControlHeader)]u8 = undefined;
+    var off: usize = 0;
+    while (off < buf.len) {
+        const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
+            error.WouldBlock => {
+                var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+                _ = posix.poll(&pfd, -1) catch return error.ConnectionClosed; // wait forever
+                continue;
+            },
+            else => return err,
+        };
+        if (n == 0) return error.ConnectionClosed;
+        off += n;
+    }
+    return std.mem.bytesToValue(ControlHeader, &buf);
+}
+
 /// Non-blocking variant: returns WouldBlock if no data available on first byte,
 /// but waits on remaining bytes (header in-flight).
 pub fn tryReadControlHeader(fd: posix.fd_t) !ControlHeader {

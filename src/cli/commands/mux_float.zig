@@ -176,8 +176,12 @@ pub fn runMuxFloat(
         return;
     };
 
-    // Wait for response (FloatCreated for immediate, FloatResult for wait).
-    const hdr = wire.readControlHeader(fd) catch {
+    // Wait for the response. wait_for_exit is always on for the CLI, so this
+    // blocks until the user CLOSES the float — seconds to hours for an
+    // interactive float. Must be UNBOUNDED: the 10s wire default made the CLI
+    // give up on any float open longer than 10s and return empty, breaking
+    // `dir=$(hexe mux float … yazi …)` and every other capture-based float.
+    const hdr = wire.readControlHeaderBlocking(fd) catch {
         print("No response from ses\n", .{});
         return;
     };
