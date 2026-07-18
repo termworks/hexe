@@ -1296,7 +1296,9 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
         return false;
     };
 
-    const hdr = wire.readControlHeader(fd) catch {
+    // Block UNBOUNDED: this confirm has timeout_ms=0 (waits for the user forever);
+    // the 10s wire default aborted the prompt after 10s.
+    const hdr = wire.readControlHeaderBlocking(fd) catch {
         posix.close(fd);
         return false;
     };

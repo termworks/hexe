@@ -93,7 +93,12 @@ pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i6
         std.process.exit(1);
     };
 
-    const hdr = wire.readControlHeader(fd) catch {
+    // Interactive popup: block UNBOUNDED for the user's response. A popup with
+    // no timeout (timeout_ms == 0) waits for the user indefinitely; the 10s wire
+    // default made the CLI give up after 10s. The frontend always sends a
+    // pop_response (user action or its own timeout), and a dead connection ends
+    // the wait via EOF.
+    const hdr = wire.readControlHeaderBlocking(fd) catch {
         posix.close(fd);
         std.process.exit(1);
     };
@@ -177,7 +182,12 @@ pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
         std.process.exit(1);
     };
 
-    const hdr = wire.readControlHeader(fd) catch {
+    // Interactive popup: block UNBOUNDED for the user's response. A popup with
+    // no timeout (timeout_ms == 0) waits for the user indefinitely; the 10s wire
+    // default made the CLI give up after 10s. The frontend always sends a
+    // pop_response (user action or its own timeout), and a dead connection ends
+    // the wait via EOF.
+    const hdr = wire.readControlHeaderBlocking(fd) catch {
         posix.close(fd);
         std.process.exit(1);
     };
