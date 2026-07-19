@@ -287,6 +287,19 @@ pub const State = struct {
     overlays: OverlayManager,
     popups: pop.PopupManager,
     pending_action: ?PendingAction,
+    /// Stand-in layout handed out by `currentLayout()` while the session has
+    /// no tab (the startup chooser). It stays empty — splitCount() 0, no
+    /// focused pane — so the loop's per-frame helpers are no-ops instead of
+    /// indexing an empty tab list.
+    empty_layout: Layout,
+    /// Bare `hexe` startup chooser is on screen and no tab exists yet. While
+    /// set, the loop must NOT create its fallback tab and the renderer must
+    /// draw the MUX popup only — the answer decides what the session becomes.
+    startup_choice_pending: bool,
+    /// Session-id prefixes of the same-cwd attach candidates offered by the
+    /// startup chooser, in the order their labels were listed.
+    startup_attach_ids: [16][8]u8,
+    startup_attach_count: usize,
     exit_from_shell_death: bool,
     pending_exit_intent: bool,
     /// If non-zero and in the future, skip confirm_on_exit for the next last-pane death.
@@ -461,6 +474,10 @@ pub const State = struct {
             .overlays = OverlayManager.initWithConfig(allocator, pop_cfg.widgets.keycast),
             .popups = pop.PopupManager.init(allocator),
             .pending_action = null,
+            .empty_layout = Layout.init(allocator, 0, 0),
+            .startup_choice_pending = false,
+            .startup_attach_ids = .{.{0} ** 8} ** 16,
+            .startup_attach_count = 0,
             .exit_from_shell_death = false,
             .pending_exit_intent = false,
             .exit_intent_deadline_ms = 0,
@@ -932,6 +949,21 @@ pub const State = struct {
         return true;
     }
 
+    /// Like `showConfirmOrNotify` but the popup copies `message`, so callers
+    /// may build it in a temporary buffer. (`showConfirm` only borrows.)
+    pub fn showConfirmOwnedOrNotify(self: *State, pending_action: PendingAction, message: []const u8) bool {
+        self.pending_action = pending_action;
+        self.popups.showConfirmOwned(message, .{}) catch |err| {
+            core.logging.logError("terminal", "failed to show confirmation popup", err);
+            self.pending_action = null;
+            self.notifications.show("Confirmation failed");
+            self.needs_render = true;
+            return false;
+        };
+        self.needs_render = true;
+        return true;
+    }
+
     pub fn showPickerOrNotify(
         self: *State,
         pending_action: PendingAction,
@@ -962,6 +994,7 @@ pub const State = struct {
         self.key_timers.deinit(self.allocator);
 
         self.view.deinit(self.allocator);
+        self.empty_layout.deinit();
         {
             var it = self.float_ui.iterator();
             while (it.next()) |entry| {
@@ -1165,6 +1198,9 @@ pub const State = struct {
     }
 
     pub fn currentLayout(self: *State) *Layout {
+        // No tab yet (startup chooser): hand back the empty stand-in rather
+        // than indexing an empty list.
+        if (self.view.tab_views.items.len == 0) return &self.empty_layout;
         return state_tabs.currentLayout(self);
     }
 

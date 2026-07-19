@@ -16,6 +16,7 @@ const loop_input_keys = @import("loop_input_keys.zig");
 const loop_mouse = @import("loop_mouse.zig");
 
 const tab_switch = @import("tab_switch.zig");
+const startup_chooser = @import("startup_chooser.zig");
 
 // Mouse helpers moved to loop_mouse.zig.
 
@@ -497,6 +498,40 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                     }
                     state.pending_action = null;
                     state.popups.clearResults();
+                },
+                .startup_attach_confirm => {
+                    // Bare `hexe`, level 1 with a single same-cwd session.
+                    const attach = state.popups.getConfirmResult() orelse false;
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    if (attach) {
+                        startup_chooser.attachSelected(state, 0);
+                    } else {
+                        startup_chooser.levelTwo(state);
+                    }
+                },
+                .startup_attach_choose => {
+                    // Bare `hexe`, level 1 with several same-cwd sessions.
+                    const selected = state.popups.getPickerResult();
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    if (selected) |idx| {
+                        startup_chooser.attachSelected(state, idx);
+                    } else {
+                        startup_chooser.levelTwo(state);
+                    }
+                },
+                .startup_layout_confirm => {
+                    // Bare `hexe`, level 2: local .hexe.lua.
+                    const load = state.popups.getConfirmResult() orelse false;
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    if (load) {
+                        replaceFromLocalLayout(state);
+                        startup_chooser.finishLayout(state, true);
+                    } else {
+                        startup_chooser.finishPlain(state);
+                    }
                 },
                 else => {
                     // Handle other confirm dialogs (exit/detach/disown/close)

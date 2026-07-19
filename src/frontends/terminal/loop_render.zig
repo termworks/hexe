@@ -260,6 +260,20 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Begin a new frame.
     renderer.vx.screen.clear();
 
+    // Tab-less frame: the bare-`hexe` startup chooser is asking whether to
+    // attach / load .hexe.lua before any pane exists. Everything below indexes
+    // the active tab, so draw the MUX popup on an empty screen and stop.
+    if (state.view.tab_views.items.len == 0) {
+        // Same order as the full path: notifications first, MUX popup on top.
+        notification.renderFull(&state.notifications, renderer, state.term_width, state.term_height);
+        if (state.popups.getActivePopup()) |popup| {
+            popup_render.draw(renderer, popup, &state.pop_config.carrier, state.term_width, state.term_height);
+        }
+        try render_vx.renderFrame(&renderer.vx, stdout, CursorInfo{}, state.force_full_render);
+        state.force_full_render = false;
+        return;
+    }
+
     // Draw splits into the cell buffer.
     var pane_it = state.currentLayout().splitIterator();
     while (pane_it.next()) |pane| {

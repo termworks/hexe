@@ -22,6 +22,12 @@ pub const PendingAction = enum {
     adopt_confirm, // Confirming destroy vs swap
     layout_save_choose, // Choosing local/global/both for layout save
     layout_load_choose, // Choosing detach/replace for local layout load
+    /// Bare `hexe` startup, level 1: exactly one session rooted at this cwd.
+    startup_attach_confirm,
+    /// Bare `hexe` startup, level 1: several sessions rooted at this cwd.
+    startup_attach_choose,
+    /// Bare `hexe` startup, level 2: a local .hexe.lua exists.
+    startup_layout_confirm,
 };
 
 /// A terminal tab view contains only terminal widgets for one projected tab.

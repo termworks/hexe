@@ -712,18 +712,11 @@ pub fn main() !void {
     const matches = try app.parseFrom(normalized_args.items);
 
     if (!matches.containsArgs()) {
-        var has_local_layout = false;
-        if (std.fs.cwd().access(".hexe.lua", .{})) |_| {
-            has_local_layout = true;
-        } else |_| {}
-        if (has_local_layout and shouldLoadLocalLayoutPrompt()) {
-            if (askUseLocalLayout()) {
-                try cli_cmds.runSesOpen(allocator, ".", null, "", "");
-                return;
-            }
-        }
-
-        try runTerminalNew("", null, "", "", false, .{});
+        // Bare `hexe`: the frontend asks — in a popup, once it owns the screen —
+        // whether to attach to a session already rooted here, then whether to
+        // load .hexe.lua. HEXE_SKIP_LOCAL_CONFIG=1 keeps the unattended
+        // straight-to-new-session behaviour for scripts.
+        try runTerminalNew("", null, "", "", false, .{}, shouldPromptOnStartup());
         return;
     }
 
@@ -945,6 +938,8 @@ pub fn main() !void {
                     .user = m.getSingleValue("user") orelse "",
                     .identity = m.getSingleValue("identity") orelse "",
                 },
+                // `hexe mux new` is always an explicit "give me a new one".
+                false,
             );
             return;
         }
@@ -1316,28 +1311,14 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
     return resp.response_type == 1;
 }
 
-fn shouldLoadLocalLayoutPrompt() bool {
+/// Whether bare `hexe` may ask anything at startup (attach / .hexe.lua).
+/// HEXE_SKIP_LOCAL_CONFIG=1 opts scripted runs out of both questions.
+fn shouldPromptOnStartup() bool {
+    if (!std.posix.isatty(std.posix.STDIN_FILENO)) return false;
     if (std.posix.getenv("HEXE_SKIP_LOCAL_CONFIG")) |v| {
         return !std.mem.eql(u8, v, "1");
     }
     return true;
-}
-
-fn askUseLocalLayout() bool {
-    const stdin_fd = std.posix.STDIN_FILENO;
-    const stdout_fd = std.posix.STDOUT_FILENO;
-    if (!std.posix.isatty(stdin_fd) or !std.posix.isatty(stdout_fd)) return true;
-
-    const stdout = std.fs.File.stdout();
-    stdout.writeAll("Local .hexe.lua found. Load local layout? [Y/n]: ") catch return true;
-
-    var line_buf: [32]u8 = undefined;
-    const n = std.posix.read(stdin_fd, line_buf[0..]) catch return true;
-    if (n == 0) return true;
-    const line = std.mem.trim(u8, line_buf[0..n], " \t\r\n");
-    if (line.len == 0) return true;
-    if (std.ascii.eqlIgnoreCase(line, "y") or std.ascii.eqlIgnoreCase(line, "yes")) return true;
-    return false;
 }
 
 /// Raw `--remote`/`--user`/`--identity` CLI values (empty = unset).
@@ -1401,7 +1382,7 @@ fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool, 
     return opts;
 }
 
-fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool, remote: RemoteConnectArgs) !void {
+fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool, remote: RemoteConnectArgs, startup_chooser: bool) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
             if (!try showNestedMuxConfirmation(pane_uuid)) {
@@ -1414,6 +1395,7 @@ fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []
         .name = if (name.len > 0) name else null,
         .log_level = log_level,
         .log_file = if (log_file.len > 0) log_file else null,
+        .startup_chooser = startup_chooser,
         .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses, remote),
     });
 }
