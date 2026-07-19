@@ -127,11 +127,26 @@ pub fn runMuxFloat(
         break :blk owned_result_path.?;
     };
 
-    // Get source session ID from environment (if running inside a mux pane).
+    // Identify the CALLING pane so SES delivers the float to THIS session.
+    //
+    // HEXE_SESSION alone is not enough: pane shells are spawned by the pod, so
+    // they never inherit the frontend's setenv, and a session uuid can change on
+    // reattach anyway. The pod always exports HEXE_PANE_UUID and a pane uuid is
+    // stable, so fall back to it — SES maps it to the session that currently
+    // owns the pane. Without this the request is untargeted and, with more than
+    // one session open, the float surfaced in the wrong one.
     var source_session_id: [32]u8 = .{0} ** 32;
     if (std.posix.getenv("HEXE_SESSION")) |sid| {
         if (sid.len == 32) {
             @memcpy(&source_session_id, sid);
+        }
+    }
+    const zero_id: [32]u8 = .{0} ** 32;
+    if (std.mem.eql(u8, &source_session_id, &zero_id)) {
+        if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
+            if (pane_uuid.len == 32) {
+                @memcpy(&source_session_id, pane_uuid);
+            }
         }
     }
 
@@ -225,7 +240,14 @@ pub fn runMuxFloat(
                     print("Error reading float error response: {s}\n", .{@errorName(err)});
                     return;
                 };
-                print("Error: {s}\n", .{err_buf[0..hdr.payload_len]});
+                // The payload is wire.Error{msg_len} followed by the message;
+                // printing it raw leaked the length bytes ("\x06\x00no_mux").
+                const err_hdr_len = @sizeOf(wire.Error);
+                const msg = if (hdr.payload_len > err_hdr_len)
+                    err_buf[err_hdr_len..hdr.payload_len]
+                else
+                    err_buf[0..hdr.payload_len];
+                print("Error: {s}\n", .{msg});
             } else {
                 print("Error from ses\n", .{});
             }
