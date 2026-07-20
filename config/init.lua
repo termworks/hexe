@@ -19,6 +19,76 @@ local function concat(...)
   return out
 end
 
+-- Distro glyph, resolved in pure Lua from /etc/os-release. Replaces a shell-out
+-- to `distrologo` (which itself spawned lsb_release + cut + xargs) that cost
+-- ~15ms on EVERY prompt. Reading the file is effectively free; memoized so
+-- repeated segment calls in one prompt don't re-read.
+local _distro_glyph
+local function distro_logo()
+  if _distro_glyph ~= nil then
+    return _distro_glyph ~= false and _distro_glyph or nil
+  end
+  local glyph
+  local f = io.open("/etc/os-release", "r")
+  if f then
+    local data = f:read("*a") or ""
+    f:close()
+    local id = data:match("\nID=([%w%-%._]+)") or data:match("^ID=([%w%-%._]+)")
+      or data:match('\nID="([^"]+)"') or data:match('^ID="([^"]+)"')
+    if id then
+      local map = {
+        arch = "\239\140\131",    -- U+F303
+        ubuntu = "\239\140\156",  -- U+F31C
+        debian = "\238\157\189",  -- U+E77D
+        manjaro = "\239\140\146", -- U+F312
+      }
+      glyph = map[id:lower()]
+    end
+  end
+  _distro_glyph = glyph or false
+  return glyph
+end
+
+-- Virtualization/container type. `systemd-detect-virt` is boot-invariant, so
+-- spawning it on every prompt (~3ms) is pure waste. Resolution order:
+--   1. $HEXE_VIRT if the shell exported it (instant, zero spawn)
+--   2. a per-boot cache file in /tmp (spawns once per boot, then free)
+-- To skip even the first spawn, add to your shell init:
+--   export HEXE_VIRT="$(systemd-detect-virt 2>/dev/null)"
+local _virt
+local function detect_virt()
+  if _virt ~= nil then return _virt end
+  local env = os.getenv("HEXE_VIRT")
+  if env and env ~= "" then
+    _virt = env
+    return _virt
+  end
+  local cache = "/tmp/.hexe-virt-" .. (os.getenv("USER") or "u")
+  local cf = io.open(cache, "r")
+  if cf then
+    local v = cf:read("*l")
+    cf:close()
+    if v and v ~= "" then
+      _virt = v
+      return _virt
+    end
+  end
+  local p = io.popen("systemd-detect-virt 2>/dev/null")
+  local v = "none"
+  if p then
+    v = ((p:read("*a") or ""):match("^%s*(.-)%s*$"))
+    p:close()
+    if v == "" then v = "none" end
+  end
+  local wf = io.open(cache, "w")
+  if wf then
+    wf:write(v)
+    wf:close()
+  end
+  _virt = v
+  return _virt
+end
+
 local function focused_process_is_editor(ctx)
   local p = ctx.pane(0)
   return p and (p.process_name == "nvim" or p.process_name == "vim")
@@ -456,14 +526,8 @@ return hexe.setup({
         name = "distro",
         priority = 10,
         render = function(_)
-          local p = io.popen("~/.config/profile/functions/shell/distrologo")
-          if not p then
-            return nil
-          end
-          local raw = p:read("*a") or ""
-          p:close()
-          local t = raw:match("^%s*(.-)%s*$")
-          if not t or t == "" then
+          local t = distro_logo()
+          if not t then
             return nil
           end
           return { { text = " " .. t, style = style_git_branch } }
@@ -530,13 +594,7 @@ return hexe.setup({
         name = "container",
         priority = 50,
         render = function(_)
-          local p = io.popen("systemd-detect-virt 2>/dev/null")
-          if not p then
-            return nil
-          end
-          local out = p:read("*a") or ""
-          p:close()
-          local virt = out:match("^%s*(.-)%s*$")
+          local virt = detect_virt()
           if virt == "" or virt == "none" then
             return nil
           end
