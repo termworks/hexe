@@ -1252,7 +1252,14 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
     var effective_input = input_bytes;
 
-    if (state.drop_next_input_batch) {
+    if (state.drop_input_until_ms != 0 and std.time.milliTimestamp() >= state.drop_input_until_ms) {
+        // The float's trigger-key window closed without any input arriving, so
+        // this batch is genuine user input — deliver it. Without this expiry the
+        // arm sat pending forever and ate whatever was typed next.
+        state.drop_input_until_ms = 0;
+    }
+
+    if (state.drop_input_until_ms != 0) {
         var keep_all = false;
         if (state.stdin_tail_len > 0) {
             const tl: usize = @intCast(state.stdin_tail_len);
@@ -1266,7 +1273,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
             } else {
                 // Plain trigger-key batch: drop it entirely.
-                state.drop_next_input_batch = false;
+                state.drop_input_until_ms = 0;
                 state.stdin_tail_len = 0;
                 vaxis_parser = .{};
                 return;
@@ -1275,12 +1282,12 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
         // Control/reply traffic is preserved (with optional plain-key prefix trimmed).
         if (effective_input.len == 0) {
-            state.drop_next_input_batch = false;
+            state.drop_input_until_ms = 0;
             state.stdin_tail_len = 0;
             vaxis_parser = .{};
             return;
         }
-        state.drop_next_input_batch = false;
+        state.drop_input_until_ms = 0;
     }
 
     // Stdin reads can split escape sequences. Merge with any pending tail first.

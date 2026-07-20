@@ -353,8 +353,20 @@ pub const State = struct {
     terminal_caps_ready: bool = false,
     terminal_query_timed_out: bool = false,
 
-    // Drop one stdin batch after focus handoff to a newly spawned float.
-    drop_next_input_batch: bool = false,
+    // Drop one stdin batch after focus handoff to a newly spawned float, so the
+    // key that triggered the float cannot leak into it.
+    //
+    // TIME-BOUNDED on purpose. This used to be a plain "drop the next batch"
+    // flag with no expiry: when a float opened without a trailing trigger key
+    // (every `hexe mux float` from a shell, and any float the user does not type
+    // into immediately) the flag stayed armed and silently ate the next thing
+    // typed — seconds or minutes later, a completely unrelated keystroke batch.
+    // That is the "I typed a command and nothing happened" / "the first key I
+    // press after a float does nothing" unreliability. Leftover trigger bytes
+    // are already in the tty buffer when the float opens, so they always land
+    // within a few ms; anything arriving after this deadline is genuine input
+    // and must be delivered.
+    drop_input_until_ms: i64 = 0,
 
     pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 
@@ -509,7 +521,7 @@ pub const State = struct {
             .terminal_query_deadline_ms = 0,
             .terminal_caps_ready = false,
             .terminal_query_timed_out = false,
-            .drop_next_input_batch = false,
+            .drop_input_until_ms = 0,
 
             .pending_float_requests = std.AutoHashMap([32]u8, PendingFloatRequest).init(allocator),
 
