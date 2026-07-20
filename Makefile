@@ -21,6 +21,7 @@ smoke:
 	python3 -u scripts/smoke_attach_chaos.py
 	python3 -u scripts/smoke_slow_segments.py
 	python3 -u scripts/smoke_startup_chooser.py
+	python3 -u scripts/smoke_bad_config.py
 
 # Heavy-load scenario: splits + floats + fullscreen apps + huge buffers +
 # pastes, then chaos rounds. Needs a ReleaseFast build (Debug VT parsing is
@@ -37,6 +38,7 @@ smoke-heavy:
 	python3 -u scripts/smoke_float_content.py
 	python3 -u scripts/smoke_float_tui.py
 	python3 -u scripts/smoke_input_after_float.py
+	python3 -u scripts/smoke_float_toggle.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"
