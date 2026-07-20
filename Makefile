@@ -34,6 +34,9 @@ smoke-heavy:
 	python3 -u scripts/smoke_input_exactly_once.py
 	python3 -u scripts/smoke_float.py
 	python3 -u scripts/smoke_float_session.py
+	python3 -u scripts/smoke_float_content.py
+	python3 -u scripts/smoke_float_tui.py
+	python3 -u scripts/smoke_input_after_float.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"
