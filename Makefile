@@ -1,7 +1,7 @@
 .PHONY: build test smoke install release
 
 build:
-	zig build -Doptimize=ReleaseFast
+	zig build -Doptimize=ReleaseFast -Dstrip=true
 
 test:
 	zig build test -Doptimize=ReleaseFast

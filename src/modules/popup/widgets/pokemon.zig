@@ -47,11 +47,8 @@ pub const PokemonState = struct {
             self.sprite_content = null;
         }
 
-        // Get sprite from embedded data
-        const sprite_data = sprites_embedded.getSprite(name, shiny) orelse return error.SpriteNotFound;
-
-        // Duplicate the embedded data so we can free it later
-        const content = try self.allocator.dupe(u8, sprite_data);
+        // Inflate the sprite out of the embedded compressed archive.
+        const content = try sprites_embedded.getSpriteAlloc(self.allocator, name, shiny);
 
         self.sprite_content = content;
         self.sprite_name = name;

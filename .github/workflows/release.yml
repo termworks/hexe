@@ -45,7 +45,7 @@ jobs:
       - name: Build binary
         env:
           GIT_CEILING_DIRECTORIES: ${{ github.workspace }}/.zig-cache
-        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+        run: zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=${{ matrix.target }}
 
       - name: Smoke-test binary
         # Both targets run natively on their runner, so a basic invocation

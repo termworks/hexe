@@ -3,7 +3,39 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const strip = b.option(bool, "strip", "Strip debug info and symbols from the installed hexe binary") orelse false;
     const runtime_epoch = computeRuntimeEpoch(b);
+
+    // Pack the Pokemon sprites into a compressed archive at build time and
+    // expose it as the "sprites_pack" module (consumed by
+    // src/core/sprites_embedded.zig). Raw sprites stay in src/core/sprites;
+    // the binary only embeds the ~1.6MB archive of per-sprite gzip streams.
+    const sprite_pack_tool = b.addExecutable(.{
+        .name = "sprite-pack",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tools/sprite_pack.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run_sprite_pack = b.addRunArtifact(sprite_pack_tool);
+    const sprites_pack_file = run_sprite_pack.addOutputFileArg("sprites.pack");
+    run_sprite_pack.addDirectoryArg(b.path("src/core/sprites"));
+    // Directory args are hashed by path only, so feed a content fingerprint
+    // into the cache manifest to re-pack when sprite files change.
+    run_sprite_pack.addArg(b.fmt("{x}", .{spritesFingerprint(b)}));
+
+    const sprites_wf = b.addWriteFiles();
+    _ = sprites_wf.addCopyFile(sprites_pack_file, "sprites.pack");
+    const sprites_pack_root = sprites_wf.add("sprites_pack.zig",
+        \\pub const data = @embedFile("sprites.pack");
+        \\
+    );
+    const sprites_pack_mod = b.createModule(.{
+        .root_source_file = sprites_pack_root,
+        .target = target,
+        .optimize = optimize,
+    });
 
     // Get ghostty-vt module from dependency
     const ghostty_vt_mod = if (b.lazyDependency("ghostty", .{
@@ -76,6 +108,7 @@ pub fn build(b: *std.Build) void {
         core_module.addImport("liblink", ll);
     }
     core_module.addImport("logly", logly_mod);
+    core_module.addImport("sprites_pack", sprites_pack_mod);
 
     // Create frontend-core module (host-neutral frontend event/action boundary)
     const frontend_core_module = b.createModule(.{
@@ -189,7 +222,20 @@ pub fn build(b: *std.Build) void {
     cli_exe.addCSourceFile(.{
         .file = b.path("src/frontends/terminal/regex_shim.c"),
     });
-    b.installArtifact(cli_exe);
+    if (strip) {
+        // Zig's per-module strip flag would leave dependency debug info in
+        // the link, and `zig objcopy --strip-*` is unimplemented in 0.15, so
+        // run the system `strip` on the finished binary (~78MB -> ~22MB).
+        // Fine for native builds (make build, CI); build without -Dstrip if
+        // no `strip` is available for the target.
+        const strip_cmd = b.addSystemCommand(&.{ "strip", "-o" });
+        const stripped_bin = strip_cmd.addOutputFileArg("hexe");
+        strip_cmd.addFileArg(cli_exe.getEmittedBin());
+        const install_stripped = b.addInstallBinFile(stripped_bin, "hexe");
+        b.getInstallStep().dependOn(&install_stripped.step);
+    } else {
+        b.installArtifact(cli_exe);
+    }
 
     // Run hexe step
     const run_hexe = b.addRunArtifact(cli_exe);
@@ -524,6 +570,27 @@ fn hashDirRecursive(b: *std.Build, hasher: anytype, root_path: []const u8) void 
         defer b.allocator.free(path);
         hashFile(b, hasher, path);
     }
+}
+
+/// Order-independent fingerprint of the sprites directory (path + size per
+/// file). Cheap enough to run on every configure; only used to invalidate
+/// the sprite-pack Run-step cache, which otherwise hashes the directory path
+/// but not its contents.
+fn spritesFingerprint(b: *std.Build) u64 {
+    var acc: u64 = 0;
+    var dir = std.fs.cwd().openDir("src/core/sprites", .{ .iterate = true }) catch return 0;
+    defer dir.close();
+    var walker = dir.walk(b.allocator) catch return 0;
+    defer walker.deinit();
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const st = entry.dir.statFile(entry.basename) catch continue;
+        var h = std.hash.Wyhash.init(0);
+        h.update(entry.path);
+        h.update(std.mem.asBytes(&st.size));
+        acc ^= h.final();
+    }
+    return acc;
 }
 
 fn hasRuntimeEpochExtension(path: []const u8) bool {
