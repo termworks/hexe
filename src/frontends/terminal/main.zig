@@ -15,6 +15,7 @@ const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
 const State = @import("state.zig").State;
 const terminal_host = @import("host.zig");
+const startup_chooser = @import("startup_chooser.zig");
 const statusbar = @import("statusbar.zig");
 
 var debug_enabled: bool = false;
@@ -206,6 +207,10 @@ pub const TerminalArgs = struct {
     log_file: ?[]const u8 = null,
     session_config_path: ?[]const u8 = null,
     session_tab_filter: ?[]const u8 = null,
+    /// Bare `hexe` with no arguments: ask (in a popup) whether to attach to a
+    /// session already rooted at this cwd, then whether to load .hexe.lua,
+    /// before falling back to a plain new session. See startup_chooser.zig.
+    startup_chooser: bool = false,
     connect_options: FrontendConnectOptions = .{},
 };
 
@@ -540,6 +545,10 @@ pub fn run(terminal_args: TerminalArgs) !void {
                 try state.createTab();
             };
         }
+    } else if (terminal_args.startup_chooser) {
+        // Bare `hexe`: ask before committing to anything. No tab is created
+        // here — the popup answer decides. See startup_chooser.zig.
+        startup_chooser.begin(&state);
     } else {
         // Apply the enabled SES layout on normal startup when present.
         var applied_layout = false;
@@ -563,7 +572,9 @@ pub fn run(terminal_args: TerminalArgs) !void {
     // exact: if the detached session listed four floats, the attached session
     // must not opportunistically pull in unrelated free sticky floats from the
     // same CWD.
-    if (!restored_existing_target) {
+    // The startup chooser has no panes to adopt into yet; it adopts itself
+    // once the user has answered.
+    if (!restored_existing_target and !state.startup_choice_pending) {
         state.adoptStickyPanes();
     }
 

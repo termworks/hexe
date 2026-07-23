@@ -14,6 +14,12 @@ const actions = @import("loop_actions.zig");
 const focus_move = @import("focus_move.zig");
 const lua_events = @import("lua_events.zig");
 
+/// How long a newly opened float may swallow already-in-flight input (the key
+/// that triggered it). Those bytes sit in the tty buffer when the float request
+/// arrives, so they land within milliseconds; a generous window still expires
+/// long before a user's next deliberate keystroke.
+const TRIGGER_KEY_DROP_WINDOW_MS: i64 = 200;
+
 const CtlDispatchContext = struct {
     state: *State,
     fd: posix.fd_t,
@@ -895,7 +901,9 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     if (state.view.float_views.items.len > 0) {
         state.syncPaneFocus(state.view.float_views.items[state.view.float_views.items.len - 1], old_uuid);
-        state.drop_next_input_batch = true;
+        // Only swallow input that is already in flight with the float request
+        // (the trigger key's leftover bytes). See State.drop_input_until_ms.
+        state.drop_input_until_ms = std.time.milliTimestamp() + TRIGGER_KEY_DROP_WINDOW_MS;
     }
     state.needs_render = true;
 

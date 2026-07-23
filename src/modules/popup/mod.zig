@@ -152,12 +152,18 @@ pub const PopupManager = struct {
     // Confirm methods (blocking)
     // =========================================================================
 
-    /// Show a confirm dialog (blocking)
+    /// Show a confirm dialog (blocking).
+    ///
+    /// The message is COPIED. It used to be borrowed, and a popup outlives the
+    /// call by however long the user takes to answer — so any caller formatting
+    /// its prompt into a stack buffer left the renderer walking freed bytes.
+    /// Same defect class as the notification manager's borrowed message.
     pub fn showConfirm(self: *PopupManager, message: []const u8, opts: ConfirmOptions) !void {
         if (self.active != null) return error.PopupAlreadyActive;
 
         const c = try self.allocator.create(Confirm);
-        c.* = Confirm.init(self.allocator, message, opts);
+        errdefer self.allocator.destroy(c);
+        c.* = try Confirm.initOwned(self.allocator, message, opts);
         self.active = .{ .confirm = c };
     }
 
@@ -174,12 +180,13 @@ pub const PopupManager = struct {
     // Picker methods (blocking)
     // =========================================================================
 
-    /// Show a picker dialog (blocking)
+    /// Show a picker dialog (blocking). Items are COPIED — see showConfirm.
     pub fn showPicker(self: *PopupManager, items: []const []const u8, opts: PickerOptions) !void {
         if (self.active != null) return error.PopupAlreadyActive;
 
         const p = try self.allocator.create(Picker);
-        p.* = Picker.init(self.allocator, items, opts);
+        errdefer self.allocator.destroy(p);
+        p.* = try Picker.initOwned(self.allocator, items, opts);
         self.active = .{ .picker = p };
     }
 

@@ -2350,8 +2350,8 @@ pub const Server = struct {
                         return;
                     };
                 }
-                // Find the MUX for the source session (or fallback to any MUX).
-                const mux_fd = self.findMuxCtlForSessionId(fr.source_session_id) orelse {
+                // Resolve the caller's own session — never another one.
+                const mux_fd = self.resolveFloatTargetMux(fr.source_session_id) orelse {
                     core.logging.warn("ses", "float_request target mux not found for session={s}", .{fr.source_session_id[0..8]});
                     self.sendBinaryError(fd, "no_mux");
                     posix.close(fd);
@@ -2426,7 +2426,10 @@ pub const Server = struct {
                 const mux_fd = if (std.mem.eql(u8, &sk.uuid, &zero_uuid))
                     self.findAnyMuxCtl()
                 else
-                    self.findMuxCtlForUuid(sk.uuid) orelse self.findAnyMuxCtl();
+                    // A specific pane was named: resolve it or drop. Falling
+                    // back to any mux injected keystrokes into a pane in a
+                    // DIFFERENT session.
+                    self.findMuxCtlForUuid(sk.uuid);
                 if (mux_fd) |mfd| {
                     self.replyOrClose(mfd, .send_keys, buf[0..hdr.payload_len]);
                 }
@@ -2451,7 +2454,13 @@ pub const Server = struct {
                     self.closeCliRequest(fd, "targeted_notify payload malformed");
                     return;
                 };
-                const mux_fd = self.findMuxCtlForUuid(tn.uuid) orelse self.findAnyMuxCtl();
+                const tn_zero_uuid: [32]u8 = .{0} ** 32;
+                const mux_fd = if (std.mem.eql(u8, &tn.uuid, &tn_zero_uuid))
+                    self.findAnyMuxCtl()
+                else
+                    // Specific pane: resolve it or drop — never notify a
+                    // different session.
+                    self.findMuxCtlForUuid(tn.uuid);
                 if (mux_fd) |mfd| {
                     self.replyOrClose(mfd, .targeted_notify, buf[0..hdr.payload_len]);
                 }
@@ -2501,7 +2510,9 @@ pub const Server = struct {
                 const mux_fd = if (std.mem.eql(u8, &pc.uuid, &zero_uuid))
                     self.findAnyMuxCtl()
                 else
-                    self.findMuxCtlForUuid(pc.uuid) orelse self.findAnyMuxCtl();
+                    // Specific pane: resolve it or report no_mux — a popup must
+                    // never appear in a session the caller did not target.
+                    self.findMuxCtlForUuid(pc.uuid);
                 if (mux_fd) |mfd| {
                     self.replyOrClose(mfd, .pop_confirm, buf[0..hdr.payload_len]);
                     if (self.pending_pop_requests.fetchRemove(mfd)) |stale| {
@@ -2540,7 +2551,8 @@ pub const Server = struct {
                 const mux_fd = if (std.mem.eql(u8, &pch.uuid, &zero_uuid))
                     self.findAnyMuxCtl()
                 else
-                    self.findMuxCtlForUuid(pch.uuid) orelse self.findAnyMuxCtl();
+                    // Specific pane: resolve it or report no_mux (see pop_confirm).
+                    self.findMuxCtlForUuid(pch.uuid);
                 if (mux_fd) |mfd| {
                     self.replyOrClose(mfd, .pop_choose, buf[0..hdr.payload_len]);
                     if (self.pending_pop_requests.fetchRemove(mfd)) |stale| {
@@ -2644,7 +2656,12 @@ pub const Server = struct {
         return true;
     }
 
-    /// Find the MUX CTL fd for a given pane UUID.
+    /// Find the MUX CTL fd that owns a given pane UUID, or null.
+    ///
+    /// NEVER falls back to "any connected mux". Resolving a SPECIFIC pane to an
+    /// arbitrary other session is how keystrokes (send_keys), popups and
+    /// notifications ended up in a session the caller never targeted — the
+    /// caller must handle null (report no_mux) instead.
     fn findMuxCtlForUuid(self: *Server, uuid: [32]u8) ?posix.fd_t {
         if (self.ses_state.store.panes.get(uuid)) |pane| {
             if (pane.attached_to) |client_id| {
@@ -2653,18 +2670,38 @@ pub const Server = struct {
                 }
             }
         }
-        // Fallback: try any connected MUX.
-        return self.findAnyMuxCtl();
+        return null;
+    }
+
+    /// Resolve a float request's target mux.
+    ///
+    /// The CLI sends its session uuid when it has one, otherwise its PANE uuid
+    /// (pane shells only ever get HEXE_PANE_UUID), so try both. Returns null
+    /// rather than guessing: a float must open in the session that asked for it.
+    fn resolveFloatTargetMux(self: *Server, id: [32]u8) ?posix.fd_t {
+        if (self.findMuxCtlForSessionId(id)) |mux_fd| return mux_fd;
+        return self.findMuxCtlForUuid(id);
     }
 
     /// Find the MUX CTL fd for a given session ID (32-char hex).
-    /// Falls back to findAnyMuxCtl if session_id is zeroed or not found.
+    ///
+    /// A ZEROED id means "no session specified" (the CLI was run outside a hexe
+    /// pane, so HEXE_SESSION was unset) — there, any connected mux is the
+    /// intended best-effort target.
+    ///
+    /// But when a SPECIFIC session is named and cannot be resolved, this returns
+    /// null so the caller reports no_mux. It must NEVER fall back to "any mux":
+    /// that silently delivered the request to a DIFFERENT session — a float
+    /// launched from one hexe session popped up inside another one. The id goes
+    /// stale easily: a pane's shell inherits HEXE_SESSION at spawn, and a
+    /// reattach can change the session uuid afterwards, so every long-lived
+    /// shell can end up asking for a session that no longer matches.
     fn findMuxCtlForSessionId(self: *Server, session_hex: [32]u8) ?posix.fd_t {
         const zero: [32]u8 = .{0} ** 32;
         if (std.mem.eql(u8, &session_hex, &zero)) return self.findAnyMuxCtl();
 
         // Convert 32-char hex to 16-byte binary for comparison with client.session_id.
-        const session_bin = core.uuid.hexToBin(session_hex) orelse return self.findAnyMuxCtl();
+        const session_bin = core.uuid.hexToBin(session_hex) orelse return null;
 
         for (self.ses_state.store.clients.items) |client| {
             if (client.session_id) |csid| {
@@ -2673,16 +2710,30 @@ pub const Server = struct {
                 }
             }
         }
-        // Fallback: try any connected MUX.
-        return self.findAnyMuxCtl();
+        return null;
     }
 
-    /// Find any connected MUX CTL fd.
+    /// The SOLE connected MUX CTL fd, for requests that name no target.
+    ///
+    /// Returns null when more than one mux is connected: with several sessions
+    /// open there is no correct answer, and picking the first one delivered
+    /// floats/keystrokes/popups into whichever session happened to be first in
+    /// the list. An untargeted request is better refused (the caller reports
+    /// no_mux) than silently executed in someone else's session.
     fn findAnyMuxCtl(self: *Server) ?posix.fd_t {
+        var found: ?posix.fd_t = null;
+        var count: usize = 0;
         for (self.ses_state.store.clients.items) |client| {
-            if (client.mux_ctl_fd) |mux_fd| return mux_fd;
+            if (client.mux_ctl_fd) |mux_fd| {
+                count += 1;
+                if (found == null) found = mux_fd;
+            }
         }
-        return null;
+        if (count > 1) {
+            core.logging.warn("ses", "untargeted request with {d} connected muxes: refusing to guess a session", .{count});
+            return null;
+        }
+        return found;
     }
 
     /// Find the client (MUX) that owns a given pane UUID.

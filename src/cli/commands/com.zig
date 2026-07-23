@@ -1117,8 +1117,10 @@ pub fn runExitIntent(allocator: std.mem.Allocator) !void {
         std.process.exit(0);
     };
 
-    // Wait for exit_intent_result (may block for popup confirm).
-    const hdr = wire.readControlHeader(fd) catch {
+    // Wait for exit_intent_result — this may block on an interactive close-
+    // confirm popup for as long as the user takes, so wait UNBOUNDED (the 10s
+    // wire default aborted the confirm after 10s).
+    const hdr = wire.readControlHeaderBlocking(fd) catch {
         std.process.exit(0);
     };
     if (@as(wire.MsgType, @enumFromInt(hdr.msg_type)) != .exit_intent_result) {

@@ -87,6 +87,92 @@ pub fn hasAsyncCache() bool {
 /// is per render, not per session — it must stay small.
 pub const DEFAULT_TIMEOUT_MS: i32 = 500;
 
+// ===========================================================================
+// File-backed result cache for SHORT-LIVED processes (the `shp` prompt).
+//
+// The in-memory `async_cache` only exists in the long-lived terminal frontend.
+// A fresh `hexe shp prompt` process has none, so without this every prompt
+// re-spawns `sudo -n true` (and any other builtin probe) — ~5ms each, on every
+// keystroke-return. This records the outcome to a tiny file under the per-boot
+// runtime dir and reuses it across prompt invocations within a TTL, so a burst
+// of prompts pays for at most one spawn.
+//
+// Best-effort throughout: any path/IO/parse failure falls straight through to
+// running the command, so it can never wedge or corrupt a prompt.
+// ===========================================================================
+
+fn segCacheDir(buf: []u8) ?[]const u8 {
+    const base = std.posix.getenv("XDG_RUNTIME_DIR") orelse "/tmp";
+    const uid = std.os.linux.getuid();
+    const dir = std.fmt.bufPrint(buf, "{s}/hexe-seg-{d}", .{ base, uid }) catch return null;
+    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return null,
+    };
+    return dir;
+}
+
+fn segCachePath(buf: []u8, key: []const u8) ?[]const u8 {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = segCacheDir(&dir_buf) orelse return null;
+    // Sanitize the key into a safe filename.
+    var name_buf: [128]u8 = undefined;
+    var n: usize = 0;
+    for (key) |c| {
+        if (n >= name_buf.len) break;
+        name_buf[n] = if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_') c else '_';
+        n += 1;
+    }
+    return std.fmt.bufPrint(buf, "{s}/{s}", .{ dir, name_buf[0..n] }) catch null;
+}
+
+/// Like `runArgvSucceeds`, but reuses a file-cached outcome when a previous run
+/// within `ttl_ms` recorded one. For prompt/CLI processes that have no
+/// `async_cache`. Serves rapid successive prompts from one spawn.
+pub fn fileCachedSucceededArgv(key: []const u8, argv: []const []const u8, ttl_ms: i64) bool {
+    const now = std.time.milliTimestamp();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = segCachePath(&path_buf, key) orelse
+        return runArgvSucceeds(std.heap.page_allocator, argv, DEFAULT_TIMEOUT_MS);
+
+    // Cache hit within TTL: "<timestamp_ms> <0|1>".
+    if (std.fs.cwd().readFileAlloc(std.heap.page_allocator, path, 64)) |contents| {
+        defer std.heap.page_allocator.free(contents);
+        const trimmed = std.mem.trim(u8, contents, " \n\r\t");
+        var it = std.mem.splitScalar(u8, trimmed, ' ');
+        const ts_str = it.next() orelse "";
+        const ok_str = it.next() orelse "";
+        if (std.fmt.parseInt(i64, ts_str, 10)) |ts| {
+            if (now - ts >= 0 and now - ts < ttl_ms and ok_str.len > 0) {
+                return ok_str[0] == '1';
+            }
+        } else |_| {}
+    } else |_| {}
+
+    // Miss or stale: run, then record (write to a temp file + rename so a
+    // concurrent prompt never reads a half-written entry).
+    const ok = runArgvSucceeds(std.heap.page_allocator, argv, DEFAULT_TIMEOUT_MS);
+    writeSegCache(path, now, ok);
+    return ok;
+}
+
+fn writeSegCache(path: []const u8, ts_ms: i64, ok: bool) void {
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.{d}", .{ path, std.os.linux.getpid() }) catch return;
+    var line_buf: [64]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "{d} {d}", .{ ts_ms, @as(u8, if (ok) 1 else 0) }) catch return;
+    const f = std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch return;
+    f.writeAll(line) catch {
+        f.close();
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return;
+    };
+    f.close();
+    std.fs.cwd().rename(tmp_path, path) catch {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+    };
+}
+
 fn deadlineExpired(deadline_ms: i64) bool {
     return std.time.milliTimestamp() >= deadline_ms;
 }

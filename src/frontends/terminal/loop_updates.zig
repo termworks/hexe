@@ -103,17 +103,23 @@ pub fn updateOverlaysPopupsAndKeyTimers(state: *State, now_ms: i64) void {
         }
     }
 
-    // Update TAB realm notifications (current tab only).
-    if (state.view.tab_views.items[state.activeTabIndex()].notifications.update()) {
-        state.needs_render = true;
-    }
+    // TAB realm (current tab only) — skipped while the session has no tab,
+    // which is the startup chooser's normal state.
+    if (state.view.tab_views.items.len > 0) {
+        const tab = &state.view.tab_views.items[state.activeTabIndex()];
 
-    // Update TAB realm popups (check for timeout).
-    if (state.view.tab_views.items[state.activeTabIndex()].popups.update()) {
-        state.needs_render = true;
-        // Check if a popup timed out and we need to send response.
-        if (state.pending_pop_response and state.pending_pop_scope == .tab and !state.view.tab_views.items[state.activeTabIndex()].popups.isBlocked()) {
-            loop_ipc.sendPopResponse(state);
+        // Update TAB realm notifications.
+        if (tab.notifications.update()) {
+            state.needs_render = true;
+        }
+
+        // Update TAB realm popups (check for timeout).
+        if (tab.popups.update()) {
+            state.needs_render = true;
+            // Check if a popup timed out and we need to send response.
+            if (state.pending_pop_response and state.pending_pop_scope == .tab and !tab.popups.isBlocked()) {
+                loop_ipc.sendPopResponse(state);
+            }
         }
     }
 

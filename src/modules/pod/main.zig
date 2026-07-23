@@ -416,6 +416,13 @@ const Pod = struct {
     pty: core.Pty,
     server: core.IpcServer,
     client: ?core.IpcConnection = null,
+    /// Bumped every time `client` is replaced. The read watcher is keyed on
+    /// this, NOT on the fd number: closing a client frees its fd, and the
+    /// kernel hands the SAME number back to the next accept. A number-only
+    /// check then reads "already watched" for a brand-new connection whose
+    /// poll registration died with the old file description — the pod goes
+    /// permanently deaf to input while its output keeps flowing.
+    client_gen: u64 = 0,
     observers: std.array_list.Managed(core.IpcConnection),
     backlog: RingBuffer,
     /// Absolute offset of the byte AFTER the last one appended to `backlog`
@@ -672,6 +679,7 @@ const Pod = struct {
         slots: [2]*ClientSlot,
         gen: *u1,
         watched_fd: ?posix.fd_t = null,
+        watched_gen: u64 = 0,
     };
 
     const TimerContext = struct {
@@ -739,8 +747,13 @@ const Pod = struct {
     }
 
     fn armClientWatcher(ctx: *ClientContext, client_fd: posix.fd_t) void {
-        if (ctx.watched_fd != null) {
-            debugLog("armClientWatcher: SKIP fd={d} (watched_fd={?d} still set)", .{ client_fd, ctx.watched_fd });
+        // Only skip when this is genuinely the SAME connection we already
+        // watch. Comparing fd numbers alone is not enough — see Pod.client_gen.
+        if (ctx.watched_fd != null and
+            ctx.watched_fd.? == client_fd and
+            ctx.watched_gen == ctx.pod.client_gen)
+        {
+            debugLog("armClientWatcher: SKIP fd={d} (already watching gen={d})", .{ client_fd, ctx.watched_gen });
             return;
         }
         // Alternate between two completion/slot pairs so we never overwrite
@@ -749,8 +762,9 @@ const Pod = struct {
         const completion = ctx.completions[ctx.gen.*];
         const slot = ctx.slots[ctx.gen.*];
 
-        debugLog("armClientWatcher: ARMED fd={d} gen={d}", .{ client_fd, ctx.gen.* });
+        debugLog("armClientWatcher: ARMED fd={d} slot={d} conn_gen={d}", .{ client_fd, ctx.gen.*, ctx.pod.client_gen });
         ctx.watched_fd = client_fd;
+        ctx.watched_gen = ctx.pod.client_gen;
 
         slot.* = .{ .parent = ctx, .fd = client_fd };
         const watcher = xev.File.initFd(client_fd);
@@ -1284,6 +1298,7 @@ const Pod = struct {
         // path takes over, instead of freezing the pod (and shell) forever.
         setNonBlocking(conn.fd);
         self.client = conn;
+        self.client_gen +%= 1;
 
         // Send acknowledgment so client knows we're ready. Bounded like every
         // other write to this peer — plain writeControl carries the 10s wire

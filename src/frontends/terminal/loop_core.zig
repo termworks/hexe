@@ -199,7 +199,10 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         runtime_events.applyDeferredPaneInfoResponse(state);
         runtime_events.applyDeferredSessionSnapshots(state);
         runtime_events.applyDeferredSessionStolen(state);
-        if (state.view.tab_views.items.len == 0) {
+        // The bare-`hexe` startup chooser runs with no tab on purpose: its
+        // answer decides whether this session gets one at all, and creating a
+        // fallback here would spawn the throwaway pane it exists to avoid.
+        if (state.view.tab_views.items.len == 0 and !state.startup_choice_pending) {
             dead_panes.handleDeferredRespawn(state);
             if (state.view.tab_views.items.len == 0) {
                 if (state.pending_action == .exit and state.exit_from_shell_death) {
@@ -221,16 +224,22 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
 
         hooks.pollResize(state);
 
-        dead_panes.cleanupDeadFloats(state);
+        // The startup chooser owns a pane-less session on purpose; the
+        // dead-pane sweep reads "no panes left" as "last shell exited" and
+        // would tear the frontend down before the user could answer.
+        const skip_dead_sweep = state.startup_choice_pending;
+
+        if (!skip_dead_sweep) dead_panes.cleanupDeadFloats(state);
 
         const now2 = std.time.milliTimestamp();
         loop_updates.updateSelectionAndStatus(state, now2, &last_status_update);
 
         // Handle a cancelled shell-death exit confirmation before dead-pane
         // cleanup re-enters the last-pane exit path.
-        dead_panes.handleDeferredRespawn(state);
-
-        dead_panes.cleanupDeadSplits(state, &dead_splits);
+        if (!skip_dead_sweep) {
+            dead_panes.handleDeferredRespawn(state);
+            dead_panes.cleanupDeadSplits(state, &dead_splits);
+        }
 
         loop_updates.updateOverlaysPopupsAndKeyTimers(state, now2);
 

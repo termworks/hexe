@@ -16,6 +16,7 @@ const loop_input_keys = @import("loop_input_keys.zig");
 const loop_mouse = @import("loop_mouse.zig");
 
 const tab_switch = @import("tab_switch.zig");
+const startup_chooser = @import("startup_chooser.zig");
 
 // Mouse helpers moved to loop_mouse.zig.
 
@@ -497,6 +498,40 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                     }
                     state.pending_action = null;
                     state.popups.clearResults();
+                },
+                .startup_attach_confirm => {
+                    // Bare `hexe`, level 1 with a single same-cwd session.
+                    const attach = state.popups.getConfirmResult() orelse false;
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    if (attach) {
+                        startup_chooser.attachSelected(state, 0);
+                    } else {
+                        startup_chooser.levelTwo(state);
+                    }
+                },
+                .startup_attach_choose => {
+                    // Bare `hexe`, level 1 with several same-cwd sessions.
+                    const selected = state.popups.getPickerResult();
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    if (selected) |idx| {
+                        startup_chooser.attachSelected(state, idx);
+                    } else {
+                        startup_chooser.levelTwo(state);
+                    }
+                },
+                .startup_layout_confirm => {
+                    // Bare `hexe`, level 2: local .hexe.lua.
+                    const load = state.popups.getConfirmResult() orelse false;
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    if (load) {
+                        replaceFromLocalLayout(state);
+                        startup_chooser.finishLayout(state, true);
+                    } else {
+                        startup_chooser.finishPlain(state);
+                    }
                 },
                 else => {
                     // Handle other confirm dialogs (exit/detach/disown/close)
@@ -1217,7 +1252,14 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
     var effective_input = input_bytes;
 
-    if (state.drop_next_input_batch) {
+    if (state.drop_input_until_ms != 0 and std.time.milliTimestamp() >= state.drop_input_until_ms) {
+        // The float's trigger-key window closed without any input arriving, so
+        // this batch is genuine user input — deliver it. Without this expiry the
+        // arm sat pending forever and ate whatever was typed next.
+        state.drop_input_until_ms = 0;
+    }
+
+    if (state.drop_input_until_ms != 0) {
         var keep_all = false;
         if (state.stdin_tail_len > 0) {
             const tl: usize = @intCast(state.stdin_tail_len);
@@ -1231,7 +1273,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
             } else {
                 // Plain trigger-key batch: drop it entirely.
-                state.drop_next_input_batch = false;
+                state.drop_input_until_ms = 0;
                 state.stdin_tail_len = 0;
                 vaxis_parser = .{};
                 return;
@@ -1240,12 +1282,12 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
         // Control/reply traffic is preserved (with optional plain-key prefix trimmed).
         if (effective_input.len == 0) {
-            state.drop_next_input_batch = false;
+            state.drop_input_until_ms = 0;
             state.stdin_tail_len = 0;
             vaxis_parser = .{};
             return;
         }
-        state.drop_next_input_batch = false;
+        state.drop_input_until_ms = 0;
     }
 
     // Stdin reads can split escape sequences. Merge with any pending tail first.

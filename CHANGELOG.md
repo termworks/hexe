@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.1.1] - 2026-07-23
+
+### <!-- 0 -->⛰️  Features
+
+- Embed compressed Pokemon sprites in binary
+- Speed up prompt rendering for shell scripts
+- Popup startup chooser for bare hexe
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Copy notification and popup messages
+- Expire float trigger-key input drop
+- Never route a request to another session
+- Popups/exit-confirm wait unbounded for the user
+- Wait unbounded for float exit, not 10s
+
+### <!-- 6 -->🧪 Testing
+
+- Bad configs and toggled float content
+- Float content, TUI floats, input after float
+- Wire cross-session float smoke
+- Smoke for mux float capture + long wait
+
 ## [0.1.0] - 2026-07-16
 
 ### <!-- 0 -->⛰️  Features
