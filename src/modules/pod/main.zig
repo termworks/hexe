@@ -404,6 +404,9 @@ const REPLAY_TAIL_CAP: usize = 1024 * 1024;
 const PTY_WRITE_BUF_MAX: usize = 16 * 1024 * 1024;
 const POD_EXIT_ATTACH_GRACE_MS: i64 = 300;
 
+/// Cadence of the socket-file / accept-watcher self-heal check.
+const POD_SOCKET_HEAL_MS: i64 = 5_000;
+
 fn applyPasswordMode(backlog: *RingBuffer, password_mode: *bool, enabled: bool) void {
     if (password_mode.* == enabled) return;
     password_mode.* = enabled;
@@ -525,7 +528,6 @@ const Pod = struct {
 
         const server_watcher = xev.File.initFd(self.server.getFd());
         const pty_watcher = xev.File.initFd(self.pty.master_fd);
-        var server_completion: xev.Completion = .{};
         var pty_completion: xev.Completion = .{};
         var pty_drain_completion: xev.Completion = .{};
         var timer_completion: xev.Completion = .{};
@@ -584,14 +586,20 @@ const Pod = struct {
             .backlog_tmp = backlog_tmp,
             .pty_ctx = &pty_ctx,
             .client_ctx = &client_ctx,
+            .watcher_armed = true,
         };
-        server_watcher.poll(&loop, &server_completion, .read, AcceptContext, &accept_ctx, acceptCallback);
+        var initial_accept_node = AcceptNode{
+            .accept_ctx = &accept_ctx,
+            .fd = self.server.getFd(),
+        };
+        server_watcher.poll(&loop, &initial_accept_node.completion, .read, AcceptNode, &initial_accept_node, acceptNodeCallback);
         armPtyWatcher(&pty_ctx);
 
         var timer_ctx = TimerContext{
             .pod = self,
             .opts = opts,
             .ticker = ticker,
+            .accept_ctx = &accept_ctx,
         };
         ticker.run(&loop, &timer_completion, 100, TimerContext, &timer_ctx, timerCallback);
 
@@ -640,7 +648,35 @@ const Pod = struct {
         backlog_tmp: []u8,
         pty_ctx: *PtyContext,
         client_ctx: *ClientContext,
+        // Accept-watcher health (see healServerSocket): whether some accept
+        // watcher is armed for the CURRENT listener, and how many poll
+        // errors it returned in a row.
+        watcher_armed: bool = false,
+        poll_err_burst: usize = 0,
     };
+
+    /// Per-watcher accept node: records which listener fd the watcher was
+    /// armed for, so a watcher left over from a re-bound socket can detect
+    /// it is stale and disarm instead of accepting for (or busy-polling) a
+    /// listener it no longer represents.
+    const AcceptNode = struct {
+        accept_ctx: *AcceptContext,
+        fd: posix.fd_t,
+        completion: xev.Completion = .{},
+    };
+
+    fn acceptNodeCallback(
+        ctx: ?*AcceptNode,
+        loop: *xev.Loop,
+        completion: *xev.Completion,
+        file: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const node = ctx orelse return .disarm;
+        // Superseded by a socket re-bind: this node's listener is closed.
+        if (node.fd != node.accept_ctx.pod.server.getFd()) return .disarm;
+        return acceptCallback(node.accept_ctx, loop, completion, file, result);
+    }
 
     const PtyContext = struct {
         pod: *Pod,
@@ -686,10 +722,61 @@ const Pod = struct {
         pod: *Pod,
         opts: RunOptions,
         ticker: xev.Timer,
+        accept_ctx: *AcceptContext,
         last_meta_ms: i64 = 0,
         last_meta_cwd_hash: ?u64 = null,
         last_meta_write_ms: i64 = 0,
+        last_sock_heal_ms: i64 = 0,
     };
+
+    /// Socket + accept-watcher self-heal, run from the periodic tick. An
+    /// externally deleted socket file (runtime-dir cleanup, /tmp reaper)
+    /// leaves the pod running but permanently unadoptable: the kernel
+    /// listener survives, but no path reaches it and SES can never connect.
+    /// Like the meta-sidecar keepalive, detect the missing file and bind a
+    /// fresh listener at the same path; established connections (uplink,
+    /// attached VT) are unaffected.
+    fn healServerSocket(self: *Pod, loop: *xev.Loop, accept_ctx: *AcceptContext) void {
+        const path_exists = blk: {
+            std.fs.cwd().access(self.server.path, .{}) catch |err| {
+                if (err == error.FileNotFound) break :blk false;
+                // Transient stat failure: don't churn the listener over it.
+                break :blk true;
+            };
+            break :blk true;
+        };
+        if (path_exists and accept_ctx.watcher_armed) return;
+
+        if (!path_exists) {
+            debugLog("server socket '{s}' vanished; re-binding listener", .{self.server.path});
+            const new_server = core.ipc.Server.init(self.allocator, self.server.path) catch |err| {
+                debugLog("socket re-bind failed: {s} (will retry)", .{@errorName(err)});
+                return;
+            };
+            // Close the old listener WITHOUT Server.deinit: deinit unlinks
+            // self.path, which would delete the freshly bound socket. A poll
+            // still pending on the old file description never fires after
+            // close; its AcceptNode disarms via the fd guard on any late
+            // event.
+            posix.close(self.server.fd);
+            self.allocator.free(self.server.path);
+            self.server = new_server;
+        }
+
+        // Arm a fresh heap-owned watcher for the (possibly new) listener.
+        // The node is intentionally never freed: the kernel may reference
+        // its completion for the pod's remaining lifetime, and heal events
+        // are rare (mirrors the accepted stale-node leak in the frontend
+        // connection watchers).
+        const node = self.allocator.create(AcceptNode) catch |err| {
+            debugLog("accept watcher re-arm alloc failed: {s}", .{@errorName(err)});
+            return;
+        };
+        node.* = .{ .accept_ctx = accept_ctx, .fd = self.server.getFd() };
+        const watcher = xev.File.initFd(self.server.getFd());
+        watcher.poll(loop, &node.completion, .read, AcceptNode, node, acceptNodeCallback);
+        accept_ctx.watcher_armed = true;
+    }
 
     fn acceptCallback(
         ctx: ?*AcceptContext,
@@ -701,8 +788,19 @@ const Pod = struct {
         const accept_ctx = ctx orelse return .disarm;
         _ = result catch |err| {
             debugLog("acceptCallback: poll error: {s}", .{@errorName(err)});
+            // A persistently erroring poll (e.g. EBADF after the listener
+            // was replaced under us) would spin the loop at 100% CPU on
+            // rearm. Disarm after a burst; the periodic socket healer
+            // re-arms a fresh watcher for the current listener.
+            accept_ctx.poll_err_burst += 1;
+            if (accept_ctx.poll_err_burst >= 3) {
+                accept_ctx.poll_err_burst = 0;
+                accept_ctx.watcher_armed = false;
+                return .disarm;
+            }
             return .rearm;
         };
+        accept_ctx.poll_err_burst = 0;
 
         while (accept_ctx.pod.server.tryAccept() catch |err| blk: {
             debugLog("acceptCallback: tryAccept failed: {s}", .{@errorName(err)});
@@ -1056,6 +1154,14 @@ const Pod = struct {
 
         const uplink_attached = timer_ctx.pod.client != null or timer_ctx.pod.observers.items.len > 0;
         timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid, uplink_attached);
+
+        {
+            const now_ms: i64 = std.time.milliTimestamp();
+            if (now_ms - timer_ctx.last_sock_heal_ms >= POD_SOCKET_HEAL_MS) {
+                timer_ctx.last_sock_heal_ms = now_ms;
+                timer_ctx.pod.healServerSocket(loop, timer_ctx.accept_ctx);
+            }
+        }
 
         if (timer_ctx.opts.write_meta) {
             const now_ms: i64 = std.time.milliTimestamp();

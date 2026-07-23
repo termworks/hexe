@@ -48,6 +48,47 @@ fn deleteSocketPath(path: []const u8) void {
     }
 }
 
+/// How long to wait for a stale daemon to exit and release the instance
+/// flock, per signal (SIGTERM, then again after SIGKILL escalation).
+const STALE_DAEMON_WAIT_MS: u64 = 3_000;
+
+fn readLockPid(lock_path: []const u8) ?posix.pid_t {
+    const file = std.fs.cwd().openFile(lock_path, .{}) catch return null;
+    defer file.close();
+    var buf: [32]u8 = undefined;
+    const n = file.read(&buf) catch return null;
+    const trimmed = std.mem.trim(u8, buf[0..n], " \t\r\n");
+    const pid = std.fmt.parseInt(posix.pid_t, trimmed, 10) catch return null;
+    if (pid <= 1) return null;
+    return pid;
+}
+
+/// Pid-reuse guard: only signal the pid from the lock file if its cmdline
+/// still looks like `hexe ses daemon ...` (argv is NUL-separated in
+/// /proc/<pid>/cmdline, so plain substring checks work per argument).
+fn pidIsSesDaemon(pid: posix.pid_t) bool {
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pid}) catch return false;
+    const file = std.fs.cwd().openFile(path, .{}) catch return false;
+    defer file.close();
+    var buf: [512]u8 = undefined;
+    const n = file.read(&buf) catch return false;
+    const cmd = buf[0..n];
+    return std.mem.indexOf(u8, cmd, "hexe") != null and
+        std.mem.indexOf(u8, cmd, "ses") != null and
+        std.mem.indexOf(u8, cmd, "daemon") != null;
+}
+
+/// Probe whether the daemon instance flock is currently held. A shared
+/// non-blocking flock succeeds iff no daemon holds the exclusive lock.
+fn instanceLockFree(lock_path: []const u8) bool {
+    const fd = posix.open(lock_path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0) catch return true;
+    defer posix.close(fd);
+    posix.flock(fd, posix.LOCK.SH | posix.LOCK.NB) catch return false;
+    posix.flock(fd, posix.LOCK.UN) catch {};
+    return true;
+}
+
 fn defaultCapabilityFlags(frontend_kind: wire.FrontendKind, transport_kind: wire.FrontendTransportKind) u32 {
     var flags: u32 = wire.FrontendCapabilityFlag.interactive_input | wire.FrontendCapabilityFlag.cell_render;
     switch (frontend_kind) {
@@ -471,7 +512,14 @@ pub const SesClient = struct {
                 return error.ConnectionRefused;
             }
             if (self.stale_runtime_detected) {
-                self.debugLog("ses connect: removing stale runtime socket before daemon restart", .{});
+                // Deleting the socket alone bricks the instance: the old
+                // daemon keeps the instance flock so our replacement daemon
+                // exits without binding, while the old daemon itself becomes
+                // permanently unreachable (an unlinked socket path cannot be
+                // re-linked). Stop the old daemon first and wait for its
+                // flock to release; pods survive and are re-adopted.
+                self.debugLog("ses connect: terminating stale-epoch daemon before restart", .{});
+                self.terminateStaleDaemon(socket_path);
                 deleteSocketPath(socket_path);
                 self.stale_runtime_detected = false;
             }
@@ -508,6 +556,50 @@ pub const SesClient = struct {
     }
 
     /// Open the control channel to SES.
+    /// Stop a stale-epoch daemon so a replacement can take the instance
+    /// flock. The daemon records its pid in the lock file next to the socket
+    /// (acquireInstanceLock); we verify the pid still belongs to a ses daemon
+    /// before signaling (pid reuse), SIGTERM it (graceful: final persist,
+    /// pods survive for re-adoption), and escalate to SIGKILL only if the
+    /// flock is still held after the grace window.
+    fn terminateStaleDaemon(self: *SesClient, socket_path: []const u8) void {
+        const lock_path = std.fmt.allocPrint(self.allocator, "{s}.lock", .{socket_path}) catch return;
+        defer self.allocator.free(lock_path);
+
+        const pid = readLockPid(lock_path) orelse {
+            self.debugLog("stale daemon: no pid recorded in lock file", .{});
+            return;
+        };
+        if (!pidIsSesDaemon(pid)) {
+            self.debugLog("stale daemon: pid {d} is not a ses daemon, not signaling", .{pid});
+            return;
+        }
+
+        posix.kill(pid, posix.SIG.TERM) catch |err| {
+            self.debugLog("stale daemon: SIGTERM pid {d} failed: {s}", .{ pid, @errorName(err) });
+            return;
+        };
+        if (self.waitInstanceLockFree(lock_path)) return;
+
+        // Graceful stop didn't finish in time. SIGKILL skips the final state
+        // flush, but the daemon persists dirty state every second anyway.
+        self.debugLog("stale daemon: pid {d} ignored SIGTERM, escalating to SIGKILL", .{pid});
+        posix.kill(pid, posix.SIG.KILL) catch {};
+        if (!self.waitInstanceLockFree(lock_path)) {
+            self.debugLog("stale daemon: instance lock still held after SIGKILL", .{});
+        }
+    }
+
+    fn waitInstanceLockFree(self: *SesClient, lock_path: []const u8) bool {
+        _ = self;
+        var waited_ms: u64 = 0;
+        while (waited_ms <= STALE_DAEMON_WAIT_MS) : (waited_ms += 100) {
+            if (instanceLockFree(lock_path)) return true;
+            std.Thread.sleep(100 * std.time.ns_per_ms);
+        }
+        return false;
+    }
+
     fn connectCtl(self: *SesClient, socket_path: []const u8) bool {
         const ctl_client = ipc.Client.connect(socket_path) catch |err| {
             logging.logError("frontend-client", "failed to connect SES control socket", err);

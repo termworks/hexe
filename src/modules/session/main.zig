@@ -736,8 +736,21 @@ fn acquireInstanceLock() bool {
         },
     };
 
+    // Record our pid in the lock file so a newer-build frontend that detects
+    // a stale-epoch daemon can terminate us and take over the instance (see
+    // SesClient.terminateStaleDaemon). Best-effort: without it the frontend
+    // just can't auto-replace a stale daemon.
+    writeLockPid(fd);
+
     instance_lock_fd = fd;
     return true;
+}
+
+fn writeLockPid(fd: posix.fd_t) void {
+    var buf: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}\n", .{std.os.linux.getpid()}) catch return;
+    posix.ftruncate(fd, 0) catch return;
+    _ = posix.pwrite(fd, text, 0) catch return;
 }
 
 fn setupSignalHandlers(srv: *server.Server) void {
