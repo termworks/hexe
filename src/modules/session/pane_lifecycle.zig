@@ -55,6 +55,11 @@ fn reattachStealAllowed(client: *const store_mod.Client, uuid: [32]u8) bool {
     return clientSnapshotHasFloat(client, uuid);
 }
 
+/// Budget for finishing a pane_exited frame that was only partly accepted.
+/// Small: the socket already took part of a 42-byte frame, so the peer is
+/// draining; this only bounds the pathological case.
+const PARTIAL_FRAME_COMPLETION_MS: i64 = 50;
+
 fn notifyPaneExitedBestEffort(fd: posix.fd_t, uuid: [32]u8) void {
     var msg: wire.PaneUuid = .{ .uuid = uuid };
     var hdr: wire.ControlHeader = .{
@@ -86,12 +91,40 @@ fn notifyPaneExitedBestEffort(fd: posix.fd_t, uuid: [32]u8) void {
         return;
     }
 
-    const n = posix.write(fd, &buf) catch |err| {
+    var written: usize = 0;
+    written = posix.write(fd, &buf) catch |err| {
         core.logging.logError("ses", "best-effort pane_exited notify write failed during pane takeover", err);
         return;
     };
-    if (n != buf.len) {
-        core.logging.warn("ses", "best-effort pane_exited notify wrote partial frame during pane takeover", .{});
+    if (written == buf.len) return;
+
+    // Partial write. Unlike every other CTL reply this one cannot go through
+    // the server's outbound queue (PLAN.md 1.5): this runs in the STATE layer,
+    // which has no handle on the Server, and threading one in reaches far
+    // wider than the queue is worth. But abandoning a half-written frame is not
+    // an option either — the peer would read the remaining bytes as the next
+    // frame's header and desync its whole control stream.
+    //
+    // So finish it, with a tight budget. The frame is 42 bytes and the socket
+    // just accepted part of it, so the peer is draining and the remainder lands
+    // almost immediately; the budget only bounds the pathological case.
+    const deadline = std.time.milliTimestamp() + PARTIAL_FRAME_COMPLETION_MS;
+    while (written < buf.len) {
+        const left = deadline - std.time.milliTimestamp();
+        if (left <= 0) {
+            core.logging.warn("ses", "pane_exited notify left a partial frame; old mux ctl stream is desynced", .{});
+            return;
+        }
+        var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+        const ok = posix.poll(&pfd, @intCast(@min(left, 25))) catch |err| {
+            core.logging.logError("ses", "pane_exited notify poll failed completing partial frame", err);
+            return;
+        };
+        if (ok == 0 or (pfd[0].revents & posix.POLL.OUT) == 0) continue;
+        written += posix.write(fd, buf[written..]) catch |err| {
+            core.logging.logError("ses", "pane_exited notify write failed completing partial frame", err);
+            return;
+        };
     }
 }
 

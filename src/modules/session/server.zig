@@ -17,6 +17,7 @@ const server_register_handler = @import("server_register_handler.zig");
 const ses = @import("main.zig");
 const vt_stream_reader = @import("vt_stream_reader.zig");
 const FramePool = @import("frame_pool.zig").FramePool;
+const CtlOutQueue = @import("ctl_out_queue.zig").CtlOutQueue;
 const VtStreamReader = vt_stream_reader.VtStreamReader;
 const xev = @import("xev").Dynamic;
 
@@ -83,6 +84,17 @@ fn ctlPayloadLen(hdr: []const u8) u32 {
 /// handlers could never have processed is still rejected — just earlier, and
 /// without blocking.
 const CTL_PAYLOAD_BUF_LEN: usize = 65536;
+
+/// Scratch for assembling a CTL reply frame before it is written or queued.
+/// Sized to hold the common case outright; larger replies fall back to a heap
+/// assembly so a frame is still delivered as one all-or-nothing unit.
+const CTL_FRAME_STACK_LEN: usize = 65536;
+
+/// Cap on reply bytes buffered for one client. A peer that lets this much pile
+/// up is not reading its control socket; the connection is dropped rather than
+/// letting a dead client pin daemon memory. Generous enough for a full session
+/// state/layout dump plus the replies around it.
+const CTL_OUT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// Cursor over a CTL payload that has already been read into memory.
 ///
@@ -151,6 +163,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(allocator),
         .pending_vt_close_fds = .empty,
         .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(allocator),
+        .ctl_out_queues = std.AutoHashMap(posix.fd_t, CtlOutQueue).init(allocator),
         .pending_handshakes = .empty,
         .frame_pool = FramePool.init(allocator),
         .ctl_payload_buf = allocator.alloc(u8, CTL_PAYLOAD_BUF_LEN) catch unreachable,
@@ -181,6 +194,9 @@ fn deinitTestServer(server: *Server) void {
     var mux_queue_it = server.mux_vt_queues.iterator();
     while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(server.allocator);
     server.mux_vt_queues.deinit();
+    var ctl_out_it = server.ctl_out_queues.iterator();
+    while (ctl_out_it.next()) |entry| entry.value_ptr.deinit(server.allocator);
+    server.ctl_out_queues.deinit();
     server.paused_pod_vt_fds.deinit();
     server.pending_handshakes.deinit(server.allocator);
     var vr_it = server.vt_readers.valueIterator();
@@ -761,6 +777,7 @@ pub const Server = struct {
     vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
     pending_vt_close_fds: std.ArrayList(PendingVtClose),
     mux_vt_queues: std.AutoHashMap(posix.fd_t, MuxVtQueue),
+    ctl_out_queues: std.AutoHashMap(posix.fd_t, CtlOutQueue),
     /// Connections accepted but still waiting for their handshake preamble.
     pending_handshakes: std.ArrayList(PendingHandshake),
     /// Resumable HEADER readers, one per CTL fd. See handleBinaryCtlMessage.
@@ -821,6 +838,7 @@ pub const Server = struct {
             .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(page_alloc),
             .pending_vt_close_fds = .empty,
             .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(page_alloc),
+            .ctl_out_queues = std.AutoHashMap(posix.fd_t, CtlOutQueue).init(page_alloc),
             .pending_handshakes = .empty,
             .frame_pool = FramePool.init(page_alloc),
             .ctl_payload_buf = try page_alloc.alloc(u8, CTL_PAYLOAD_BUF_LEN),
@@ -856,6 +874,9 @@ pub const Server = struct {
         self.pending_vt_close_fds.deinit(self.allocator);
         var mux_queue_it = self.mux_vt_queues.iterator();
         while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(self.allocator);
+        var ctl_out_it = self.ctl_out_queues.iterator();
+        while (ctl_out_it.next()) |entry| entry.value_ptr.deinit(self.allocator);
+        self.ctl_out_queues.deinit();
         self.mux_vt_queues.deinit();
         self.paused_pod_vt_fds.deinit();
         for (self.pending_handshakes.items) |ph| posix.close(ph.fd);
@@ -995,6 +1016,11 @@ pub const Server = struct {
                 ses.debugLog("processPendingCtlCloses: fd={d} already closed elsewhere, skipping", .{pending.fd});
                 continue;
             }
+            // Reply-then-close is common here (error replies, disconnect acks,
+            // the CLI request paths). The reply may still be sitting in the out
+            // queue, so give it one last chance to reach the peer before the fd
+            // goes away — dropCtlReader discards whatever is left.
+            _ = self.flushCtlQueue(pending.fd);
             _ = self.binary_ctl_fds.remove(pending.fd);
             self.dropCtlReader(pending.fd);
             // Covers a CTL fd with no client record (never registered, or the
@@ -1249,13 +1275,172 @@ pub const Server = struct {
         queuePendingClose(PendingVtClose, &self.pending_vt_close_fds, self.allocator, .{ .fd = fd, .watcher = watcher }, "VT");
     }
 
+    /// Send a whole CTL frame without ever waiting for the peer (PLAN.md 1.5).
+    ///
+    /// Writes inline for as long as the socket accepts bytes, then buffers the
+    /// rest. Returns false if the connection is dead or has exceeded its
+    /// backlog cap, in which case the caller should close it.
+    ///
+    /// Ordering is the subtle part: if ANYTHING is already queued for this fd,
+    /// the whole frame must queue behind it. Writing inline in that case would
+    /// interleave this frame ahead of the pending bytes and desync the peer's
+    /// control stream.
+    pub fn writeCtlBytes(self: *Server, fd: posix.fd_t, bytes: []const u8) bool {
+        if (bytes.len == 0) return true;
+
+        var off: usize = 0;
+        const queued = if (self.ctl_out_queues.getPtr(fd)) |q| q.pending() else 0;
+        if (queued == 0) {
+            while (off < bytes.len) {
+                const n = posix.write(fd, bytes[off..]) catch |err| switch (err) {
+                    error.WouldBlock => break,
+                    else => {
+                        ses.debugLog("ctl reply: write failed fd={d}: {s}", .{ fd, @errorName(err) });
+                        return false;
+                    },
+                };
+                if (n == 0) return false;
+                off += n;
+            }
+            if (off == bytes.len) return true;
+        }
+        return self.enqueueCtlBytes(fd, bytes[off..]);
+    }
+
+    /// Buffer the unwritten tail of a frame. Overflow closes the connection: a
+    /// peer that has let this much reply data pile up is not reading its
+    /// control socket at all, and the alternative (dropping bytes) would leave
+    /// a truncated frame on the wire.
+    fn enqueueCtlBytes(self: *Server, fd: posix.fd_t, bytes: []const u8) bool {
+        var entry = self.ctl_out_queues.getOrPut(fd) catch |err| {
+            core.logging.logError("ses", "failed to allocate CTL out queue", err);
+            return false;
+        };
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        if (entry.value_ptr.pending() + bytes.len > CTL_OUT_QUEUE_MAX_BYTES) {
+            core.logging.warnWithSource(
+                "ses",
+                "CTL reply backlog exceeded: fd={d} pending={d} max={d}",
+                .{ fd, entry.value_ptr.pending(), CTL_OUT_QUEUE_MAX_BYTES },
+                @src(),
+            );
+            return false;
+        }
+        entry.value_ptr.append(self.allocator, bytes) catch |err| {
+            core.logging.logError("ses", "failed to queue CTL reply", err);
+            return false;
+        };
+        return true;
+    }
+
+    /// Push whatever the socket will now take. Returns false on a permanent
+    /// failure (EPIPE/ECONNRESET), so the caller can drop the connection.
+    fn flushCtlQueue(self: *Server, fd: posix.fd_t) bool {
+        const queue = self.ctl_out_queues.getPtr(fd) orelse return true;
+        defer queue.compact();
+
+        while (queue.pending() > 0) {
+            const n = posix.write(fd, queue.unsent()) catch |err| switch (err) {
+                error.WouldBlock => break,
+                else => {
+                    ses.debugLog("ctl reply: queued write failed fd={d}: {s}", .{ fd, @errorName(err) });
+                    return false;
+                },
+            };
+            if (n == 0) return false;
+            queue.consume(n);
+        }
+        return true;
+    }
+
+    fn flushCtlQueues(self: *Server) void {
+        // Mirrors flushMuxVtQueues: a peer that never drains would otherwise
+        // pin its backlog forever. queueCtlClose only appends to a pending
+        // list, so closing mid-iteration does not mutate this map.
+        var it = self.ctl_out_queues.iterator();
+        while (it.next()) |entry| {
+            if (!self.flushCtlQueue(entry.key_ptr.*)) {
+                self.queueCtlClose(entry.key_ptr.*, null);
+            }
+        }
+    }
+
+    /// Serialize `[header][fixed][trails...]` into `scratch` when it fits.
+    /// Returns null if it does not, so the caller can fall back rather than
+    /// emit a partial frame.
+    fn buildCtlFrame(
+        scratch: []u8,
+        msg_type: wire.MsgType,
+        request_id: u32,
+        fixed: []const u8,
+        trails: []const []const u8,
+    ) ?[]const u8 {
+        var total: usize = fixed.len;
+        for (trails) |t| total += t.len;
+        const frame_len = @sizeOf(wire.ControlHeader) + total;
+        if (frame_len > scratch.len) return null;
+
+        const hdr = wire.ControlHeader{
+            .msg_type = @intFromEnum(msg_type),
+            .request_id = request_id,
+            .payload_len = @intCast(total),
+        };
+        @memcpy(scratch[0..@sizeOf(wire.ControlHeader)], std.mem.asBytes(&hdr));
+        var off: usize = @sizeOf(wire.ControlHeader);
+        if (fixed.len > 0) {
+            @memcpy(scratch[off .. off + fixed.len], fixed);
+            off += fixed.len;
+        }
+        for (trails) |t| {
+            if (t.len == 0) continue;
+            @memcpy(scratch[off .. off + t.len], t);
+            off += t.len;
+        }
+        return scratch[0..frame_len];
+    }
+
+    /// Build and send a CTL frame, closing the connection if it cannot be
+    /// delivered. The single funnel for every SES reply.
+    pub fn sendCtlFrame(
+        self: *Server,
+        fd: posix.fd_t,
+        msg_type: wire.MsgType,
+        fixed: []const u8,
+        trails: []const []const u8,
+        comptime what: []const u8,
+    ) bool {
+        var stack: [CTL_FRAME_STACK_LEN]u8 = undefined;
+        const request_id = self.responseRequestIdForFd(fd);
+
+        if (buildCtlFrame(&stack, msg_type, request_id, fixed, trails)) |frame| {
+            if (self.writeCtlBytes(fd, frame)) return true;
+            core.logging.warnWithSource("ses", what ++ " failed: fd={d} type={s}", .{ fd, @tagName(msg_type) }, @src());
+            self.queueCtlClose(fd, null);
+            return false;
+        }
+
+        // Rare: a reply bigger than the stack frame (large layout/state JSON).
+        // Heap-assemble rather than write piecewise, so the frame still reaches
+        // writeCtlBytes as one all-or-nothing unit.
+        var total: usize = fixed.len;
+        for (trails) |t| total += t.len;
+        const heap = self.allocator.alloc(u8, @sizeOf(wire.ControlHeader) + total) catch |err| {
+            core.logging.logError("ses", what ++ ": failed to allocate reply frame", err);
+            self.queueCtlClose(fd, null);
+            return false;
+        };
+        defer self.allocator.free(heap);
+        const frame = buildCtlFrame(heap, msg_type, request_id, fixed, trails).?;
+        if (self.writeCtlBytes(fd, frame)) return true;
+        core.logging.warnWithSource("ses", what ++ " failed: fd={d} type={s}", .{ fd, @tagName(msg_type) }, @src());
+        self.queueCtlClose(fd, null);
+        return false;
+    }
+
     /// Write a control reply to a client fd; on failure log and queue the
     /// connection for close so stale fds don't accumulate.
     pub fn replyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
-        wire.writeControlWithRequestIdTimeout(fd, msg_type, self.responseRequestIdForFd(fd), payload, HANDLER_IO_TIMEOUT_MS) catch |err| {
-            core.logging.warnWithSource("ses", "reply failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
-            self.queueCtlClose(fd, null);
-        };
+        _ = self.sendCtlFrame(fd, msg_type, payload, &.{}, "reply");
     }
 
     /// Same as replyOrClose but for messages with a trailing byte blob.
@@ -1266,10 +1451,7 @@ pub const Server = struct {
         payload: []const u8,
         trail: []const u8,
     ) void {
-        wire.writeControlWithTrailAndRequestIdTimeout(fd, msg_type, self.responseRequestIdForFd(fd), payload, trail, HANDLER_IO_TIMEOUT_MS) catch |err| {
-            core.logging.warnWithSource("ses", "reply-with-trail failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
-            self.queueCtlClose(fd, null);
-        };
+        _ = self.sendCtlFrame(fd, msg_type, payload, &.{trail}, "reply-with-trail");
     }
 
     pub fn responseRequestIdForFd(self: *const Server, fd: posix.fd_t) u32 {
@@ -1641,6 +1823,7 @@ pub const Server = struct {
         periodic.server.processPendingHandshakes();
         periodic.server.flushMuxVtQueues();
         periodic.server.flushPodVtQueues();
+        periodic.server.flushCtlQueues();
         // Queues just drained; re-arm anything paused for backpressure.
         periodic.server.resumePausedPodVtWatchers();
 
@@ -2265,10 +2448,24 @@ pub const Server = struct {
         self.ctl_payload.pos = self.ctl_payload.buf.len;
     }
 
+    /// Drop all per-fd CTL stream state: the resumable reader AND the outbound
+    /// reply queue. Both are keyed by fd number and both are lethal if they
+    /// outlive the connection — a reused fd number would inherit a half-read
+    /// frame on the way in, or unsent reply bytes prepended to a brand-new
+    /// client's stream on the way out. They are dropped together so the
+    /// several cleanup paths that call this cannot cover one and miss the
+    /// other.
     pub fn dropCtlReader(self: *Server, fd: posix.fd_t) void {
         if (self.ctl_readers.fetchRemove(fd)) |kv| {
             var reader = kv.value;
             reader.deinit(self.allocator);
+        }
+        if (self.ctl_out_queues.fetchRemove(fd)) |kv| {
+            var queue = kv.value;
+            if (queue.pending() > 0) {
+                ses.debugLog("ctl reply: dropping {d} unsent bytes for fd={d}", .{ queue.pending(), fd });
+            }
+            queue.deinit(self.allocator);
         }
     }
 
