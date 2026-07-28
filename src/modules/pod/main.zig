@@ -961,6 +961,20 @@ const Pod = struct {
 
         debugLog("clientCallback: read {d} bytes from fd={d}", .{ n, slot.fd });
         client_ctx.pod.reader.feed(client_ctx.io_buf[0..n], @ptrCast(client_ctx.pod), podFrameCallback);
+
+        // A header declaring a length past MAX_FRAME_LEN cannot be skipped past
+        // -- the reader would sit in `skipping` for up to 4 GiB while the pane
+        // stayed deaf to input and output kept flowing, which looks exactly
+        // like a hung shell and never recovers. Drop the connection; SES
+        // re-dials and the backlog replays.
+        if (client_ctx.pod.reader.hasProtocolError()) {
+            debugLog("clientCallback: protocol error on fd={d}, dropping client", .{slot.fd});
+            client_ctx.pod.reader.reset();
+            if (client_ctx.pod.client) |*conn| conn.close();
+            client_ctx.pod.client = null;
+            client_ctx.watched_fd = null;
+            return .disarm;
+        }
         return .rearm;
     }
 

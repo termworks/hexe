@@ -117,9 +117,20 @@ pub const Queue = struct {
             return self.enqueueFrameChunk(allocator, pane_id, frame_type, "", max_pending_bytes);
         }
 
+        // Chunk to the space left AFTER the (epoch, seq) prefix.
+        //
+        // This chunked at MAX_PAYLOAD_LEN and enqueueFrameChunk then added 16
+        // bytes on top, so a single input payload of exactly >=4 MiB emitted a
+        // MuxVtHeader declaring `len = MAX_PAYLOAD_LEN + 16`. routeMuxToPod
+        // rejects anything over the cap and tears down the mux's ENTIRE VT
+        // channel -- every pane in that frontend, not just the one being pasted
+        // into. Reachable with a >=4 MiB bracketed paste.
+        const is_input_frame = frame_type == INPUT_FRAME_TYPE;
+        const max_chunk = wire.MAX_PAYLOAD_LEN - (if (is_input_frame) INPUT_SEQ_PREFIX_LEN else 0);
+
         var off: usize = 0;
         while (off < payload.len) {
-            const chunk_len = @min(payload.len - off, wire.MAX_PAYLOAD_LEN);
+            const chunk_len = @min(payload.len - off, max_chunk);
             const ok = try self.enqueueFrameChunk(
                 allocator,
                 pane_id,
@@ -321,4 +332,39 @@ test "flushToFd drains queued bytes" {
     try testing.expectEqual(@as(u32, 7), hdr.len);
     try testing.expectEqualStrings("payload", buf[@sizeOf(wire.MuxVtHeader)..n]);
     try testing.expectEqual(@as(usize, 0), queue.queuedBytes());
+}
+
+test "enqueueFrame never emits a frame larger than MAX_PAYLOAD_LEN" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var queue = Queue{};
+    defer queue.deinit(allocator);
+    queue.epoch = 7;
+
+    // Exactly at the cap: chunking at MAX_PAYLOAD_LEN and then adding the
+    // 16-byte prefix declared len = MAX_PAYLOAD_LEN + 16, which routeMuxToPod
+    // rejects by dropping the whole VT channel.
+    const payload = try allocator.alloc(u8, wire.MAX_PAYLOAD_LEN);
+    defer allocator.free(payload);
+    @memset(payload, 'p');
+
+    const ok = try queue.enqueueFrame(allocator, 1, INPUT_FRAME_TYPE, payload, 64 * 1024 * 1024);
+    try testing.expect(ok);
+
+    // Walk the queued bytes and check every declared length.
+    var off: usize = 0;
+    var frames: usize = 0;
+    while (off + @sizeOf(wire.MuxVtHeader) <= queue.bytes.items.len) {
+        const hdr = std.mem.bytesToValue(
+            wire.MuxVtHeader,
+            queue.bytes.items[off..][0..@sizeOf(wire.MuxVtHeader)],
+        );
+        try testing.expect(hdr.len <= wire.MAX_PAYLOAD_LEN);
+        off += @sizeOf(wire.MuxVtHeader) + hdr.len;
+        frames += 1;
+    }
+    try testing.expectEqual(queue.bytes.items.len, off);
+    // It must have split rather than emitted one oversized frame.
+    try testing.expect(frames >= 2);
 }
