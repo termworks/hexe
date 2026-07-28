@@ -34,12 +34,27 @@ pub const SesState = struct {
     polling: PollingState,
     locks: SessionLocks,
 
-    /// The allocator argument is ignored: SES daemonizes by `fork()` + `exec()`-less
-    /// continuation, and any heap-allocating bookkeeping that lives across the
-    /// fork must be on `page_allocator` so the child doesn't inherit a broken
-    /// GPA arena. The parameter is kept in the signature for call-site symmetry
-    /// with other modules (and so tests can still pass `testing.allocator`
-    /// without the callsite looking wrong).
+    /// The allocator argument is ignored: everything here runs on
+    /// `page_allocator`.
+    ///
+    /// MEASURED, do not "fix" this without re-measuring. The cost is real --
+    /// page_allocator services every allocation with an mmap/munmap rounded to
+    /// a page, including per-frame VT queue frames on the routing hot path --
+    /// and the usual argument for changing it looks sound: `run()` completes
+    /// BOTH forks in `daemonize()` before creating any allocator, and the
+    /// daemon is single-threaded, so the classic "another thread held the
+    /// allocator mutex at fork" hazard cannot arise.
+    ///
+    /// It still does not work. Switching this and `Server.init` to a
+    /// GeneralPurposeAllocator makes the DAEMONIZED process panic with
+    /// "reached unreachable code" immediately after its first log line, while
+    /// the same binary in `--foreground` (which skips daemonize) runs fine.
+    /// The likely culprit is that daemonize() closes stdio and chdir("/"),
+    /// which breaks the self-debug-info lookup the GPA's safety machinery uses.
+    ///
+    /// Anyone attacking this should start there -- e.g. an arena or a
+    /// FixedBufferAllocator-backed pool for the hot-path VT frames, which needs
+    /// none of that machinery -- rather than swapping the global allocator.
     pub fn init(_: std.mem.Allocator) SesState {
         const page_alloc = std.heap.page_allocator;
         var self = SesState{

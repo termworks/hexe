@@ -83,7 +83,7 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
     // Find incomplete transactions (start without commit) and keep the
     // operation type so recovery can roll back detaches without destroying a
     // still-valid detached session after a failed reattach.
-    var incomplete = try txlog.findIncompleteOperations(entries.items);
+    var incomplete = try txlog.findIncompleteOperations(allocator, entries.items);
     defer incomplete.deinit(allocator);
 
     if (incomplete.items.len == 0) {

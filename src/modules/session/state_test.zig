@@ -991,8 +991,8 @@ test "TxLog: findIncompleteTransactions detects incomplete detach" {
         .payload = "",
     });
 
-    var incomplete = try txlog.findIncompleteTransactions(entries.items);
-    defer incomplete.deinit(page_alloc); // Use page_alloc since that's what findIncompleteTransactions uses
+    var incomplete = try txlog.findIncompleteTransactions(page_alloc, entries.items);
+    defer incomplete.deinit(page_alloc);
 
     try testing.expectEqual(@as(usize, 1), incomplete.items.len);
     try testing.expectEqualSlices(u8, &session_id_2, &incomplete.items[0]);
@@ -1012,7 +1012,7 @@ test "TxLog: findIncompleteOperations preserves reattach type" {
         .payload = "",
     });
 
-    var incomplete = try txlog.findIncompleteOperations(entries.items);
+    var incomplete = try txlog.findIncompleteOperations(page_alloc, entries.items);
     defer incomplete.deinit(page_alloc);
 
     try testing.expectEqual(@as(usize, 1), incomplete.items.len);

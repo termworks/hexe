@@ -302,10 +302,14 @@ pub const IncompleteTransaction = struct {
 
 /// Analyze transaction log entries to detect incomplete operations and preserve
 /// the operation type for recovery handling.
-pub fn findIncompleteOperations(entries: []const TxLogEntry) !std.ArrayList(IncompleteTransaction) {
+///
+/// Takes the allocator explicitly: it used to allocate the returned list with
+/// `page_allocator` while its caller released it with `ses_state.allocator`.
+/// That only worked because everything happened to BE page_allocator; the
+/// moment the daemon uses a real allocator it is a cross-allocator free.
+pub fn findIncompleteOperations(alloc: std.mem.Allocator, entries: []const TxLogEntry) !std.ArrayList(IncompleteTransaction) {
     var incomplete: std.ArrayList(IncompleteTransaction) = .empty;
 
-    const alloc = std.heap.page_allocator;
     var pending_ops = std.AutoHashMap([16]u8, TxType).init(alloc);
     defer pending_ops.deinit();
 
@@ -337,13 +341,13 @@ pub fn findIncompleteOperations(entries: []const TxLogEntry) !std.ArrayList(Inco
 
 /// Analyze transaction log entries to detect incomplete operations.
 /// Returns sessions that need rollback/recovery.
-pub fn findIncompleteTransactions(entries: []const TxLogEntry) !std.ArrayList([16]u8) {
-    var incomplete_ops = try findIncompleteOperations(entries);
-    defer incomplete_ops.deinit(std.heap.page_allocator);
+pub fn findIncompleteTransactions(alloc: std.mem.Allocator, entries: []const TxLogEntry) !std.ArrayList([16]u8) {
+    var incomplete_ops = try findIncompleteOperations(alloc, entries);
+    defer incomplete_ops.deinit(alloc);
 
     var incomplete: std.ArrayList([16]u8) = .empty;
     for (incomplete_ops.items) |entry| {
-        try incomplete.append(std.heap.page_allocator, entry.session_id);
+        try incomplete.append(alloc, entry.session_id);
     }
     return incomplete;
 }

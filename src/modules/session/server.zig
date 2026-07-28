@@ -742,8 +742,8 @@ pub const Server = struct {
     // Reused by the single-threaded VT router to avoid alloc/free per output frame.
     vt_route_buf: []u8,
 
-    /// Allocator is ignored — see `SesState.init` for the rationale. Everything
-    /// that outlives the fork runs on `page_allocator`.
+    /// Allocator is ignored — see `SesState.init`, which records the measured
+    /// reason this cannot simply be switched to a GeneralPurposeAllocator.
     pub fn init(_: std.mem.Allocator, ses_state: *state.SesState) !Server {
         const page_alloc = std.heap.page_allocator;
         const socket_path = try ipc.getSesSocketPath(page_alloc);
