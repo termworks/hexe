@@ -834,7 +834,17 @@ const Pod = struct {
                 armClientWatcher(accept_ctx.client_ctx, client.fd);
             }
             debugLog("acceptCallback: after armClient, watched_fd={?d}", .{accept_ctx.client_ctx.watched_fd});
-            if (accept_ctx.pod.client != null and accept_ctx.pod.pty_paused) {
+            // Resume for ANY consumer. Back-pressure pauses the PTY when the
+            // ring fills with nothing attached; gating the resume on `client`
+            // alone meant an observer (`hexe pod record`) could attach, receive
+            // the backlog, and then sit there while the child shell stayed
+            // blocked on its PTY writes forever — the reader that was supposed
+            // to unblock it was attached and ignored. armPtyWatcher itself
+            // early-returns while pty_paused is set, so the flag must be
+            // cleared first.
+            if ((accept_ctx.pod.client != null or accept_ctx.pod.observers.items.len > 0) and
+                accept_ctx.pod.pty_paused)
+            {
                 debugLog("acceptCallback: re-arming pty watcher (was paused)", .{});
                 accept_ctx.pod.pty_paused = false;
                 armPtyWatcher(accept_ctx.pty_ctx);
@@ -1266,16 +1276,23 @@ const Pod = struct {
             n,
             REPLAY_TAIL_CAP,
         );
+        // Bounded writes, like the VT client path. The fd was just set
+        // non-blocking and Connection.send is a bare write loop with no
+        // readiness wait, so plain writeFrame returned WouldBlock as soon as
+        // the socket buffer filled — a few hundred KB in. Any pane with real
+        // scrollback therefore dropped the observer mid-replay, before it was
+        // ever appended to self.observers: `hexe pod record` failed
+        // deterministically with a truncated cast and no error surfaced.
         while (off < n) {
             const chunk = @min(@as(usize, 16 * 1024), n - off);
-            pod_protocol.writeFrame(&obs_conn, .output, backlog_tmp[off .. off + chunk]) catch {
+            pod_protocol.writeFrameBounded(&obs_conn, .output, backlog_tmp[off .. off + chunk], CLIENT_WRITE_TIMEOUT_MS) catch {
                 var tmp = obs_conn;
                 tmp.close();
                 return;
             };
             off += chunk;
         }
-        pod_protocol.writeFrame(&obs_conn, .backlog_end, &[_]u8{}) catch {
+        pod_protocol.writeFrameBounded(&obs_conn, .backlog_end, &[_]u8{}, CLIENT_WRITE_TIMEOUT_MS) catch {
             var tmp = obs_conn;
             tmp.close();
             return;
@@ -1297,7 +1314,9 @@ const Pod = struct {
         var i: usize = 0;
         while (i < self.observers.items.len) {
             const obs = &self.observers.items[i];
-            pod_protocol.writeFrame(obs, .output, data) catch {
+            // Same reasoning as the replay above: one transient EAGAIN on a
+            // live observer used to evict it permanently.
+            pod_protocol.writeFrameBounded(obs, .output, data, CLIENT_WRITE_TIMEOUT_MS) catch {
                 obs.close();
                 _ = self.observers.swapRemove(i);
                 continue;

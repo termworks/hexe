@@ -10,6 +10,43 @@ const shared = @import("shared.zig");
 
 const print = std.debug.print;
 
+/// mux->pod INPUT frames carry a 16-byte `[epoch:u64][seq:u64]` little-endian
+/// prefix (see frontends/terminal/vt_write_queue.zig and Pod.applyInputFrame),
+/// which the pod strips before writing to the PTY. `hexe pod attach`
+/// handshakes as POD_HANDSHAKE_SES_VT, so it IS the authoritative VT client and
+/// its frames go through that dedup path — but it was sending raw stdin bytes.
+/// A single keystroke is 1 byte, fails the `payload.len >= 16` check, and was
+/// dropped: every key, arrow and Ctrl-C silently vanished. A >=16-byte burst
+/// was worse, its first 16 bytes being consumed as a bogus (epoch, seq) that
+/// then poisoned the pod's dedup state for the next real client.
+const INPUT_SEQ_PREFIX_LEN: usize = 16;
+
+/// Distinct per attach process so the pod's dedup treats us as a new client
+/// (a different epoch is adopted rather than compared against a stale seq).
+var input_epoch: u64 = 0;
+var input_seq: u64 = 0;
+
+fn inputEpoch() u64 {
+    if (input_epoch == 0) {
+        const pid: u64 = @intCast(std.os.linux.getpid());
+        const now: u64 = @bitCast(std.time.milliTimestamp());
+        input_epoch = (now << 16) ^ pid;
+        if (input_epoch == 0) input_epoch = 1;
+    }
+    return input_epoch;
+}
+
+/// Send an INPUT frame with the (epoch, seq) prefix the pod requires.
+fn writeInputFrame(conn: *ipc.Connection, payload: []const u8) !void {
+    var buf: [4096 + INPUT_SEQ_PREFIX_LEN]u8 = undefined;
+    if (payload.len > buf.len - INPUT_SEQ_PREFIX_LEN) return error.PayloadTooLarge;
+    input_seq += 1;
+    std.mem.writeInt(u64, buf[0..8], inputEpoch(), .little);
+    std.mem.writeInt(u64, buf[8..16], input_seq, .little);
+    @memcpy(buf[INPUT_SEQ_PREFIX_LEN..][0..payload.len], payload);
+    return pod_protocol.writeFrame(conn, .input, buf[0 .. INPUT_SEQ_PREFIX_LEN + payload.len]);
+}
+
 const AttachContext = struct {
     conn: *ipc.Connection,
     frame_reader: *pod_protocol.Reader,
@@ -55,7 +92,7 @@ fn stdinCallback(
                 return .disarm;
             }
             var tmp: [2]u8 = .{ c.detach_code, c.in_buf[0] };
-            pod_protocol.writeFrame(c.conn, .input, tmp[0..2]) catch |err| {
+            writeInputFrame(c.conn, tmp[0..2]) catch |err| {
                 core.logging.logError("pod_attach", "failed to send detach-prefix input", err);
                 c.running = false;
                 return .disarm;
@@ -75,7 +112,7 @@ fn stdinCallback(
         }
     }
 
-    pod_protocol.writeFrame(c.conn, .input, c.in_buf[0..n]) catch |err| {
+    writeInputFrame(c.conn, c.in_buf[0..n]) catch |err| {
         core.logging.logError("pod_attach", "failed to send input", err);
         c.running = false;
         return .disarm;
