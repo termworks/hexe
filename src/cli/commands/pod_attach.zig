@@ -10,45 +10,42 @@ const shared = @import("shared.zig");
 
 const print = std.debug.print;
 
-/// mux->pod INPUT frames carry a 16-byte `[epoch:u64][seq:u64]` little-endian
-/// prefix (see frontends/terminal/vt_write_queue.zig and Pod.applyInputFrame),
-/// which the pod strips before writing to the PTY. `hexe pod attach`
-/// handshakes as POD_HANDSHAKE_SES_VT, so it IS the authoritative VT client and
-/// its frames go through that dedup path — but it was sending raw stdin bytes.
-/// A single keystroke is 1 byte, fails the `payload.len >= 16` check, and was
-/// dropped: every key, arrow and Ctrl-C silently vanished. A >=16-byte burst
-/// was worse, its first 16 bytes being consumed as a bogus (epoch, seq) that
-/// then poisoned the pod's dedup state for the next real client.
-const INPUT_SEQ_PREFIX_LEN: usize = 16;
-
-/// Distinct per attach process so the pod's dedup treats us as a new client
-/// (a different epoch is adopted rather than compared against a stale seq).
-var input_epoch: u64 = 0;
-var input_seq: u64 = 0;
-
-fn inputEpoch() u64 {
-    if (input_epoch == 0) {
-        const pid: u64 = @intCast(std.os.linux.getpid());
-        const now: u64 = @bitCast(std.time.milliTimestamp());
-        input_epoch = (now << 16) ^ pid;
-        if (input_epoch == 0) input_epoch = 1;
-    }
-    return input_epoch;
+/// `hexe pod attach` must NOT displace the pane's real VT client.
+///
+/// It used to handshake as POD_HANDSHAKE_SES_VT, which made it the pod's
+/// authoritative client — and `acceptVtClient` unconditionally closes the
+/// existing one. Running it against a live pane therefore evicted SES, which
+/// re-dialled, which evicted the attach client, and so on: a flap with a full
+/// backlog replay every cycle (PLAN.md C-1).
+///
+/// Now the two directions use the pod's existing non-authoritative channels:
+///
+///   - OUTPUT: one persistent POD_HANDSHAKE_AUX_OBSERVER connection. Observers
+///     receive the backlog replay and every subsequent output frame in exactly
+///     the pod_protocol framing this command already parses, and attaching one
+///     never touches `Pod.client`.
+///   - INPUT: a short-lived POD_HANDSHAKE_AUX_INPUT connection per burst. That
+///     channel writes straight to the PTY without becoming the client.
+///
+/// Aux input bypasses `applyInputFrame`, so it takes the RAW payload — the
+/// 16-byte `[epoch:u64][seq:u64]` prefix that path requires must not be sent
+/// here. (Adding that prefix was the fix for the other half of C-1, back when
+/// this command still spoke on the authoritative channel.)
+fn sendAuxFrame(socket_path: []const u8, frame_type: pod_protocol.FrameType, payload: []const u8) !void {
+    var client = try ipc.Client.connect(socket_path);
+    defer client.close();
+    try wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_INPUT);
+    var conn = client.toConnection();
+    try pod_protocol.writeFrame(&conn, frame_type, payload);
 }
 
-/// Send an INPUT frame with the (epoch, seq) prefix the pod requires.
-fn writeInputFrame(conn: *ipc.Connection, payload: []const u8) !void {
-    var buf: [4096 + INPUT_SEQ_PREFIX_LEN]u8 = undefined;
-    if (payload.len > buf.len - INPUT_SEQ_PREFIX_LEN) return error.PayloadTooLarge;
-    input_seq += 1;
-    std.mem.writeInt(u64, buf[0..8], inputEpoch(), .little);
-    std.mem.writeInt(u64, buf[8..16], input_seq, .little);
-    @memcpy(buf[INPUT_SEQ_PREFIX_LEN..][0..payload.len], payload);
-    return pod_protocol.writeFrame(conn, .input, buf[0 .. INPUT_SEQ_PREFIX_LEN + payload.len]);
+fn sendAuxInput(socket_path: []const u8, payload: []const u8) !void {
+    try sendAuxFrame(socket_path, .input, payload);
 }
 
 const AttachContext = struct {
     conn: *ipc.Connection,
+    socket_path: []const u8,
     frame_reader: *pod_protocol.Reader,
     recorder: ?*AsciicastWriter,
     capture_input: bool,
@@ -92,7 +89,7 @@ fn stdinCallback(
                 return .disarm;
             }
             var tmp: [2]u8 = .{ c.detach_code, c.in_buf[0] };
-            writeInputFrame(c.conn, tmp[0..2]) catch |err| {
+            sendAuxInput(c.socket_path, tmp[0..2]) catch |err| {
                 core.logging.logError("pod_attach", "failed to send detach-prefix input", err);
                 c.running = false;
                 return .disarm;
@@ -112,7 +109,7 @@ fn stdinCallback(
         }
     }
 
-    writeInputFrame(c.conn, c.in_buf[0..n]) catch |err| {
+    sendAuxInput(c.socket_path, c.in_buf[0..n]) catch |err| {
         core.logging.logError("pod_attach", "failed to send input", err);
         c.running = false;
         return .disarm;
@@ -160,6 +157,7 @@ fn connCallback(
 
 const ResizeContext = struct {
     conn: *ipc.Connection,
+    socket_path: []const u8,
     pipe_fd: std.posix.fd_t,
     net_buf: [4096]u8 = undefined,
 };
@@ -180,7 +178,7 @@ fn resizeCallback(
         core.logging.logError("pod_attach", "resize pipe read failed", err);
         return .disarm;
     };
-    sendResize(c.conn, tty.getTermSize()) catch |err| {
+    sendResize(c.socket_path, tty.getTermSize()) catch |err| {
         core.logging.logError("pod_attach", "failed to send resize after SIGWINCH", err);
     };
     return .rearm;
@@ -207,8 +205,8 @@ pub fn runPodAttach(
     };
     defer client.close();
 
-    // Send versioned handshake to identify as VT client.
-    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_SES_VT) catch |err| {
+    // Observer, NOT the authoritative VT client — see sendAuxFrame above.
+    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_OBSERVER) catch |err| {
         print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
         return;
     };
@@ -223,7 +221,7 @@ pub fn runPodAttach(
 
     // Initial resize.
     const term_size = tty.getTermSize();
-    sendResize(&conn, term_size) catch |err| {
+    sendResize(target_socket, term_size) catch |err| {
         print("Warning: failed to send initial resize: {s}\n", .{@errorName(err)});
     };
 
@@ -279,6 +277,7 @@ pub fn runPodAttach(
 
     var attach_ctx = AttachContext{
         .conn = &conn,
+        .socket_path = target_socket,
         .frame_reader = &frame_reader,
         .recorder = if (recorder) |*r| r else null,
         .capture_input = capture_input,
@@ -295,7 +294,7 @@ pub fn runPodAttach(
     var resize_completion: xev.Completion = .{};
     var resize_ctx: ResizeContext = undefined;
     if (pipe_fds[0] >= 0) {
-        resize_ctx = .{ .conn = &conn, .pipe_fd = pipe_fds[0] };
+        resize_ctx = .{ .conn = &conn, .socket_path = target_socket, .pipe_fd = pipe_fds[0] };
         const resize_watcher = xev.File.initFd(pipe_fds[0]);
         resize_watcher.poll(&loop, &resize_completion, .read, ResizeContext, &resize_ctx, resizeCallback);
     }
@@ -318,11 +317,11 @@ fn winchHandler(_: i32) callconv(.c) void {
     _ = c.write(WinchPipe.write_fd, &b, 1);
 }
 
-fn sendResize(conn: *ipc.Connection, size: tty.TermSize) !void {
+fn sendResize(socket_path: []const u8, size: tty.TermSize) !void {
     var payload: [4]u8 = undefined;
     std.mem.writeInt(u16, payload[0..2], size.cols, .big);
     std.mem.writeInt(u16, payload[2..4], size.rows, .big);
-    try pod_protocol.writeFrame(conn, .resize, &payload);
+    try sendAuxFrame(socket_path, .resize, &payload);
 }
 
 fn podFrameCallback(ctx: *anyopaque, frame: pod_protocol.Frame) void {
