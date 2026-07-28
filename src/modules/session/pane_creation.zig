@@ -4,6 +4,7 @@ const ipc = core.ipc;
 const ses = @import("main.zig");
 const pane_spawn = @import("pane_spawn.zig");
 const store_mod = @import("store.zig");
+const sticky_panes = @import("sticky_panes.zig");
 
 fn killPaneLogged(self: anytype, pane_uuid: [32]u8, comptime context: []const u8) void {
     self.killPane(pane_uuid) catch |err| {
@@ -33,6 +34,17 @@ pub fn createPane(
     errdefer if (!pane_inserted) self.allocator.free(pod_socket_path);
 
     const spawn = try pane_spawn.spawnPod(self.allocator, uuid, name, pod_socket_path, shell, cwd, env, isolation_profile);
+    // spawnPod forked a real `hexe pod daemon`. If anything below fails before
+    // the pane is in the store, that process is orphaned: it keeps its pty, its
+    // shell child and its socket forever, with no record for any sweep to find.
+    // The later failures already route through killPaneLogged; these earlier
+    // ones (the sticky-pwd dupe, the panes.put) had nothing at all.
+    errdefer if (!pane_inserted) {
+        if (sticky_panes.podPidMatchesPane(spawn.pod_pid, uuid)) {
+            ses.debugLog("createPane: reaping orphaned pod pid={d} after failed insert", .{spawn.pod_pid});
+            _ = std.c.kill(spawn.pod_pid, std.c.SIG.TERM);
+        }
+    };
 
     const owned_pwd: ?[]const u8 = if (sticky_pwd) |pwd|
         try self.allocator.dupe(u8, pwd)

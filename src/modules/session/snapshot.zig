@@ -191,6 +191,18 @@ pub fn removePaneFromSessionSnapshot(
                     // survived detach/reattach and daemon restarts.
                     float_state.tab_visible = shiftTabVisibleForRemove(float_state.tab_visible, tab_idx);
                 }
+
+                // active_tab is an INDEX too, and every index above the removed
+                // tab just shifted down. Leaving it alone silently moved focus
+                // to a different tab: with tabs [0,1,2] and active_tab = 1,
+                // collapsing tab 0 makes old tab 1 index 0, but active_tab
+                // stayed 1 -- now pointing at what used to be tab 2.
+                // normalizeAfterPaneRemoval only CLAMPS an out-of-range value,
+                // so it never caught this, and it then rewrote the focused pane
+                // of the wrong tab.
+                if (snapshot.active_tab > tab_idx) {
+                    snapshot.active_tab -= 1;
+                }
             }
         },
     }
@@ -253,4 +265,74 @@ test "tab_visible insert then remove at the same index round-trips" {
             try testing.expectEqual(mask, shiftTabVisibleForRemove(shifted, idx));
         }
     }
+}
+
+test "removing a collapsed tab shifts active_tab with it" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Three tabs, each a single pane; focus on tab 1.
+    var snap = try session_model.SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "shifty");
+    defer snap.deinit();
+
+    var uuids: [3][32]u8 = undefined;
+    for (0..3) |i| {
+        uuids[i] = [_]u8{@intCast('a' + i)} ** 32;
+        const root = try allocator.create(session_model.SessionLayoutNode);
+        root.* = .{ .pane = uuids[i] };
+        try snap.tabs.append(allocator, .{
+            .uuid = [_]u8{@intCast('T')} ** 32,
+            .name = try allocator.dupe(u8, "t"),
+            .root = root,
+            .focused_pane_uuid = uuids[i],
+            .allocator = allocator,
+        });
+        try snap.panes.put(uuids[i], .{
+            .uuid = uuids[i],
+            .kind = .split,
+            .parent_tab = i,
+        });
+    }
+    snap.active_tab = 1;
+
+    // Collapse tab 0 by removing its only pane. Old tab 1 becomes index 0, so
+    // focus must follow it to 0 -- not stay at 1, which is now old tab 2.
+    removePaneFromSessionSnapshot(allocator, &snap, uuids[0]);
+
+    try testing.expectEqual(@as(usize, 2), snap.tabs.items.len);
+    try testing.expectEqual(@as(usize, 0), snap.active_tab);
+    try testing.expectEqualSlices(u8, &uuids[1], &snap.tabs.items[0].focused_pane_uuid.?);
+}
+
+test "removing a tab below active_tab leaves it alone" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var snap = try session_model.SessionSnapshot.initMinimal(allocator, [_]u8{'s'} ** 32, "steady");
+    defer snap.deinit();
+
+    var uuids: [3][32]u8 = undefined;
+    for (0..3) |i| {
+        uuids[i] = [_]u8{@intCast('a' + i)} ** 32;
+        const root = try allocator.create(session_model.SessionLayoutNode);
+        root.* = .{ .pane = uuids[i] };
+        try snap.tabs.append(allocator, .{
+            .uuid = [_]u8{@intCast('T')} ** 32,
+            .name = try allocator.dupe(u8, "t"),
+            .root = root,
+            .focused_pane_uuid = uuids[i],
+            .allocator = allocator,
+        });
+        try snap.panes.put(uuids[i], .{
+            .uuid = uuids[i],
+            .kind = .split,
+            .parent_tab = i,
+        });
+    }
+    snap.active_tab = 0;
+
+    // Removing a LATER tab must not move focus.
+    removePaneFromSessionSnapshot(allocator, &snap, uuids[2]);
+    try testing.expectEqual(@as(usize, 2), snap.tabs.items.len);
+    try testing.expectEqual(@as(usize, 0), snap.active_tab);
 }

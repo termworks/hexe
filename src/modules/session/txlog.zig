@@ -12,12 +12,22 @@ pub const TxType = enum(u8) {
     pane_state_change = 5,
 };
 
-pub const TxEntry = struct {
-    tx_type: TxType,
-    timestamp: i64,
-    session_id: [16]u8,
+/// On-disk transaction record.
+///
+/// MUST stay `extern`: this is written to a persistent file with
+/// `std.mem.asBytes`. As a plain struct its layout was compiler-chosen, so the
+/// on-disk format depended on field-ordering decisions -- a toolchain change
+/// would silently reinterpret existing logs as garbage rather than reject them
+/// -- and `asBytes` copied the struct's PADDING, i.e. uninitialized stack
+/// memory, straight into the file. `readAll`'s habit of reading the type tag at
+/// `@offsetOf(...)` rather than from the parsed struct only worked because of
+/// that same layout assumption.
+pub const TxEntry = extern struct {
+    tx_type: TxType align(1),
+    timestamp: i64 align(1),
+    session_id: [16]u8 align(1),
     // Flexible payload for operation-specific data
-    payload_len: u32,
+    payload_len: u32 align(1),
 };
 
 pub const TxLog = struct {
@@ -85,7 +95,10 @@ pub const TxLog = struct {
     pub fn write(self: *TxLog, tx_type: TxType, session_id: [16]u8, payload: []const u8) !void {
         if (self.log_fd == null) try self.open();
 
-        const entry = TxEntry{
+        // Zero-initialise so no uninitialised bytes can reach the file even if
+        // the layout ever gains padding again.
+        var entry = std.mem.zeroes(TxEntry);
+        entry = .{
             .tx_type = tx_type,
             .timestamp = std.time.timestamp(),
             .session_id = session_id,
@@ -281,4 +294,20 @@ pub fn findIncompleteTransactions(entries: []const TxLogEntry) !std.ArrayList([1
         try incomplete.append(std.heap.page_allocator, entry.session_id);
     }
     return incomplete;
+}
+
+test "TxEntry has a stable, padding-free on-disk layout" {
+    const testing = std.testing;
+    // Written to a persistent file with asBytes, so its size must be exactly
+    // the sum of its fields: any padding would be uninitialised stack memory
+    // landing in the log, and a compiler-chosen layout would make existing
+    // logs unreadable after a toolchain change.
+    const expected = @sizeOf(TxType) + @sizeOf(i64) + 16 + @sizeOf(u32);
+    try testing.expectEqual(expected, @sizeOf(TxEntry));
+
+    // Field order is part of the format.
+    try testing.expectEqual(@as(usize, 0), @offsetOf(TxEntry, "tx_type"));
+    try testing.expectEqual(@as(usize, 1), @offsetOf(TxEntry, "timestamp"));
+    try testing.expectEqual(@as(usize, 9), @offsetOf(TxEntry, "session_id"));
+    try testing.expectEqual(@as(usize, 25), @offsetOf(TxEntry, "payload_len"));
 }

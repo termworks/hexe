@@ -3226,6 +3226,47 @@ test "store.allocPaneId: after wrapping, never aliases a live pane" {
     try testing.expectEqual(@as(u16, 2), next);
 }
 
+test "findByNameOrPrefix: an ambiguous NAME resolves to nothing, not an arbitrary session" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    // Duplicate names are deliberately tolerated (cleanup keeps both, and
+    // persist.load can create a pair). Returning the first hashmap-order match
+    // meant `hexe kill-session dup` destroyed an arbitrary one of them.
+    const id_a = [_]u8{'a'} ** 16;
+    const id_b = [_]u8{'b'} ** 16;
+    try store.detached_sessions.put(id_a, .{
+        .session_id = id_a,
+        .session_snapshot = try state.SessionSnapshot.initMinimal(store.allocator, [_]u8{'1'} ** 32, "dup"),
+        .pane_uuids = try store.allocator.alloc([32]u8, 0),
+        .detached_at = 0,
+        .allocator = store.allocator,
+    });
+    try store.detached_sessions.put(id_b, .{
+        .session_id = id_b,
+        .session_snapshot = try state.SessionSnapshot.initMinimal(store.allocator, [_]u8{'2'} ** 32, "dup"),
+        .pane_uuids = try store.allocator.alloc([32]u8, 0),
+        .detached_at = 0,
+        .allocator = store.allocator,
+    });
+
+    const detached_sessions = @import("detached_sessions.zig");
+    try testing.expect(detached_sessions.findByNameOrPrefix(store, "dup") == null);
+
+    // A unique name still resolves.
+    const id_c = [_]u8{'c'} ** 16;
+    try store.detached_sessions.put(id_c, .{
+        .session_id = id_c,
+        .session_snapshot = try state.SessionSnapshot.initMinimal(store.allocator, [_]u8{'3'} ** 32, "solo"),
+        .pane_uuids = try store.allocator.alloc([32]u8, 0),
+        .detached_at = 0,
+        .allocator = store.allocator,
+    });
+    const found = detached_sessions.findByNameOrPrefix(store, "solo") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(u8, &id_c, &found);
+}
+
 test "store closed-fd log: two-generation shield ages an fd out after two rotations" {
     var ses_state = state.SesState.init(testing.allocator);
     defer ses_state.deinit();
