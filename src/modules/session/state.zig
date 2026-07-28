@@ -42,13 +42,16 @@ pub const SesState = struct {
     /// without the callsite looking wrong).
     pub fn init(_: std.mem.Allocator) SesState {
         const page_alloc = std.heap.page_allocator;
-        return .{
+        var self = SesState{
             .allocator = page_alloc,
             .store = SessionStore.init(page_alloc),
             .persistence = Persistence.init(page_alloc),
             .polling = .{},
             .locks = SessionLocks.init(page_alloc),
         };
+        // Makes noteClosedFd infallible; see reserveClosedFdLog.
+        self.store.reserveClosedFdLog();
+        return self;
     }
 
     pub const removePaneFromSessionSnapshot = api.removePaneFromSessionSnapshot;

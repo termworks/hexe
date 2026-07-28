@@ -618,9 +618,36 @@ pub const SessionStore = struct {
         };
     }
 
+    /// Pre-size the closed-fd log so `noteClosedFd` cannot fail to allocate.
+    ///
+    /// That log is the ONLY thing stopping the pending-close processors from
+    /// `posix.close`-ing an fd number that was already closed and reused by a
+    /// brand-new connection -- the failure the comments around it describe in
+    /// detail. Swallowing a failed `put` therefore re-enabled exactly the
+    /// double-close it exists to prevent, silently tearing down a live client.
+    /// Reserved generously: it holds at most two event-loop generations of
+    /// closes, and reserving is far cheaper than the failure it rules out.
+    pub fn reserveClosedFdLog(self: *SessionStore) void {
+        const capacity: u32 = @intCast(core.constants.Limits.max_clients * 8);
+        self.closed_fds_cur.ensureTotalCapacity(capacity) catch |err| {
+            core.logging.logError("ses", "failed to reserve closed-fd log", err);
+        };
+        self.closed_fds_prev.ensureTotalCapacity(capacity) catch |err| {
+            core.logging.logError("ses", "failed to reserve closed-fd log", err);
+        };
+    }
+
     pub fn noteClosedFd(self: *SessionStore, fd: posix.fd_t) void {
+        // Capacity is reserved up front (see reserveClosedFdLog), so this
+        // should never fail. If it somehow does, say so loudly: the next
+        // pending-close pass may now close an fd number that a new connection
+        // already owns.
         self.closed_fds_cur.put(fd, {}) catch |err| {
-            core.logging.logError("ses", "failed to record closed fd", err);
+            core.logging.warn(
+                "ses",
+                "closed-fd log insert FAILED for fd={d} ({s}); a reused fd number may now be double-closed",
+                .{ fd, @errorName(err) },
+            );
         };
         // Free any pending MUX→POD input queue for this fd before its number can
         // be reused by a new connection (which would otherwise inherit stale
@@ -639,6 +666,8 @@ pub const SessionStore = struct {
     /// pending-close processing rounds, then stop shielding the fd number.
     pub fn rotateClosedFdLog(self: *SessionStore) void {
         std.mem.swap(std.AutoHashMap(posix.fd_t, void), &self.closed_fds_cur, &self.closed_fds_prev);
+        // clearRetainingCapacity, not clearAndFree: the reservation from
+        // reserveClosedFdLog is what makes noteClosedFd infallible.
         self.closed_fds_cur.clearRetainingCapacity();
     }
 
