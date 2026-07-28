@@ -434,6 +434,15 @@ pub fn killPane(self: anytype, uuid: [32]u8) !void {
     } else {
         ses.debugLog("killPane: {s} pod_vt_fd=null, removing pane_id from routing", .{hex_uuid[0..8]});
         _ = self.store.pane_id_to_pod_vt.remove(pane.value.pane_id);
+        // pane_id_to_uuid must go on BOTH branches. Detach nulls pod_vt_fd, so
+        // every pane killed while detached (killDetachedSession,
+        // cleanupExpiredDetachedSessions, cleanupDetachedSessions,
+        // cleanupOrphanedPanes on a sticky pane) left a stale
+        // pane_id -> dead uuid entry behind. Those entries never expire, and
+        // every stale hit pushes findMuxVtForPane / muxVtFdOwnsPane onto their
+        // full-pane-table scan fallback — on the per-frame output hot path,
+        // twice per input frame.
+        _ = self.store.pane_id_to_uuid.remove(pane.value.pane_id);
     }
 
     // Never signal a pid that is no longer our pod: after pid reuse it may

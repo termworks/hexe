@@ -3191,6 +3191,41 @@ test "store.allocPaneId: increments, skips 0, wraps to 1" {
     try testing.expectEqual(@as(u16, 1), store.allocPaneId());
 }
 
+test "store.allocPaneId: after wrapping, never aliases a live pane" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    // A live pane holding id 1. Before this fix the counter handed 1 straight
+    // back after wrapping, and connectPodVt then overwrote this pane's routes.
+    const live_uuid = [_]u8{'L'} ** 32;
+    try store.panes.put(live_uuid, .{
+        .uuid = live_uuid,
+        .pod_pid = 0,
+        .pod_socket_path = try store.allocator.dupe(u8, "/tmp/hexe-alloc-test"),
+        .child_pid = 0,
+        .state = .orphaned,
+        .pane_id = 1,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = null,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = store.allocator,
+    });
+
+    // Force the wrap.
+    store.next_pane_id = std.math.maxInt(u16);
+    try testing.expectEqual(std.math.maxInt(u16), store.allocPaneId());
+    try testing.expect(store.pane_ids_wrapped);
+
+    // 1 is taken, so the next id must skip past it.
+    const next = store.allocPaneId();
+    try testing.expect(next != 1);
+    try testing.expectEqual(@as(u16, 2), next);
+}
+
 test "store closed-fd log: two-generation shield ages an fd out after two rotations" {
     var ses_state = state.SesState.init(testing.allocator);
     defer ses_state.deinit();

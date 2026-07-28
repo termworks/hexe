@@ -597,6 +597,9 @@ pub const SessionStore = struct {
     /// tear that connection down (or trip the EBADF safety check). Two
     /// generations because a watcher error CQE for a directly-closed fd can
     /// surface one full loop iteration after the close.
+    /// Set once next_pane_id has wrapped, after which allocPaneId must check
+    /// for collisions with live panes.
+    pane_ids_wrapped: bool = false,
     closed_fds_cur: std.AutoHashMap(posix.fd_t, void),
     closed_fds_prev: std.AutoHashMap(posix.fd_t, void),
 
@@ -672,11 +675,43 @@ pub const SessionStore = struct {
         self.closed_fds_prev.deinit();
     }
 
+    /// Allocate a routing id that no live pane already holds.
+    ///
+    /// `pane_id` is the key for pane_id_to_pod_vt / pod_vt_to_pane_id /
+    /// pane_id_to_uuid. The counter is a u16 that wraps to 1, and it used to
+    /// hand the wrapped value out unconditionally — so after 65535 pane
+    /// creations in one daemon lifetime (very reachable for a multiplexer
+    /// opening and closing per-CWD floats over weeks) a new pane aliased a live
+    /// pane's routes: connectPodVt would overwrite them, and killing either
+    /// pane would tear down the other's routing.
+    ///
+    /// Before the first wrap the counter is strictly monotonic, so the common
+    /// path stays a plain increment with no scan.
     pub fn allocPaneId(self: *SessionStore) u16 {
-        const id = self.next_pane_id;
-        self.next_pane_id +%= 1;
-        if (self.next_pane_id == 0) self.next_pane_id = 1;
-        return id;
+        var attempts: usize = 0;
+        while (attempts <= std.math.maxInt(u16)) : (attempts += 1) {
+            const id = self.next_pane_id;
+            self.next_pane_id +%= 1;
+            if (self.next_pane_id == 0) {
+                self.next_pane_id = 1;
+                self.pane_ids_wrapped = true;
+            }
+            if (!self.pane_ids_wrapped) return id;
+            if (!self.paneIdInUse(id)) return id;
+        }
+        // Every id is live (65535 concurrent panes). Nothing better to do than
+        // hand one back; the caller is far past any sane resource limit.
+        core.logging.warn("ses", "pane id space exhausted; reusing {d}", .{self.next_pane_id});
+        return self.next_pane_id;
+    }
+
+    fn paneIdInUse(self: *const SessionStore, id: u16) bool {
+        if (self.pane_id_to_pod_vt.contains(id)) return true;
+        var it = self.panes.valueIterator();
+        while (it.next()) |pane| {
+            if (pane.pane_id == id) return true;
+        }
+        return false;
     }
 
     pub fn markDirty(self: *SessionStore) void {
