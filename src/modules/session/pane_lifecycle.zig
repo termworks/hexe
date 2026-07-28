@@ -121,13 +121,7 @@ fn prunePaneFromDetachedSnapshot(
     }
 
     if (found_idx) |idx| {
-        var uuids = std.ArrayList([32]u8).fromOwnedSlice(detached.pane_uuids);
-        _ = uuids.orderedRemove(idx);
-        detached.pane_uuids = uuids.toOwnedSlice(detached.allocator) catch |err| {
-            core.logging.logError("ses", "failed to shrink detached pane UUID list after pruning", err);
-            detached.pane_uuids = uuids.items;
-            return;
-        };
+        detached.pane_uuids = snapshot_mod.removeUuidFromOwnedSlice(detached.allocator, detached.pane_uuids, idx);
     }
 
     snapshot_mod.removePaneFromSessionSnapshot(allocator, &detached.session_snapshot, pane_uuid);

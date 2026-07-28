@@ -24,6 +24,33 @@ pub fn shiftTabVisibleForRemove(mask: u64, index: usize) u64 {
     return low | high;
 }
 
+/// Remove `idx` from an owned uuid slice, returning a correctly-sized slice.
+///
+/// The previous idiom was fromOwnedSlice -> orderedRemove -> toOwnedSlice, and
+/// on toOwnedSlice failure it assigned `list.items` -- a slice ONE ELEMENT
+/// SHORTER than its backing allocation. `pane_uuids` is later released with
+/// `allocator.free(self.pane_uuids)`, i.e. by that wrong length: an
+/// allocation-size mismatch under the testing allocator, and an under-unmap
+/// under page_allocator.
+///
+/// Shrinking realloc is effectively infallible (it can return the same
+/// pointer), but if it ever fails the ORIGINAL length is kept so the eventual
+/// free still matches the allocation. That leaves the tail entry duplicated,
+/// which is harmless: a second lookup finds the same pane and the next prune
+/// removes it.
+pub fn removeUuidFromOwnedSlice(
+    allocator: std.mem.Allocator,
+    uuids: [][32]u8,
+    idx: usize,
+) [][32]u8 {
+    if (idx >= uuids.len) return uuids;
+    std.mem.copyForwards([32]u8, uuids[idx .. uuids.len - 1], uuids[idx + 1 ..]);
+    return allocator.realloc(uuids, uuids.len - 1) catch |err| {
+        core.logging.logError("ses", "failed to shrink pane uuid list; keeping full allocation", err);
+        return uuids;
+    };
+}
+
 pub fn paneUuidInList(list: []const [32]u8, uuid: [32]u8) bool {
     for (list) |candidate| {
         if (std.mem.eql(u8, &candidate, &uuid)) return true;
@@ -335,4 +362,52 @@ test "removing a tab below active_tab leaves it alone" {
     removePaneFromSessionSnapshot(allocator, &snap, uuids[2]);
     try testing.expectEqual(@as(usize, 2), snap.tabs.items.len);
     try testing.expectEqual(@as(usize, 0), snap.active_tab);
+}
+
+test "removeUuidFromOwnedSlice returns an exactly-sized slice" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // The testing allocator fails the whole test on an allocation-size
+    // mismatch, so a slice whose length disagrees with its allocation would be
+    // caught right here on free -- which is exactly the bug the old
+    // toOwnedSlice-failure path introduced.
+    var uuids = try allocator.alloc([32]u8, 3);
+    uuids[0] = [_]u8{'a'} ** 32;
+    uuids[1] = [_]u8{'b'} ** 32;
+    uuids[2] = [_]u8{'c'} ** 32;
+
+    uuids = removeUuidFromOwnedSlice(allocator, uuids, 1);
+    defer allocator.free(uuids);
+
+    try testing.expectEqual(@as(usize, 2), uuids.len);
+    try testing.expectEqualSlices(u8, &[_]u8{'a'} ** 32, &uuids[0]);
+    try testing.expectEqualSlices(u8, &[_]u8{'c'} ** 32, &uuids[1]);
+}
+
+test "removeUuidFromOwnedSlice handles first, last and out-of-range" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var first = try allocator.alloc([32]u8, 2);
+    first[0] = [_]u8{'x'} ** 32;
+    first[1] = [_]u8{'y'} ** 32;
+    first = removeUuidFromOwnedSlice(allocator, first, 0);
+    defer allocator.free(first);
+    try testing.expectEqual(@as(usize, 1), first.len);
+    try testing.expectEqualSlices(u8, &[_]u8{'y'} ** 32, &first[0]);
+
+    var last = try allocator.alloc([32]u8, 2);
+    last[0] = [_]u8{'x'} ** 32;
+    last[1] = [_]u8{'y'} ** 32;
+    last = removeUuidFromOwnedSlice(allocator, last, 1);
+    defer allocator.free(last);
+    try testing.expectEqual(@as(usize, 1), last.len);
+    try testing.expectEqualSlices(u8, &[_]u8{'x'} ** 32, &last[0]);
+
+    var untouched = try allocator.alloc([32]u8, 1);
+    untouched[0] = [_]u8{'z'} ** 32;
+    untouched = removeUuidFromOwnedSlice(allocator, untouched, 5);
+    defer allocator.free(untouched);
+    try testing.expectEqual(@as(usize, 1), untouched.len);
 }

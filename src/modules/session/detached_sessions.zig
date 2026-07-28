@@ -48,12 +48,11 @@ pub fn removePaneFromDetachedSessions(
         }
         const idx = found_idx orelse continue;
 
-        var pane_uuids = std.ArrayList([32]u8).fromOwnedSlice(entry.value_ptr.pane_uuids);
-        _ = pane_uuids.orderedRemove(idx);
-        entry.value_ptr.pane_uuids = pane_uuids.toOwnedSlice(entry.value_ptr.allocator) catch {
-            entry.value_ptr.pane_uuids = pane_uuids.items;
-            continue;
-        };
+        entry.value_ptr.pane_uuids = snapshot_mod.removeUuidFromOwnedSlice(
+            entry.value_ptr.allocator,
+            entry.value_ptr.pane_uuids,
+            idx,
+        );
         snapshot_mod.removePaneFromSessionSnapshot(allocator, &entry.value_ptr.session_snapshot, pane_uuid);
 
         if (entry.value_ptr.pane_uuids.len == 0) {
