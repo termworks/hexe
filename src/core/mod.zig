@@ -90,6 +90,13 @@ pub const NotificationStyleConfig = config.NotificationStyleConfig;
 pub const NotificationConfig = config.NotificationConfig;
 pub const PaneQuery = query.PaneQuery;
 
+/// Resumable, non-blocking framed stream reader. Lives in core because BOTH
+/// the session daemon and the pod need it: each accepts connections on a
+/// single-threaded event loop where a bounded blocking read is a stall vector
+/// (PLAN.md 1.2/1.3 for SES, C-4 for the pod).
+pub const stream_reader = @import("stream_reader.zig");
+pub const StreamReader = stream_reader.VtStreamReader;
+
 test {
     // Collect the inline tests from each core submodule. We reference the
     // files explicitly rather than refAllDeclsRecursive(@This()): the latter
