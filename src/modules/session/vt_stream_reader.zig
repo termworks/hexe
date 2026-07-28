@@ -55,7 +55,9 @@ pub const VtStreamReader = struct {
     hdr_len: u8,
     payload_len_fn: PayloadLenFn,
 
-    hdr: [8]u8 = undefined,
+    /// Sized for the largest header this reader is used with: 5 (pod
+    /// protocol), 7 (wire.MuxVtHeader), 10 (wire.ControlHeader).
+    hdr: [16]u8 = undefined,
     hdr_got: u8 = 0,
     have_hdr: bool = false,
     payload_len: u32 = 0,
@@ -65,7 +67,7 @@ pub const VtStreamReader = struct {
     spill_got: usize = 0,
 
     pub fn init(hdr_len: u8, payload_len_fn: PayloadLenFn) VtStreamReader {
-        std.debug.assert(hdr_len <= 8);
+        std.debug.assert(hdr_len <= 16);
         return .{ .hdr_len = hdr_len, .payload_len_fn = payload_len_fn };
     }
 
@@ -324,4 +326,51 @@ test "VtStreamReader: reports EOF and oversize distinctly" {
             else => return error.TestUnexpectedResult,
         }
     }
+}
+
+test "VtStreamReader: header buffer fits every header it is used with" {
+    // wire.ControlHeader is 10 bytes -- larger than the original [8]u8 buffer,
+    // which tripped the init assert at runtime and took down every frontend.
+    // Keep this in sync with the call sites in server.zig.
+    const used_header_sizes = [_]u8{ 5, 7, 10 };
+    const probe = VtStreamReader.init(5, podPayloadLen);
+    for (used_header_sizes) |len| {
+        try std.testing.expect(len <= probe.hdr.len);
+    }
+}
+
+test "VtStreamReader: header-only mode yields a frame as soon as the header lands" {
+    const fds = try testPair();
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const Zero = struct {
+        fn f(_: []const u8) u32 {
+            return 0;
+        }
+    };
+    // 10-byte header, payload deliberately left in the socket for a caller that
+    // reads it separately (how SES handles CTL frames).
+    var r = VtStreamReader.init(10, Zero.f);
+    defer r.deinit(std.testing.allocator);
+
+    const hdr = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    _ = try posix.write(fds[1], hdr[0..4]);
+    try std.testing.expectEqual(Result.none, r.next(fds[0], &.{}, std.testing.allocator));
+
+    _ = try posix.write(fds[1], hdr[4..10]);
+    _ = try posix.write(fds[1], "payload-stays-put");
+    switch (r.next(fds[0], &.{}, std.testing.allocator)) {
+        .frame => |f| {
+            try std.testing.expectEqual(@as(usize, 10), f.hdr.len);
+            try std.testing.expectEqualSlices(u8, &hdr, f.hdr);
+            try std.testing.expectEqual(@as(usize, 0), f.payload.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // The payload really is still in the socket for the caller to read.
+    var rest: [17]u8 = undefined;
+    const n = try posix.read(fds[0], &rest);
+    try std.testing.expectEqualStrings("payload-stays-put", rest[0..n]);
 }

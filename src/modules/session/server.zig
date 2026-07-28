@@ -70,6 +70,14 @@ fn podVtPayloadLen(hdr: []const u8) u32 {
     return std.mem.readInt(u32, hdr[1..5], .big);
 }
 
+/// CTL frames are read HEADER-ONLY by the resumable reader: the payload is left
+/// in the socket for the handlers, which read it themselves. Reporting a zero
+/// payload length makes VtStreamReader hand back a frame the moment the 10-byte
+/// header is complete, which is exactly the resumable-header behaviour wanted.
+fn ctlHeaderOnlyPayloadLen(_: []const u8) u32 {
+    return 0;
+}
+
 /// wire.MuxVtHeader is an extern struct with align(1) fields, so `len` sits at
 /// a fixed offset and is native-endian.
 fn muxVtPayloadLen(hdr: []const u8) u32 {
@@ -116,6 +124,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(allocator),
         .pending_handshakes = .empty,
         .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(allocator),
+        .ctl_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(allocator),
         .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
         .deferred_destroy_ctl = .empty,
         .deferred_destroy_vt = .empty,
@@ -146,6 +155,9 @@ fn deinitTestServer(server: *Server) void {
     var vr_it = server.vt_readers.valueIterator();
     while (vr_it.next()) |r| r.deinit(server.allocator);
     server.vt_readers.deinit();
+    var cr_it = server.ctl_readers.valueIterator();
+    while (cr_it.next()) |r| r.deinit(server.allocator);
+    server.ctl_readers.deinit();
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
@@ -701,6 +713,8 @@ pub const Server = struct {
     mux_vt_queues: std.AutoHashMap(posix.fd_t, MuxVtQueue),
     /// Connections accepted but still waiting for their handshake preamble.
     pending_handshakes: std.ArrayList(PendingHandshake),
+    /// Resumable HEADER readers, one per CTL fd. See handleBinaryCtlMessage.
+    ctl_readers: std.AutoHashMap(posix.fd_t, VtStreamReader),
     /// Resumable frame readers, one per VT fd. Keyed by fd rather than held on
     /// the watcher node because backpressure pause/resume destroys and recreates
     /// that node, which would discard a half-read frame and desync the stream.
@@ -752,6 +766,7 @@ pub const Server = struct {
             .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(page_alloc),
             .pending_handshakes = .empty,
             .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(page_alloc),
+            .ctl_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(page_alloc),
             .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .deferred_destroy_ctl = .empty,
             .deferred_destroy_vt = .empty,
@@ -789,6 +804,9 @@ pub const Server = struct {
         var vt_reader_it = self.vt_readers.valueIterator();
         while (vt_reader_it.next()) |r| r.deinit(self.allocator);
         self.vt_readers.deinit();
+        var ctl_reader_it = self.ctl_readers.valueIterator();
+        while (ctl_reader_it.next()) |r| r.deinit(self.allocator);
+        self.ctl_readers.deinit();
         self.flushDeferredDestroys();
         self.deferred_destroy_ctl.deinit(self.allocator);
         self.deferred_destroy_vt.deinit(self.allocator);
@@ -917,6 +935,7 @@ pub const Server = struct {
                 continue;
             }
             _ = self.binary_ctl_fds.remove(pending.fd);
+            self.dropCtlReader(pending.fd);
             // Covers a CTL fd with no client record (never registered, or the
             // record is already gone); purgeMuxFdState handles the rest.
             self.releasePendingCliWaiters(pending.fd);
@@ -1031,6 +1050,7 @@ pub const Server = struct {
     pub fn purgeMuxFdState(self: *Server, ctl_fd: ?posix.fd_t, vt_fd: ?posix.fd_t) void {
         if (ctl_fd) |cfd| {
             self.releasePendingCliWaiters(cfd);
+            self.dropCtlReader(cfd);
             _ = self.binary_ctl_fds.remove(cfd);
             self.disarmCtlWatcher(cfd);
             if (self.pending_pop_requests.fetchRemove(cfd)) |kv| {
@@ -1274,6 +1294,7 @@ pub const Server = struct {
             // pane goes silent. This queue is the one place all three of those
             // paths funnel through.
             self.dropVtReader(fd);
+            self.dropCtlReader(fd);
             if (self.binary_ctl_fds.contains(fd)) {
                 self.disarmCtlWatcher(fd);
             }
@@ -2148,6 +2169,24 @@ pub const Server = struct {
         return entry.value_ptr;
     }
 
+    fn ctlReaderFor(self: *Server, fd: posix.fd_t) ?*VtStreamReader {
+        const entry = self.ctl_readers.getOrPut(fd) catch |err| {
+            core.logging.logError("ses", "failed to allocate CTL header reader", err);
+            return null;
+        };
+        if (!entry.found_existing) {
+            entry.value_ptr.* = VtStreamReader.init(@sizeOf(wire.ControlHeader), ctlHeaderOnlyPayloadLen);
+        }
+        return entry.value_ptr;
+    }
+
+    pub fn dropCtlReader(self: *Server, fd: posix.fd_t) void {
+        if (self.ctl_readers.fetchRemove(fd)) |kv| {
+            var reader = kv.value;
+            reader.deinit(self.allocator);
+        }
+    }
+
     pub fn dropVtReader(self: *Server, fd: posix.fd_t) void {
         if (self.vt_readers.fetchRemove(fd)) |kv| {
             var reader = kv.value;
@@ -2406,9 +2445,35 @@ pub const Server = struct {
 
     /// Handle a binary control message. Returns false if connection should be removed.
     fn handleBinaryCtlMessage(self: *Server, fd: posix.fd_t) bool {
-        const hdr = wire.readControlHeaderTimeout(fd, CTL_FRAME_IO_TIMEOUT_MS) catch |err| {
-            core.logging.logError("ses", "failed to read control header", err);
-            return false;
+        // Read the header RESUMABLY and without blocking.
+        //
+        // `readControlHeaderTimeout` blocked for up to CTL_FRAME_IO_TIMEOUT_MS
+        // once any part of the 10-byte header had arrived — the cheapest stall
+        // vector there was: send one byte, wait, repeat, and every session
+        // freezes each time. Splitting a header across writes is not just a
+        // hostile act either; `writeAllTimeout` produces it whenever the peer's
+        // socket buffer is briefly full under load, which is exactly what made
+        // the frontend's own header read busy-spin before it was fixed.
+        //
+        // The PAYLOAD is still read by the handlers from this fd with bounded
+        // blocking. Removing that too means separating "where the payload is
+        // read from" from "where the reply goes", since handlers use this one
+        // fd for both — a mechanical change across ~40 handlers in 8 files, and
+        // the remaining half of PLAN.md 1.2.
+        const reader = self.ctlReaderFor(fd) orelse return false;
+        const hdr = switch (reader.next(fd, &.{}, self.allocator)) {
+            .none => return true, // header still in flight; resume on next wakeup
+            .closed => {
+                ses.debugLog("ctl: fd={d} closed", .{fd});
+                return false;
+            },
+            .failed => {
+                core.logging.logError("ses", "failed to read control header", error.BrokenPipe);
+                return false;
+            },
+            // Unreachable: ctlHeaderOnlyPayloadLen always reports 0.
+            .oversize => return false,
+            .frame => |frame| std.mem.bytesToValue(wire.ControlHeader, frame.hdr[0..@sizeOf(wire.ControlHeader)]),
         };
         // Cap payload length before any allocation or chunked read. A
         // misbehaving or malicious client cannot coerce us into a giant
