@@ -624,23 +624,39 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
     rt.lua.pushInteger(@intCast(ctx.now_ms));
     rt.lua.setField(-2, "now_ms");
 
-    var env_map_opt = std.process.getEnvMap(rt.allocator) catch |err| blk: {
-        core.logging.logError("terminal", "statusbar Lua query failed to copy environment", err);
-        break :blk null;
-    };
-    if (env_map_opt) |*env_map| {
-        defer env_map.deinit();
-        rt.lua.createTable(0, @intCast(env_map.count()));
-        var it = env_map.iterator();
-        while (it.next()) |entry| {
-            _ = rt.lua.pushString(entry.key_ptr.*);
-            _ = rt.lua.pushString(entry.value_ptr.*);
-            rt.lua.setTable(-3);
-        }
+    // The frontend's own environment does not change while it runs, but this
+    // used to call getEnvMap() -- allocate and copy every variable -- and then
+    // push all of them into a fresh Lua table for EVERY Context. A Context is
+    // built per statusbar draw and per visible float title, on frames driven by
+    // pane output rather than the status tick, so with a few floats this ran
+    // hundreds of times a second. Build it once and hand out the same table.
+    const env_cache_global = "__hexe_statusbar_env";
+    const cached_env = rt.lua.getGlobal(env_cache_global) catch .nil;
+    if (cached_env == .table) {
         rt.lua.setField(-2, "env");
     } else {
-        rt.lua.createTable(0, 0);
-        rt.lua.setField(-2, "env");
+        rt.lua.pop(1);
+        var env_map_opt = std.process.getEnvMap(rt.allocator) catch |err| blk: {
+            core.logging.logError("terminal", "statusbar Lua query failed to copy environment", err);
+            break :blk null;
+        };
+        if (env_map_opt) |*env_map| {
+            defer env_map.deinit();
+            rt.lua.createTable(0, @intCast(env_map.count()));
+            var it = env_map.iterator();
+            while (it.next()) |entry| {
+                _ = rt.lua.pushString(entry.key_ptr.*);
+                _ = rt.lua.pushString(entry.value_ptr.*);
+                rt.lua.setTable(-3);
+            }
+            // Keep one reference for reuse, set the other on ctx.
+            rt.lua.pushValue(-1);
+            rt.lua.setGlobal(env_cache_global);
+            rt.lua.setField(-2, "env");
+        } else {
+            rt.lua.createTable(0, 0);
+            rt.lua.setField(-2, "env");
+        }
     }
 
     // Build pane lookup maps: numeric index, uuid, and tab focus.
@@ -745,12 +761,11 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
         "hexe.status=hexe.status or {}; " ++
         "hexe.status.pane=ctx.pane; " ++
         "end";
-    const pane_api_z = rt.allocator.dupeZ(u8, pane_api) catch {
-        rt.lua.setGlobal("ctx");
-        return;
-    };
-    defer rt.allocator.free(pane_api_z);
-    rt.lua.loadString(pane_api_z) catch {
+    // `pane_api` is a compile-time constant, so the old per-call
+    // `dupeZ` + free was pure waste on a path that runs for every Context —
+    // and a Context is built per statusbar draw AND per visible float title,
+    // on frames driven by pane output rather than the status tick.
+    rt.lua.loadString(pane_api) catch {
         rt.lua.setGlobal("ctx");
         return;
     };
