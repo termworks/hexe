@@ -100,6 +100,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(allocator),
         .pending_vt_close_fds = .empty,
         .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(allocator),
+        .pending_handshakes = .empty,
         .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
         .deferred_destroy_ctl = .empty,
         .deferred_destroy_vt = .empty,
@@ -126,6 +127,7 @@ fn deinitTestServer(server: *Server) void {
     while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(server.allocator);
     server.mux_vt_queues.deinit();
     server.paused_pod_vt_fds.deinit();
+    server.pending_handshakes.deinit(server.allocator);
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
@@ -375,6 +377,32 @@ test "Server.handleBinarySessionSetSplitRatio rejects unknown snapshot tab" {
 const PendingCtlClose = struct {
     fd: posix.fd_t,
     watcher: ?*CtlWatcher,
+};
+
+/// How long a freshly accepted connection may take to send its handshake
+/// preamble before we give up on it.
+const HANDSHAKE_PREAMBLE_TIMEOUT_MS: i64 = 5_000;
+
+/// A connection that has been accepted but whose handshake preamble has not
+/// fully arrived yet.
+///
+/// The accept path used to read the preamble with blocking bounded reads: 500ms
+/// for `[channel, version]`, then another 500ms for a frontend VT session id or
+/// a POD uuid. Any local process could connect, send nothing, and freeze every
+/// session for that long — repeatedly, and for free. The bytes are now
+/// accumulated without blocking; `dispatchNewConnection` still tries once
+/// inline, so a well-behaved peer (whose preamble is already in the socket
+/// buffer) is dispatched with no added latency at all.
+const PendingHandshake = struct {
+    /// 2 bytes of `[channel, version]` plus the largest follow-on: a 32-byte
+    /// frontend VT session id.
+    const MAX_PREAMBLE = 34;
+
+    fd: posix.fd_t,
+    buf: [MAX_PREAMBLE]u8 = undefined,
+    got: usize = 0,
+    need: usize = 2,
+    started_ms: i64,
 };
 
 /// A CLI process blocked in `wire.readControlHeaderBlocking` (an unbounded
@@ -653,6 +681,8 @@ pub const Server = struct {
     vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
     pending_vt_close_fds: std.ArrayList(PendingVtClose),
     mux_vt_queues: std.AutoHashMap(posix.fd_t, MuxVtQueue),
+    /// Connections accepted but still waiting for their handshake preamble.
+    pending_handshakes: std.ArrayList(PendingHandshake),
     /// POD VT fds whose watcher is intentionally disarmed because the client
     /// they feed is not draining fast enough. Re-armed by
     /// `resumePausedPodVtWatchers` once the queue falls below the low-water
@@ -698,6 +728,7 @@ pub const Server = struct {
             .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(page_alloc),
             .pending_vt_close_fds = .empty,
             .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(page_alloc),
+            .pending_handshakes = .empty,
             .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .deferred_destroy_ctl = .empty,
             .deferred_destroy_vt = .empty,
@@ -730,6 +761,8 @@ pub const Server = struct {
         while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(self.allocator);
         self.mux_vt_queues.deinit();
         self.paused_pod_vt_fds.deinit();
+        for (self.pending_handshakes.items) |ph| posix.close(ph.fd);
+        self.pending_handshakes.deinit(self.allocator);
         self.flushDeferredDestroys();
         self.deferred_destroy_ctl.deinit(self.allocator);
         self.deferred_destroy_vt.deinit(self.allocator);
@@ -1484,6 +1517,8 @@ pub const Server = struct {
         const now_ms = std.time.milliTimestamp();
         periodic.last_fire = now_ms;
 
+        // Advance connections whose handshake preamble has not fully arrived.
+        periodic.server.processPendingHandshakes();
         periodic.server.flushMuxVtQueues();
         periodic.server.flushPodVtQueues();
         // Queues just drained; re-arm anything paused for backpressure.
@@ -1573,63 +1608,130 @@ pub const Server = struct {
         }
         self.resource_monitor.recordConnection();
 
-        // Read versioned handshake: [channel_type, version]
-        var handshake: [2]u8 = undefined;
-        wire.readExactTimeout(conn.fd, &handshake, CTL_FRAME_IO_TIMEOUT_MS) catch |err| {
-            core.logging.logError("ses", "connection handshake read failed", err);
-            var tmp = conn;
-            tmp.close();
-            return;
-        };
+        // Accumulate the handshake preamble without blocking. The common case
+        // (preamble already buffered) completes inside this call.
+        var pending = PendingHandshake{ .fd = conn.fd, .started_ms = std.time.milliTimestamp() };
+        if (self.advanceHandshake(&pending) == .pending) {
+            self.pending_handshakes.append(self.allocator, pending) catch |err| {
+                core.logging.logError("ses", "failed to track pending handshake", err);
+                self.ses_state.store.noteClosedFd(conn.fd);
+                posix.close(conn.fd);
+            };
+        }
+    }
 
-        // Validate protocol version with negotiation.
-        const client_version = handshake[1];
+    const HandshakeProgress = enum { done, pending };
+
+    /// Read as much of the preamble as is available right now. `.done` means the
+    /// connection was dispatched or closed and the entry must be dropped.
+    fn advanceHandshake(self: *Server, ph: *PendingHandshake) HandshakeProgress {
+        while (ph.got < ph.need) {
+            const n = posix.read(ph.fd, ph.buf[ph.got..ph.need]) catch |err| switch (err) {
+                error.WouldBlock => return .pending,
+                else => {
+                    core.logging.logError("ses", "connection handshake read failed", err);
+                    self.closeHandshakeFd(ph.fd);
+                    return .done;
+                },
+            };
+            if (n == 0) {
+                // Peer hung up before completing the preamble.
+                self.closeHandshakeFd(ph.fd);
+                return .done;
+            }
+            ph.got += n;
+
+            if (ph.got == 2 and ph.need == 2) {
+                // Decide the version verdict now, before waiting on any
+                // follow-on bytes a rejected peer would never send.
+                if (!self.acceptHandshakeVersion(ph.fd, ph.buf[0], ph.buf[1])) return .done;
+                ph.need = switch (ph.buf[0]) {
+                    wire.SES_HANDSHAKE_FRONTEND_VT => 2 + 32,
+                    wire.SES_HANDSHAKE_POD_CTL => 2 + 16,
+                    else => 2,
+                };
+            }
+        }
+
+        self.dispatchWithPreamble(ipc.Connection{ .fd = ph.fd }, ph.buf[0..ph.got]);
+        return .done;
+    }
+
+    fn closeHandshakeFd(self: *Server, fd: posix.fd_t) void {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
+
+    /// Drive handshakes that could not complete inline. Runs on the periodic
+    /// tick, so a peer that trickles its preamble costs latency instead of
+    /// freezing the loop.
+    fn processPendingHandshakes(self: *Server) void {
+        if (self.pending_handshakes.items.len == 0) return;
+        const now = std.time.milliTimestamp();
+        var i: usize = 0;
+        while (i < self.pending_handshakes.items.len) {
+            const ph = &self.pending_handshakes.items[i];
+            if (self.advanceHandshake(ph) == .done) {
+                _ = self.pending_handshakes.swapRemove(i);
+                continue;
+            }
+            if (now - ph.started_ms > HANDSHAKE_PREAMBLE_TIMEOUT_MS) {
+                core.logging.warn("ses", "handshake preamble timed out on fd={d} ({d}/{d} bytes)", .{ ph.fd, ph.got, ph.need });
+                self.closeHandshakeFd(ph.fd);
+                _ = self.pending_handshakes.swapRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    /// Version gate. Returns false if the connection was rejected and closed.
+    fn acceptHandshakeVersion(self: *Server, fd: posix.fd_t, channel: u8, client_version: u8) bool {
         if (!wire.isProtocolVersionSupported(client_version)) {
             ses.debugLog("reject: unsupported protocol version {d} (supported: {d}-{d})", .{
                 client_version,
                 wire.MIN_PROTOCOL_VERSION,
                 wire.PROTOCOL_VERSION,
             });
-            // Send error message if this is a CTL channel (can receive error responses)
-            if (handshake[0] == wire.SES_HANDSHAKE_FRONTEND_CTL or handshake[0] == wire.SES_HANDSHAKE_POD_CTL) {
-                // Send version mismatch error with version range
+            if (channel == wire.SES_HANDSHAKE_FRONTEND_CTL or channel == wire.SES_HANDSHAKE_POD_CTL) {
                 const err_msg = std.fmt.allocPrint(
                     self.allocator,
                     "protocol_version_mismatch: client={d} supported={d}-{d}",
                     .{ client_version, wire.MIN_PROTOCOL_VERSION, wire.PROTOCOL_VERSION },
                 ) catch "protocol_version_mismatch";
                 defer if (!std.mem.eql(u8, err_msg, "protocol_version_mismatch")) self.allocator.free(err_msg);
-
                 const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
-                self.replyOrCloseWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
+                self.replyOrCloseWithTrail(fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
             }
-            var tmp = conn;
-            tmp.close();
-            return;
+            self.closeHandshakeFd(fd);
+            return false;
         }
 
-        // Log deprecation warning if client is using old version
         if (wire.isProtocolVersionDeprecated(client_version)) {
             ses.debugLog("warning: client using deprecated protocol version {d} (current: {d})", .{
                 client_version,
                 wire.PROTOCOL_VERSION,
             });
-            // Send deprecation notice if this is a CTL channel
-            if (handshake[0] == wire.SES_HANDSHAKE_FRONTEND_CTL) {
+            if (channel == wire.SES_HANDSHAKE_FRONTEND_CTL) {
                 const warn_msg = std.fmt.allocPrint(
                     self.allocator,
                     "Protocol version {d} is deprecated. Please update to version {d}.",
                     .{ client_version, wire.PROTOCOL_VERSION },
                 ) catch "";
                 defer if (warn_msg.len > 0) self.allocator.free(warn_msg);
-
                 if (warn_msg.len > 0) {
                     const notify = wire.Notify{ .msg_len = @intCast(warn_msg.len) };
-                    self.replyOrCloseWithTrail(conn.fd, .notify, std.mem.asBytes(&notify), warn_msg);
+                    self.replyOrCloseWithTrail(fd, .notify, std.mem.asBytes(&notify), warn_msg);
                 }
             }
         }
+        return true;
+    }
 
+    /// Dispatch a connection whose full preamble has been read.
+    fn dispatchWithPreamble(self: *Server, conn: ipc.Connection, preamble: []const u8) void {
+        const handshake: [2]u8 = .{ preamble[0], preamble[1] };
+        // Version was validated at the 2-byte boundary in advanceHandshake.
         switch (handshake[0]) {
             wire.SES_HANDSHAKE_FRONTEND_CTL => {
                 wire.sendServerHello(conn.fd) catch |err| {
@@ -1656,13 +1758,14 @@ pub const Server = struct {
             wire.SES_HANDSHAKE_FRONTEND_VT => {
                 // Frontend VT data channel — read 32-byte session_id to identify client.
                 ses.debugLog("accept: frontend VT channel fd={d}", .{conn.fd});
-                var sid: [32]u8 = undefined;
-                wire.readExactTimeout(conn.fd, &sid, HANDLER_IO_TIMEOUT_MS) catch |err| {
-                    core.logging.logError("ses", "frontend VT session id read failed", err);
+                if (preamble.len < 2 + 32) {
+                    core.logging.warn("ses", "frontend VT preamble too short fd={d}", .{conn.fd});
                     var tmp = conn;
                     tmp.close();
                     return;
-                };
+                }
+                var sid: [32]u8 = undefined;
+                @memcpy(&sid, preamble[2..34]);
                 // Convert 32-char hex to 16-byte session_id for lookup.
                 const session_id = core.uuid.hexToBin(sid) orelse {
                     // Invalid hex — close connection.
@@ -1717,13 +1820,14 @@ pub const Server = struct {
             wire.SES_HANDSHAKE_POD_CTL => {
                 // POD control uplink — read 16-byte binary UUID.
                 ses.debugLog("accept: POD ctl uplink fd={d}", .{conn.fd});
-                var uuid_bin: [16]u8 = undefined;
-                wire.readExactTimeout(conn.fd, &uuid_bin, HANDLER_IO_TIMEOUT_MS) catch |err| {
-                    core.logging.logError("ses", "POD ctl uuid read failed", err);
+                if (preamble.len < 2 + 16) {
+                    core.logging.warn("ses", "POD ctl preamble too short fd={d}", .{conn.fd});
                     var tmp = conn;
                     tmp.close();
                     return;
-                };
+                }
+                var uuid_bin: [16]u8 = undefined;
+                @memcpy(&uuid_bin, preamble[2..18]);
                 // Convert 16 binary bytes → 32-char hex UUID key.
                 const uuid_hex = core.uuid.binToHex(uuid_bin);
                 // Store fd in the pane's pod_ctl_fd.

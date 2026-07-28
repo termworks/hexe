@@ -17,6 +17,7 @@ smoke:
 	python3 -u scripts/smoke_input_batch.py
 	python3 -u scripts/smoke_kill.py
 	python3 -u scripts/smoke_cli_waiter_release.py
+	python3 -u scripts/smoke_stalled_peer.py
 	python3 -u scripts/smoke_bighistory.py
 	python3 -u scripts/smoke_dot_attach.py
 	python3 -u scripts/smoke_attach_stress.py

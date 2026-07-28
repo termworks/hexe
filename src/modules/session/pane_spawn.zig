@@ -169,8 +169,15 @@ pub fn spawnPod(
     const deadline_ms = std.time.milliTimestamp() + spawn_timeout_ms;
     const stdout_fd = stdout_file.handle;
 
+    // Read the handshake line in CHUNKS, not one byte at a time.
+    //
+    // This ran `waitReadableTimeout` + `read` per byte, so a 400-byte handshake
+    // cost ~800 syscalls and the 512-byte worst case ~1024 — all of it on the
+    // single-threaded event loop, blocking every other session. The pod writes
+    // the line in one go, so in practice this is now a single poll + read.
     var line_buf: [512]u8 = undefined;
     var pos: usize = 0;
+    var line_end: ?usize = null;
     while (pos < line_buf.len) {
         const remaining_ms = deadline_ms - std.time.milliTimestamp();
         if (remaining_ms <= 0) return error.PodSpawnTimeout;
@@ -180,15 +187,18 @@ pub fn spawnPod(
             else => return err,
         };
 
-        var one: [1]u8 = undefined;
-        const n = try stdout_file.read(&one);
-        if (n == 0) break;
-        if (one[0] == '\n') break;
-        line_buf[pos] = one[0];
-        pos += 1;
+        const n = try stdout_file.read(line_buf[pos..]);
+        if (n == 0) break; // EOF before a newline
+        const chunk_start = pos;
+        pos += n;
+        if (std.mem.indexOfScalar(u8, line_buf[chunk_start..pos], '\n')) |rel| {
+            line_end = chunk_start + rel;
+            break;
+        }
     }
-    if (pos == 0) return error.PodNoHandshake;
-    const line = line_buf[0..pos];
+    const line_len = line_end orelse pos;
+    if (line_len == 0) return error.PodNoHandshake;
+    const line = line_buf[0..line_len];
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
     defer parsed.deinit();
