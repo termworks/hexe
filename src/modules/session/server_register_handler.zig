@@ -11,11 +11,11 @@ const Server = server.Server;
 
 pub fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.Register)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "register: payload too small");
         return;
     }
-    const reg = wire.readStructTimeout(wire.FrontendRegister, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const reg = self.readPayloadStruct(wire.FrontendRegister) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "register request read failed", err);
         self.sendBinaryError(fd, "register: read failed");
@@ -24,7 +24,7 @@ pub fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf
 
     const trailing_len: usize = @as(usize, reg.name_len) + @as(usize, reg.base_root_len);
     if (trailing_len != payload_len - @sizeOf(wire.Register)) {
-        self.skipBinaryPayload(fd, payload_len - @sizeOf(wire.Register), buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "register: trailing payload size mismatch");
         return;
     }
@@ -35,12 +35,12 @@ pub fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf
     if (trailing_len > 0) {
         if (trailing_len > wire.MAX_PAYLOAD_LEN) {
             // Name exceeds protocol limit - drain and reject
-            self.skipBinaryPayload(fd, @intCast(trailing_len), buf);
+            self.skipPayloadRest();
             self.sendBinaryError(fd, "register: trailing payload exceeds MAX_PAYLOAD_LEN");
             return;
         }
         if (trailing_len <= buf.len) {
-            wire.readExactTimeout(fd, buf[0..trailing_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+            self.readPayloadInto(buf[0..trailing_len]) catch |err| {
                 self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.logError("ses", "register trailing payload read failed", err);
                 self.sendBinaryError(fd, "register: name read failed");
@@ -50,7 +50,7 @@ pub fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf
             base_root_slice = buf[reg.name_len..trailing_len];
         } else {
             // Name too large for buffer - drain bytes to keep stream aligned, then reject
-            self.skipBinaryPayload(fd, @intCast(trailing_len), buf);
+            self.skipPayloadRest();
             self.sendBinaryError(fd, "register: trailing payload too long for buffer");
             return;
         }

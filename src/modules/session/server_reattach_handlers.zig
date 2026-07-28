@@ -39,12 +39,13 @@ fn forceDetachWithPurge(self: *Server, session_id: [16]u8) bool {
 }
 
 pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.Detach)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "detach: payload too small for Detach header");
         return;
     }
-    const det = wire.readStructTimeout(wire.Detach, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const det = self.readPayloadStruct(wire.Detach) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "detach request read failed", err);
         self.sendBinaryError(fd, "detach: read failed");
@@ -52,7 +53,7 @@ pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
     };
     const extra_len = payload_len - @sizeOf(wire.Detach);
     if (extra_len > 0) {
-        self.skipBinaryPayload(fd, extra_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "detach: legacy state payload is no longer accepted");
         return;
     }
@@ -113,22 +114,22 @@ pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
 
 pub fn handleBinaryReattach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.Reattach)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "invalid_payload");
         return;
     }
-    const ra = wire.readStructTimeout(wire.Reattach, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const ra = self.readPayloadStruct(wire.Reattach) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "reattach request read failed", err);
         self.sendBinaryError(fd, "reattach: read failed");
         return;
     };
     if (ra.id_len > buf.len or ra.id_len == 0) {
-        self.skipBinaryPayload(fd, ra.id_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "invalid_id");
         return;
     }
-    wire.readExactTimeout(fd, buf[0..ra.id_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    self.readPayloadInto(buf[0..ra.id_len]) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "reattach id read failed", err);
         self.sendBinaryError(fd, "reattach: id read failed");
@@ -449,12 +450,13 @@ pub fn completeReattach(self: *Server, fd: posix.fd_t, session_id: [16]u8, clien
 /// Returns false: the connection is consumed by the disconnect, so the
 /// watcher must stop polling it.
 pub fn handleBinaryDisconnect(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) bool {
+    _ = buf;
     if (payload_len < @sizeOf(wire.Disconnect)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "disconnect: payload too small");
         return true;
     }
-    const dc = wire.readStructTimeout(wire.Disconnect, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const dc = self.readPayloadStruct(wire.Disconnect) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "disconnect request read failed", err);
         return false;

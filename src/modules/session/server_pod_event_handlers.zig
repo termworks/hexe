@@ -12,22 +12,22 @@ const Server = server.Server;
 
 pub fn handleBinaryCwdChanged(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.CwdChanged)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         core.logging.warnWithSource("ses", "cwd_changed payload too small: fd={d} len={d}", .{ fd, payload_len }, @src());
         return;
     }
-    const cc = wire.readStructTimeout(wire.CwdChanged, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const cc = self.readPayloadStruct(wire.CwdChanged) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.warnWithSource("ses", "cwd_changed read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
         return;
     };
     if (cc.cwd_len > wire.MAX_PAYLOAD_LEN or cc.cwd_len > buf.len) {
-        self.skipBinaryPayload(fd, cc.cwd_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "cwd_changed: path too large");
         return;
     }
     if (cc.cwd_len > 0) {
-        wire.readExactTimeout(fd, buf[0..cc.cwd_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..cc.cwd_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "cwd_changed path read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;
@@ -51,22 +51,22 @@ pub fn handleBinaryCwdChanged(self: *Server, fd: posix.fd_t, payload_len: u32, b
 
 pub fn handleBinaryFgChanged(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.FgChanged)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         core.logging.warnWithSource("ses", "fg_changed payload too small: fd={d} len={d}", .{ fd, payload_len }, @src());
         return;
     }
-    const fc = wire.readStructTimeout(wire.FgChanged, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const fc = self.readPayloadStruct(wire.FgChanged) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.warnWithSource("ses", "fg_changed read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
         return;
     };
     if (fc.name_len > wire.MAX_PAYLOAD_LEN or fc.name_len > buf.len) {
-        self.skipBinaryPayload(fd, fc.name_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "fg_changed: name too large");
         return;
     }
     if (fc.name_len > 0) {
-        wire.readExactTimeout(fd, buf[0..fc.name_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..fc.name_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "fg_changed name read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;
@@ -91,22 +91,22 @@ pub fn handleBinaryFgChanged(self: *Server, fd: posix.fd_t, payload_len: u32, bu
 
 pub fn handleBinaryShellEvent(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.ShpShellEvent)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         core.logging.warnWithSource("ses", "shell_event payload too small: fd={d} len={d}", .{ fd, payload_len }, @src());
         return;
     }
-    const ev = wire.readStructTimeout(wire.ShpShellEvent, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const ev = self.readPayloadStruct(wire.ShpShellEvent) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.warnWithSource("ses", "shell_event read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
         return;
     };
     const trail_len = payload_len - @sizeOf(wire.ShpShellEvent);
     if (trail_len > wire.MAX_PAYLOAD_LEN or trail_len > buf.len) {
-        self.skipBinaryPayload(fd, trail_len, buf);
+        self.skipPayloadRest();
         return;
     }
     if (trail_len > 0) {
-        wire.readExactTimeout(fd, buf[0..trail_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..trail_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "shell_event trail read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;

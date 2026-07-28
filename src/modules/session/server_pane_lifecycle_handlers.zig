@@ -11,11 +11,11 @@ const Server = server.Server;
 
 pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.CreatePane)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "create_pane: payload too small for CreatePane struct");
         return;
     }
-    const cp = wire.readStructTimeout(wire.CreatePane, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const cp = self.readPayloadStruct(wire.CreatePane) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "create_pane request read failed", err);
         self.sendBinaryError(fd, "create_pane: read failed");
@@ -25,12 +25,12 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
 
     // Read trailing: shell + cwd + sticky_pwd.
     if (trail_len > buf.len) {
-        self.skipBinaryPayload(fd, trail_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "payload_too_large");
         return;
     }
     if (trail_len > 0) {
-        wire.readExactTimeout(fd, buf[0..trail_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..trail_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "create_pane trail read failed", err);
             self.sendBinaryError(fd, "create_pane: trail read failed");
@@ -267,23 +267,23 @@ pub fn replayPaneBacklogNow(self: *Server, uuid: [32]u8) void {
 
 pub fn handleBinaryFindSticky(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.FindSticky)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "find_sticky: payload too small");
         return;
     }
-    const fs = wire.readStructTimeout(wire.FindSticky, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const fs = self.readPayloadStruct(wire.FindSticky) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "find_sticky request read failed", err);
         self.sendBinaryError(fd, "find_sticky: read failed");
         return;
     };
     if (fs.pwd_len > buf.len) {
-        self.skipBinaryPayload(fd, fs.pwd_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "find_sticky: pwd too large");
         return;
     }
     if (fs.pwd_len > 0) {
-        wire.readExactTimeout(fd, buf[0..fs.pwd_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..fs.pwd_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "find_sticky pwd read failed", err);
             self.sendBinaryError(fd, "find_sticky: pwd read failed");
@@ -370,12 +370,13 @@ pub fn handleBinaryFindSticky(self: *Server, fd: posix.fd_t, payload_len: u32, b
 }
 
 pub fn handleBinaryOrphanPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.PaneUuid)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "orphan_pane: payload too small for PaneUuid");
         return;
     }
-    const pu = wire.readStructTimeout(wire.PaneUuid, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const pu = self.readPayloadStruct(wire.PaneUuid) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "orphan_pane request read failed", err);
         self.sendBinaryError(fd, "orphan_pane: read failed");
@@ -416,12 +417,13 @@ pub fn requesterMayReleasePane(self: *Server, uuid: [32]u8, requester: ?usize, c
 }
 
 pub fn handleBinaryAdoptPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.PaneUuid)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "adopt_pane: payload too small for PaneUuid");
         return;
     }
-    const pu = wire.readStructTimeout(wire.PaneUuid, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const pu = self.readPayloadStruct(wire.PaneUuid) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "adopt_pane request read failed", err);
         self.sendBinaryError(fd, "adopt_pane: read failed");
@@ -458,12 +460,13 @@ pub fn handleBinaryAdoptPane(self: *Server, fd: posix.fd_t, payload_len: u32, bu
 }
 
 pub fn handleBinaryKillPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.PaneUuid)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "kill_pane: payload too small for PaneUuid");
         return;
     }
-    const pu = wire.readStructTimeout(wire.PaneUuid, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const pu = self.readPayloadStruct(wire.PaneUuid) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "kill_pane request read failed", err);
         self.sendBinaryError(fd, "kill_pane: read failed");
@@ -492,23 +495,23 @@ pub fn handleBinaryKillPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf
 
 pub fn handleBinarySetSticky(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.SetSticky)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "set_sticky: payload too small");
         return;
     }
-    const ss = wire.readStructTimeout(wire.SetSticky, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const ss = self.readPayloadStruct(wire.SetSticky) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "set_sticky request read failed", err);
         self.sendBinaryError(fd, "set_sticky: read failed");
         return;
     };
     if (ss.pwd_len > buf.len) {
-        self.skipBinaryPayload(fd, ss.pwd_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "set_sticky: pwd too large");
         return;
     }
     if (ss.pwd_len > 0) {
-        wire.readExactTimeout(fd, buf[0..ss.pwd_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..ss.pwd_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "set_sticky pwd read failed", err);
             self.sendBinaryError(fd, "set_sticky: pwd read failed");
@@ -563,12 +566,13 @@ pub fn handleBinarySetSticky(self: *Server, fd: posix.fd_t, payload_len: u32, bu
 }
 
 pub fn handleBinaryGetPaneCwd(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.GetPaneCwd)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "get_pane_cwd: payload too small");
         return;
     }
-    const gpc = wire.readStructTimeout(wire.GetPaneCwd, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const gpc = self.readPayloadStruct(wire.GetPaneCwd) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "get_pane_cwd request read failed", err);
         self.sendBinaryError(fd, "get_pane_cwd: read failed");

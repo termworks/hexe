@@ -11,23 +11,23 @@ const Server = server.Server;
 
 pub fn handleBinarySessionAddTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.SessionAddTab)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_add_tab: payload too small");
         return;
     }
-    const msg = wire.readStructTimeout(wire.SessionAddTab, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const msg = self.readPayloadStruct(wire.SessionAddTab) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "session_add_tab request read failed", err);
         self.sendBinaryError(fd, "session_add_tab: read failed");
         return;
     };
     if (msg.name_len > wire.MAX_PAYLOAD_LEN or msg.name_len > buf.len) {
-        self.skipBinaryPayload(fd, msg.name_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_add_tab: name too large");
         return;
     }
     if (msg.name_len > 0) {
-        wire.readExactTimeout(fd, buf[0..msg.name_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..msg.name_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "session_add_tab name read failed", err);
             self.sendBinaryError(fd, "session_add_tab: name read failed");
@@ -56,12 +56,13 @@ pub fn handleBinarySessionAddTab(self: *Server, fd: posix.fd_t, payload_len: u32
 }
 
 pub fn handleBinarySessionRemoveTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.SessionRemoveTab)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_remove_tab: payload too small");
         return;
     }
-    const msg = wire.readStructTimeout(wire.SessionRemoveTab, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const msg = self.readPayloadStruct(wire.SessionRemoveTab) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "session_remove_tab request read failed", err);
         self.sendBinaryError(fd, "session_remove_tab: read failed");
@@ -89,23 +90,23 @@ pub fn handleBinarySessionRemoveTab(self: *Server, fd: posix.fd_t, payload_len: 
 
 pub fn handleBinarySessionRenameTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.SessionRenameTab)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_rename_tab: payload too small");
         return;
     }
-    const msg = wire.readStructTimeout(wire.SessionRenameTab, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const msg = self.readPayloadStruct(wire.SessionRenameTab) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "session_rename_tab request read failed", err);
         self.sendBinaryError(fd, "session_rename_tab: read failed");
         return;
     };
     if (msg.name_len > wire.MAX_PAYLOAD_LEN or msg.name_len > buf.len) {
-        self.skipBinaryPayload(fd, msg.name_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_rename_tab: name too large");
         return;
     }
     if (msg.name_len > 0) {
-        wire.readExactTimeout(fd, buf[0..msg.name_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..msg.name_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "session_rename_tab name read failed", err);
             self.sendBinaryError(fd, "session_rename_tab: name read failed");
@@ -129,12 +130,13 @@ pub fn handleBinarySessionRenameTab(self: *Server, fd: posix.fd_t, payload_len: 
 }
 
 pub fn handleBinarySessionSyncFloat(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.SessionSyncFloat)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_sync_float: payload too small");
         return;
     }
-    const msg = wire.readStructTimeout(wire.SessionSyncFloat, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const msg = self.readPayloadStruct(wire.SessionSyncFloat) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "session_sync_float request read failed", err);
         self.sendBinaryError(fd, "session_sync_float: read failed");
@@ -173,12 +175,13 @@ pub fn handleBinarySessionSyncFloat(self: *Server, fd: posix.fd_t, payload_len: 
 }
 
 pub fn handleBinarySessionRemoveFloat(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.SessionRemoveFloat)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_remove_float: payload too small");
         return;
     }
-    const msg = wire.readStructTimeout(wire.SessionRemoveFloat, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const msg = self.readPayloadStruct(wire.SessionRemoveFloat) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "session_remove_float request read failed", err);
         self.sendBinaryError(fd, "session_remove_float: read failed");
@@ -201,12 +204,13 @@ pub fn handleBinarySessionRemoveFloat(self: *Server, fd: posix.fd_t, payload_len
 }
 
 pub fn handleBinarySessionSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.SessionSplitPane)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_split_pane: payload too small");
         return;
     }
-    const msg = wire.readStructTimeout(wire.SessionSplitPane, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const msg = self.readPayloadStruct(wire.SessionSplitPane) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "session_split_pane request read failed", err);
         self.sendBinaryError(fd, "session_split_pane: read failed");
@@ -251,12 +255,13 @@ pub fn handleBinarySessionSplitPane(self: *Server, fd: posix.fd_t, payload_len: 
 }
 
 pub fn handleBinarySessionReplaceSplitPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.SessionReplaceSplitPane)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_replace_split_pane: payload too small");
         return;
     }
-    const msg = wire.readStructTimeout(wire.SessionReplaceSplitPane, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const msg = self.readPayloadStruct(wire.SessionReplaceSplitPane) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "session_replace_split_pane request read failed", err);
         self.sendBinaryError(fd, "session_replace_split_pane: read failed");
@@ -292,12 +297,13 @@ pub fn handleBinarySessionReplaceSplitPane(self: *Server, fd: posix.fd_t, payloa
 }
 
 pub fn handleBinarySessionSetSplitRatio(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.SessionSetSplitRatio)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "session_set_split_ratio: payload too small");
         return;
     }
-    const msg = wire.readStructTimeout(wire.SessionSetSplitRatio, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const msg = self.readPayloadStruct(wire.SessionSetSplitRatio) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "session_set_split_ratio request read failed", err);
         self.sendBinaryError(fd, "session_set_split_ratio: read failed");

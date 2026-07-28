@@ -71,13 +71,41 @@ fn podVtPayloadLen(hdr: []const u8) u32 {
     return std.mem.readInt(u32, hdr[1..5], .big);
 }
 
-/// CTL frames are read HEADER-ONLY by the resumable reader: the payload is left
-/// in the socket for the handlers, which read it themselves. Reporting a zero
-/// payload length makes VtStreamReader hand back a frame the moment the 10-byte
-/// header is complete, which is exactly the resumable-header behaviour wanted.
-fn ctlHeaderOnlyPayloadLen(_: []const u8) u32 {
-    return 0;
+/// Payload length of a wire.ControlHeader, for the resumable CTL reader.
+fn ctlPayloadLen(hdr: []const u8) u32 {
+    const parsed = std.mem.bytesToValue(wire.ControlHeader, hdr[0..@sizeOf(wire.ControlHeader)]);
+    return parsed.payload_len;
 }
+
+/// Scratch for a whole CTL frame's payload.
+///
+/// Matches the 64KiB stack buffer the handlers already used, so a payload the
+/// handlers could never have processed is still rejected — just earlier, and
+/// without blocking.
+const CTL_PAYLOAD_BUF_LEN: usize = 65536;
+
+/// Cursor over a CTL payload that has already been read into memory.
+///
+/// Handlers used to read their payload straight off the fd with bounded
+/// BLOCKING reads, using the same fd they reply on. Making those reads
+/// non-blocking therefore meant separating "where the payload comes from" from
+/// "where the reply goes"; this cursor is the former, and `fd` stays the
+/// latter, so handler signatures are unchanged.
+const PayloadCursor = struct {
+    buf: []const u8 = &.{},
+    pos: usize = 0,
+
+    fn remaining(self: *const PayloadCursor) usize {
+        return self.buf.len - self.pos;
+    }
+
+    fn take(self: *PayloadCursor, n: usize) ![]const u8 {
+        if (n > self.remaining()) return error.PayloadTruncated;
+        const out = self.buf[self.pos .. self.pos + n];
+        self.pos += n;
+        return out;
+    }
+};
 
 /// wire.MuxVtHeader is an extern struct with align(1) fields, so `len` sits at
 /// a fixed offset and is native-endian.
@@ -125,6 +153,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(allocator),
         .pending_handshakes = .empty,
         .frame_pool = FramePool.init(allocator),
+        .ctl_payload_buf = allocator.alloc(u8, CTL_PAYLOAD_BUF_LEN) catch unreachable,
         .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(allocator),
         .ctl_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(allocator),
         .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
@@ -161,10 +190,25 @@ fn deinitTestServer(server: *Server) void {
     while (cr_it.next()) |r| r.deinit(server.allocator);
     server.ctl_readers.deinit();
     server.frame_pool.deinit();
+    server.allocator.free(server.ctl_payload_buf);
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
     server.allocator.free(server.vt_route_buf);
+}
+
+/// Stage a CTL payload for a handler invoked directly by a test.
+///
+/// In production `handleBinaryCtlMessage` reads the whole frame into
+/// `ctl_payload_buf` and points the cursor at it before dispatching; these
+/// tests call handlers directly, so they must do the same.
+fn setTestPayload(server: *Server, parts: []const []const u8) void {
+    var off: usize = 0;
+    for (parts) |part| {
+        @memcpy(server.ctl_payload_buf[off .. off + part.len], part);
+        off += part.len;
+    }
+    server.ctl_payload = .{ .buf = server.ctl_payload_buf[0..off], .pos = 0 };
 }
 
 fn expectBinaryError(fd: posix.fd_t, expected: []const u8) !void {
@@ -267,7 +311,7 @@ test "Server.handleBinarySessionRemoveTab rejects unknown snapshot tab" {
         .active_tab = 0,
         .has_active_tab = 0,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionRemoveTab(&server, pair.a, @sizeOf(wire.SessionRemoveTab), &buf);
@@ -292,8 +336,7 @@ test "Server.handleBinarySessionRenameTab rejects unknown snapshot tab" {
         .tab_uuid = [_]u8{'t'} ** 32,
         .name_len = @intCast(new_name.len),
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
-    try wire.writeAll(pair.b, new_name);
+    setTestPayload(&server, &.{ std.mem.asBytes(&msg), new_name });
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionRenameTab(&server, pair.a, @sizeOf(wire.SessionRenameTab) + @as(u32, new_name.len), &buf);
@@ -316,7 +359,7 @@ test "Server.handleBinarySessionRemoveFloat rejects unknown snapshot pane" {
     const msg = wire.SessionRemoveFloat{
         .pane_uuid = [_]u8{'p'} ** 32,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionRemoveFloat(&server, pair.a, @sizeOf(wire.SessionRemoveFloat), &buf);
@@ -345,7 +388,7 @@ test "Server.handleBinarySessionSplitPane rejects unknown snapshot tab" {
         .dir = 0,
         .has_focused_pane = 0,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionSplitPane(&server, pair.a, @sizeOf(wire.SessionSplitPane), &buf);
@@ -373,7 +416,7 @@ test "Server.handleBinarySessionReplaceSplitPane rejects unknown snapshot tab" {
         .active_tab = 0,
         .has_focused_pane = 0,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionReplaceSplitPane(&server, pair.a, @sizeOf(wire.SessionReplaceSplitPane), &buf);
@@ -400,7 +443,7 @@ test "Server.handleBinarySessionSetSplitRatio rejects unknown snapshot tab" {
         .active_tab = 0,
         .ratio = 0.5,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionSetSplitRatio(&server, pair.a, @sizeOf(wire.SessionSetSplitRatio), &buf);
@@ -728,6 +771,10 @@ pub const Server = struct {
     /// Reusable byte buffers for queued VT frames, so the routing hot path
     /// stops paying an mmap/munmap per frame under page_allocator.
     frame_pool: FramePool,
+    /// Scratch holding the CTL frame currently being dispatched.
+    ctl_payload_buf: []u8,
+    /// Cursor handlers read their payload through.
+    ctl_payload: PayloadCursor = .{},
     vt_readers: std.AutoHashMap(posix.fd_t, VtStreamReader),
     /// POD VT fds whose watcher is intentionally disarmed because the client
     /// they feed is not draining fast enough. Re-armed by
@@ -776,6 +823,7 @@ pub const Server = struct {
             .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(page_alloc),
             .pending_handshakes = .empty,
             .frame_pool = FramePool.init(page_alloc),
+            .ctl_payload_buf = try page_alloc.alloc(u8, CTL_PAYLOAD_BUF_LEN),
             .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(page_alloc),
             .ctl_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(page_alloc),
             .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
@@ -819,6 +867,7 @@ pub const Server = struct {
         while (ctl_reader_it.next()) |r| r.deinit(self.allocator);
         self.ctl_readers.deinit();
         self.frame_pool.deinit();
+        self.allocator.free(self.ctl_payload_buf);
         self.flushDeferredDestroys();
         self.deferred_destroy_ctl.deinit(self.allocator);
         self.deferred_destroy_vt.deinit(self.allocator);
@@ -2193,9 +2242,27 @@ pub const Server = struct {
             return null;
         };
         if (!entry.found_existing) {
-            entry.value_ptr.* = VtStreamReader.init(@sizeOf(wire.ControlHeader), ctlHeaderOnlyPayloadLen);
+            entry.value_ptr.* = VtStreamReader.init(@sizeOf(wire.ControlHeader), ctlPayloadLen);
         }
         return entry.value_ptr;
+    }
+
+    /// Read a fixed struct from the CTL payload currently being dispatched.
+    pub fn readPayloadStruct(self: *Server, comptime T: type) !T {
+        const bytes = try self.ctl_payload.take(@sizeOf(T));
+        return std.mem.bytesToValue(T, bytes[0..@sizeOf(T)]);
+    }
+
+    /// Copy `dest.len` bytes out of the current CTL payload.
+    pub fn readPayloadInto(self: *Server, dest: []u8) !void {
+        const bytes = try self.ctl_payload.take(dest.len);
+        @memcpy(dest, bytes);
+    }
+
+    /// Discard the rest of the current CTL payload. Always succeeds: the frame
+    /// is already in memory, so there is nothing left to fail on.
+    pub fn skipPayloadRest(self: *Server) void {
+        self.ctl_payload.pos = self.ctl_payload.buf.len;
     }
 
     pub fn dropCtlReader(self: *Server, fd: posix.fd_t) void {
@@ -2473,25 +2540,43 @@ pub const Server = struct {
         // socket buffer is briefly full under load, which is exactly what made
         // the frontend's own header read busy-spin before it was fixed.
         //
-        // The PAYLOAD is still read by the handlers from this fd with bounded
-        // blocking. Removing that too means separating "where the payload is
-        // read from" from "where the reply goes", since handlers use this one
-        // fd for both — a mechanical change across ~40 handlers in 8 files, and
-        // the remaining half of PLAN.md 1.2.
+        // The PAYLOAD is read here too, in the same resumable pass. Handlers
+        // used to pull it off this fd themselves with bounded blocking reads,
+        // which reopened the same stall vector one level down: a client that
+        // sent a header and then dribbled its payload froze every session for
+        // the timeout. They now read it through `ctl_payload`, so a handler
+        // cannot block on the socket at all. That is why the fd argument they
+        // still take is a REPLY SINK only, never a read source.
         const reader = self.ctlReaderFor(fd) orelse return false;
-        const hdr = switch (reader.next(fd, &.{}, self.allocator)) {
-            .none => return true, // header still in flight; resume on next wakeup
+        const hdr = switch (reader.next(fd, self.ctl_payload_buf, self.allocator)) {
+            .none => return true, // frame still in flight; resume on next wakeup
             .closed => {
                 ses.debugLog("ctl: fd={d} closed", .{fd});
                 return false;
             },
             .failed => {
-                core.logging.logError("ses", "failed to read control header", error.BrokenPipe);
+                core.logging.logError("ses", "failed to read control frame", error.BrokenPipe);
                 return false;
             },
-            // Unreachable: ctlHeaderOnlyPayloadLen always reports 0.
-            .oversize => return false,
-            .frame => |frame| std.mem.bytesToValue(wire.ControlHeader, frame.hdr[0..@sizeOf(wire.ControlHeader)]),
+            .oversize => |len| {
+                // Bigger than any handler could ever process (they all used a
+                // 64KiB stack buffer). Rejected here rather than drained,
+                // because a payload that large means the stream is desynced and
+                // cannot be resynchronised by skipping.
+                core.logging.warnWithSource(
+                    "ses",
+                    "ctl payload too large: len={d} max={d} fd={d}",
+                    .{ len, CTL_PAYLOAD_BUF_LEN, fd },
+                    @src(),
+                );
+                return false;
+            },
+            .frame => |frame| blk: {
+                // The whole payload is now in memory; handlers read it through
+                // the cursor instead of blocking on the socket.
+                self.ctl_payload = .{ .buf = frame.payload, .pos = 0 };
+                break :blk std.mem.bytesToValue(wire.ControlHeader, frame.hdr[0..@sizeOf(wire.ControlHeader)]);
+            },
         };
         // Cap payload length before any allocation or chunked read. A
         // misbehaving or malicious client cannot coerce us into a giant
@@ -2510,11 +2595,17 @@ pub const Server = struct {
         var buf: [65536]u8 = undefined;
         const prev_request_fd = self.current_ctl_request_fd;
         const prev_request_id = self.current_ctl_request_id;
+        const prev_payload = self.ctl_payload;
         self.current_ctl_request_fd = fd;
         self.current_ctl_request_id = hdr.request_id;
         defer {
             self.current_ctl_request_fd = prev_request_fd;
             self.current_ctl_request_id = prev_request_id;
+            // Restored with the rest of the per-request state. Nothing reenters
+            // this function today, but the cursor borrows a SHARED scratch
+            // buffer, so leaving it dangling past the dispatch would hand the
+            // next caller a stale window into a buffer that has been refilled.
+            self.ctl_payload = prev_payload;
         }
 
         switch (msg_type) {
@@ -2555,14 +2646,14 @@ pub const Server = struct {
             },
             .pane_info => {
                 if (hdr.payload_len < @sizeOf(wire.PaneUuid)) {
-                    self.skipBinaryPayload(fd, hdr.payload_len, &buf);
+                    self.skipPayloadRest();
                     self.replyOrClose(fd, .@"error", &.{});
                     return false;
                 }
-                const pu = wire.readStructTimeout(wire.PaneUuid, fd, HANDLER_IO_TIMEOUT_MS) catch |err| {
-                    self.ctlStreamDesynced(fd, "mid-message read failed");
+                const pu = self.readPayloadStruct(wire.PaneUuid) catch |err| {
                     core.logging.logError("ses", "failed to read pane_info payload", err);
-                    return false;
+                    self.replyOrClose(fd, .@"error", &.{});
+                    return true;
                 };
                 server_reporting_handlers.handleBinaryPaneInfo(self, fd, pu.uuid);
             },
@@ -2643,12 +2734,12 @@ pub const Server = struct {
             // here until it's categorized (PLAN.md 2.1 — no silently-dropped
             // messages). Behavior matches the former `else`: skip + error.
             .registered, .pane_created, .destroy_pane, .session_state, .notify, .pop_confirm, .pop_choose, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .send_keys, .broadcast_notify, .targeted_notify, .status, .focus_move, .exit_intent, .float_request, .float_created, .pane_exited, .kill_session, .kill_target, .clear_sessions, .clear_orphaned_panes, .get_layout, .apply_layout, .get_session_state, .session_stolen, .bell, .shp_shell_event => {
-                self.skipBinaryPayload(fd, hdr.payload_len, &buf);
+                self.skipPayloadRest();
                 self.replyOrClose(fd, .@"error", &.{});
             },
             // Unknown wire value (not a named MsgType) — same safe handling.
             _ => {
-                self.skipBinaryPayload(fd, hdr.payload_len, &buf);
+                self.skipPayloadRest();
                 self.replyOrClose(fd, .@"error", &.{});
             },
         }

@@ -1,6 +1,15 @@
 //! CLI-facing session/layout CTL handlers (kill/clear sessions, clear orphaned
 //! panes, get/apply layout, get session state) + the layout-export helper,
 //! extracted from server.zig (PLAN.md 2.3 god-object split). Pure move.
+//!
+//! I/O CONTRACT — this file is the ODD ONE OUT. Every handler here is reached
+//! ONLY from `handleCliRequest`, the short-lived accept path, and so reads its
+//! payload from `fd` with bounded blocking reads. The `handleBinary*` handlers
+//! in the sibling `server_*_handlers.zig` files are the opposite: they are
+//! reached only from `handleBinaryCtlMessage`, which has already buffered the
+//! whole payload, so they read it via `self.readPayload*` and must NEVER read
+//! from `fd` (PLAN.md 1.2). Do not "unify" the two — a cursor read here gets an
+//! empty cursor, and an fd read there reads the NEXT message's bytes.
 const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
