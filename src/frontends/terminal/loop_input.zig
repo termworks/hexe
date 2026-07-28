@@ -967,6 +967,9 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
     while (i < inp.len) {
         var parsed_event_for_popup: ?vaxis.Event = null;
         var forward_bytes: ?[]const u8 = null;
+        // Bytes consumed by the event that reaches the forwarding tail below.
+        // Needed outside the `if (parsed)` block so the loop can advance past it.
+        var forward_advance: usize = 0;
 
         // Parse once through libvaxis and dispatch key/scroll/mouse/control.
         const parsed = firstOrParseAt(state, inp, i, first_parsed);
@@ -1052,6 +1055,7 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
             }
 
             forward_bytes = inp[i .. i + res.n];
+            forward_advance = res.n;
         } else {
             // Fallback for terminals that may not decode a key into a parser
             // event: keep adhoc float exit keys responsive on raw bytes.
@@ -1084,7 +1088,19 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
                 forwardSanitizedToFocusedPane(state, bytes, parsed_event_for_popup);
             }
         }
-        return;
+        // Advance and keep draining. This used to `return`, abandoning
+        // inp[i + res.n ..] — so whenever one read() carried several events and
+        // the first was an unmapped key (any codepoint > 0xFF that is not one of
+        // the eight specials; see input.vaxisKeyToBindKey), every later event in
+        // that batch was silently dropped. Holding Delete in a fullscreen app
+        // delivers `\x1b[3~\x1b[3~\x1b[3~` in a single read and only the first
+        // reached the pane. The 64KB pumpStdin buffer makes multi-event reads
+        // routine under fast typing.
+        i += forward_advance;
+        // Defensive: a zero advance would spin forever. Unreachable today
+        // (forward_advance is only set from a non-zero res.n) but the loop must
+        // never be able to hang the UI.
+        if (forward_advance == 0) i += 1;
     }
 }
 

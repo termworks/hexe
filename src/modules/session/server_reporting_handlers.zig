@@ -23,7 +23,8 @@ pub fn handleBinaryExitIntentResult(self: *Server, fd: posix.fd_t, payload_len: 
         self.sendBinaryError(fd, "exit_intent_result: read failed");
         return;
     };
-    if (self.pending_exit_intent_cli_fd) |cli_fd| {
+    if (self.pending_exit_intent_cli_fd) |wait| {
+        const cli_fd = wait.cli_fd;
         // Same single-owner rule as float_result: replyOrClose queues the
         // fd on write failure, so a direct close here would double-close
         // it. Route the success path through the queue too.
@@ -53,12 +54,12 @@ pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, 
     // Find CLI fd by UUID.
     var cli_fd: ?posix.fd_t = null;
     if (self.pending_float_cli_fds.fetchRemove(result.uuid)) |entry| {
-        cli_fd = entry.value;
+        cli_fd = entry.value.cli_fd;
     } else {
         // Try zero UUID (pending assignment).
         const zero_uuid: [32]u8 = .{0} ** 32;
         if (self.pending_float_cli_fds.fetchRemove(zero_uuid)) |entry| {
-            cli_fd = entry.value;
+            cli_fd = entry.value.cli_fd;
         }
     }
 

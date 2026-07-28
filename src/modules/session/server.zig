@@ -103,7 +103,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
         .deferred_destroy_ctl = .empty,
         .deferred_destroy_vt = .empty,
-        .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(allocator),
+        .pending_float_cli_fds = std.AutoHashMap([32]u8, PendingCliWait).init(allocator),
         .resource_monitor = core.resource_limits.ResourceMonitor.init(.{}),
         .vt_route_buf = allocator.alloc(u8, wire.MAX_PAYLOAD_LEN) catch unreachable,
     };
@@ -375,6 +375,16 @@ test "Server.handleBinarySessionSetSplitRatio rejects unknown snapshot tab" {
 const PendingCtlClose = struct {
     fd: posix.fd_t,
     watcher: ?*CtlWatcher,
+};
+
+/// A CLI process blocked in `wire.readControlHeaderBlocking` (an unbounded
+/// `poll(-1)`) waiting for a frontend to answer. `owner_ctl_fd` records WHICH
+/// frontend owes the answer, so its death can release the waiter instead of
+/// stranding it forever — `runExitIntent` is wired into the shell's exit hook,
+/// so a stranded waiter is a shell that can never exit.
+const PendingCliWait = struct {
+    cli_fd: posix.fd_t,
+    owner_ctl_fd: posix.fd_t,
 };
 
 const VtDirection = enum {
@@ -655,9 +665,9 @@ pub const Server = struct {
     deferred_destroy_vt: std.ArrayList(*VtWatcher),
     loop_ptr: ?*xev.Loop = null,
     // CLI fd waiting for exit_intent response.
-    pending_exit_intent_cli_fd: ?posix.fd_t = null,
+    pending_exit_intent_cli_fd: ?PendingCliWait = null,
     // CLI fds waiting for float result, keyed by float pane UUID.
-    pending_float_cli_fds: std.AutoHashMap([32]u8, posix.fd_t),
+    pending_float_cli_fds: std.AutoHashMap([32]u8, PendingCliWait),
     current_ctl_request_fd: ?posix.fd_t = null,
     current_ctl_request_id: u32 = 0,
 
@@ -691,16 +701,16 @@ pub const Server = struct {
             .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .deferred_destroy_ctl = .empty,
             .deferred_destroy_vt = .empty,
-            .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
+            .pending_float_cli_fds = std.AutoHashMap([32]u8, PendingCliWait).init(page_alloc),
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
             .vt_route_buf = try page_alloc.alloc(u8, wire.MAX_PAYLOAD_LEN),
         };
     }
 
     pub fn deinit(self: *Server) void {
-        if (self.pending_exit_intent_cli_fd) |fd| posix.close(fd);
+        if (self.pending_exit_intent_cli_fd) |wait| posix.close(wait.cli_fd);
         var float_it = self.pending_float_cli_fds.iterator();
-        while (float_it.next()) |entry| posix.close(entry.value_ptr.*);
+        while (float_it.next()) |entry| posix.close(entry.value_ptr.cli_fd);
         self.pending_float_cli_fds.deinit();
         self.pending_pop_requests.deinit();
         var watch_it = self.ctl_watchers.iterator();
@@ -848,6 +858,9 @@ pub const Server = struct {
                 continue;
             }
             _ = self.binary_ctl_fds.remove(pending.fd);
+            // Covers a CTL fd with no client record (never registered, or the
+            // record is already gone); purgeMuxFdState handles the rest.
+            self.releasePendingCliWaiters(pending.fd);
 
             var client_id: ?usize = null;
             for (self.ses_state.store.clients.items) |client| {
@@ -903,11 +916,62 @@ pub const Server = struct {
         self.purgeMuxFdState(client.mux_ctl_fd, client.mux_vt_fd);
     }
 
+    /// Release every CLI process blocked waiting on this frontend to answer.
+    ///
+    /// `pending_exit_intent_cli_fd` and `pending_float_cli_fds` were only ever
+    /// cleaned in `deinit` or when a newer request displaced them — neither
+    /// `processPendingCtlCloses` nor `purgeClientFdState` touched them, though
+    /// both handle `pending_pop_requests`. So if the frontend crashed, was
+    /// SIGKILLed, or had its session stolen while a request was outstanding,
+    /// the CLI stayed parked in an unbounded `poll(-1)` forever and the daemon
+    /// leaked its fd. Since `runExitIntent` is wired into the shell's exit hook,
+    /// that presented as a shell that could never exit.
+    ///
+    /// Answer rather than just closing: with the frontend gone nothing can veto
+    /// an exit, so `allow = 1` is the correct verdict, and a float that will
+    /// never run should report failure rather than an ambiguous EOF.
+    fn releasePendingCliWaiters(self: *Server, owner_ctl_fd: posix.fd_t) void {
+        if (self.pending_exit_intent_cli_fd) |wait| {
+            if (wait.owner_ctl_fd == owner_ctl_fd) {
+                ses.debugLog("releasing exit_intent CLI waiter fd={d} (owner mux fd={d} gone)", .{ wait.cli_fd, owner_ctl_fd });
+                const allow = wire.ExitIntentResult{ .allow = 1 };
+                self.replyOrClose(wait.cli_fd, .exit_intent_result, std.mem.asBytes(&allow));
+                self.queueCtlClose(wait.cli_fd, null);
+                self.pending_exit_intent_cli_fd = null;
+            }
+        }
+
+        // Collect first: replyOrClose/queueCtlClose must not run while the map
+        // is being iterated.
+        var orphaned: std.ArrayList([32]u8) = .empty;
+        defer orphaned.deinit(self.allocator);
+        var it = self.pending_float_cli_fds.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.owner_ctl_fd != owner_ctl_fd) continue;
+            orphaned.append(self.allocator, entry.key_ptr.*) catch |err| {
+                core.logging.logError("ses", "failed to collect orphaned float CLI waiter", err);
+                break;
+            };
+        }
+        for (orphaned.items) |key| {
+            const entry = self.pending_float_cli_fds.fetchRemove(key) orelse continue;
+            ses.debugLog("releasing float CLI waiter fd={d} (owner mux fd={d} gone)", .{ entry.value.cli_fd, owner_ctl_fd });
+            const result = wire.FloatResult{
+                .uuid = key,
+                .exit_code = 1,
+                .output_len = 0,
+            };
+            self.replyOrClose(entry.value.cli_fd, .float_result, std.mem.asBytes(&result));
+            self.queueCtlClose(entry.value.cli_fd, null);
+        }
+    }
+
     /// fd-keyed core of `purgeClientFdState`. Split out so the detach path can
     /// purge AFTER the client record is gone: `detachSession` removes the
     /// client, so a client_id lookup at that point finds nothing.
     pub fn purgeMuxFdState(self: *Server, ctl_fd: ?posix.fd_t, vt_fd: ?posix.fd_t) void {
         if (ctl_fd) |cfd| {
+            self.releasePendingCliWaiters(cfd);
             _ = self.binary_ctl_fds.remove(cfd);
             self.disarmCtlWatcher(cfd);
             if (self.pending_pop_requests.fetchRemove(cfd)) |kv| {
@@ -2479,11 +2543,11 @@ pub const Server = struct {
                     return;
                 };
                 // Close any previous pending exit_intent CLI fd.
-                if (self.pending_exit_intent_cli_fd) |old_fd| {
-                    self.ses_state.store.noteClosedFd(old_fd);
-                    posix.close(old_fd);
+                if (self.pending_exit_intent_cli_fd) |old_wait| {
+                    self.ses_state.store.noteClosedFd(old_wait.cli_fd);
+                    posix.close(old_wait.cli_fd);
                 }
-                self.pending_exit_intent_cli_fd = fd;
+                self.pending_exit_intent_cli_fd = .{ .cli_fd = fd, .owner_ctl_fd = mux_fd };
                 // Forward to MUX.
                 wire.writeControlTimeout(mux_fd, .exit_intent, std.mem.asBytes(&ei), HANDLER_IO_TIMEOUT_MS) catch |err| {
                     core.logging.logError("ses", "failed to forward exit_intent to mux", err);
@@ -2543,10 +2607,10 @@ pub const Server = struct {
                 // A second concurrent float request would overwrite (and leak)
                 // the previous waiter's fd; close the stale one first.
                 if (self.pending_float_cli_fds.fetchRemove(zero_uuid)) |stale| {
-                    self.ses_state.store.noteClosedFd(stale.value);
-                    posix.close(stale.value);
+                    self.ses_state.store.noteClosedFd(stale.value.cli_fd);
+                    posix.close(stale.value.cli_fd);
                 }
-                self.pending_float_cli_fds.put(zero_uuid, fd) catch |err| {
+                self.pending_float_cli_fds.put(zero_uuid, .{ .cli_fd = fd, .owner_ctl_fd = mux_fd }) catch |err| {
                     core.logging.logError("ses", "failed to track pending float CLI request", err);
                     self.sendBinaryError(fd, "track_failed");
                     posix.close(fd);
