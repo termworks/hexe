@@ -481,4 +481,43 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
             };
         }
     }
+
+    reconcileRecoveredSessionPanes(ses_state);
+}
+
+/// Re-link panes to the session that owns them after a crash recovery.
+///
+/// `buildStateJson` deliberately persists ATTACHED sessions as recoverable
+/// detached entries, but an attached pane has `session_id == null` (it is only
+/// stamped on detach), so on load those panes were downgraded to `.orphaned`
+/// (or `.sticky`) with `orphaned_at = now` and no session link at all.
+///
+/// `cleanupOrphanedPanes` only sweeps `.orphaned`/`.sticky`, and does so at
+/// `orphan_timeout_hours` (24h), while the recovered session record survives
+/// `detached_session_ttl_hours` (168h). So after a daemon crash the session's
+/// panes were killed on day one and the user reattaching on day two got a
+/// session whose layout still existed but whose panes were all gone.
+///
+/// Panes named by a recovered session are therefore restored as `.detached`
+/// and stamped with its id, which is what they would have been had the daemon
+/// shut down cleanly.
+fn reconcileRecoveredSessionPanes(ses_state: *state.SesState) void {
+    var relinked: usize = 0;
+    var it = ses_state.store.detached_sessions.iterator();
+    while (it.next()) |entry| {
+        const sid = entry.key_ptr.*;
+        for (entry.value_ptr.pane_uuids) |pane_uuid| {
+            const pane = ses_state.store.panes.getPtr(pane_uuid) orelse continue;
+            if (pane.session_id != null) continue; // already linked
+            if (pane.state == .attached) continue; // live, not a recovery case
+            pane.session_id = sid;
+            _ = pane.transitionState(.detached, "persist load: relinked to recovered session");
+            pane.orphaned_at = null;
+            relinked += 1;
+        }
+    }
+    if (relinked > 0) {
+        ses_state.store.dirty = true;
+        core.logging.warn("ses", "relinked {d} recovered pane(s) to their sessions", .{relinked});
+    }
 }
