@@ -71,13 +71,24 @@ pub const RingBuffer = struct {
         return true;
     }
 
+    /// Copy the NEWEST `min(out.len, len)` bytes into `out`.
+    ///
+    /// This used to copy from `self.start` forward, i.e. the OLDEST bytes,
+    /// whenever the destination was smaller than the ring. It was invisible
+    /// only because every caller passed a buffer exactly as large as the ring;
+    /// the moment those are sized independently, a reattach would replay
+    /// ancient scrollback and omit the current screen — and `replaySkipBytes`
+    /// would then compute its skip against a `ring_len` that no longer
+    /// corresponds to the ring's tail.
     pub fn copyOut(self: *const RingBuffer, out: []u8) usize {
         const n = @min(out.len, self.len);
         if (n == 0) return 0;
 
         const cap = self.buf.len;
-        const first = @min(cap - self.start, n);
-        @memcpy(out[0..first], self.buf[self.start .. self.start + first]);
+        // Start of the newest `n` bytes.
+        const begin = (self.start + (self.len - n)) % cap;
+        const first = @min(cap - begin, n);
+        @memcpy(out[0..first], self.buf[begin .. begin + first]);
         if (first < n) {
             @memcpy(out[first..n], self.buf[0 .. n - first]);
         }
@@ -423,4 +434,39 @@ test "replaySkipBytes: alt enter inside ring wins; tail cap otherwise" {
     try testing.expectEqual(@as(usize, 0), replaySkipBytes(false, null, 0, 500, 1000));
     // Alt enter within ring but older than the cap: cap still wins.
     try testing.expectEqual(@as(usize, 3000), replaySkipBytes(true, 1500, 1000, 4000, 1000));
+}
+
+test "RingBuffer.copyOut returns the NEWEST bytes when out is smaller than the ring" {
+    var backing: [8]u8 = undefined;
+    var ring = RingBuffer{ .buf = &backing };
+    _ = ring.append("abcdef");
+
+    // Full-size destination: everything, in order.
+    var all: [8]u8 = undefined;
+    try testing.expectEqual(@as(usize, 6), ring.copyOut(&all));
+    try testing.expectEqualStrings("abcdef", all[0..6]);
+
+    // Smaller destination must yield the TAIL, not the head. Copying from the
+    // head here is what would replay ancient scrollback on reattach and drop
+    // the current screen.
+    var tail: [3]u8 = undefined;
+    try testing.expectEqual(@as(usize, 3), ring.copyOut(&tail));
+    try testing.expectEqualStrings("def", &tail);
+}
+
+test "RingBuffer.copyOut returns the newest bytes across a wrap" {
+    var backing: [8]u8 = undefined;
+    var ring = RingBuffer{ .buf = &backing };
+    // Overfill so the ring wraps and drops the oldest bytes.
+    _ = ring.append("abcdefgh");
+    _ = ring.append("ijk");
+
+    var all: [8]u8 = undefined;
+    const n = ring.copyOut(&all);
+    try testing.expectEqual(@as(usize, 8), n);
+    try testing.expectEqualStrings("defghijk", all[0..n]);
+
+    var tail: [4]u8 = undefined;
+    try testing.expectEqual(@as(usize, 4), ring.copyOut(&tail));
+    try testing.expectEqualStrings("hijk", &tail);
 }

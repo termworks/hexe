@@ -404,6 +404,9 @@ const REPLAY_TAIL_CAP: usize = 1024 * 1024;
 const PTY_WRITE_BUF_MAX: usize = 16 * 1024 * 1024;
 const POD_EXIT_ATTACH_GRACE_MS: i64 = 300;
 
+/// Working-set buffer for PTY and client reads. See the allocation site.
+const IO_BUF_LEN: usize = 64 * 1024;
+
 /// Cadence of the socket-file / accept-watcher self-heal check.
 const POD_SOCKET_HEAL_MS: i64 = 5_000;
 
@@ -536,7 +539,16 @@ const Pod = struct {
         var drain_ticker = try xev.Timer.init();
         defer drain_ticker.deinit();
 
-        const buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
+        // Shared I/O buffer for the PTY read path and the client read path.
+        //
+        // This was MAX_FRAME_LEN (4 MiB) -- the protocol's maximum SINGLE
+        // MESSAGE size, not a working-set size -- and it is fully touched, so
+        // every pod paid it in RSS. A PTY master read never returns more than
+        // the tty's own buffer (tens of KB), and the client path feeds
+        // pod_protocol.Reader incrementally, so a smaller buffer just means
+        // another loop iteration. Sizing it here also caps the output frames a
+        // pod emits, which keeps SES's routing scratch bounded too.
+        const buf = try self.allocator.alloc(u8, IO_BUF_LEN);
         defer self.allocator.free(buf);
         const backlog_tmp = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(backlog_tmp);
