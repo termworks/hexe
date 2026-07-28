@@ -71,6 +71,15 @@ pub const Pane = struct {
     pod_vt_fd: ?posix.fd_t = null,
     pod_ctl_fd: ?posix.fd_t = null,
     needs_backlog_replay: bool = false,
+    /// Backoff state for `needs_backlog_replay` retries.
+    ///
+    /// `connectPodVt` blocks the single-threaded event loop (connect + ack
+    /// read). A pod that is alive but not accepting fails every attempt and
+    /// keeps the flag set, so retrying it on every 1s cleanup tick froze the
+    /// WHOLE daemon — every other session included — once per second, forever.
+    /// Back off instead: the healthy first attempt is unaffected.
+    backlog_replay_attempts: u8 = 0,
+    backlog_replay_next_ms: i64 = 0,
 
     sticky_pwd: ?[]const u8,
     sticky_key: ?u8,
@@ -104,6 +113,17 @@ pub const Pane = struct {
     last_jobs: ?u16 = null,
 
     allocator: std.mem.Allocator,
+
+    /// Request a pod VT reconnect + backlog replay, clearing any retry backoff.
+    ///
+    /// Always use this instead of setting `needs_backlog_replay` directly: a
+    /// stale backoff left by earlier failures would otherwise delay a fresh
+    /// attach by up to the maximum backoff interval.
+    pub fn requestBacklogReplay(self: *Pane) void {
+        self.needs_backlog_replay = true;
+        self.backlog_replay_attempts = 0;
+        self.backlog_replay_next_ms = 0;
+    }
 
     pub fn transitionState(self: *Pane, new_state: PaneState, reason: []const u8) bool {
         const old_state = self.state;

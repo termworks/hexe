@@ -58,19 +58,81 @@ fn loopTimerCallback(
 /// anyone actually reconnecting — the frontend used to show "Lost
 /// connection" and sit frozen until manually restarted.
 const RECONNECT_RETRY_MS: i64 = 2_000;
+/// Ceiling for the reconnect backoff. A flat 2s retry turns any persistent
+/// reconnect fault into a tight flap loop that also hammers the daemon; back
+/// off so a degraded state degrades quietly instead.
+const RECONNECT_MAX_RETRY_MS: i64 = 30_000;
 
-fn maybeReconnectSes(state: *State, last_attempt_ms: *i64) void {
-    // VT-only loss (e.g. the intentional mux-queue-overflow drop after a huge
-    // output burst) used to freeze all panes forever while CTL stayed healthy.
-    // A full reconnect + reattach heals it too: panes are rebuilt from the
-    // session snapshot and re-painted from pod backlogs, so there is no
-    // missed-output gap or duplicated content a raw VT re-open would cause.
+/// Consecutive VT-only repairs to try before falling back to full recovery.
+///
+/// A VT-only reconnect can *appear* to succeed and still not stick: if our CTL
+/// registration is gone (daemon restarted) but our CTL fd has not been reaped
+/// yet, the connect and handshake both succeed and SES then drops the channel
+/// because no client matches the session id. Without this cap the frontend
+/// would keep "repairing" the VT channel forever and never run the real
+/// recovery.
+const MAX_VT_ONLY_ATTEMPTS: u8 = 3;
+
+const ReconnectState = struct {
+    last_attempt_ms: i64 = 0,
+    /// Current retry interval, doubling on each failed full reconnect.
+    retry_ms: i64 = RECONNECT_RETRY_MS,
+    /// Consecutive VT-only repairs that have not produced a healthy link.
+    vt_only_attempts: u8 = 0,
+
+    fn recordSuccess(self: *ReconnectState) void {
+        self.retry_ms = RECONNECT_RETRY_MS;
+        self.vt_only_attempts = 0;
+    }
+
+    fn recordFailure(self: *ReconnectState) void {
+        self.retry_ms = @min(self.retry_ms * 2, RECONNECT_MAX_RETRY_MS);
+    }
+};
+
+fn maybeReconnectSes(state: *State, rc: *ReconnectState) void {
     const ctl_ok = state.runtime.getCtlFd() != null;
     const vt_ok = state.runtime.getVtFd() != null;
-    if (ctl_ok and vt_ok) return;
+    if (ctl_ok and vt_ok) {
+        rc.recordSuccess();
+        return;
+    }
     const now = std.time.milliTimestamp();
-    if (now - last_attempt_ms.* < RECONNECT_RETRY_MS) return;
-    last_attempt_ms.* = now;
+    if (now - rc.last_attempt_ms < rc.retry_ms) return;
+    rc.last_attempt_ms = now;
+
+    // VT-only loss with a healthy CTL: just reopen the data channel. The old
+    // code ran the FULL recovery here (fresh UUID + re-register + reattach),
+    // which replays every pane's backlog — the very thing that overflows the
+    // daemon's per-client VT queue and drops the channel, so the "cure"
+    // re-caused the fault and the session flapped forever.
+    if (ctl_ok and !vt_ok and rc.vt_only_attempts < MAX_VT_ONLY_ATTEMPTS) {
+        rc.vt_only_attempts += 1;
+        // Prove the CTL registration is actually live before attempting the
+        // cheap repair. `ctl_ok` only means we still hold an fd — after a
+        // daemon restart that fd can be stale, and then the VT reconnect
+        // "succeeds" (connect + handshake both work) only for SES to drop the
+        // channel because no client matches our session id. Burning the retry
+        // budget on that delays the real recovery, which is what a killed
+        // daemon actually needs.
+        if (state.runtime.sendPing() and state.runtime.reconnectVtOnly()) {
+            terminal_main.debugLog("ses vt-only reconnect: data channel restored (attempt {d})", .{rc.vt_only_attempts});
+            // Panes must repaint from the pods' backlogs over the new channel.
+            state.runtime.requestBacklogReplay() catch |err| {
+                terminal_main.debugLog("ses vt-only reconnect: replay request failed: {s}", .{@errorName(err)});
+            };
+            // Deliberately NOT recordSuccess() here: the channel is open but
+            // unproven. If it really is healthy the next iteration sees both
+            // fds live and resets the backoff there; if SES drops it again we
+            // come back, burn another attempt, and then do full recovery.
+            state.needs_render = true;
+            state.force_full_render = true;
+            return;
+        }
+        terminal_main.debugLog("ses vt-only reconnect failed; falling back to full recovery", .{});
+    }
+    // Full recovery from here on: give up on cheap repairs for this episode.
+    rc.vt_only_attempts = MAX_VT_ONLY_ATTEMPTS;
 
     // The previous session survives (persisted or still live) under our old
     // identity; capture it before re-registering mints anything new.
@@ -82,12 +144,13 @@ fn maybeReconnectSes(state: *State, last_attempt_ms: *i64) void {
     // match as "frontend restored it") and then the reattach RPC, finding
     // only ourselves attached under that id, would force-detach US mid-call.
     // reattachSession restores the old identity on success.
+    const old_name = state.allocator.dupe(u8, state.runtime.sessionName()) catch return;
+    defer state.allocator.free(old_name);
     {
         const fresh_uuid = core.uuid.generateHex();
-        const name_copy = state.allocator.dupe(u8, state.runtime.sessionName()) catch return;
-        defer state.allocator.free(name_copy);
-        if (!state.runtime.setSessionIdentity(fresh_uuid, name_copy)) {
+        if (!state.runtime.setSessionIdentity(fresh_uuid, old_name)) {
             terminal_main.debugLog("ses reconnect: failed to set recovery identity", .{});
+            rc.recordFailure();
             return;
         }
         state.runtime.syncClientSessionIdentity();
@@ -95,11 +158,23 @@ fn maybeReconnectSes(state: *State, last_attempt_ms: *i64) void {
 
     var attach = state.runtime.attachFrontend() catch |err| {
         terminal_main.debugLog("ses reconnect attempt failed: {s}", .{@errorName(err)});
+        // Roll the identity back. Without this the throwaway UUID sticks, so
+        // the NEXT attempt captures `old_uuid` = that throwaway — and once the
+        // daemon returns, reattachSession asks for a session id that never
+        // existed on it. The real persisted session and its pods survive but
+        // become permanently unreachable ("session could not be restored"),
+        // which is far worse than the failed attempt itself.
+        if (!state.runtime.setSessionIdentity(old_uuid, old_name)) {
+            terminal_main.debugLog("ses reconnect: failed to restore identity after failed attach", .{});
+        }
+        state.runtime.syncClientSessionIdentity();
+        rc.recordFailure();
         return;
     };
     defer attach.deinit(state.allocator);
     terminal_main.debugLog("ses reconnected (started_daemon={}); restoring session {s}", .{ attach.started_daemon, old_uuid[0..8] });
 
+    rc.recordSuccess();
     if (state.reattachSession(old_uuid[0..])) {
         terminal_main.exportSessionEnv(state.runtime.sessionUuid());
         state.notifications.showFor("ses daemon reconnected — session restored", 3000);
@@ -135,7 +210,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
     var dead_splits: std.ArrayList([32]u8) = .empty;
     defer dead_splits.deinit(allocator);
 
-    var last_reconnect_attempt: i64 = 0;
+    var reconnect_state: ReconnectState = .{};
     var loop_err_burst: usize = 0;
 
     // Main loop.
@@ -145,7 +220,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         // conditions): drain their output, reap finished ones, kill overruns.
         // Never blocks — that is the whole point.
         state.async_cmds.poll();
-        maybeReconnectSes(state, &last_reconnect_attempt);
+        maybeReconnectSes(state, &reconnect_state);
         runtime_events.applyDeferredPaneExits(state);
         runtime_events.applyDeferredCwdResponse(state);
         runtime_events.applyDeferredPaneInfoResponse(state);

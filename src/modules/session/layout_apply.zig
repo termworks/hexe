@@ -67,7 +67,7 @@ pub fn applyClientSessionLayoutTemplate(
     while (leaf_idx < leaf_count) : (leaf_idx += 1) {
         const cwd = if (leaf_idx < cwds.items.len) cwds.items[leaf_idx] else null;
         const pane = try self.createPane(client_id, std.posix.getenv("SHELL") orelse "/bin/sh", cwd, null, null, null, null);
-        pane.needs_backlog_replay = true;
+        pane.requestBacklogReplay();
         try leaf_uuids.append(self.allocator, pane.uuid);
         try created_uuids.append(self.allocator, pane.uuid);
     }

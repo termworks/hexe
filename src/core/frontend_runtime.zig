@@ -237,6 +237,17 @@ pub const FrontendRuntime = struct {
         return self.client.getVtFd();
     }
 
+    /// Reopen only the VT data channel while the CTL registration stays live.
+    /// See `SesClient.reconnectVtOnly`.
+    pub fn reconnectVtOnly(self: *FrontendRuntime) bool {
+        return self.client.reconnectVtOnly();
+    }
+
+    /// Ask SES to replay pod backlogs so panes repaint over a fresh VT channel.
+    pub fn requestBacklogReplay(self: *FrontendRuntime) !void {
+        return self.client.requestBacklogReplay();
+    }
+
     pub fn vtConnGen(self: *const FrontendRuntime) u64 {
         return self.client.vt_conn_gen;
     }

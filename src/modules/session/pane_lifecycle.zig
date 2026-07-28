@@ -259,14 +259,41 @@ pub fn attachPane(self: anytype, uuid: [32]u8, client_id: usize) !*store_mod.Pan
     return pane;
 }
 
+/// Backoff schedule for failed pod VT reconnects, in milliseconds. Each
+/// `connectPodVt` attempt BLOCKS the event loop (connect + ack read), so an
+/// unreachable-but-alive pod retried on every 1s tick froze the whole daemon
+/// once per second indefinitely. The first attempt is immediate; only repeated
+/// failures back off.
+const BACKLOG_REPLAY_BACKOFF_MS = [_]i64{ 0, 250, 1_000, 2_000, 5_000, 10_000, 30_000 };
+
+fn backlogReplayBackoffMs(attempts: u8) i64 {
+    const idx = @min(@as(usize, attempts), BACKLOG_REPLAY_BACKOFF_MS.len - 1);
+    return BACKLOG_REPLAY_BACKOFF_MS[idx];
+}
+
+/// How many pod VT dials one pass may perform.
+///
+/// Reattaching a session used to reconnect EVERY pane in a single pass, so all
+/// of their backlogs (up to REPLAY_TAIL_CAP each) landed in the client's one
+/// shared VT queue at once — the overflow that dropped the channel. Each dial
+/// also blocks the event loop, so an unbounded pass is an unbounded stall.
+/// Pacing a couple per pass spreads both costs; the caller runs passes at the
+/// 100ms tick, so a six-pane session is fully replayed in well under a second
+/// and the visible panes paint first.
+const BACKLOG_REPLAY_MAX_PER_PASS: usize = 2;
+
 pub fn processBacklogReplays(self: anytype) void {
     var stale_panes: std.ArrayList([32]u8) = .empty;
     defer stale_panes.deinit(self.allocator);
+
+    const now_ms = std.time.milliTimestamp();
+    var dialed: usize = 0;
 
     var iter = self.store.panes.iterator();
     while (iter.next()) |entry| {
         const pane = entry.value_ptr;
         if (!pane.needs_backlog_replay) continue;
+        if (now_ms < pane.backlog_replay_next_ms) continue;
 
         if (paneProcessDead(pane)) {
             ses.debugLog("processBacklogReplays: pruning dead pane uuid={s}", .{entry.key_ptr[0..8]});
@@ -292,13 +319,24 @@ pub fn processBacklogReplays(self: anytype) void {
             continue;
         }
 
+        if (dialed >= BACKLOG_REPLAY_MAX_PER_PASS) {
+            // Leave the flag (and the backoff) untouched: this is pacing, not
+            // a failure. The next pass picks the pane up ~100ms later.
+            continue;
+        }
+        dialed += 1;
+
         ses.debugLog("processBacklogReplays: uuid={s} pane_id={d}", .{
             entry.key_ptr[0..8],
             pane.pane_id,
         });
         if (self.connectPodVt(entry.key_ptr.*, pane.pod_socket_path, pane.pane_id)) {
             pane.needs_backlog_replay = false;
+            pane.backlog_replay_attempts = 0;
+            pane.backlog_replay_next_ms = 0;
         } else {
+            pane.backlog_replay_attempts +|= 1;
+            pane.backlog_replay_next_ms = now_ms + backlogReplayBackoffMs(pane.backlog_replay_attempts);
             if (paneProcessDead(pane)) {
                 ses.debugLog("processBacklogReplays: connect failed for dead pane uuid={s}", .{entry.key_ptr[0..8]});
                 stale_panes.append(self.allocator, entry.key_ptr.*) catch |err| {
@@ -309,7 +347,11 @@ pub fn processBacklogReplays(self: anytype) void {
 
             // Keep the flag set so periodic retries can reconnect once the pod
             // VT endpoint is ready.
-            ses.debugLog("processBacklogReplays: deferred retry uuid={s}", .{entry.key_ptr[0..8]});
+            ses.debugLog("processBacklogReplays: deferred retry uuid={s} attempt={d} next_in={d}ms", .{
+                entry.key_ptr[0..8],
+                pane.backlog_replay_attempts,
+                backlogReplayBackoffMs(pane.backlog_replay_attempts),
+            });
         }
     }
 

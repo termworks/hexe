@@ -27,7 +27,6 @@ const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
 
 pub const MAX_CANDIDATES = 16;
 
-
 /// A same-cwd session offered as an attach target.
 pub const Candidate = struct {
     id: [8]u8,

@@ -188,7 +188,7 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
 
                 // Force backlog replay for fresh renderer state in the new mux.
                 if (self.ses_state.getPane(existing.uuid)) |p| {
-                    p.needs_backlog_replay = true;
+                    p.requestBacklogReplay();
                 }
                 replayPaneBacklogNow(self, existing.uuid);
 
@@ -226,15 +226,15 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
 pub fn replayPaneBacklogNow(self: *Server, uuid: [32]u8) void {
     const pane = self.ses_state.getPane(uuid) orelse return;
     const owner_id = pane.attached_to orelse {
-        pane.needs_backlog_replay = true;
+        pane.requestBacklogReplay();
         return;
     };
     const owner = self.ses_state.getClient(owner_id) orelse {
-        pane.needs_backlog_replay = true;
+        pane.requestBacklogReplay();
         return;
     };
     if (owner.mux_vt_fd == null) {
-        pane.needs_backlog_replay = true;
+        pane.requestBacklogReplay();
         return;
     }
 
@@ -245,7 +245,7 @@ pub fn replayPaneBacklogNow(self: *Server, uuid: [32]u8) void {
             updated.needs_backlog_replay = false;
         }
     } else if (self.ses_state.getPane(uuid)) |updated| {
-        updated.needs_backlog_replay = true;
+        updated.requestBacklogReplay();
     }
 }
 
@@ -336,7 +336,7 @@ pub fn handleBinaryFindSticky(self: *Server, fd: posix.fd_t, payload_len: u32, b
         // feels instant; keep needs_backlog_replay set if the mux VT/pod VT
         // endpoint is not ready yet so the periodic worker can retry.
         if (self.ses_state.getPane(pane.uuid)) |p| {
-            p.needs_backlog_replay = true;
+            p.requestBacklogReplay();
         }
         replayPaneBacklogNow(self, pane.uuid);
         ses.debugLog("find_sticky: requested immediate backlog replay for uuid={s}", .{pane.uuid[0..8]});
@@ -427,7 +427,7 @@ pub fn handleBinaryAdoptPane(self: *Server, fd: posix.fd_t, payload_len: u32, bu
     // run replay inline. Reconnecting POD VT sockets from the CTL handler
     // can stall attach/reattach; the periodic replay worker will pick this
     // up once the mux VT channel is ready.
-    pane.needs_backlog_replay = true;
+    pane.requestBacklogReplay();
     ses.debugLog("adopt_pane: queued deferred backlog replay for uuid={s}", .{pu.uuid[0..8]});
 
     self.ses_state.markDirty();

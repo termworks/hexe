@@ -972,11 +972,23 @@ pub fn tryReadControlHeader(fd: posix.fd_t) !ControlHeader {
     // First byte: propagate WouldBlock (no data available).
     const first = posix.read(fd, buf[0..1]) catch |err| return err;
     if (first == 0) return error.ConnectionClosed;
-    // Remaining bytes: wait with yield (header in-flight).
+    // Remaining bytes: wait with a TIMEOUT (header in-flight).
+    //
+    // A bare `continue` here was a pure busy-spin: once the first byte of the
+    // 10-byte header had arrived, the remaining 9 were waited for by hot-looping
+    // read() on a non-blocking fd, pinning a core. `writeAllTimeout` splits a
+    // header across two writes whenever the peer's socket buffer is briefly
+    // full under VT load, so this was reachable in normal operation — and if
+    // the peer stalled mid-header (SIGSTOP, a long GC-like pause) the frontend
+    // spun forever with the UI frozen. The sibling tryReadMuxVtHeader already
+    // does exactly this; it was simply missed here.
     var off: usize = 1;
     while (off < buf.len) {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
-            error.WouldBlock => continue,
+            error.WouldBlock => {
+                waitReadableTimeout(fd, DEFAULT_IO_TIMEOUT_MS) catch |wait_err| return wait_err;
+                continue;
+            },
             else => return err,
         };
         if (n == 0) return error.ConnectionClosed;

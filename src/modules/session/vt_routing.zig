@@ -6,7 +6,16 @@ const ses = @import("main.zig");
 const polling_mod = @import("polling.zig");
 const store_mod = @import("store.zig");
 
-const POD_VT_ACK_TIMEOUT_MS: i32 = 1000;
+/// Budgets for the (still synchronous) pod VT dial. Both BLOCK the whole SES
+/// event loop, so every millisecond here is a millisecond in which no other
+/// session's keystroke, output frame, or attach makes progress.
+///
+/// A healthy local pod accepts and acks in microseconds; the old 2000ms connect
+/// + 1000ms ack meant one unreachable pod cost 3s of frozen daemon per attempt.
+/// Paired with the retry backoff in processBacklogReplays, this bounds the
+/// sustained cost. Phase 1 of PLAN.md replaces this with a non-blocking dial.
+const POD_VT_CONNECT_TIMEOUT_MS: i32 = 500;
+const POD_VT_ACK_TIMEOUT_MS: i32 = 500;
 
 // Dialed fds must be non-blocking: every wire timeout only engages on
 // error.WouldBlock, so a blocking pod VT fd turns a wedged pod into an
@@ -23,7 +32,7 @@ pub fn connectPodVt(
     pod_socket_path: []const u8,
     pane_id: u16,
 ) bool {
-    const client = core.ipc.Client.connect(pod_socket_path) catch {
+    const client = core.ipc.Client.connectTimeout(pod_socket_path, POD_VT_CONNECT_TIMEOUT_MS) catch {
         ses.debugLog("connectPodVt: failed to connect to {s}", .{pod_socket_path});
         return false;
     };

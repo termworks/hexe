@@ -689,6 +689,42 @@ pub const SesClient = struct {
         return true;
     }
 
+    /// Reopen ONLY the VT data channel, reusing the live CTL registration.
+    ///
+    /// Losing the VT channel while CTL is healthy used to force the full
+    /// recovery path: re-register under a fresh UUID, then reattach. That is
+    /// enormously more expensive than the fault, and it re-triggers a backlog
+    /// replay of every pane — which is what overflowed the daemon's per-client
+    /// queue and dropped the VT channel in the first place.
+    ///
+    /// SES matches a new VT connection to an existing client by session_id
+    /// (see the SES_HANDSHAKE_FRONTEND_VT accept path), so while our CTL
+    /// registration is alive this is all that is needed.
+    ///
+    /// Only meaningful for the local_ipc transport: liblink and preconnected
+    /// both carry VT over a transport we do not own the reconnect policy for.
+    pub fn reconnectVtOnly(self: *SesClient) bool {
+        if (self.ctl_fd == null) return false;
+        if (self.vt_fd != null) return true;
+        const transport = switch (self.transport) {
+            .local_ipc => |t| t,
+            else => return false,
+        };
+
+        var owned_socket_path: ?[]const u8 = null;
+        defer if (owned_socket_path) |path| self.allocator.free(path);
+        const socket_path = if (transport.socket_path) |path|
+            path
+        else blk: {
+            owned_socket_path = ipc.getSesSocketPath(self.allocator) catch return false;
+            break :blk owned_socket_path.?;
+        };
+
+        if (!self.connectVt(socket_path)) return false;
+        self.debugLog("ses vt-only reconnect succeeded", .{});
+        return true;
+    }
+
     /// Register with ses — send session_id, session_name, and keepalive preference.
     /// Server may return a different name if collision detected - stored in resolved_name.
     fn register(self: *SesClient) !void {

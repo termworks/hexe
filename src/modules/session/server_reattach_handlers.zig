@@ -81,6 +81,17 @@ pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
     };
     // Lock will be released after detach completes
 
+    // Capture the client's mux fds before detachSession removes the record.
+    // detachSession does not close them (unlike every sibling removal path), so
+    // the teardown below has to — but only after the ack goes out, since the
+    // CTL fd is the connection this request arrived on.
+    var detached_ctl_fd: ?posix.fd_t = null;
+    var detached_vt_fd: ?posix.fd_t = null;
+    if (self.ses_state.getClient(client_id)) |client| {
+        detached_ctl_fd = client.mux_ctl_fd;
+        detached_vt_fd = client.mux_vt_fd;
+    }
+
     if (self.ses_state.detachSession(client_id, session_id, session_name)) {
         self.ses_state.markDirty();
         // The detach ack promises the session is recoverable: persist the
@@ -90,6 +101,9 @@ pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
         // Release lock after successful detach
         self.ses_state.releaseSessionLock(session_id);
         self.replyOrClose(fd, .session_detached, &.{});
+        // Ack is out and the frontend exits after a successful detach
+        // (performDetach -> requestExplicitDetachStop), so close our side.
+        self.closeDetachedMuxFds(detached_ctl_fd, detached_vt_fd);
     } else {
         // Release lock on failure too
         self.ses_state.releaseSessionLock(session_id);

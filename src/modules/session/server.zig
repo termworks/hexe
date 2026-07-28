@@ -38,6 +38,20 @@ const SKIP_TOTAL_TIMEOUT_MS: i64 = 2_000;
 /// could do it again immediately.
 const CLI_HEADER_IO_TIMEOUT_MS: i32 = 500;
 const MUX_VT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Backpressure thresholds for the POD→MUX direction.
+///
+/// Overflowing the per-client queue used to DROP the frontend's VT channel,
+/// which the frontend heals with a full re-register + reattach — and that
+/// reattach replays every pane's backlog into the same queue, overflowing it
+/// again. With enough scrollback across enough panes that never converges: the
+/// session flaps every RECONNECT_RETRY_MS forever.
+///
+/// So instead of dropping, stop READING the pods that feed a deep queue. The
+/// unread bytes stay in the pod→SES socket, the pod's own bounded write starts
+/// failing, and it falls back to its backlog ring — which is exactly what the
+/// ring is for. Nothing is lost and no channel is torn down.
+const MUX_VT_QUEUE_HIGH_WATER: usize = MUX_VT_QUEUE_MAX_BYTES * 3 / 4;
+const MUX_VT_QUEUE_LOW_WATER: usize = MUX_VT_QUEUE_MAX_BYTES / 2;
 // Symmetric cap for the MUX→POD (input) direction. A frame is always accepted
 // onto an empty queue (so a single large paste is never undeliverable);
 // overflow only trips once backlog already exists, at which point the wedged
@@ -86,6 +100,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(allocator),
         .pending_vt_close_fds = .empty,
         .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(allocator),
+        .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
         .deferred_destroy_ctl = .empty,
         .deferred_destroy_vt = .empty,
         .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(allocator),
@@ -110,6 +125,7 @@ fn deinitTestServer(server: *Server) void {
     var mux_queue_it = server.mux_vt_queues.iterator();
     while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(server.allocator);
     server.mux_vt_queues.deinit();
+    server.paused_pod_vt_fds.deinit();
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
@@ -627,6 +643,11 @@ pub const Server = struct {
     vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
     pending_vt_close_fds: std.ArrayList(PendingVtClose),
     mux_vt_queues: std.AutoHashMap(posix.fd_t, MuxVtQueue),
+    /// POD VT fds whose watcher is intentionally disarmed because the client
+    /// they feed is not draining fast enough. Re-armed by
+    /// `resumePausedPodVtWatchers` once the queue falls below the low-water
+    /// mark. See MUX_VT_QUEUE_HIGH_WATER.
+    paused_pod_vt_fds: std.AutoHashMap(posix.fd_t, void),
     // Deferred watcher destruction: nodes are kept alive for one loop iteration
     // after disarm so xev can finish processing their completions. Freeing
     // immediately causes use-after-free in ReleaseFast (xev still holds refs).
@@ -667,6 +688,7 @@ pub const Server = struct {
             .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(page_alloc),
             .pending_vt_close_fds = .empty,
             .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(page_alloc),
+            .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .deferred_destroy_ctl = .empty,
             .deferred_destroy_vt = .empty,
             .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
@@ -697,6 +719,7 @@ pub const Server = struct {
         var mux_queue_it = self.mux_vt_queues.iterator();
         while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(self.allocator);
         self.mux_vt_queues.deinit();
+        self.paused_pod_vt_fds.deinit();
         self.flushDeferredDestroys();
         self.deferred_destroy_ctl.deinit(self.allocator);
         self.deferred_destroy_vt.deinit(self.allocator);
@@ -877,19 +900,54 @@ pub const Server = struct {
     /// brand-new connection that reused the fd number).
     pub fn purgeClientFdState(self: *Server, client_id: usize) void {
         const client = self.ses_state.getClient(client_id) orelse return;
-        if (client.mux_ctl_fd) |ctl_fd| {
-            _ = self.binary_ctl_fds.remove(ctl_fd);
-            self.disarmCtlWatcher(ctl_fd);
-            if (self.pending_pop_requests.fetchRemove(ctl_fd)) |kv| {
+        self.purgeMuxFdState(client.mux_ctl_fd, client.mux_vt_fd);
+    }
+
+    /// fd-keyed core of `purgeClientFdState`. Split out so the detach path can
+    /// purge AFTER the client record is gone: `detachSession` removes the
+    /// client, so a client_id lookup at that point finds nothing.
+    pub fn purgeMuxFdState(self: *Server, ctl_fd: ?posix.fd_t, vt_fd: ?posix.fd_t) void {
+        if (ctl_fd) |cfd| {
+            _ = self.binary_ctl_fds.remove(cfd);
+            self.disarmCtlWatcher(cfd);
+            if (self.pending_pop_requests.fetchRemove(cfd)) |kv| {
                 self.ses_state.store.noteClosedFd(kv.value);
                 posix.close(kv.value);
             }
         }
-        if (client.mux_vt_fd) |vt_fd| {
-            self.disarmVtWatcher(vt_fd);
-            if (self.mux_vt_queues.fetchRemove(vt_fd)) |entry| {
+        if (vt_fd) |vfd| {
+            self.disarmVtWatcher(vfd);
+            if (self.mux_vt_queues.fetchRemove(vfd)) |entry| {
                 var queue = entry.value;
                 queue.deinit(self.allocator);
+            }
+        }
+    }
+
+    /// Purge and close a detached client's mux fds.
+    ///
+    /// `detachSession` removes the client record without closing these — every
+    /// sibling removal path (`removeClient`, `removeClientGraceful`,
+    /// `shutdownClient`, `forceDetachAttachedSession`) calls `closeClientFds`,
+    /// but detach did not. That left both fds open with armed watchers and a
+    /// queued-output entry owned by no client; if the frontend re-registered on
+    /// the same CTL fd instead of hanging up, the new client got
+    /// `mux_vt_fd = null` while the old VT fd was still armed and queued.
+    ///
+    /// Must run only AFTER the detach ack has been written, since the CTL fd is
+    /// the connection the request arrived on.
+    pub fn closeDetachedMuxFds(self: *Server, ctl_fd: ?posix.fd_t, vt_fd: ?posix.fd_t) void {
+        self.purgeMuxFdState(ctl_fd, vt_fd);
+        if (vt_fd) |vfd| {
+            self.ses_state.store.noteClosedFd(vfd);
+            posix.close(vfd);
+        }
+        if (ctl_fd) |cfd| {
+            // Guard the (not expected, but cheap to rule out) aliasing case so
+            // a double close cannot land on a recycled fd number.
+            if (vt_fd == null or vt_fd.? != cfd) {
+                self.ses_state.store.noteClosedFd(cfd);
+                posix.close(cfd);
             }
         }
     }
@@ -938,6 +996,7 @@ pub const Server = struct {
                 ses.debugLog("processPendingVtCloses: fd={d} removing MUX VT", .{pending.fd});
                 self.removeMuxVtFd(pending.fd);
             }
+            _ = self.paused_pod_vt_fds.remove(pending.fd);
             if (self.mux_vt_queues.fetchRemove(pending.fd)) |entry| {
                 var queue = entry.value;
                 queue.deinit(self.allocator);
@@ -1306,6 +1365,14 @@ pub const Server = struct {
             return .disarm;
         };
 
+        // Backpressure gate: decided BEFORE reading, so the unread bytes stay
+        // in the pod's socket rather than being dropped or forced into an
+        // already-deep queue.
+        if (watch.direction == .pod_to_mux and server.shouldPausePodVt(watch.fd)) {
+            server.pausePodVtWatcher(watch.fd, watch);
+            return .disarm;
+        }
+
         const ok = switch (watch.direction) {
             .pod_to_mux => server.routePodToMux(watch.fd),
             .mux_to_pod => server.routeMuxToPod(watch.fd),
@@ -1349,6 +1416,8 @@ pub const Server = struct {
 
         periodic.server.flushMuxVtQueues();
         periodic.server.flushPodVtQueues();
+        // Queues just drained; re-arm anything paused for backpressure.
+        periodic.server.resumePausedPodVtWatchers();
 
         if (periodic.server.ses_state.store.dirty and now_ms - periodic.last_save >= 1000) {
             // Keep the store dirty when the save fails (disk full, EIO) so
@@ -1371,14 +1440,19 @@ pub const Server = struct {
             periodic.last_stats_update = now_ms;
         }
 
+        // Backlog reconnects run on the fast tick, not the 1s cleanup sweep:
+        // each pass dials at most BACKLOG_REPLAY_MAX_PER_PASS pods, so pacing
+        // them at 100ms replays a whole session in well under a second while
+        // keeping any single pass's blocking cost (and the resulting VT queue
+        // depth) small. At the 1s cadence the same cap would have made attach
+        // visibly slow.
+        periodic.server.ses_state.processBacklogReplays();
+
         if (now_ms - periodic.last_cleanup >= 1000) {
             // Reap exited pods: they are direct children spawned without a
             // matching wait, so each would otherwise linger as a zombie and
             // keep its /proc entry alive for pid-liveness checks.
             reapExitedPods();
-            // Retry any deferred backlog reconnects. This avoids attach-time
-            // races where a pod VT endpoint is not ready on the first attempt.
-            periodic.server.ses_state.processBacklogReplays();
             periodic.server.ses_state.cleanupOrphanedPanes();
             periodic.server.ses_state.cleanupExpiredDetachedSessions();
             periodic.last_cleanup = now_ms;
@@ -1690,10 +1764,93 @@ pub const Server = struct {
         return true;
     }
 
+    /// Queued bytes waiting to reach this client, without allocating.
+    fn muxVtQueueBytes(self: *Server, mux_vt_fd: posix.fd_t) usize {
+        const queue = self.mux_vt_queues.getPtr(mux_vt_fd) orelse return 0;
+        return queue.bytes;
+    }
+
+    /// Resolve where a POD VT fd's output would go, consuming no bytes. Used to
+    /// decide backpressure BEFORE reading a frame off the socket.
+    fn muxVtTargetForPodVt(self: *Server, pod_vt_fd: posix.fd_t) ?posix.fd_t {
+        const pane_id = self.ses_state.store.pod_vt_to_pane_id.get(pod_vt_fd) orelse return null;
+        return self.findMuxVtForPane(pane_id);
+    }
+
+    /// Whether this pod's output should stop being read for now.
+    fn shouldPausePodVt(self: *Server, pod_vt_fd: posix.fd_t) bool {
+        const mux_vt_fd = self.muxVtTargetForPodVt(pod_vt_fd) orelse return false;
+        return self.muxVtQueueBytes(mux_vt_fd) >= MUX_VT_QUEUE_HIGH_WATER;
+    }
+
+    /// Disarm a POD VT watcher for backpressure and remember to re-arm it.
+    /// Only valid from the watcher callback immediately before it returns
+    /// `.disarm` — the CQE is consumed at that point, so the node is safe to
+    /// defer-destroy (same contract as processPendingVtCloses).
+    fn pausePodVtWatcher(self: *Server, fd: posix.fd_t, watcher: *VtWatcher) void {
+        self.paused_pod_vt_fds.put(fd, {}) catch |err| {
+            // Without a pause record nothing would ever re-arm this fd and the
+            // pane would go permanently silent. Keep reading instead: a deep
+            // queue is far better than a dead pane.
+            core.logging.logError("ses", "failed to record paused POD VT fd", err);
+            return;
+        };
+        // Defer-destroy on BOTH branches, matching processPendingVtCloses: the
+        // callback returns .disarm right after this either way, so no further
+        // CQE can arrive for the node and freeing it at the next safe point is
+        // correct whether or not it was still the map's current watcher.
+        _ = self.disarmVtWatcherMatching(fd, watcher);
+        self.deferDestroyVtWatcher(watcher);
+        ses.debugLog("vt pod->mux: pausing pod_vt_fd={d} (client queue above high water)", .{fd});
+    }
+
+    /// Re-arm pod VT watchers whose destination has drained. Also releases the
+    /// pause when the destination went away entirely — otherwise a client that
+    /// disconnected while a pod was paused would leave that pod silent forever.
+    fn resumePausedPodVtWatchers(self: *Server) void {
+        if (self.paused_pod_vt_fds.count() == 0) return;
+
+        var resume_fds: std.ArrayList(posix.fd_t) = .empty;
+        defer resume_fds.deinit(self.allocator);
+
+        var it = self.paused_pod_vt_fds.keyIterator();
+        while (it.next()) |fd_ptr| {
+            const fd = fd_ptr.*;
+            const still_paused = blk: {
+                const mux_vt_fd = self.muxVtTargetForPodVt(fd) orelse break :blk false;
+                break :blk self.muxVtQueueBytes(mux_vt_fd) > MUX_VT_QUEUE_LOW_WATER;
+            };
+            if (still_paused) continue;
+            resume_fds.append(self.allocator, fd) catch |err| {
+                core.logging.logError("ses", "failed to collect resumable POD VT fd", err);
+                break;
+            };
+        }
+
+        for (resume_fds.items) |fd| {
+            _ = self.paused_pod_vt_fds.remove(fd);
+            // A pod fd closed while paused is no longer pollable; armVtWatcher
+            // refuses it and we simply drop the pause record.
+            if (self.armVtWatcher(fd, .pod_to_mux)) {
+                ses.debugLog("vt pod->mux: resuming pod_vt_fd={d}", .{fd});
+            }
+        }
+    }
+
     fn flushMuxVtQueues(self: *Server) void {
+        // Drop a connection whose queued write failed permanently (EPIPE,
+        // ECONNRESET), exactly as flushPodVtQueues does for the other
+        // direction. Discarding the result left a dead frontend's queue pinning
+        // up to MUX_VT_QUEUE_MAX_BYTES and being retried at 10Hz forever; it
+        // was only ever cleaned up incidentally, when a new pod frame happened
+        // to route to the same fd — which never happens for an idle pane.
+        // queueVtClose only appends to the pending-close list (no map
+        // mutation), so closing mid-iteration is safe.
         var it = self.mux_vt_queues.iterator();
         while (it.next()) |entry| {
-            _ = self.flushMuxVtQueue(entry.key_ptr.*);
+            if (!self.flushMuxVtQueue(entry.key_ptr.*)) {
+                self.queueVtClose(entry.key_ptr.*, null);
+            }
         }
     }
 
@@ -1812,8 +1969,17 @@ pub const Server = struct {
         };
 
         self.enqueueMuxVtFrame(mux_vt_fd, pane_id, frame_type, payload) catch |err| {
-            core.logging.logError("ses", "failed to queue MUX VT frame", err);
-            self.queueVtClose(mux_vt_fd, null);
+            // Reaching the hard cap despite the high-water pause means one
+            // frame overshot it. Dropping THIS frame costs one pane a visual
+            // gap that its next repaint fixes; dropping the channel (the old
+            // behavior) costs every pane in the session a reattach, and the
+            // reattach re-triggers the replay that overflowed the queue in the
+            // first place — the flap. Keep the channel.
+            core.logging.warn("ses", "mux VT queue full: dropping frame pane_id={d} len={d} ({s})", .{
+                pane_id,
+                payload.len,
+                @errorName(err),
+            });
             return true;
         };
         if (!self.flushMuxVtQueue(mux_vt_fd)) {
@@ -1949,6 +2115,10 @@ pub const Server = struct {
 
     fn removePodVtFd(self: *Server, fd: posix.fd_t) void {
         ses.debugLog("remove pod_vt fd={d}", .{fd});
+        // Drop any backpressure pause for this fd: the number can be reused by
+        // a new connection, and re-arming it later would attach a pod_to_mux
+        // watcher to something else entirely.
+        _ = self.paused_pod_vt_fds.remove(fd);
         const pane_id = if (self.ses_state.store.pod_vt_to_pane_id.fetchRemove(fd)) |kv| blk: {
             _ = self.ses_state.store.pane_id_to_pod_vt.remove(kv.value);
             _ = self.ses_state.store.pane_id_to_uuid.remove(kv.value);
@@ -1976,7 +2146,7 @@ pub const Server = struct {
                             entry.key_ptr[0..8],
                             pane_id,
                         });
-                        pane.needs_backlog_replay = true;
+                        pane.requestBacklogReplay();
                         return;
                     }
 
