@@ -61,7 +61,14 @@ const RECONNECT_RETRY_MS: i64 = 2_000;
 /// Ceiling for the reconnect backoff. A flat 2s retry turns any persistent
 /// reconnect fault into a tight flap loop that also hammers the daemon; back
 /// off so a degraded state degrades quietly instead.
-const RECONNECT_MAX_RETRY_MS: i64 = 30_000;
+/// Backoff only engages after a few fast attempts, and caps well short of the
+/// old 30s. The daemon-restart path goes through here: after a daemon dies, the
+/// first attempt can legitimately fail (its socket may still be bound, or its
+/// instance flock not yet released), and backing off immediately turned a
+/// transient loss into a many-second outage. Keep recovery snappy first, then
+/// degrade quietly if the fault persists.
+const RECONNECT_FAST_ATTEMPTS: u8 = 3;
+const RECONNECT_MAX_RETRY_MS: i64 = 10_000;
 
 /// Consecutive VT-only repairs to try before falling back to full recovery.
 ///
@@ -79,13 +86,20 @@ const ReconnectState = struct {
     retry_ms: i64 = RECONNECT_RETRY_MS,
     /// Consecutive VT-only repairs that have not produced a healthy link.
     vt_only_attempts: u8 = 0,
+    /// Consecutive failed full recoveries.
+    failures: u8 = 0,
 
     fn recordSuccess(self: *ReconnectState) void {
         self.retry_ms = RECONNECT_RETRY_MS;
         self.vt_only_attempts = 0;
+        self.failures = 0;
     }
 
     fn recordFailure(self: *ReconnectState) void {
+        self.failures +|= 1;
+        // Stay at the base interval for the first few tries so a daemon
+        // restart is not needlessly delayed.
+        if (self.failures <= RECONNECT_FAST_ATTEMPTS) return;
         self.retry_ms = @min(self.retry_ms * 2, RECONNECT_MAX_RETRY_MS);
     }
 };
