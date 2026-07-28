@@ -87,7 +87,7 @@ mount            # Separate mount table (mounts don't leak to host)
 
 **Security:**
 - ✅ `no_new_privs` (can't escalate privileges)
-- ✅ Capabilities dropped
+- ⚠️ Capabilities **not** dropped — see [Known gaps](#known-gaps)
 
 **Filesystem (chroot-style bind mounts):**
 - ✅ Private `/tmp` (tmpfs)
@@ -127,7 +127,7 @@ hostname              # "hexe" (isolated hostname)
 
 **Security:**
 - ✅ `no_new_privs` (can't escalate privileges)
-- ✅ Capabilities dropped
+- ⚠️ Capabilities **not** dropped — see [Known gaps](#known-gaps)
 
 **Filesystem (chroot-style bind mounts):**
 - ✅ Private `/tmp` (tmpfs)
@@ -255,8 +255,12 @@ isolation = {
 **Test it:**
 ```bash
 # This will fail after 100 forks
-:(){ :|:& };:  # Fork bomb (safely contained!)
+:(){ :|:& };:  # Fork bomb (contained by the PID limit)
 ```
+
+> Resource limits apply only to the `sandbox` and `full` profiles, and only
+> when you set them explicitly — there is no default PID or memory cap. A float
+> with no `pids` set is **not** protected against a fork bomb.
 
 ---
 
@@ -331,8 +335,8 @@ hexe terminal float --command "python3 /tmp/untrusted.py" \
 # - Can't access network
 # - Can't see other processes
 # - Can't see /nix, /pkg, /opt
-# - Limited to configured RAM (if set)
-# - Can't fork bomb (PID limit)
+# - Limited to configured RAM (only if `memory` is set)
+# - Can't fork bomb (only if `pids` is set)
 ```
 
 ### Example 3: Build Environment
@@ -468,8 +472,37 @@ ledger:
 - `HEXE_NO_PROJECT_COMMANDS=1` disables project hooks entirely; whereas
   `HEXE_TRUST_ALL_PROJECTS=1` bypasses the ledger (for CI / fully-trusted setups).
 
-Pure configuration (layouts, keybinds, statusbar) always loads — the Lua runtime
-is sandboxed (no `io`/`os`); only the shell-hook path is gated.
+Pure configuration (layouts, keybinds, statusbar) always loads, but an
+**untrusted** project file loads in a sandboxed runtime: `io`, `package`,
+`dofile`, `loadfile`, `load`, `debug` and `hexe.exec` are removed, `os` is
+reduced to its clock/formatting helpers, and `require` resolves only `"hexe"`.
+Once `hexe allow`ed, the file loads with full capabilities.
+
+This gating applies to *loading* the file, not just to the hooks it declares —
+loading a Lua file executes it, so a check that ran afterwards could not
+protect anything.
+
+---
+
+## Known gaps
+
+Tracked, currently **not** enforced. Listed here rather than implied to work:
+
+- **Capabilities are not dropped.** `isolation_voidbox.buildConfig` sets
+  `cap_drop = ""` / `cap_add = ""`, and libvoid's `caps.apply` returns early
+  when both lists are empty, so `capset`/`PR_CAPBSET_DROP` are never called.
+  Combined with `user = true` the child holds a full capability set inside its
+  user namespace. `no_new_privs` *is* applied.
+- **`src/core/isolation.zig` is dead code.** Its Landlock/userns/cgroup
+  implementation has no call sites and the module is not exported from
+  `src/core/mod.zig`. The live implementation is `isolation_voidbox.zig`.
+  `--isolated` now maps to the `default` voidbox profile; previously it only set
+  `HEXE_POD_ISOLATE=1`, which only that dead module read, so it isolated
+  nothing.
+- **Unknown profile names silently downgrade.** `getIsolationOptions` falls
+  through to a default for any unrecognised string, and cgroup limits apply only
+  to the exact names `sandbox` and `full`. A typo yields weaker isolation than
+  requested with no error.
 
 ---
 

@@ -867,7 +867,18 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     const env_items: ?[]const []const u8 = if (env_list.items.len > 0) env_list.items else null;
     const extra_items: ?[]const []const u8 = if (extra_env_list.items.len > 0) extra_env_list.items else null;
-    const isolation_profile: ?[]const u8 = if (isolation_profile_slice.len > 0) isolation_profile_slice else null;
+    // `--isolated` with no explicit profile must still isolate. It used to set
+    // only HEXE_POD_ISOLATE=1, which is read exclusively by src/core/isolation.zig
+    // — a module with no call sites that is not even exported from core's
+    // mod.zig. So the flag produced a plain, unsandboxed shell while
+    // docs/isolation.md advertised containment. Map it to the same voidbox
+    // profile the config-declared path already uses (loop_actions.zig).
+    const isolation_profile: ?[]const u8 = if (isolation_profile_slice.len > 0)
+        isolation_profile_slice
+    else if (isolated)
+        "default"
+    else
+        null;
     const use_pod = (!wait_for_exit) or isolated or (isolation_profile != null);
     const title: ?[]const u8 = if (title_slice.len > 0) title_slice else null;
 

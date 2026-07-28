@@ -205,6 +205,22 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
         }
     }
 
+    // Enforce the per-session pane cap. `allowNewPane` existed with no call
+    // site at all, so `max_panes_per_session` (and HEXE_MAX_PANES_PER_SESSION)
+    // did nothing: any same-uid peer could drive pane creation until the
+    // machine ran out of pids or fds. Every create_pane arrives on one
+    // already-established connection, so the connection rate limiter never
+    // applied here either.
+    const session_pane_count = if (self.ses_state.getClient(client_id)) |client|
+        client.pane_uuids.items.len
+    else
+        0;
+    if (!self.resource_monitor.allowNewPane(session_pane_count)) {
+        core.logging.warn("ses", "create_pane refused: session already has {d} panes (cap reached)", .{session_pane_count});
+        self.sendBinaryError(fd, "pane_limit_reached: session pane cap exceeded");
+        return;
+    }
+
     const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, spawn_env, isolation_profile) catch |err| {
         core.logging.logError("ses", "create_pane failed to spawn pane", err);
         self.sendBinaryError(fd, "create_failed");

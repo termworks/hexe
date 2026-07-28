@@ -37,6 +37,36 @@ pub fn hashFile(allocator: std.mem.Allocator, path: []const u8) ![HASH_HEX_LEN]u
     return std.fmt.bytesToHex(digest, .lower);
 }
 
+/// Lowercase-hex SHA-256 of an in-memory buffer.
+pub fn hashBytes(bytes: []const u8) [HASH_HEX_LEN]u8 {
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(bytes, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+/// Whether a hash is recorded in the ledger.
+pub fn hashIsTrusted(allocator: std.mem.Allocator, hash: [HASH_HEX_LEN]u8) bool {
+    const ledger = ledgerPath(allocator) catch return false;
+    defer allocator.free(ledger);
+    const contents = std.fs.cwd().readFileAlloc(allocator, ledger, 4 * 1024 * 1024) catch return false;
+    defer allocator.free(contents);
+    var it = std.mem.tokenizeScalar(u8, contents, '\n');
+    while (it.next()) |line| {
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t\r"), &hash)) return true;
+    }
+    return false;
+}
+
+/// Whether these exact bytes are trusted.
+///
+/// Prefer this over `isTrusted` wherever the caller already holds the content
+/// it is about to act on: re-reading the path to hash it is a TOCTOU window in
+/// which an attacker with write access to the working tree can present one file
+/// for execution and another for verification.
+pub fn bytesAreTrusted(allocator: std.mem.Allocator, bytes: []const u8) bool {
+    return hashIsTrusted(allocator, hashBytes(bytes));
+}
+
 /// Whether `path`'s current content hash is recorded in the ledger. Any I/O
 /// error (missing ledger, unreadable file) is treated as NOT trusted — the
 /// safe default is to withhold command execution.
@@ -105,15 +135,21 @@ test "trust ledger: allow makes a file trusted; edits invalidate it" {
 }
 
 // Minimal setenv shims for the test (std has no cross-call setenv wrapper).
-fn setenvForTest(name: [*:0]const u8, value: []const u8) void {
+// Declared against libc directly: `std.c` does not re-export setenv/unsetenv,
+// which is why this file's tests never compiled until it was imported into a
+// test target.
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+pub fn setenvForTest(name: [*:0]const u8, value: []const u8) void {
     var buf: [512]u8 = undefined;
     const z = std.fmt.bufPrintZ(&buf, "{s}", .{value}) catch return;
-    _ = std.c.setenv(name, z.ptr, 1);
+    _ = setenv(name, z.ptr, 1);
 }
-fn restoreEnvForTest(name: [*:0]const u8, prev: ?[]const u8) void {
+pub fn restoreEnvForTest(name: [*:0]const u8, prev: ?[]const u8) void {
     if (prev) |p| {
         setenvForTest(name, p);
     } else {
-        _ = std.c.unsetenv(name);
+        _ = unsetenv(name);
     }
 }
