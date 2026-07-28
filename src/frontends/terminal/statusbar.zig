@@ -1065,6 +1065,18 @@ fn evalLuaBuiltinDescCached(code: []const u8, ctx: *shp.Context) BuiltinDesc {
     return desc;
 }
 
+/// Report a malformed field in a Lua builtin descriptor.
+///
+/// These checks used to call `lua.raiseError()`, but this whole function runs
+/// AFTER `beginLuaEval` returned — plain Zig, with no `lua_pcall` frame on the
+/// stack. `lua_error` with no handler invokes Lua's default panic function,
+/// which `abort()`s the process, so a single mistyped config value
+/// (`prefix = { output = 5 }`) killed the terminal and every attached pane's UI.
+/// A bad field degrades to its default instead.
+fn warnBadBuiltinField(comptime field: []const u8) void {
+    core.logging.warn("terminal", "statusbar builtin: " ++ field ++ " must be a string; ignoring", .{});
+}
+
 fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
     var desc: BuiltinDesc = .{};
     const trace_start_ms = std.time.milliTimestamp();
@@ -1139,8 +1151,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     @memcpy(desc.prefix_buf[0..n], s[0..n]);
                     desc.prefix_len = n;
                 } else if (rt.lua.typeOf(-1) != .nil) {
-                    _ = rt.lua.pushString("builtin.prefix.output must be string");
-                    rt.lua.raiseError();
+                    warnBadBuiltinField("builtin.prefix.output");
                 }
                 rt.lua.pop(1);
 
@@ -1149,8 +1160,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     const s = rt.lua.toString(-1) catch "";
                     desc.prefix_style = shp.Style.parse(s);
                 } else if (rt.lua.typeOf(-1) != .nil) {
-                    _ = rt.lua.pushString("builtin.prefix.style must be string");
-                    rt.lua.raiseError();
+                    warnBadBuiltinField("builtin.prefix.style");
                 }
                 rt.lua.pop(1);
             }
@@ -1170,8 +1180,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     @memcpy(desc.suffix_buf[0..n], s[0..n]);
                     desc.suffix_len = n;
                 } else if (rt.lua.typeOf(-1) != .nil) {
-                    _ = rt.lua.pushString("builtin.suffix.output must be string");
-                    rt.lua.raiseError();
+                    warnBadBuiltinField("builtin.suffix.output");
                 }
                 rt.lua.pop(1);
 
@@ -1180,8 +1189,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     const s = rt.lua.toString(-1) catch "";
                     desc.suffix_style = shp.Style.parse(s);
                 } else if (rt.lua.typeOf(-1) != .nil) {
-                    _ = rt.lua.pushString("builtin.suffix.style must be string");
-                    rt.lua.raiseError();
+                    warnBadBuiltinField("builtin.suffix.style");
                 }
                 rt.lua.pop(1);
             }
@@ -1197,8 +1205,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                         @memcpy(desc.suffix_buf[0..n], s[0..n]);
                         desc.suffix_len = n;
                     } else if (rt.lua.typeOf(-1) != .nil) {
-                        _ = rt.lua.pushString("builtin.sufix.output must be string");
-                        rt.lua.raiseError();
+                        warnBadBuiltinField("builtin.sufix.output");
                     }
                     rt.lua.pop(1);
 
@@ -1207,8 +1214,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                         const s = rt.lua.toString(-1) catch "";
                         desc.suffix_style = shp.Style.parse(s);
                     } else if (rt.lua.typeOf(-1) != .nil) {
-                        _ = rt.lua.pushString("builtin.sufix.style must be string");
-                        rt.lua.raiseError();
+                        warnBadBuiltinField("builtin.sufix.style");
                     }
                     rt.lua.pop(1);
                 }

@@ -37,6 +37,15 @@ CASES = [
     ("lua syntax error", 'local hexe = require("hexe")\nreturn hexe.setup({ keys = { ,, } }\n'),
     ("wrong schema", 'local hexe = require("hexe")\nreturn hexe.setup({ ses = { layouts = "not-a-table" } })\n'),
     ("not a table", 'return 42\n'),
+    # A statusbar builtin descriptor with a non-string field. These checks used
+    # to call lua.raiseError() from plain Zig with no pcall frame on the stack,
+    # so Lua's default panic function abort()ed the whole frontend -- one
+    # mistyped config value killed the terminal and every attached pane.
+    ("builtin bad field type",
+     'local hexe = require("hexe")\n'
+     'return hexe.setup({ status = { left = { hexe.segment({\n'
+     '  builtin = [[return { name = "time", prefix = { output = 5 } }]],\n'
+     '}) } } })\n'),
 ]
 
 procs = []
