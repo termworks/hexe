@@ -14,6 +14,7 @@ games — just sustained output vs. input.
 Needs a ReleaseFast build (Debug VT parsing cannot keep up with the flood).
 """
 import atexit
+import signal
 import fcntl
 import os
 import pty

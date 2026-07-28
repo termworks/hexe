@@ -20,7 +20,7 @@ pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
 
     if (message.len == 0) {
         print("Error: message is required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     var target_uuid: [32]u8 = undefined;
@@ -59,8 +59,13 @@ pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i6
     const posix = std.posix;
 
     if (message.len == 0) {
+        // Must NOT be a plain `return`: main exits 0 on a normal return, and
+        // THIS command's documented contract is `0 = yes`. A script doing
+        // `hexe popup confirm "$msg" && rm -rf ...` with an unset $msg
+        // therefore got a silent confirmation. Every other failure in this
+        // function already exits 1.
         print("Error: message is required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     var target_uuid: [32]u8 = undefined;
@@ -125,7 +130,7 @@ pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
 
     if (items.len == 0) {
         print("Error: --items is required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     var target_uuid: [32]u8 = undefined;

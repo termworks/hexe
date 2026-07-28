@@ -19,6 +19,7 @@ emits cell diffs, so a marker often arrives split across cursor moves even when
 it rendered perfectly.
 """
 import atexit
+import signal
 import fcntl, os, pty, select, struct, subprocess, sys, termios, time
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

@@ -671,8 +671,10 @@ pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, 
     const posix = std.posix;
 
     if (message.len == 0) {
+        // A bare `return` exits 0, so a script could not tell that the notify
+        // never went anywhere.
         print("Error: message is required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     var target_uuid: [32]u8 = undefined;

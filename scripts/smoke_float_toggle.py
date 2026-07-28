@@ -17,6 +17,7 @@ per-round marker so a *stale* repaint (showing an older round's content) is
 caught too, not just a blank one.
 """
 import atexit
+import signal
 import fcntl, os, pty, select, struct, subprocess, sys, termios, time
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

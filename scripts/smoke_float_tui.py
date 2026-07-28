@@ -18,6 +18,7 @@ The marker therefore proves the whole query/reply round trip worked, not just
 that output flows one way. A round that hangs is the bug reproducing.
 """
 import atexit
+import signal
 import fcntl, os, pty, select, struct, subprocess, sys, termios, time
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

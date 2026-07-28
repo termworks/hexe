@@ -11,6 +11,7 @@ Asserts: (1) a float with session A's id appears in A and NOT in B;
          (2) a float with an unknown/stale id appears in NEITHER (no_mux).
 """
 import atexit
+import signal
 import fcntl, os, pty, select, shutil, struct, subprocess, sys, termios, time
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HEXE = os.path.join(REPO, "zig-out/bin/hexe")

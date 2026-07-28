@@ -23,6 +23,7 @@ appears in the typed command line — the shell's echo of the command can't
 satisfy the assertion.
 """
 import atexit
+import signal
 import fcntl, os, pty, re, select, struct, subprocess, sys, termios, time
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
