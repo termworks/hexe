@@ -26,6 +26,16 @@ pub fn initVaxisForSize(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, width: u
 }
 
 pub fn resizeVaxisForSize(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, width: u16, height: u16) !void {
+    // Screen.init resets width_method to its .wcwidth default, and capability
+    // detection is one-shot at startup (host.zig / loop_input.zig) with nothing
+    // to re-apply it. Replacing the screen therefore silently downgraded
+    // grapheme measurement for the rest of the session, so every emoji and wide
+    // character misaligned by a column after the first resize. Carry the
+    // detected settings across.
+    const width_method = vx.screen.width_method;
+    const cursor_shape = vx.screen.cursor_shape;
+    const mouse_shape = vx.screen.mouse_shape;
+
     vx.screen.deinit(allocator);
     vx.screen = try vaxis.Screen.init(allocator, .{
         .rows = height,
@@ -33,6 +43,10 @@ pub fn resizeVaxisForSize(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, width:
         .x_pixel = 0,
         .y_pixel = 0,
     });
+    vx.screen.width_method = width_method;
+    vx.screen.cursor_shape = cursor_shape;
+    vx.screen.mouse_shape = mouse_shape;
+
     vx.screen_last.deinit(allocator);
     vx.screen_last = try vaxis.AllocatingScreen.init(allocator, width, height);
 }

@@ -2,6 +2,28 @@ const std = @import("std");
 const core = @import("core");
 const session_model = core.session_model;
 
+/// Shift a per-tab-index visibility bitmask when a tab is inserted at `index`.
+/// Bits at or above `index` move up one; the new tab starts hidden.
+pub fn shiftTabVisibleForInsert(mask: u64, index: usize) u64 {
+    if (index >= 64) return mask;
+    const shift: u6 = @intCast(index);
+    const low_mask: u64 = (@as(u64, 1) << shift) - 1;
+    const low = mask & low_mask;
+    const high = (mask & ~low_mask) << 1;
+    return low | high;
+}
+
+/// Shift a per-tab-index visibility bitmask when the tab at `index` is removed.
+/// Its bit is dropped and everything above it moves down one.
+pub fn shiftTabVisibleForRemove(mask: u64, index: usize) u64 {
+    if (index >= 64) return mask;
+    const shift: u6 = @intCast(index);
+    const low_mask: u64 = (@as(u64, 1) << shift) - 1;
+    const low = mask & low_mask;
+    const high = (mask >> shift) >> 1 << shift;
+    return low | high;
+}
+
 pub fn paneUuidInList(list: []const [32]u8, uuid: [32]u8) bool {
     for (list) |candidate| {
         if (std.mem.eql(u8, &candidate, &uuid)) return true;
@@ -160,6 +182,14 @@ pub fn removePaneFromSessionSnapshot(
                             float_state.parent_tab = parent - 1;
                         }
                     }
+                    // tab_visible is indexed BY TAB INDEX
+                    // (session_projection.paneVisibleOnTab tests
+                    // `tab_visible & (1 << tab)`), so it has to move with
+                    // parent_tab. Leaving it alone made a float pinned to a
+                    // later tab appear on the wrong one after a tab closed —
+                    // and it round-trips through JSON, so the corruption
+                    // survived detach/reattach and daemon restarts.
+                    float_state.tab_visible = shiftTabVisibleForRemove(float_state.tab_visible, tab_idx);
                 }
             }
         },
@@ -177,4 +207,50 @@ pub fn removePaneFromSessionSnapshot(
     }
 
     normalizeAfterPaneRemoval(snapshot);
+}
+
+test "tab_visible shifts with tab insertion" {
+    const testing = std.testing;
+    // Tabs [0,1,2]; float visible on 0 and 2 => 0b101.
+    const mask: u64 = 0b101;
+    // Insert at 0: everything moves up, new tab starts hidden.
+    try testing.expectEqual(@as(u64, 0b1010), shiftTabVisibleForInsert(mask, 0));
+    // Insert at 1: bit 0 stays, bits 1.. move up.
+    try testing.expectEqual(@as(u64, 0b1001), shiftTabVisibleForInsert(mask, 1));
+    // Insert beyond the set bits changes nothing meaningful.
+    try testing.expectEqual(@as(u64, 0b101), shiftTabVisibleForInsert(mask, 3));
+    // Out-of-range index is a no-op rather than UB.
+    try testing.expectEqual(mask, shiftTabVisibleForInsert(mask, 64));
+}
+
+test "tab_visible shifts with tab removal" {
+    const testing = std.testing;
+    // Tabs [0,1,2]; float visible only on tab 2 => 0b100.
+    const only_last: u64 = 0b100;
+    // Remove tab 0: old tab 2 becomes index 1, so the bit must follow it.
+    // Leaving the mask alone was the bug: the float vanished from the tab it
+    // was pinned to and reappeared on a tab index that no longer existed.
+    try testing.expectEqual(@as(u64, 0b010), shiftTabVisibleForRemove(only_last, 0));
+
+    // Removing the very tab a float was visible on drops that bit.
+    try testing.expectEqual(@as(u64, 0b000), shiftTabVisibleForRemove(only_last, 2));
+
+    // Mixed: visible on 0 and 2, remove 1 => visible on 0 and 1.
+    try testing.expectEqual(@as(u64, 0b011), shiftTabVisibleForRemove(0b101, 1));
+
+    // Removing above every set bit leaves them alone.
+    try testing.expectEqual(@as(u64, 0b101), shiftTabVisibleForRemove(0b101, 5));
+
+    try testing.expectEqual(only_last, shiftTabVisibleForRemove(only_last, 64));
+}
+
+test "tab_visible insert then remove at the same index round-trips" {
+    const testing = std.testing;
+    const cases = [_]u64{ 0, 0b1, 0b101, 0b1111, 0xDEAD_BEEF };
+    for (cases) |mask| {
+        for ([_]usize{ 0, 1, 3, 7 }) |idx| {
+            const shifted = shiftTabVisibleForInsert(mask, idx);
+            try testing.expectEqual(mask, shiftTabVisibleForRemove(shifted, idx));
+        }
+    }
 }

@@ -1419,7 +1419,13 @@ pub const Server = struct {
         // orphaned node and stop polling.
         const current = server.vt_watchers.get(watch.fd);
         if (current == null or current.? != watch) {
-            server.allocator.destroy(watch);
+            // Defer, do NOT destroy inline. The CTL path handles the identical
+            // stale-CQE case with deferDestroyCtlWatcher, and the comment in
+            // processPendingVtCloses states outright that an immediate free here
+            // is a use-after-free in ReleaseFast because xev may still reference
+            // the completion until the loop batch finishes. This path was the
+            // one place that broke that rule.
+            server.deferDestroyVtWatcher(watch);
             return .disarm;
         }
 
@@ -2006,8 +2012,7 @@ pub const Server = struct {
         // Look up pane_id.
         const pane_id = self.ses_state.store.pod_vt_to_pane_id.get(pod_vt_fd) orelse {
             ses.debugLog("vt pod->mux: pod_vt_fd={d} NOT in routing table, draining {d} bytes", .{ pod_vt_fd, payload_len });
-            self.skipBytes(pod_vt_fd, payload_len);
-            return true;
+            return self.skipBytes(pod_vt_fd, payload_len);
         };
         ses.debugLog("vt pod->mux: pane_id={d} type={d} len={d} pod_vt_fd={d}", .{ pane_id, frame_type, payload_len, pod_vt_fd });
 
@@ -2015,14 +2020,12 @@ pub const Server = struct {
         const mux_vt_fd = self.findMuxVtForPane(pane_id) orelse {
             // No MUX connected — skip payload.
             core.logging.warn("ses", "POD VT frame has no mux target: pod_vt_fd={d} pane_id={d}", .{ pod_vt_fd, pane_id });
-            self.skipBytes(pod_vt_fd, payload_len);
-            return true;
+            return self.skipBytes(pod_vt_fd, payload_len);
         };
 
         if (payload_len > self.vt_route_buf.len) {
             core.logging.warn("ses", "POD VT frame exceeds route buffer: fd={d} len={d}", .{ pod_vt_fd, payload_len });
-            self.skipBytes(pod_vt_fd, payload_len);
-            return true;
+            return self.skipBytes(pod_vt_fd, payload_len);
         }
         const payload = self.vt_route_buf[0..payload_len];
 
@@ -2076,8 +2079,7 @@ pub const Server = struct {
         const pod_vt_fd = self.ses_state.store.pane_id_to_pod_vt.get(mux_hdr.pane_id) orelse {
             // Unknown pane — skip payload.
             core.logging.warn("ses", "MUX VT frame for unknown pane_id={d} fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
-            self.skipBytes(mux_vt_fd, mux_hdr.len);
-            return true;
+            return self.skipBytes(mux_vt_fd, mux_hdr.len);
         };
 
         // Ownership gate: only the pane's current owner may inject input.
@@ -2087,8 +2089,7 @@ pub const Server = struct {
         // shell (cross-client input injection).
         if (!self.muxVtFdOwnsPane(mux_vt_fd, mux_hdr.pane_id)) {
             ses.debugLog("vt mux->pod: dropping frame for pane_id={d} from non-owner fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
-            self.skipBytes(mux_vt_fd, mux_hdr.len);
-            return true;
+            return self.skipBytes(mux_vt_fd, mux_hdr.len);
         }
 
         // Read the full payload from the MUX first, so a POD that exits
@@ -2097,8 +2098,7 @@ pub const Server = struct {
         // never reentrant with the POD→MUX path that also uses it.
         if (mux_hdr.len > self.vt_route_buf.len) {
             core.logging.warn("ses", "MUX VT frame exceeds route buffer: fd={d} len={d}", .{ mux_vt_fd, mux_hdr.len });
-            self.skipBytes(mux_vt_fd, mux_hdr.len);
-            return true;
+            return self.skipBytes(mux_vt_fd, mux_hdr.len);
         }
         const payload = self.vt_route_buf[0..mux_hdr.len];
         wire.readExactTimeout(mux_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
@@ -2259,22 +2259,29 @@ pub const Server = struct {
     /// inside the budget never trips it. With a 4MB max payload and 4KB chunks
     /// that is 1024 chunks x 500ms = ~8.5 MINUTES of frozen daemon. The total
     /// deadline below is what actually bounds it.
-    fn skipBytes(_: *Server, fd: posix.fd_t, len: u32) void {
+    /// Returns false if the payload could NOT be fully discarded.
+    ///
+    /// A partial skip leaves the stream mid-frame, so the next read parses
+    /// payload bytes as a frame header and every subsequent frame on that
+    /// channel is garbage. Callers used to ignore that and carry on; they must
+    /// drop the connection instead.
+    fn skipBytes(_: *Server, fd: posix.fd_t, len: u32) bool {
         var remaining: usize = len;
         var buf: [4096]u8 = undefined;
         const deadline = std.time.milliTimestamp() + SKIP_TOTAL_TIMEOUT_MS;
         while (remaining > 0) {
             if (std.time.milliTimestamp() >= deadline) {
-                core.logging.warn("ses", "giving up skipping VT payload ({d} bytes left)", .{remaining});
-                return;
+                core.logging.warn("ses", "giving up skipping VT payload ({d} bytes left); dropping desynced connection", .{remaining});
+                return false;
             }
             const chunk = @min(remaining, buf.len);
             wire.readExactTimeout(fd, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
                 core.logging.logError("ses", "failed to skip VT payload", err);
-                return;
+                return false;
             };
             remaining -= chunk;
         }
+        return true;
     }
 
     /// Find client_id for a binary CTL fd.

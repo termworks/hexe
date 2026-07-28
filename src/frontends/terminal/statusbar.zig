@@ -2150,7 +2150,14 @@ fn measureTabsWidth(tab_names: []const []const u8, separator: []const u8, left_a
 
 pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: *const core.config.Segment, start_x: u16, y: u16, hovered: bool) u16 {
     var x = start_x;
-    _ = query;
+
+    // `when` was parsed onto every Segment (config_builder.zig, config.zig) and
+    // implemented here as passesWhen/passesWhenClause, but nothing ever called
+    // it — both this and calcModuleWidth discarded their PaneQuery. So a segment
+    // configured `when = { float = true }` was always drawn and always measured.
+    // The shell prompt path honours it (modules/shell/main.zig), which is what
+    // makes this a terminal-side regression rather than an intentional removal.
+    if (!passesWhen(ctx, query, mod.*)) return start_x;
 
     const prev_module_style = ctx.module_default_style;
     defer ctx.module_default_style = prev_module_style;
@@ -2400,7 +2407,8 @@ pub fn drawFormatted(renderer: *Renderer, ctx: *shp.Context, start_x: u16, y: u1
 }
 
 pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *const core.config.Segment) u16 {
-    _ = query;
+    // Must agree with drawModule or the bar's layout and its contents disagree.
+    if (!passesWhen(ctx, query, mod.*)) return 0;
 
     const prev_module_style = ctx.module_default_style;
     defer ctx.module_default_style = prev_module_style;

@@ -3,6 +3,7 @@ const core = @import("core");
 
 const session_model = core.session_model;
 const store_mod = @import("store.zig");
+const snapshot_mod = @import("snapshot.zig");
 
 pub fn ensureClientSessionSnapshot(
     allocator: std.mem.Allocator,
@@ -107,6 +108,8 @@ pub fn addTab(
                 float_state.parent_tab = parent + 1;
             }
         }
+        // Keep the per-tab-index visibility mask aligned with the shift.
+        float_state.tab_visible = snapshot_mod.shiftTabVisibleForInsert(float_state.tab_visible, insert_index);
     }
 
     const root = try snapshot.allocator.create(session_model.SessionLayoutNode);
@@ -225,6 +228,7 @@ pub fn removeTab(
                 float_state.parent_tab = parent - 1;
             }
         }
+        float_state.tab_visible = snapshot_mod.shiftTabVisibleForRemove(float_state.tab_visible, idx);
         float_index += 1;
     }
 
