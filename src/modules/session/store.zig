@@ -471,7 +471,10 @@ pub const Client = struct {
 /// One owned outbound frame (pod_protocol header + payload) awaiting delivery
 /// to a POD VT socket. `written` tracks partial non-blocking writes.
 pub const PodVtFrame = struct {
+    /// Backing buffer, which may be LONGER than the frame (see FramePool).
     bytes: []u8,
+    /// Logical frame length. Always use this, never `bytes.len`.
+    len: usize,
     written: usize = 0,
 };
 

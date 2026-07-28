@@ -16,6 +16,7 @@ const server_listing_handlers = @import("server_listing_handlers.zig");
 const server_register_handler = @import("server_register_handler.zig");
 const ses = @import("main.zig");
 const vt_stream_reader = @import("vt_stream_reader.zig");
+const FramePool = @import("frame_pool.zig").FramePool;
 const VtStreamReader = vt_stream_reader.VtStreamReader;
 const xev = @import("xev").Dynamic;
 
@@ -123,6 +124,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .pending_vt_close_fds = .empty,
         .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(allocator),
         .pending_handshakes = .empty,
+        .frame_pool = FramePool.init(allocator),
         .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(allocator),
         .ctl_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(allocator),
         .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
@@ -158,6 +160,7 @@ fn deinitTestServer(server: *Server) void {
     var cr_it = server.ctl_readers.valueIterator();
     while (cr_it.next()) |r| r.deinit(server.allocator);
     server.ctl_readers.deinit();
+    server.frame_pool.deinit();
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
@@ -463,7 +466,11 @@ const PendingVtClose = struct {
 };
 
 const QueuedVtFrame = struct {
+    /// Backing buffer, which may be LONGER than the frame: buffers come from a
+    /// FramePool and are handed out with `len >= requested`.
     bytes: []u8,
+    /// Logical frame length. Always use this, never `bytes.len`.
+    len: usize,
     written: usize = 0,
 };
 
@@ -473,7 +480,7 @@ const MuxVtQueue = struct {
     head: usize = 0,
 
     fn frameHeader(frame: QueuedVtFrame) ?wire.MuxVtHeader {
-        if (frame.bytes.len < @sizeOf(wire.MuxVtHeader)) return null;
+        if (frame.len < @sizeOf(wire.MuxVtHeader)) return null;
         var hdr_buf: [@sizeOf(wire.MuxVtHeader)]u8 = undefined;
         @memcpy(&hdr_buf, frame.bytes[0..@sizeOf(wire.MuxVtHeader)]);
         return std.mem.bytesToValue(wire.MuxVtHeader, &hdr_buf);
@@ -513,7 +520,7 @@ const MuxVtQueue = struct {
                 continue;
             };
             if (frame.written == 0 and hdr.pane_id == pane_id and hdr.frame_type == frame_type) {
-                self.bytes -= frame.bytes.len;
+                self.bytes -= frame.len;
                 allocator.free(frame.bytes);
                 _ = self.frames.orderedRemove(i);
                 continue;
@@ -544,7 +551,7 @@ fn testQueuedMuxFrame(allocator: std.mem.Allocator, pane_id: u16, frame_type: u8
         .len = 0,
     };
     @memcpy(bytes, std.mem.asBytes(&hdr));
-    return .{ .bytes = bytes, .written = written };
+    return .{ .bytes = bytes, .len = bytes.len, .written = written };
 }
 
 test "MuxVtQueue coalesces only unwritten backlog_end frames for the same pane" {
@@ -718,6 +725,9 @@ pub const Server = struct {
     /// Resumable frame readers, one per VT fd. Keyed by fd rather than held on
     /// the watcher node because backpressure pause/resume destroys and recreates
     /// that node, which would discard a half-read frame and desync the stream.
+    /// Reusable byte buffers for queued VT frames, so the routing hot path
+    /// stops paying an mmap/munmap per frame under page_allocator.
+    frame_pool: FramePool,
     vt_readers: std.AutoHashMap(posix.fd_t, VtStreamReader),
     /// POD VT fds whose watcher is intentionally disarmed because the client
     /// they feed is not draining fast enough. Re-armed by
@@ -765,6 +775,7 @@ pub const Server = struct {
             .pending_vt_close_fds = .empty,
             .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(page_alloc),
             .pending_handshakes = .empty,
+            .frame_pool = FramePool.init(page_alloc),
             .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(page_alloc),
             .ctl_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(page_alloc),
             .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
@@ -807,6 +818,7 @@ pub const Server = struct {
         var ctl_reader_it = self.ctl_readers.valueIterator();
         while (ctl_reader_it.next()) |r| r.deinit(self.allocator);
         self.ctl_readers.deinit();
+        self.frame_pool.deinit();
         self.flushDeferredDestroys();
         self.deferred_destroy_ctl.deinit(self.allocator);
         self.deferred_destroy_vt.deinit(self.allocator);
@@ -1950,8 +1962,8 @@ pub const Server = struct {
             return error.QueueFull;
         }
 
-        const frame = try self.allocator.alloc(u8, frame_len);
-        errdefer self.allocator.free(frame);
+        const frame = try self.frame_pool.acquire(frame_len);
+        errdefer self.frame_pool.release(frame);
         const mux_hdr = wire.MuxVtHeader{
             .pane_id = pane_id,
             .frame_type = frame_type,
@@ -1959,9 +1971,9 @@ pub const Server = struct {
         };
         @memcpy(frame[0..@sizeOf(wire.MuxVtHeader)], std.mem.asBytes(&mux_hdr));
         if (payload.len > 0) {
-            @memcpy(frame[@sizeOf(wire.MuxVtHeader)..], payload);
+            @memcpy(frame[@sizeOf(wire.MuxVtHeader)..frame_len], payload);
         }
-        try entry.value_ptr.frames.append(self.allocator, .{ .bytes = frame });
+        try entry.value_ptr.frames.append(self.allocator, .{ .bytes = frame, .len = frame_len });
         entry.value_ptr.bytes += frame_len;
     }
 
@@ -1976,7 +1988,7 @@ pub const Server = struct {
 
         while (queue.pendingLen() > 0) {
             var frame = &queue.frames.items[queue.head];
-            const n = posix.write(mux_vt_fd, frame.bytes[frame.written..]) catch |err| {
+            const n = posix.write(mux_vt_fd, frame.bytes[frame.written..frame.len]) catch |err| {
                 switch (err) {
                     error.WouldBlock => {},
                     else => {
@@ -1988,10 +2000,10 @@ pub const Server = struct {
             };
             if (n == 0) return false;
             frame.written += n;
-            if (frame.written < frame.bytes.len) break;
+            if (frame.written < frame.len) break;
 
-            queue.bytes -= frame.bytes.len;
-            self.allocator.free(frame.bytes);
+            queue.bytes -= frame.len;
+            self.frame_pool.release(frame.bytes);
             queue.head += 1;
         }
         return true;
@@ -2103,14 +2115,20 @@ pub const Server = struct {
             return error.QueueFull;
         }
 
+        // Deliberately NOT pooled: this queue is owned by the STORE and is
+        // freed from paths that have no handle on the server's pool
+        // (noteClosedFd, store teardown). Handing it server-owned buffers is a
+        // cross-allocator free waiting to happen -- the unit tests caught
+        // exactly that. The mux direction, which the server owns end to end,
+        // is pooled instead, and it is the higher-volume one.
         const frame = try store.allocator.alloc(u8, frame_len);
         errdefer store.allocator.free(frame);
         frame[0] = frame_type;
         std.mem.writeInt(u32, frame[1..5], @intCast(payload.len), .big);
         if (payload.len > 0) {
-            @memcpy(frame[5..], payload);
+            @memcpy(frame[5..frame_len], payload);
         }
-        try entry.value_ptr.frames.append(store.allocator, .{ .bytes = frame });
+        try entry.value_ptr.frames.append(store.allocator, .{ .bytes = frame, .len = frame_len });
         entry.value_ptr.bytes += frame_len;
     }
 
@@ -2123,7 +2141,7 @@ pub const Server = struct {
 
         while (queue.pendingLen() > 0) {
             var frame = &queue.frames.items[queue.head];
-            const n = posix.write(pod_vt_fd, frame.bytes[frame.written..]) catch |err| {
+            const n = posix.write(pod_vt_fd, frame.bytes[frame.written..frame.len]) catch |err| {
                 switch (err) {
                     error.WouldBlock => {},
                     else => {
@@ -2135,9 +2153,9 @@ pub const Server = struct {
             };
             if (n == 0) return false;
             frame.written += n;
-            if (frame.written < frame.bytes.len) break;
+            if (frame.written < frame.len) break;
 
-            queue.bytes -= frame.bytes.len;
+            queue.bytes -= frame.len;
             store.allocator.free(frame.bytes);
             queue.head += 1;
         }
