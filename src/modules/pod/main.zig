@@ -1537,7 +1537,15 @@ const Pod = struct {
         // Read trailing variable data (cmd + cwd).
         var trail_buf: [8192]u8 = undefined;
         const trail_len: usize = @as(usize, evt.cmd_len) + @as(usize, evt.cwd_len);
-        if (trail_len > trail_buf.len) {
+        // Cross-validate the STRUCT's declared lengths against the HEADER's.
+        // Only `payload_len >= @sizeOf(ShpShellEvent)` was checked, so a peer
+        // could declare payload_len = 21 and cmd_len = 8000 and make the pod
+        // block for the full read budget on bytes that were never promised --
+        // and then forward an event to SES whose trail lengths disagreed with
+        // the header it had been given.
+        const declared_trail = @as(usize, hdr.payload_len) - @sizeOf(wire.ShpShellEvent);
+        if (trail_len != declared_trail or trail_len > trail_buf.len) {
+            debugLog("shp: trail length mismatch (struct={d} header={d}) fd={d}", .{ trail_len, declared_trail, conn.fd });
             var tmp = conn;
             tmp.close();
             return;
