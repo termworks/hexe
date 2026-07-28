@@ -9,6 +9,7 @@ repeat, and non-bracketed paste.
 
 Writes each line as ONE os.write so the frontend sees it as one read.
 """
+import atexit
 import fcntl, os, pty, select, signal, struct, subprocess, sys, termios, time
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,7 +26,7 @@ procs = []
 
 
 def pgrep(pat):
-    r = subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True)
+    r = subprocess.run(["pgrep", "-f", "--", pat], capture_output=True, text=True)
     return [int(x) for x in r.stdout.split()] if r.returncode == 0 else []
 
 
@@ -42,6 +43,14 @@ def cleanup():
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+# Run teardown even when this script raises or is killed by a timeout.
+# Without this, cleanup() ran only on the success path and inside fail(),
+# so any unhandled exception left the daemon, its pods and their shells
+# alive. Hundreds of runs accumulate enough of them to slow the machine
+# down and make later smokes fail in ways that look like product bugs.
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
 
 def fail(msg):

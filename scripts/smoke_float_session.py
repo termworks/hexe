@@ -10,6 +10,7 @@ launched in one session popped up inside a DIFFERENT one.
 Asserts: (1) a float with session A's id appears in A and NOT in B;
          (2) a float with an unknown/stale id appears in NEITHER (no_mux).
 """
+import atexit
 import fcntl, os, pty, select, shutil, struct, subprocess, sys, termios, time
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HEXE = os.path.join(REPO, "zig-out/bin/hexe")
@@ -23,7 +24,7 @@ env.pop("HEXE_SESSION", None); os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
 procs = []
 
 def dpids():
-    return subprocess.run(["pgrep", "-f", "daemon --instance " + INST], capture_output=True, text=True).stdout.split()
+    return subprocess.run(["pgrep", "-f", "--", "daemon --instance " + INST], capture_output=True, text=True).stdout.split()
 
 def cleanup():
     for p in procs:
@@ -34,6 +35,14 @@ def cleanup():
     for pid in dpids():
         try: os.kill(int(pid), 9)
         except Exception: pass
+
+# Run teardown even when this script raises or is killed by a timeout.
+# Without this, cleanup() ran only on the success path and inside fail(),
+# so any unhandled exception left the daemon, its pods and their shells
+# alive. Hundreds of runs accumulate enough of them to slow the machine
+# down and make later smokes fail in ways that look like product bugs.
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
 def fail(msg):
     print("FAIL:", msg); cleanup(); sys.exit(1)

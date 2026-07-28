@@ -1,4 +1,4 @@
-.PHONY: build test smoke install release
+.PHONY: build test smoke smoke-clean smoke-heavy install release
 
 build:
 	zig build -Doptimize=ReleaseFast -Dstrip=true
@@ -8,7 +8,23 @@ test:
 
 # Live end-to-end smokes: real frontend under a pty, isolated HEXE_INSTANCE.
 # Requires a debug build in zig-out (zig build) and python3.
-smoke:
+# Kill anything the suite leaked and clear its scratch state.
+#
+# Each script's cleanup() only ran on the success path and inside fail(), so an
+# unhandled exception or a `timeout` kill left the daemon, its pods and their
+# shells running. That is fixed with atexit handlers now, but a machine that
+# already accumulated leaks (or a hard SIGKILL) still needs this: leaked
+# processes slow everything down until later smokes fail in ways that look
+# exactly like product bugs. Measured directly -- smoke_heavy2 failed 2/2 on
+# untouched develop with 39 leaked processes present, and passed once they
+# were cleared, with no code change in between.
+smoke-clean:
+	@# Bracket the first char so the pattern cannot match this shell itself.
+	-@pkill -9 -f '[z]ig-out/bin/hexe' 2>/dev/null || true
+	-rm -rf "$${HEXE_SMOKE_TMP:-/tmp/hexe-smoke}" 2>/dev/null || true
+	-rm -rf "$${XDG_RUNTIME_DIR:-/tmp}"/hexe/smk* 2>/dev/null || true
+
+smoke: smoke-clean
 	zig build
 	python3 -u scripts/smoke_reconnect.py
 	python3 -u scripts/smoke_detach_reattach.py
@@ -29,7 +45,7 @@ smoke:
 # Heavy-load scenario: splits + floats + fullscreen apps + huge buffers +
 # pastes, then chaos rounds. Needs a ReleaseFast build (Debug VT parsing is
 # ~50x slower and cannot keep up with a 5-pod session).
-smoke-heavy:
+smoke-heavy: smoke-clean
 	zig build -Doptimize=ReleaseFast
 	python3 -u scripts/smoke_heavy.py
 	python3 -u scripts/smoke_heavy2.py

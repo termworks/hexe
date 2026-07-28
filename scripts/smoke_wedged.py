@@ -28,6 +28,7 @@ Three phases, each pinning one direction of the invariant:
 
 Needs a ReleaseFast build (Debug VT parsing cannot keep up with a flood).
 """
+import atexit
 import fcntl
 import os
 import pty
@@ -93,7 +94,7 @@ KEY = {"h": b"\x1b\x08", "v": b"\x1b\x16", "next": b"\x1b."}
 log = open(os.path.join(SCRATCH, "smoke-wedged.raw"), "wb")
 
 def pgrep(pattern):
-    r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+    r = subprocess.run(["pgrep", "-f", "--", pattern], capture_output=True, text=True)
     return [int(x) for x in r.stdout.split()] if r.returncode == 0 else []
 
 def pods():
@@ -125,6 +126,14 @@ def cleanup():
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+# Run teardown even when this script raises or is killed by a timeout.
+# Without this, cleanup() ran only on the success path and inside fail(),
+# so any unhandled exception left the daemon, its pods and their shells
+# alive. Hundreds of runs accumulate enough of them to slow the machine
+# down and make later smokes fail in ways that look like product bugs.
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
 def fail(msg):
     print(f"FAIL: {msg}")

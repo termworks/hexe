@@ -7,6 +7,7 @@ verifies shell I/O works, SIGKILLs the ses daemon, and verifies:
   2. the pod (and the user's shell) never died,
   3. shell I/O works again end-to-end after the auto-reattach.
 """
+import atexit
 import fcntl
 import os
 import pty
@@ -35,7 +36,7 @@ env.pop("HEXE_NO_PROJECT_COMMANDS", None)
 os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
 
 def pgrep(pattern):
-    r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+    r = subprocess.run(["pgrep", "-f", "--", pattern], capture_output=True, text=True)
     return [int(x) for x in r.stdout.split()] if r.returncode == 0 else []
 
 def ses_pids():
@@ -81,6 +82,14 @@ def cleanup():
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+# Run teardown even when this script raises or is killed by a timeout.
+# Without this, cleanup() ran only on the success path and inside fail(),
+# so any unhandled exception left the daemon, its pods and their shells
+# alive. Hundreds of runs accumulate enough of them to slow the machine
+# down and make later smokes fail in ways that look like product bugs.
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
