@@ -572,10 +572,29 @@ pub fn queuePaneInfoResponseBody(self: *SesClient, fd: posix.fd_t, resp: wire.Pa
     self.queuePendingPaneInfoResponse(pending);
 }
 
+/// Whole-skip budget.
+///
+/// The per-chunk `readExact` timeout is NOT a bound: it restarts on every call,
+/// so a peer trickling one chunk just inside it never trips anything. With a
+/// desynced stream reporting `payload_len` near 2^32 that is 1M chunks x up to
+/// DEFAULT_IO_TIMEOUT_MS each -- the frontend's event loop blocked for
+/// effectively forever. The daemon side already learned this
+/// (`SKIP_TOTAL_TIMEOUT_MS` in server.zig, whose comment says a total deadline
+/// is the only thing that actually bounds a trickling peer); the frontend never
+/// got the same treatment.
+const SKIP_TOTAL_TIMEOUT_MS: i64 = 2_000;
+
 pub fn skipPayloadChecked(_: *SesClient, fd: posix.fd_t, len: u32) !void {
+    // A length past the protocol maximum is not something to skip past: the
+    // stream cannot be resynchronised from there, so fail and let the caller
+    // drop the connection.
+    if (len > wire.MAX_PAYLOAD_LEN) return error.PayloadTooLarge;
+
     var remaining: usize = len;
     var buf: [4096]u8 = undefined;
+    const deadline = std.time.milliTimestamp() + SKIP_TOTAL_TIMEOUT_MS;
     while (remaining > 0) {
+        if (std.time.milliTimestamp() >= deadline) return error.Timeout;
         const chunk = @min(remaining, buf.len);
         try wire.readExact(fd, buf[0..chunk]);
         remaining -= chunk;
@@ -590,9 +609,12 @@ pub fn skipPayload(self: *SesClient, fd: posix.fd_t, len: u32) void {
 }
 
 pub fn skipPayloadU16Checked(_: *SesClient, fd: posix.fd_t, len: u16) !void {
+    // u16 caps this at 64KB, but the same trickle hazard applies.
     var remaining: usize = len;
     var buf: [4096]u8 = undefined;
+    const deadline = std.time.milliTimestamp() + SKIP_TOTAL_TIMEOUT_MS;
     while (remaining > 0) {
+        if (std.time.milliTimestamp() >= deadline) return error.Timeout;
         const chunk = @min(remaining, buf.len);
         try wire.readExact(fd, buf[0..chunk]);
         remaining -= chunk;

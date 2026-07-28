@@ -52,6 +52,7 @@ pub fn readMuxVtFrame(fd: posix.fd_t, buffer: []u8) !VtFrameReadResult {
         error.WouldBlock => return .would_block,
         else => return err,
     };
+    if (header.len > wire.MAX_PAYLOAD_LEN) return error.FrameTooLarge;
     const event = vtFrameEventFromHeader(header);
 
     if (header.len > buffer.len) {
@@ -202,6 +203,14 @@ pub const MuxVtReader = struct {
                 }
                 const header = std.mem.bytesToValue(wire.MuxVtHeader, &self.hdr_buf);
                 self.hdr_got = 0;
+                // `header.len` is a raw u32 off the wire. SES caps what it
+                // SENDS, but nothing capped what the frontend would ACCEPT, so
+                // a desynced stream -- the very situation the drained_oversized
+                // path exists to handle -- could make the render loop read up
+                // to 4 GiB in buffer-sized gulps before regaining control.
+                // Past the protocol maximum the stream cannot be resynchronised
+                // by draining anyway; surface it so the caller drops the link.
+                if (header.len > wire.MAX_PAYLOAD_LEN) return error.FrameTooLarge;
                 self.event = vtFrameEventFromHeader(header);
                 self.payload_got = 0;
                 self.oversized_remaining = if (header.len > buffer.len) header.len else 0;
@@ -276,4 +285,69 @@ test "MuxVtReader: resumes a frame split across arbitrary boundaries" {
     try reader.drain(fds[0], &buffer, 16, {}, Collect.onFrame, Collect.onOversized);
     try std.testing.expectEqual(@as(usize, 1), Collect.frames);
     try std.testing.expectEqual(@as(usize, 10), Collect.last_len);
+}
+
+test "MuxVtReader refuses a frame length past MAX_PAYLOAD_LEN" {
+    var fds: [2]posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0, &fds);
+    try std.testing.expect(rc == 0);
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const Noop = struct {
+        fn onFrame(_: void, _: VtFrameEvent, _: []const u8) bool {
+            return true;
+        }
+        fn onOversized(_: void, _: VtFrameEvent) bool {
+            return true;
+        }
+    };
+
+    var reader = MuxVtReader{};
+    var buffer: [64]u8 = undefined;
+
+    // Declare a payload far beyond the protocol maximum. Draining it would
+    // have blocked the render loop reading gigabytes.
+    var hdr: wire.MuxVtHeader = .{ .pane_id = 1, .frame_type = 1, .len = std.math.maxInt(u32) };
+    _ = try posix.write(fds[1], std.mem.asBytes(&hdr));
+
+    try std.testing.expectError(
+        error.FrameTooLarge,
+        reader.drain(fds[0], &buffer, 16, {}, Noop.onFrame, Noop.onOversized),
+    );
+}
+
+test "MuxVtReader still drains an oversized-but-legal frame" {
+    var fds: [2]posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, 0, &fds);
+    try std.testing.expect(rc == 0);
+    defer posix.close(fds[0]);
+    defer posix.close(fds[1]);
+
+    const Seen = struct {
+        var oversized: usize = 0;
+        fn onFrame(_: void, _: VtFrameEvent, _: []const u8) bool {
+            return true;
+        }
+        fn onOversized(_: void, _: VtFrameEvent) bool {
+            oversized += 1;
+            return true;
+        }
+    };
+    Seen.oversized = 0;
+
+    var reader = MuxVtReader{};
+    var buffer: [8]u8 = undefined;
+
+    // Larger than the caller's buffer but well within the protocol cap: this
+    // must still be drained and reported, not rejected.
+    const payload_len: u32 = 32;
+    var hdr: wire.MuxVtHeader = .{ .pane_id = 1, .frame_type = 1, .len = payload_len };
+    _ = try posix.write(fds[1], std.mem.asBytes(&hdr));
+    var payload: [payload_len]u8 = undefined;
+    @memset(&payload, 'z');
+    _ = try posix.write(fds[1], &payload);
+
+    try reader.drain(fds[0], &buffer, 16, {}, Seen.onFrame, Seen.onOversized);
+    try std.testing.expectEqual(@as(usize, 1), Seen.oversized);
 }
