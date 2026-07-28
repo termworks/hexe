@@ -15,6 +15,8 @@ const server_reporting_handlers = @import("server_reporting_handlers.zig");
 const server_listing_handlers = @import("server_listing_handlers.zig");
 const server_register_handler = @import("server_register_handler.zig");
 const ses = @import("main.zig");
+const vt_stream_reader = @import("vt_stream_reader.zig");
+const VtStreamReader = vt_stream_reader.VtStreamReader;
 const xev = @import("xev").Dynamic;
 
 // Keep VT routing I/O short to avoid blocking the whole SES event loop when a
@@ -63,6 +65,18 @@ const VT_FRAME_TYPE_PASSWORD_MODE: u8 = @intFromEnum(core.pod_protocol.FrameType
 /// Maximum number of concurrent client connections (MUX instances).
 const MAX_CLIENTS: usize = core.constants.Limits.max_clients;
 
+/// pod_protocol header: [type:u8][len:u32 big-endian].
+fn podVtPayloadLen(hdr: []const u8) u32 {
+    return std.mem.readInt(u32, hdr[1..5], .big);
+}
+
+/// wire.MuxVtHeader is an extern struct with align(1) fields, so `len` sits at
+/// a fixed offset and is native-endian.
+fn muxVtPayloadLen(hdr: []const u8) u32 {
+    const parsed = std.mem.bytesToValue(wire.MuxVtHeader, hdr[0..@sizeOf(wire.MuxVtHeader)]);
+    return parsed.len;
+}
+
 fn setNonBlocking(fd: posix.fd_t) void {
     const O_NONBLOCK: usize = 0o4000;
     const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| {
@@ -101,6 +115,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .pending_vt_close_fds = .empty,
         .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(allocator),
         .pending_handshakes = .empty,
+        .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(allocator),
         .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
         .deferred_destroy_ctl = .empty,
         .deferred_destroy_vt = .empty,
@@ -128,6 +143,9 @@ fn deinitTestServer(server: *Server) void {
     server.mux_vt_queues.deinit();
     server.paused_pod_vt_fds.deinit();
     server.pending_handshakes.deinit(server.allocator);
+    var vr_it = server.vt_readers.valueIterator();
+    while (vr_it.next()) |r| r.deinit(server.allocator);
+    server.vt_readers.deinit();
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
@@ -683,6 +701,10 @@ pub const Server = struct {
     mux_vt_queues: std.AutoHashMap(posix.fd_t, MuxVtQueue),
     /// Connections accepted but still waiting for their handshake preamble.
     pending_handshakes: std.ArrayList(PendingHandshake),
+    /// Resumable frame readers, one per VT fd. Keyed by fd rather than held on
+    /// the watcher node because backpressure pause/resume destroys and recreates
+    /// that node, which would discard a half-read frame and desync the stream.
+    vt_readers: std.AutoHashMap(posix.fd_t, VtStreamReader),
     /// POD VT fds whose watcher is intentionally disarmed because the client
     /// they feed is not draining fast enough. Re-armed by
     /// `resumePausedPodVtWatchers` once the queue falls below the low-water
@@ -729,6 +751,7 @@ pub const Server = struct {
             .pending_vt_close_fds = .empty,
             .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(page_alloc),
             .pending_handshakes = .empty,
+            .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(page_alloc),
             .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .deferred_destroy_ctl = .empty,
             .deferred_destroy_vt = .empty,
@@ -763,6 +786,9 @@ pub const Server = struct {
         self.paused_pod_vt_fds.deinit();
         for (self.pending_handshakes.items) |ph| posix.close(ph.fd);
         self.pending_handshakes.deinit(self.allocator);
+        var vt_reader_it = self.vt_readers.valueIterator();
+        while (vt_reader_it.next()) |r| r.deinit(self.allocator);
+        self.vt_readers.deinit();
         self.flushDeferredDestroys();
         self.deferred_destroy_ctl.deinit(self.allocator);
         self.deferred_destroy_vt.deinit(self.allocator);
@@ -1014,6 +1040,7 @@ pub const Server = struct {
         }
         if (vt_fd) |vfd| {
             self.disarmVtWatcher(vfd);
+            self.dropVtReader(vfd);
             if (self.mux_vt_queues.fetchRemove(vfd)) |entry| {
                 var queue = entry.value;
                 queue.deinit(self.allocator);
@@ -1094,6 +1121,9 @@ pub const Server = struct {
                 self.removeMuxVtFd(pending.fd);
             }
             _ = self.paused_pod_vt_fds.remove(pending.fd);
+            // A reused fd number must never inherit the previous
+            // connection's half-read frame.
+            self.dropVtReader(pending.fd);
             if (self.mux_vt_queues.fetchRemove(pending.fd)) |entry| {
                 var queue = entry.value;
                 queue.deinit(self.allocator);
@@ -1236,6 +1266,14 @@ pub const Server = struct {
         }
         for (self.ses_state.polling.pending_remove_poll_fds.items) |fd| {
             ses.debugLog("processPendingWatcherUpdates: disarm fd={d}", .{fd});
+            // These fds were closed by the STATE layer (connectPodVt replacing
+            // a pod dial, detachSession, killPane), which has no handle on the
+            // server's per-fd readers. Without dropping the reader here, a
+            // half-read frame outlives the connection and the next connection
+            // to reuse the fd number inherits it — the stream desyncs and that
+            // pane goes silent. This queue is the one place all three of those
+            // paths funnel through.
+            self.dropVtReader(fd);
             if (self.binary_ctl_fds.contains(fd)) {
                 self.disarmCtlWatcher(fd);
             }
@@ -2096,133 +2134,126 @@ pub const Server = struct {
         }
     }
 
+    /// Frames routed per wakeup before yielding, so one loud pane cannot
+    /// starve the others. The reader keeps any partial frame, so a budget
+    /// boundary is never a desync.
+    const VT_FRAMES_PER_WAKEUP: usize = 32;
+
+    fn vtReaderFor(self: *Server, fd: posix.fd_t, hdr_len: u8, len_fn: vt_stream_reader.PayloadLenFn) ?*VtStreamReader {
+        const entry = self.vt_readers.getOrPut(fd) catch |err| {
+            core.logging.logError("ses", "failed to allocate VT stream reader", err);
+            return null;
+        };
+        if (!entry.found_existing) entry.value_ptr.* = VtStreamReader.init(hdr_len, len_fn);
+        return entry.value_ptr;
+    }
+
+    pub fn dropVtReader(self: *Server, fd: posix.fd_t) void {
+        if (self.vt_readers.fetchRemove(fd)) |kv| {
+            var reader = kv.value;
+            reader.deinit(self.allocator);
+        }
+    }
+
+    /// Route VT data from POD -> MUX.
+    ///
+    /// Drains without blocking: the reader retains any partial frame, so a pod
+    /// that stalls mid-frame costs nothing instead of freezing every session for
+    /// the read timeout. Because the payload is always fully in hand before
+    /// routing, an unroutable frame is simply discarded — no `skipBytes`, and
+    /// therefore no way to leave the stream desynced.
     fn routePodToMux(self: *Server, pod_vt_fd: posix.fd_t) bool {
-        // Read 5-byte pod_protocol header (type:u8 + len:u32 big-endian).
-        var hdr: [5]u8 = undefined;
-        wire.readExactTimeout(pod_vt_fd, &hdr, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            core.logging.logError("ses", "failed to read POD VT frame header", err);
-            return false;
-        };
+        const reader = self.vtReaderFor(pod_vt_fd, 5, podVtPayloadLen) orelse return false;
 
-        const frame_type = hdr[0];
-        const payload_len = std.mem.readInt(u32, hdr[1..5], .big);
-
-        // Safety cap.
-        if (payload_len > wire.MAX_PAYLOAD_LEN) {
-            core.logging.warn("ses", "POD VT frame too large: fd={d} len={d}", .{ pod_vt_fd, payload_len });
-            return false;
-        }
-
-        // Look up pane_id.
-        const pane_id = self.ses_state.store.pod_vt_to_pane_id.get(pod_vt_fd) orelse {
-            ses.debugLog("vt pod->mux: pod_vt_fd={d} NOT in routing table, draining {d} bytes", .{ pod_vt_fd, payload_len });
-            return self.skipBytes(pod_vt_fd, payload_len);
-        };
-        ses.debugLog("vt pod->mux: pane_id={d} type={d} len={d} pod_vt_fd={d}", .{ pane_id, frame_type, payload_len, pod_vt_fd });
-
-        // Find the MUX VT fd for this pane.
-        const mux_vt_fd = self.findMuxVtForPane(pane_id) orelse {
-            // No MUX connected — skip payload.
-            core.logging.warn("ses", "POD VT frame has no mux target: pod_vt_fd={d} pane_id={d}", .{ pod_vt_fd, pane_id });
-            return self.skipBytes(pod_vt_fd, payload_len);
-        };
-
-        if (payload_len > self.vt_route_buf.len) {
-            core.logging.warn("ses", "POD VT frame exceeds route buffer: fd={d} len={d}", .{ pod_vt_fd, payload_len });
-            return self.skipBytes(pod_vt_fd, payload_len);
-        }
-        const payload = self.vt_route_buf[0..payload_len];
-
-        wire.readExactTimeout(pod_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            core.logging.logError("ses", "failed to read POD VT payload", err);
-            self.queueVtClose(pod_vt_fd, null);
-            return true;
-        };
-
-        self.enqueueMuxVtFrame(mux_vt_fd, pane_id, frame_type, payload) catch |err| {
-            // Reaching the hard cap despite the high-water pause means one
-            // frame overshot it. Dropping THIS frame costs one pane a visual
-            // gap that its next repaint fixes; dropping the channel (the old
-            // behavior) costs every pane in the session a reattach, and the
-            // reattach re-triggers the replay that overflowed the queue in the
-            // first place — the flap. Keep the channel.
-            core.logging.warn("ses", "mux VT queue full: dropping frame pane_id={d} len={d} ({s})", .{
-                pane_id,
-                payload.len,
-                @errorName(err),
-            });
-            return true;
-        };
-        if (!self.flushMuxVtQueue(mux_vt_fd)) {
-            self.queueVtClose(mux_vt_fd, null);
+        var routed: usize = 0;
+        while (routed < VT_FRAMES_PER_WAKEUP) : (routed += 1) {
+            switch (reader.next(pod_vt_fd, self.vt_route_buf, self.allocator)) {
+                .none => return true,
+                .closed => {
+                    ses.debugLog("vt pod->mux: pod_vt_fd={d} closed", .{pod_vt_fd});
+                    return false;
+                },
+                .failed => {
+                    core.logging.logError("ses", "POD VT read failed", error.BrokenPipe);
+                    return false;
+                },
+                .oversize => |len| {
+                    core.logging.warn("ses", "POD VT frame too large: fd={d} len={d}; dropping connection", .{ pod_vt_fd, len });
+                    return false;
+                },
+                .frame => |frame| {
+                    const frame_type = frame.hdr[0];
+                    const pane_id = self.ses_state.store.pod_vt_to_pane_id.get(pod_vt_fd) orelse {
+                        ses.debugLog("vt pod->mux: pod_vt_fd={d} not routed, discarding {d} bytes", .{ pod_vt_fd, frame.payload.len });
+                        continue;
+                    };
+                    const mux_vt_fd = self.findMuxVtForPane(pane_id) orelse {
+                        core.logging.warn("ses", "POD VT frame has no mux target: pod_vt_fd={d} pane_id={d}", .{ pod_vt_fd, pane_id });
+                        continue;
+                    };
+                    self.enqueueMuxVtFrame(mux_vt_fd, pane_id, frame_type, frame.payload) catch |err| {
+                        // See enqueueMuxVtFrame: dropping one frame beats
+                        // dropping the client's channel and re-triggering the
+                        // replay that overflowed the queue.
+                        core.logging.warn("ses", "mux VT queue full: dropping frame pane_id={d} len={d} ({s})", .{
+                            pane_id,
+                            frame.payload.len,
+                            @errorName(err),
+                        });
+                        continue;
+                    };
+                    if (!self.flushMuxVtQueue(mux_vt_fd)) {
+                        self.queueVtClose(mux_vt_fd, null);
+                    }
+                },
+            }
         }
         return true;
     }
 
-    /// Route VT data from MUX → POD.
-    /// Reads a 7-byte MuxVtHeader + payload from mux_vt_fd,
-    /// wraps it in a 5-byte pod_protocol header, and writes to the POD VT channel.
-    /// Returns false if the connection should be removed.
+    /// Route VT data from MUX -> POD. Same non-blocking contract as above.
     fn routeMuxToPod(self: *Server, mux_vt_fd: posix.fd_t) bool {
-        // Read 7-byte MuxVtHeader.
-        var mux_hdr_buf: [@sizeOf(wire.MuxVtHeader)]u8 = undefined;
-        wire.readExactTimeout(mux_vt_fd, &mux_hdr_buf, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            ses.debugLog("vt mux->pod: mux disconnected: {s}", .{@errorName(err)});
-            return false;
-        };
-        const mux_hdr = std.mem.bytesToValue(wire.MuxVtHeader, &mux_hdr_buf);
-        ses.debugLog("vt mux->pod: pane_id={d} type={d} len={d} mux_vt_fd={d}", .{ mux_hdr.pane_id, mux_hdr.frame_type, mux_hdr.len, mux_vt_fd });
+        const reader = self.vtReaderFor(mux_vt_fd, @sizeOf(wire.MuxVtHeader), muxVtPayloadLen) orelse return false;
 
-        // Safety cap.
-        if (mux_hdr.len > wire.MAX_PAYLOAD_LEN) {
-            core.logging.warn("ses", "MUX VT frame too large: fd={d} len={d}", .{ mux_vt_fd, mux_hdr.len });
-            return false;
-        }
-
-        // Look up pod_vt_fd from pane_id.
-        const pod_vt_fd = self.ses_state.store.pane_id_to_pod_vt.get(mux_hdr.pane_id) orelse {
-            // Unknown pane — skip payload.
-            core.logging.warn("ses", "MUX VT frame for unknown pane_id={d} fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
-            return self.skipBytes(mux_vt_fd, mux_hdr.len);
-        };
-
-        // Ownership gate: only the pane's current owner may inject input.
-        // Float steals notify the old mux best-effort, so a client with a
-        // stale view can keep sending keystrokes for a pane that now renders
-        // in another mux — without this check they land in the new owner's
-        // shell (cross-client input injection).
-        if (!self.muxVtFdOwnsPane(mux_vt_fd, mux_hdr.pane_id)) {
-            ses.debugLog("vt mux->pod: dropping frame for pane_id={d} from non-owner fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
-            return self.skipBytes(mux_vt_fd, mux_hdr.len);
-        }
-
-        // Read the full payload from the MUX first, so a POD that exits
-        // mid-frame never receives a header without its payload. Reuse the
-        // shared route buffer — the event loop is single-threaded, so this is
-        // never reentrant with the POD→MUX path that also uses it.
-        if (mux_hdr.len > self.vt_route_buf.len) {
-            core.logging.warn("ses", "MUX VT frame exceeds route buffer: fd={d} len={d}", .{ mux_vt_fd, mux_hdr.len });
-            return self.skipBytes(mux_vt_fd, mux_hdr.len);
-        }
-        const payload = self.vt_route_buf[0..mux_hdr.len];
-        wire.readExactTimeout(mux_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            ses.debugLog("vt mux->pod: failed to read payload from mux: {s}", .{@errorName(err)});
-            return false;
-        };
-
-        // Enqueue for non-blocking delivery. A wedged POD (child not draining
-        // its VT input) must never block the SES event loop on a synchronous
-        // write, so writes go through a bounded per-POD queue drained by the
-        // periodic tick — symmetric with the POD→MUX path. On overflow drop the
-        // whole POD VT connection (reconnected by backlog-replay if the pod is
-        // still alive) rather than silently losing keystrokes.
-        self.enqueuePodVtFrame(pod_vt_fd, mux_hdr.frame_type, payload) catch |err| {
-            ses.debugLog("vt mux->pod: pod queue overflow fd={d}: {s}, dropping", .{ pod_vt_fd, @errorName(err) });
-            self.queueVtClose(pod_vt_fd, null);
-            return true;
-        };
-        if (!self.flushPodVtQueue(pod_vt_fd)) {
-            self.queueVtClose(pod_vt_fd, null);
+        var routed: usize = 0;
+        while (routed < VT_FRAMES_PER_WAKEUP) : (routed += 1) {
+            switch (reader.next(mux_vt_fd, self.vt_route_buf, self.allocator)) {
+                .none => return true,
+                .closed => {
+                    ses.debugLog("vt mux->pod: mux_vt_fd={d} closed", .{mux_vt_fd});
+                    return false;
+                },
+                .failed => {
+                    ses.debugLog("vt mux->pod: read failed fd={d}", .{mux_vt_fd});
+                    return false;
+                },
+                .oversize => |len| {
+                    core.logging.warn("ses", "MUX VT frame too large: fd={d} len={d}; dropping connection", .{ mux_vt_fd, len });
+                    return false;
+                },
+                .frame => |frame| {
+                    const mux_hdr = std.mem.bytesToValue(wire.MuxVtHeader, frame.hdr[0..@sizeOf(wire.MuxVtHeader)]);
+                    const pod_vt_fd = self.ses_state.store.pane_id_to_pod_vt.get(mux_hdr.pane_id) orelse {
+                        core.logging.warn("ses", "MUX VT frame for unknown pane_id={d} fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
+                        continue;
+                    };
+                    // Ownership gate: only the pane's current owner may inject
+                    // input, or a client with a stale view keeps typing into a
+                    // pane that now renders elsewhere.
+                    if (!self.muxVtFdOwnsPane(mux_vt_fd, mux_hdr.pane_id)) {
+                        ses.debugLog("vt mux->pod: dropping frame for pane_id={d} from non-owner fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
+                        continue;
+                    }
+                    self.enqueuePodVtFrame(pod_vt_fd, mux_hdr.frame_type, frame.payload) catch |err| {
+                        ses.debugLog("vt mux->pod: pod queue overflow fd={d}: {s}, dropping", .{ pod_vt_fd, @errorName(err) });
+                        self.queueVtClose(pod_vt_fd, null);
+                        continue;
+                    };
+                    if (!self.flushPodVtQueue(pod_vt_fd)) {
+                        self.queueVtClose(pod_vt_fd, null);
+                    }
+                },
+            }
         }
         return true;
     }
@@ -2287,6 +2318,7 @@ pub const Server = struct {
         // a new connection, and re-arming it later would attach a pod_to_mux
         // watcher to something else entirely.
         _ = self.paused_pod_vt_fds.remove(fd);
+        self.dropVtReader(fd);
         const pane_id = if (self.ses_state.store.pod_vt_to_pane_id.fetchRemove(fd)) |kv| blk: {
             _ = self.ses_state.store.pane_id_to_pod_vt.remove(kv.value);
             _ = self.ses_state.store.pane_id_to_uuid.remove(kv.value);
@@ -2346,6 +2378,7 @@ pub const Server = struct {
 
     fn removeMuxVtFd(self: *Server, fd: posix.fd_t) void {
         ses.debugLog("remove mux_vt fd={d}", .{fd});
+        self.dropVtReader(fd);
         for (self.ses_state.store.clients.items) |*client| {
             if (client.mux_vt_fd) |vt_fd| {
                 if (vt_fd == fd) {
@@ -2363,31 +2396,6 @@ pub const Server = struct {
     /// inside the budget never trips it. With a 4MB max payload and 4KB chunks
     /// that is 1024 chunks x 500ms = ~8.5 MINUTES of frozen daemon. The total
     /// deadline below is what actually bounds it.
-    /// Returns false if the payload could NOT be fully discarded.
-    ///
-    /// A partial skip leaves the stream mid-frame, so the next read parses
-    /// payload bytes as a frame header and every subsequent frame on that
-    /// channel is garbage. Callers used to ignore that and carry on; they must
-    /// drop the connection instead.
-    fn skipBytes(_: *Server, fd: posix.fd_t, len: u32) bool {
-        var remaining: usize = len;
-        var buf: [4096]u8 = undefined;
-        const deadline = std.time.milliTimestamp() + SKIP_TOTAL_TIMEOUT_MS;
-        while (remaining > 0) {
-            if (std.time.milliTimestamp() >= deadline) {
-                core.logging.warn("ses", "giving up skipping VT payload ({d} bytes left); dropping desynced connection", .{remaining});
-                return false;
-            }
-            const chunk = @min(remaining, buf.len);
-            wire.readExactTimeout(fd, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-                core.logging.logError("ses", "failed to skip VT payload", err);
-                return false;
-            };
-            remaining -= chunk;
-        }
-        return true;
-    }
-
     /// Find client_id for a binary CTL fd.
     pub fn findClientForCtlFd(self: *Server, fd: posix.fd_t) ?usize {
         for (self.ses_state.store.clients.items) |client| {
