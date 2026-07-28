@@ -62,9 +62,29 @@ pub const Pty = struct {
         else
             null;
 
-        // Create sync pipes for parent-child user namespace coordination
+        // Create sync pipes for parent-child user namespace coordination.
+        //
+        // Every fd opened between here and the fork needs an errdefer: there
+        // was none, so a failure part-way leaked whatever had already been
+        // opened -- 6 fds if the fork itself failed. fork() fails with EAGAIN
+        // precisely under process pressure, i.e. exactly when a caller would
+        // retry, so each retry burned another 6 fds until the process could no
+        // longer spawn anything at all. The errdefers are cancelled by
+        // `spawn_committed` once the fork succeeds and ownership moves to the
+        // parent/child split below.
+        var spawn_committed = false;
+
         const sync_pipe = if (isolated) try posix.pipe() else .{ @as(posix.fd_t, -1), @as(posix.fd_t, -1) };
+        errdefer if (isolated and !spawn_committed) {
+            posix.close(sync_pipe[0]);
+            posix.close(sync_pipe[1]);
+        };
+
         const done_pipe = if (isolated) try posix.pipe() else .{ @as(posix.fd_t, -1), @as(posix.fd_t, -1) };
+        errdefer if (isolated and !spawn_committed) {
+            posix.close(done_pipe[0]);
+            posix.close(done_pipe[1]);
+        };
 
         // Get current terminal size to pass to the new PTY
         var ws: c.winsize = undefined;
@@ -78,8 +98,13 @@ pub const Pty = struct {
         if (c.openpty(&master_fd, &slave_fd, null, null, &ws) != 0) {
             return error.OpenPtyFailed;
         }
+        errdefer if (!spawn_committed) {
+            posix.close(master_fd);
+            posix.close(slave_fd);
+        };
 
         const pid = try posix.fork();
+        spawn_committed = true;
         if (pid == 0) {
             // ============================================================
             // CHILD PROCESS
