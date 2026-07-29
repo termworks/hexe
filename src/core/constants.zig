@@ -25,9 +25,24 @@ pub const Timing = struct {
     /// Used in: src/cli/commands/pod_new.zig
     pub const pod_spawn_timeout: i64 = 2500;
 
-    /// Timeout for SES state operations
-    /// Used in: src/modules/session/state.zig
-    pub const ses_spawn_timeout: i64 = 2000;
+    /// Budget for reading a newly spawned pod's handshake line.
+    ///
+    /// This is a BLOCKING wait on the single-threaded SES event loop, so it is
+    /// also the worst-case stall every other session pays for one pane
+    /// creation (PLAN.md 1.1). With the CTL read/reply stalls removed in
+    /// 1.2/1.5 it is now the largest remaining one, so it is bounded by data
+    /// rather than by a round number: measured over 10 spawns on a box at load
+    /// ~58/24 cores, the handshake takes min 15ms, median 22ms, max 31ms. 500ms
+    /// keeps ~16x headroom over that while cutting the worst-case freeze 4x,
+    /// and matches HANDLER_IO_TIMEOUT_MS, the established bounded-stall budget
+    /// elsewhere in the daemon.
+    ///
+    /// Overshooting it fails ONE create_pane with a visible "create_failed"
+    /// that the user can retry; the old budget instead froze every session for
+    /// 2s, invisibly. Removing the wait entirely needs the async spawn state
+    /// machine, which is the rest of 1.1.
+    /// Used in: src/modules/session/pane_spawn.zig
+    pub const ses_spawn_timeout: i64 = 500;
 
     /// Key repeat event tracking timeout
     /// Used in: src/frontends/terminal/keybinds.zig
