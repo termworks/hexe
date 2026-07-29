@@ -40,7 +40,9 @@ pub fn generateUniquePaneName(
     }
 }
 
-pub fn spawnPod(
+/// Fork `hexe pod daemon` and return immediately, WITHOUT reading its
+/// handshake. The caller polls `pollPodHandshake` until it resolves.
+pub fn startPodSpawn(
     allocator: std.mem.Allocator,
     uuid: [32]u8,
     name: []const u8,
@@ -49,7 +51,7 @@ pub fn spawnPod(
     cwd: ?[]const u8,
     env: ?[]const []const u8,
     isolation_profile: ?[]const u8,
-) !SpawnResult {
+) !PendingPodSpawn {
     var args_list: std.ArrayList([]const u8) = .empty;
     defer args_list.deinit(allocator);
 
@@ -160,60 +162,118 @@ pub fn spawnPod(
     }
 
     try child.spawn();
-    const pod_pid: posix.pid_t = @intCast(child.id);
 
-    var stdout_file = child.stdout orelse return error.PodNoStdout;
-    defer stdout_file.close();
+    const stdout_file = child.stdout orelse return error.PodNoStdout;
+    // Non-blocking, so `pollHandshake` can be called from the event loop
+    // without ever waiting on a slow pod (PLAN.md 1.1).
+    core.ipc.setNonBlocking(stdout_file.handle) catch {};
 
-    const spawn_timeout_ms: i64 = core.constants.Timing.ses_spawn_timeout;
-    const deadline_ms = std.time.milliTimestamp() + spawn_timeout_ms;
-    const stdout_fd = stdout_file.handle;
+    return .{
+        .pod_pid = @intCast(child.id),
+        .stdout_file = stdout_file,
+        .deadline_ms = std.time.milliTimestamp() + core.constants.Timing.ses_spawn_timeout,
+    };
+}
 
-    // Read the handshake line in CHUNKS, not one byte at a time.
-    //
-    // This ran `waitReadableTimeout` + `read` per byte, so a 400-byte handshake
-    // cost ~800 syscalls and the 512-byte worst case ~1024 — all of it on the
-    // single-threaded event loop, blocking every other session. The pod writes
-    // the line in one go, so in practice this is now a single poll + read.
-    var line_buf: [512]u8 = undefined;
-    var pos: usize = 0;
-    var line_end: ?usize = null;
-    while (pos < line_buf.len) {
-        const remaining_ms = deadline_ms - std.time.milliTimestamp();
+/// A forked pod whose handshake line has not fully arrived yet.
+///
+/// `spawnPod` used to fork and then BLOCK reading this line, for up to
+/// `ses_spawn_timeout`, on the single-threaded SES loop — so one slow pod
+/// stalled every other session (PLAN.md 1.1). Splitting the fork from the read
+/// lets the caller poll it from the periodic tick instead.
+///
+/// Owns `stdout_file`; whoever drops the spawn must call `deinit`.
+pub const PendingPodSpawn = struct {
+    pod_pid: posix.pid_t,
+    stdout_file: std.fs.File,
+    deadline_ms: i64,
+    buf: [512]u8 = undefined,
+    pos: usize = 0,
+
+    pub fn deinit(self: *PendingPodSpawn) void {
+        self.stdout_file.close();
+    }
+
+    pub fn expired(self: *const PendingPodSpawn, now_ms: i64) bool {
+        return now_ms >= self.deadline_ms;
+    }
+};
+
+pub const HandshakeProgress = union(enum) {
+    /// Nothing to do yet; call again later.
+    pending,
+    /// Handshake parsed; this is the pod's shell pid.
+    ready: posix.pid_t,
+    /// Unusable (EOF, malformed, or oversized). The caller must reap the pod.
+    failed,
+};
+
+/// Read whatever of the handshake line is available right now. Never blocks.
+pub fn pollPodHandshake(sp: *PendingPodSpawn) HandshakeProgress {
+    while (sp.pos < sp.buf.len) {
+        const n = sp.stdout_file.read(sp.buf[sp.pos..]) catch |err| switch (err) {
+            error.WouldBlock => return .pending,
+            else => return .failed,
+        };
+        if (n == 0) return .failed; // EOF before a newline
+        const chunk_start = sp.pos;
+        sp.pos += n;
+        if (std.mem.indexOfScalar(u8, sp.buf[chunk_start..sp.pos], '\n')) |rel| {
+            return parseHandshakeLine(sp.buf[0 .. chunk_start + rel]);
+        }
+    }
+    // Filled the buffer with no newline: this is not a handshake.
+    return .failed;
+}
+
+/// Parse the pod's handshake JSON and extract its shell pid.
+///
+/// Validates the shape: anything writing to the pod's stdout before the
+/// handshake (shell profile noise, wrapper output) can produce valid JSON of
+/// the wrong type, and unchecked union accesses would be safety-checked illegal
+/// behavior in the daemon.
+fn parseHandshakeLine(line: []const u8) HandshakeProgress {
+    if (line.len == 0) return .failed;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const parsed = std.json.parseFromSlice(std.json.Value, arena.allocator(), line, .{}) catch return .failed;
+    if (parsed.value != .object) return .failed;
+    const pid_node = parsed.value.object.get("pid") orelse return .failed;
+    if (pid_node != .integer) return .failed;
+    const pid_val = pid_node.integer;
+    if (pid_val <= 0 or pid_val > std.math.maxInt(posix.pid_t)) return .failed;
+    return .{ .ready = @intCast(pid_val) };
+}
+
+/// Fork a pod AND wait for its handshake, blocking up to `ses_spawn_timeout`.
+///
+/// Retained for `layout_apply`, which builds a tree from panes it consumes
+/// immediately and so cannot tolerate a deferred result. The interactive
+/// `create_pane` path uses `startPodSpawn` + `pollPodHandshake` instead.
+pub fn spawnPod(
+    allocator: std.mem.Allocator,
+    uuid: [32]u8,
+    name: []const u8,
+    pod_socket_path: []const u8,
+    shell: []const u8,
+    cwd: ?[]const u8,
+    env: ?[]const []const u8,
+    isolation_profile: ?[]const u8,
+) !SpawnResult {
+    var sp = try startPodSpawn(allocator, uuid, name, pod_socket_path, shell, cwd, env, isolation_profile);
+    defer sp.deinit();
+
+    while (true) {
+        switch (pollPodHandshake(&sp)) {
+            .ready => |child_pid| return .{ .pod_pid = sp.pod_pid, .child_pid = child_pid },
+            .failed => return error.PodBadHandshake,
+            .pending => {},
+        }
+        const remaining_ms = sp.deadline_ms - std.time.milliTimestamp();
         if (remaining_ms <= 0) return error.PodSpawnTimeout;
-
-        wire.waitReadableTimeout(stdout_fd, @intCast(remaining_ms)) catch |err| switch (err) {
+        wire.waitReadableTimeout(sp.stdout_file.handle, @intCast(remaining_ms)) catch |err| switch (err) {
             error.Timeout => return error.PodSpawnTimeout,
             else => return err,
         };
-
-        const n = try stdout_file.read(line_buf[pos..]);
-        if (n == 0) break; // EOF before a newline
-        const chunk_start = pos;
-        pos += n;
-        if (std.mem.indexOfScalar(u8, line_buf[chunk_start..pos], '\n')) |rel| {
-            line_end = chunk_start + rel;
-            break;
-        }
     }
-    const line_len = line_end orelse pos;
-    if (line_len == 0) return error.PodNoHandshake;
-    const line = line_buf[0..line_len];
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
-    defer parsed.deinit();
-
-    // Validate the shape: anything writing to the pod's stdout before the
-    // handshake (shell profile noise, wrapper output) can produce valid JSON
-    // of the wrong type, and unchecked union accesses would be safety-checked
-    // illegal behavior in the daemon.
-    if (parsed.value != .object) return error.PodBadHandshake;
-    const root = parsed.value.object;
-    const pid_node = root.get("pid") orelse return error.PodBadHandshake;
-    if (pid_node != .integer) return error.PodBadHandshake;
-    const pid_val = pid_node.integer;
-    if (pid_val <= 0 or pid_val > std.math.maxInt(posix.pid_t)) return error.PodBadHandshake;
-    const child_pid: posix.pid_t = @intCast(pid_val);
-
-    return .{ .pod_pid = pod_pid, .child_pid = child_pid };
 }
