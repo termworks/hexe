@@ -123,6 +123,39 @@ pub fn applyParentCgroups(child_pid: posix.pid_t, pane_uuid: ?[]const u8) void {
 // Profile → IsolationOptions
 // ============================================================================
 
+/// The isolation profiles hexe accepts, as spelled by the CLI
+/// (`mux_float.zig`) and the config default (`config.zig: profile = "default"`).
+///
+/// `getIsolationOptions` and `buildFsActions` match these with `std.mem.eql`,
+/// and ANY unrecognised string used to fall through to the `default` branch
+/// while the cgroup limits keyed off exact `"sandbox"`/`"full"` equality
+/// (PLAN.md A-10). So `"Sandbox"` or `"none "` — a typo, or a caller that
+/// forgot to trim — silently got `default` isolation instead of what was asked
+/// for, with no error anywhere. Callers validate at the trust boundary with
+/// `parseProfile` and reject unknown values.
+///
+/// NOTE `default` is a real profile, not a fallback: it is the config default
+/// and deliberately maps to the middle-strength options. Do not "harden" the
+/// fallthrough into the strictest profile — that would silently give every
+/// default-isolated pane network isolation it never asked for.
+pub const Profile = enum { none, minimal, default, balanced, sandbox, full };
+
+pub fn parseProfile(name: []const u8) ?Profile {
+    return std.meta.stringToEnum(Profile, name);
+}
+
+test "parseProfile accepts exactly the documented profiles" {
+    // The full vocabulary the CLI advertises: none|minimal|default|balanced|sandbox|full
+    for ([_][]const u8{ "none", "minimal", "default", "balanced", "sandbox", "full" }) |name| {
+        try std.testing.expect(parseProfile(name) != null);
+    }
+    // The near-misses that used to downgrade to `default` silently.
+    try std.testing.expect(parseProfile("Sandbox") == null);
+    try std.testing.expect(parseProfile("none ") == null);
+    try std.testing.expect(parseProfile("") == null);
+    try std.testing.expect(parseProfile("sandbox ") == null);
+}
+
 fn getIsolationOptions(profile: []const u8) voidbox.IsolationOptions {
     if (std.mem.eql(u8, profile, "minimal")) {
         return .{
@@ -165,6 +198,9 @@ fn getIsolationOptions(profile: []const u8) voidbox.IsolationOptions {
             .cgroup = false,
         };
     } else {
+        // `default` — a real profile, and the config default. Unknown strings
+        // no longer reach here: the SES boundary rejects them up front, which
+        // is what A-10 was actually about.
         return .{
             .user = true,
             .pid = true,

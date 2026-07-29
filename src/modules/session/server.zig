@@ -1898,18 +1898,20 @@ pub const Server = struct {
             return;
         }
 
-        // Check resource limits and rate limiting
-        if (!self.resource_monitor.allowNewConnection()) {
-            ses.debugLog("reject: connection limit or rate limit exceeded", .{});
-            // Try to send error message before closing
-            const err_msg = "server_overloaded: connection/rate limit exceeded";
+        // Only the hard COUNT ceiling here — the per-minute rate limit moved to
+        // dispatchWithPreamble, where the channel type is known (PLAN.md A-14).
+        // Applying the rate limit at accept time meant pod reconnects, which
+        // retry from a ~1s tick, could exhaust the window and lock the user out
+        // of attach; a human gets one try, a dozen pods get sixty.
+        if (!self.resource_monitor.allowNewConnectionCount()) {
+            ses.debugLog("reject: connection count limit exceeded", .{});
+            const err_msg = "server_overloaded: connection limit exceeded";
             const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
             self.replyOrCloseWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
             var tmp = conn;
             tmp.close();
             return;
         }
-        self.resource_monitor.recordConnection();
 
         // Accumulate the handshake preamble without blocking. The common case
         // (preamble already buffered) completes inside this call.
@@ -2034,6 +2036,25 @@ pub const Server = struct {
     /// Dispatch a connection whose full preamble has been read.
     fn dispatchWithPreamble(self: *Server, conn: ipc.Connection, preamble: []const u8) void {
         const handshake: [2]u8 = .{ preamble[0], preamble[1] };
+
+        // Rate-limit only what a person or a script drives. POD channels are
+        // exempt: they reconnect on their own timer, so counting them is what
+        // starved interactive attach after a daemon restart (PLAN.md A-14).
+        // Every connection is still bounded by the count ceiling at accept.
+        const is_pod = handshake[0] == wire.SES_HANDSHAKE_POD_CTL;
+        if (!is_pod) {
+            if (!self.resource_monitor.allowNewConnectionRate()) {
+                ses.debugLog("reject: connection rate limit exceeded", .{});
+                const err_msg = "server_overloaded: connection rate limit exceeded";
+                const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
+                self.replyOrCloseWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
+                var tmp = conn;
+                tmp.close();
+                return;
+            }
+            self.resource_monitor.recordConnection();
+        }
+
         // Version was validated at the 2-byte boundary in advanceHandshake.
         switch (handshake[0]) {
             wire.SES_HANDSHAKE_FRONTEND_CTL => {

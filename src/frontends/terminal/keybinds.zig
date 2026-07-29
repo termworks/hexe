@@ -1,4 +1,8 @@
 const std = @import("std");
+
+/// How long a fired hold-timer stays parked waiting for its key release before
+/// it is reaped. See the park site below (PLAN.md F-10).
+const HOLD_PARK_TTL_MS: i64 = 5 * 60 * 1000;
 const core = @import("core");
 const vaxis = @import("vaxis");
 const log = std.log.scoped(.terminal_keybinds);
@@ -665,7 +669,20 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
                 _ = dispatchAction(state, t.action);
             }
             state.key_timers.items[i].kind = .hold_fired;
-            state.key_timers.items[i].deadline_ms = std.math.maxInt(i64);
+            // Park with a TTL, not forever (PLAN.md F-10). A `hold_fired`
+            // entry exists only so the matching RELEASE can decide whether to
+            // forward the key to the pane — but releases are not guaranteed to
+            // arrive (a terminal that ignores `report_events`, or a capability
+            // probe that timed out), and `maxInt` meant such an entry lived for
+            // the rest of the process while four functions walked the list on
+            // every key event. The expiry loop below already removes a
+            // `hold_fired` whose deadline passed and does nothing else with it,
+            // so a deadline is all that is needed to bound the list.
+            //
+            // The TTL is deliberately far longer than any real key hold: the
+            // only cost of expiring one early is a single stray forward of that
+            // key, whereas too short a TTL would break genuine long holds.
+            state.key_timers.items[i].deadline_ms = now_ms + HOLD_PARK_TTL_MS;
             i += 1;
             continue;
         }

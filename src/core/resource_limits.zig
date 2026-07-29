@@ -146,21 +146,31 @@ pub const ResourceMonitor = struct {
         self.stats.last_update_ms = std.time.milliTimestamp();
     }
 
-    /// Check if a new connection should be allowed
-    pub fn allowNewConnection(self: *ResourceMonitor) bool {
+    /// Hard ceiling on concurrent connections. Cheap, and safe to apply before
+    /// we know who is connecting.
+    pub fn allowNewConnectionCount(self: *const ResourceMonitor) bool {
+        return self.stats.active_connections < self.limits.max_connections;
+    }
+
+    /// Per-minute connection RATE check.
+    ///
+    /// Kept separate from the count ceiling because the two must be applied at
+    /// different points (PLAN.md A-14). The rate limit is global, and every pod
+    /// redials from its ~1s tick — so a daemon restart with a dozen panes
+    /// saturated the 60/min window within seconds, after which SES rejected the
+    /// user's `attach` and every CLI command. The pods always won that race
+    /// because they retry automatically and the human does not. Callers now
+    /// apply this only to interactive channels, once the handshake has said
+    /// which channel it is, so pod reconnect traffic can no longer consume the
+    /// budget that attach depends on.
+    pub fn allowNewConnectionRate(self: *ResourceMonitor) bool {
         const now = std.time.milliTimestamp();
+        return !self.rate_limiter.isRateLimited(now, self.limits.max_connections_per_minute);
+    }
 
-        // Check connection count limit
-        if (self.stats.active_connections >= self.limits.max_connections) {
-            return false;
-        }
-
-        // Check rate limit
-        if (self.rate_limiter.isRateLimited(now, self.limits.max_connections_per_minute)) {
-            return false;
-        }
-
-        return true;
+    /// Check if a new connection should be allowed (count AND rate).
+    pub fn allowNewConnection(self: *ResourceMonitor) bool {
+        return self.allowNewConnectionCount() and self.allowNewConnectionRate();
     }
 
     /// Record a new connection

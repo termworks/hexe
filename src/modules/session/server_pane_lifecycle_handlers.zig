@@ -77,6 +77,17 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
         }
         const p = buf[offset .. offset + cp.isolation_profile_len];
         offset += cp.isolation_profile_len;
+        // Reject unknown profiles HERE, at the trust boundary (PLAN.md A-10).
+        // SES forwarded these as raw trail bytes, and the consumer matched
+        // names with std.mem.eql and fell through to a middle-strength default
+        // for anything unrecognised — so "Sandbox" or "none " silently got
+        // different isolation than the caller asked for. A security control
+        // that quietly downgrades is worse than one that errors.
+        if (core.isolation_voidbox.parseProfile(p) == null) {
+            core.logging.warn("ses", "create_pane refused: unknown isolation profile '{s}'", .{p});
+            self.sendBinaryError(fd, "unknown_isolation_profile");
+            return;
+        }
         break :blk p;
     } else null;
     const inherit_env_parent_uuid: ?[32]u8 = if (cp.inherit_env_parent_uuid_len > 0) blk: {
