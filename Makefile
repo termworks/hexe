@@ -36,6 +36,7 @@ smoke: smoke-clean
 	python3 -u scripts/smoke_stalled_peer.py
 	python3 -u scripts/smoke_stalled_pod_peer.py
 	python3 -u scripts/smoke_rate_limit_attach.py
+	python3 -u scripts/smoke_log_not_in_tmp.py
 	python3 -u scripts/smoke_pod_attach.py
 	python3 -u scripts/smoke_wedged_ctl_reader.py
 	python3 -u scripts/smoke_bighistory.py

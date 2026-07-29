@@ -106,12 +106,10 @@ pub const Server = struct {
 
     fn makeSocketParentPath(path: []const u8) !void {
         const dir = std.fs.path.dirname(path) orelse return;
-        if (std.fs.path.isAbsolute(dir)) {
-            var root = try std.fs.openDirAbsolute("/", .{});
-            defer root.close();
-            return root.makePath(dir[1..]);
-        }
-        return std.fs.cwd().makePath(dir);
+        // Same hazard as the log directory: with no XDG_RUNTIME_DIR the socket
+        // dir lands under world-writable /tmp, where anyone can pre-create or
+        // symlink it (PLAN.md A-6). Bind only into a directory we own.
+        return ensurePrivateDir(dir);
     }
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Server {
@@ -647,8 +645,84 @@ pub fn getSesStatePath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/hexe/ses_state.json", .{state_home});
 }
 
+/// Create `path` if needed and refuse to use it unless WE own it (PLAN.md A-6).
+///
+/// hexe's runtime and log directories used to be created with a bare
+/// `makePath` under world-writable `/tmp`, with no ownership or type check. A
+/// local attacker who pre-creates `/tmp/hexe/<instance>` — or symlinks it at
+/// one of the victim's files — gets hexe to write there, and the debug log
+/// carries cwds, command lines and pane metadata.
+///
+/// The check is deliberately asymmetric: a directory we do not own is an
+/// attack and hard-fails, while merely loose permissions on a directory we DO
+/// own are tightened where possible and warned about otherwise. That avoids
+/// bricking a daemon over a umask quirk while still refusing the real hazard.
+pub fn ensurePrivateDir(path: []const u8) !void {
+    std.fs.cwd().makePath(path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    // Open the directory and verify the fd, rather than stat-ing the name:
+    // checking the path and then using it is a TOCTOU window.
+    var dir = std.fs.cwd().openDir(path, .{}) catch |err| {
+        log.warn("refusing to use {s}: cannot open it ({s})", .{ path, @errorName(err) });
+        return error.PrivateDirUnusable;
+    };
+    defer dir.close();
+
+    const st = std.posix.fstat(dir.fd) catch |err| {
+        log.warn("refusing to use {s}: cannot stat it ({s})", .{ path, @errorName(err) });
+        return error.PrivateDirUnusable;
+    };
+
+    if (!std.posix.S.ISDIR(st.mode)) {
+        log.warn("refusing to use {s}: not a directory", .{path});
+        return error.PrivateDirUnusable;
+    }
+    if (st.uid != linux.getuid()) {
+        log.warn("refusing to use {s}: owned by uid {d}, not {d}", .{ path, st.uid, linux.getuid() });
+        return error.PrivateDirUnusable;
+    }
+    if (st.mode & 0o022 != 0) {
+        // Ours, but group/world writable. Tighten it; warn if we cannot.
+        std.posix.fchmod(dir.fd, 0o700) catch {
+            log.warn("{s} is group/world writable and could not be tightened", .{path});
+        };
+    }
+}
+
+test "ensurePrivateDir accepts a directory we own and rejects a non-directory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+
+    // Fresh path: created and accepted.
+    const good = try std.fmt.allocPrint(std.testing.allocator, "{s}/nested/dir", .{base});
+    defer std.testing.allocator.free(good);
+    try ensurePrivateDir(good);
+    // Idempotent: an existing directory we own stays acceptable.
+    try ensurePrivateDir(good);
+
+    // A regular file where a directory is expected must be REFUSED, not used.
+    // The contract is "fails", not a specific error: `makePath` rejects this
+    // with NotDir before the ownership check is even reached, and pinning the
+    // exact error would make the test brittle against that ordering.
+    const file_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/afile", .{base});
+    defer std.testing.allocator.free(file_path);
+    (try std.fs.createFileAbsolute(file_path, .{})).close();
+    try std.testing.expect(if (ensurePrivateDir(file_path)) |_| false else |_| true);
+}
+
 /// Get the debug log file path.
-/// Returns /tmp/hexe/<instance>/log where instance defaults to "default".
+///
+/// Follows XDG_STATE_HOME (then `~/.local/state`), NOT a hardcoded `/tmp`
+/// (PLAN.md A-6): this file records cwds, command lines and pane metadata, so
+/// it belongs in the user's private state directory, not a world-writable one.
+/// `/tmp` remains only as a last resort when there is no HOME at all, and even
+/// then the directory must pass `ensurePrivateDir`.
 pub fn getLogPath(allocator: std.mem.Allocator) ![]const u8 {
     const instance_raw = posix.getenv("HEXE_INSTANCE");
     const instance = if (instance_raw) |inst| (if (inst.len > 0) inst else "default") else "default";
@@ -657,11 +731,19 @@ pub fn getLogPath(allocator: std.mem.Allocator) ![]const u8 {
     const sanitized = sanitizeInstanceName(sanitized_buf[0..], instance);
     const final_instance = if (sanitized.len > 0) sanitized else "default";
 
-    const dir = try std.fmt.allocPrint(allocator, "/tmp/hexe/{s}", .{final_instance});
-    defer allocator.free(dir);
-    try std.fs.cwd().makePath(dir);
+    const state_home_env = posix.getenv("XDG_STATE_HOME");
+    const state_home: []const u8 = state_home_env orelse blk: {
+        const home = posix.getenv("HOME") orelse break :blk "/tmp";
+        break :blk try std.fmt.allocPrint(allocator, "{s}/.local/state", .{home});
+    };
+    const owned_state_home = state_home_env == null and !std.mem.eql(u8, state_home, "/tmp");
+    defer if (owned_state_home) allocator.free(state_home);
 
-    return std.fmt.allocPrint(allocator, "/tmp/hexe/{s}/log", .{final_instance});
+    const dir = try std.fmt.allocPrint(allocator, "{s}/hexe/{s}", .{ state_home, final_instance });
+    defer allocator.free(dir);
+    try ensurePrivateDir(dir);
+
+    return std.fmt.allocPrint(allocator, "{s}/hexe/{s}/log", .{ state_home, final_instance });
 }
 
 /// Get the layout storage directory path (~/.config/hexe/layouts/).
