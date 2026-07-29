@@ -547,9 +547,65 @@ test "sanitizeInstanceName rejects dot-only names but keeps dots elsewhere" {
 }
 
 /// Get the socket directory path
+/// Per-user runtime directory to use when `XDG_RUNTIME_DIR` is unset.
+///
+/// Prefers `/run/user/<uid>` — the same directory the variable normally points
+/// at, created 0700 and owned by us on any logind system — before falling back
+/// to world-writable `/tmp` (PLAN.md A-6). Writing `buf`, returning a slice of
+/// it or a static string.
+///
+/// Note this narrows exposure rather than being the whole defence: sockets are
+/// bound through `makeSocketParentPath`, which runs `ensurePrivateDir` and
+/// refuses any directory we do not own. `/tmp` pre-created or symlinked by
+/// another user therefore fails closed already; this just stops us reaching for
+/// `/tmp` at all when a private runtime dir is right there.
+fn fallbackRuntimeDir(buf: []u8) []const u8 {
+    const candidate = std.fmt.bufPrint(buf, "/run/user/{d}", .{linux.getuid()}) catch return "/tmp";
+    var dir = std.fs.cwd().openDir(candidate, .{}) catch return "/tmp";
+    defer dir.close();
+    const st = std.posix.fstat(dir.fd) catch return "/tmp";
+    if (!std.posix.S.ISDIR(st.mode)) return "/tmp";
+    if (st.uid != linux.getuid()) return "/tmp";
+    return candidate;
+}
+
+test "fallbackRuntimeDir prefers a private /run/user over world-writable /tmp" {
+    var buf: [64]u8 = undefined;
+    const got = fallbackRuntimeDir(&buf);
+
+    var probe: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&probe, "/run/user/{d}", .{linux.getuid()});
+    const have_private_runtime = blk: {
+        var d = std.fs.cwd().openDir(expected, .{}) catch break :blk false;
+        d.close();
+        break :blk true;
+    };
+
+    if (have_private_runtime) {
+        try std.testing.expectEqualStrings(expected, got);
+    } else {
+        // No private runtime dir on this host: /tmp is the only option left,
+        // and ensurePrivateDir still refuses one we do not own.
+        try std.testing.expectEqualStrings("/tmp", got);
+    }
+}
+
+test "pod socket paths stay inside the sockaddr_un limit" {
+    // The reason relocating the socket directory is risky at all: AF_UNIX paths
+    // are capped at 108 bytes and Server.init rejects anything longer, so a
+    // deeper base directory can break pane creation rather than merely move it.
+    var buf: [64]u8 = undefined;
+    const base = fallbackRuntimeDir(&buf);
+
+    // Worst case the sanitiser permits: a 24-char instance name, plus the
+    // longest thing we ever put in that directory (a 32-hex pod socket).
+    const longest = base.len + "/hexe/".len + 24 + "/pod-".len + 32 + ".sock".len;
+    try std.testing.expect(longest < 108);
+}
+
 pub fn getSocketDir(allocator: std.mem.Allocator) ![]const u8 {
-    // Use XDG_RUNTIME_DIR if available, otherwise /tmp
-    const runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse "/tmp";
+    var fallback_buf: [64]u8 = undefined;
+    const runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse fallbackRuntimeDir(&fallback_buf);
 
     const instance_raw = std.posix.getenv("HEXE_INSTANCE");
     if (instance_raw) |inst| {

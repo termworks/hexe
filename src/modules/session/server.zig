@@ -1163,8 +1163,35 @@ pub const Server = struct {
     /// pending-close processors (which would find either nothing or, worse, a
     /// brand-new connection that reused the fd number).
     pub fn purgeClientFdState(self: *Server, client_id: usize) void {
+        self.cancelPendingSpawnsForClient(client_id);
         const client = self.ses_state.getClient(client_id) orelse return;
         self.purgeMuxFdState(client.mux_ctl_fd, client.mux_vt_fd);
+    }
+
+    /// Drop spawns still in flight for a client that just lost its session.
+    ///
+    /// A `create_pane` that was mid-flight when the session got STOLEN would
+    /// otherwise complete a tick later and attach a brand-new pane to the OLD
+    /// client — resurrecting a frontend that was supposed to exit, which is the
+    /// "stolen frontend did not exit" failure.
+    ///
+    /// `finishCreatePane` only guards against the client being GONE
+    /// (`ClientNotFound`). A steal is the case that slips through: it leaves the
+    /// client alive and merely paneless, so the pane lands successfully on a
+    /// frontend nobody expects to still be running. Making pane creation
+    /// asynchronous is what opened this window — synchronously, the pane always
+    /// existed before the steal could begin.
+    pub fn cancelPendingSpawnsForClient(self: *Server, client_id: usize) void {
+        var i: usize = 0;
+        while (i < self.pending_spawns.items.len) {
+            const ps = &self.pending_spawns.items[i];
+            if (ps.flight.client_id != client_id) {
+                i += 1;
+                continue;
+            }
+            self.failPendingSpawn(ps, "session_taken_over");
+            _ = self.pending_spawns.swapRemove(i);
+        }
     }
 
     /// Release every CLI process blocked waiting on this frontend to answer.
