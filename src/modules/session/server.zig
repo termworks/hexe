@@ -33,6 +33,15 @@ const xev = @import("xev").Dynamic;
 const VT_ROUTE_IO_TIMEOUT_MS: i32 = 500;
 const CTL_FRAME_IO_TIMEOUT_MS: i32 = 500;
 pub const HANDLER_IO_TIMEOUT_MS: i32 = 500;
+
+/// How long a FRONTEND control connection may sit accepted-but-unregistered
+/// before SES reclaims it (PLAN.md A-13).
+///
+/// Deliberately generous. A real frontend sends `register` as its first
+/// message, in milliseconds; this only reclaims sockets that completed a
+/// handshake and then went silent forever, which would otherwise hold an fd
+/// and a slot against the connection cap for the life of the daemon.
+const UNREGISTERED_CTL_TIMEOUT_MS: i64 = 120_000;
 /// Whole-skip budget. The per-chunk timeouts above restart on every chunk, so
 /// only a total deadline actually bounds a peer that trickles a huge payload.
 const SKIP_TOTAL_TIMEOUT_MS: i64 = 2_000;
@@ -158,6 +167,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .running = true,
         .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(allocator),
         .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
+        .ctl_unregistered_since = std.AutoHashMap(posix.fd_t, i64).init(allocator),
         .ctl_watchers = std.AutoHashMap(posix.fd_t, *CtlWatcher).init(allocator),
         .pending_ctl_close_fds = .empty,
         .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(allocator),
@@ -210,6 +220,7 @@ fn deinitTestServer(server: *Server) void {
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
+    server.ctl_unregistered_since.deinit();
     server.allocator.free(server.vt_route_buf);
 }
 
@@ -289,6 +300,41 @@ test "Server replies echo request id only to current request fd" {
 
     const other_hdr = try wire.readControlHeader(other_pair.b);
     try std.testing.expectEqual(@as(u32, 0), other_hdr.request_id);
+}
+
+test "reapUnregisteredCtl reclaims a stale unregistered CTL fd but spares a fresh one" {
+    const allocator = std.testing.allocator;
+    // Needs real state: the reaper consults the client list and the pane table
+    // to decide what is registered / what is a pod uplink.
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+    var server = testServerWithState(allocator, &ses_state);
+    defer deinitTestServer(&server);
+
+    // Fake fd numbers: the reaper only queues them for deferred close, it does
+    // not touch the descriptors itself.
+    const stale_fd: posix.fd_t = 4242;
+    const fresh_fd: posix.fd_t = 4243;
+    const now = std.time.milliTimestamp();
+    try server.ctl_unregistered_since.put(stale_fd, now - UNREGISTERED_CTL_TIMEOUT_MS - 1_000);
+    try server.ctl_unregistered_since.put(fresh_fd, now);
+
+    server.reapUnregisteredCtl();
+
+    // Stale: queued for close and no longer tracked.
+    try std.testing.expect(!server.ctl_unregistered_since.contains(stale_fd));
+    var queued = false;
+    for (server.pending_ctl_close_fds.items) |pending| {
+        if (pending.fd == stale_fd) queued = true;
+    }
+    try std.testing.expect(queued);
+
+    // Fresh: still tracked, and NOT queued. A frontend gets its full grace
+    // period to send `register`.
+    try std.testing.expect(server.ctl_unregistered_since.contains(fresh_fd));
+    for (server.pending_ctl_close_fds.items) |pending| {
+        try std.testing.expect(pending.fd != fresh_fd);
+    }
 }
 
 test "Server.requireSnapshotTab rejects unknown tab with binary error" {
@@ -772,6 +818,8 @@ pub const Server = struct {
     pending_pop_requests: std.AutoHashMap(posix.fd_t, posix.fd_t),
     // Track which fds use binary control protocol (MUX_CTL and POD_CTL connections).
     binary_ctl_fds: std.AutoHashMap(posix.fd_t, void),
+    /// Frontend CTL fds still awaiting `register`, and when they arrived.
+    ctl_unregistered_since: std.AutoHashMap(posix.fd_t, i64),
     ctl_watchers: std.AutoHashMap(posix.fd_t, *CtlWatcher),
     pending_ctl_close_fds: std.ArrayList(PendingCtlClose),
     vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
@@ -833,6 +881,7 @@ pub const Server = struct {
             .running = true,
             .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(page_alloc),
             .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
+            .ctl_unregistered_since = std.AutoHashMap(posix.fd_t, i64).init(page_alloc),
             .ctl_watchers = std.AutoHashMap(posix.fd_t, *CtlWatcher).init(page_alloc),
             .pending_ctl_close_fds = .empty,
             .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(page_alloc),
@@ -894,6 +943,7 @@ pub const Server = struct {
         self.deferred_destroy_vt.deinit(self.allocator);
 
         self.binary_ctl_fds.deinit();
+        self.ctl_unregistered_since.deinit();
         self.allocator.free(self.vt_route_buf);
         self.socket.deinit();
     }
@@ -1262,6 +1312,56 @@ pub const Server = struct {
     /// the one being fixed, and one that only shows up after hours of uptime.
     fn liveConnectionCount(self: *const Server) usize {
         return self.ctl_watchers.count() + self.vt_watchers.count() + self.pending_handshakes.items.len;
+    }
+
+    /// Reclaim frontend CTL connections that handshaked and then never
+    /// registered (PLAN.md A-13).
+    ///
+    /// Scoped tightly on purpose. A REGISTERED frontend may legitimately sit
+    /// idle for hours (a user away from the keyboard sends no control traffic),
+    /// so idleness alone must never close anything — only the absence of a
+    /// client record does. Pod uplinks share `binary_ctl_fds` but are never
+    /// registered as clients, so they are excluded explicitly; `pane.pod_ctl_fd`
+    /// is assigned before the fd is added to that map, so there is no window in
+    /// which a live pod looks unregistered.
+    fn reapUnregisteredCtl(self: *Server) void {
+        if (self.ctl_unregistered_since.count() == 0) return;
+        const now = std.time.milliTimestamp();
+
+        var doomed: [16]posix.fd_t = undefined;
+        var doomed_n: usize = 0;
+
+        var it = self.ctl_unregistered_since.iterator();
+        while (it.next()) |entry| {
+            const fd = entry.key_ptr.*;
+            if (self.findClientForCtlFd(fd) != null) {
+                // Registered: stop tracking it, never reap it.
+                doomed[doomed_n] = fd;
+                doomed_n += 1;
+                if (doomed_n == doomed.len) break;
+                continue;
+            }
+            if (now - entry.value_ptr.* <= UNREGISTERED_CTL_TIMEOUT_MS) continue;
+            if (self.isPodCtlFd(fd)) continue;
+
+            core.logging.warn("ses", "closing CTL fd={d}: handshaked but never registered", .{fd});
+            self.queueCtlClose(fd, null);
+            doomed[doomed_n] = fd;
+            doomed_n += 1;
+            if (doomed_n == doomed.len) break;
+        }
+        // Mutate the map only after iteration.
+        for (doomed[0..doomed_n]) |fd| _ = self.ctl_unregistered_since.remove(fd);
+    }
+
+    fn isPodCtlFd(self: *const Server, fd: posix.fd_t) bool {
+        var panes = self.ses_state.store.panes.valueIterator();
+        while (panes.next()) |pane| {
+            if (pane.pod_ctl_fd) |pod_fd| {
+                if (pod_fd == fd) return true;
+            }
+        }
+        return false;
     }
 
     /// Enqueue an fd for deferred close, deduped by fd. Shared by the CTL and
@@ -1837,6 +1937,7 @@ pub const Server = struct {
 
         // Advance connections whose handshake preamble has not fully arrived.
         periodic.server.processPendingHandshakes();
+        periodic.server.reapUnregisteredCtl();
         periodic.server.flushMuxVtQueues();
         periodic.server.flushPodVtQueues();
         periodic.server.flushCtlQueues();
@@ -2083,6 +2184,7 @@ pub const Server = struct {
                 };
                 // Frontend binary control channel.
                 ses.debugLog("accept: frontend ctl channel fd={d}", .{conn.fd});
+                self.ctl_unregistered_since.put(conn.fd, std.time.milliTimestamp()) catch {};
                 self.binary_ctl_fds.put(conn.fd, {}) catch |err| {
                     core.logging.logError("ses", "failed to register frontend CTL fd", err);
                     var tmp = conn;
@@ -2498,6 +2600,7 @@ pub const Server = struct {
             var reader = kv.value;
             reader.deinit(self.allocator);
         }
+        _ = self.ctl_unregistered_since.remove(fd);
         if (self.ctl_out_queues.fetchRemove(fd)) |kv| {
             var queue = kv.value;
             if (queue.pending() > 0) {
