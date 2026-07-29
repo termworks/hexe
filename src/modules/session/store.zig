@@ -71,6 +71,15 @@ pub const Pane = struct {
     pod_vt_fd: ?posix.fd_t = null,
     pod_ctl_fd: ?posix.fd_t = null,
     needs_backlog_replay: bool = false,
+    /// Backoff state for `needs_backlog_replay` retries.
+    ///
+    /// `connectPodVt` blocks the single-threaded event loop (connect + ack
+    /// read). A pod that is alive but not accepting fails every attempt and
+    /// keeps the flag set, so retrying it on every 1s cleanup tick froze the
+    /// WHOLE daemon — every other session included — once per second, forever.
+    /// Back off instead: the healthy first attempt is unaffected.
+    backlog_replay_attempts: u8 = 0,
+    backlog_replay_next_ms: i64 = 0,
 
     sticky_pwd: ?[]const u8,
     sticky_key: ?u8,
@@ -104,6 +113,17 @@ pub const Pane = struct {
     last_jobs: ?u16 = null,
 
     allocator: std.mem.Allocator,
+
+    /// Request a pod VT reconnect + backlog replay, clearing any retry backoff.
+    ///
+    /// Always use this instead of setting `needs_backlog_replay` directly: a
+    /// stale backoff left by earlier failures would otherwise delay a fresh
+    /// attach by up to the maximum backoff interval.
+    pub fn requestBacklogReplay(self: *Pane) void {
+        self.needs_backlog_replay = true;
+        self.backlog_replay_attempts = 0;
+        self.backlog_replay_next_ms = 0;
+    }
 
     pub fn transitionState(self: *Pane, new_state: PaneState, reason: []const u8) bool {
         const old_state = self.state;
@@ -451,7 +471,10 @@ pub const Client = struct {
 /// One owned outbound frame (pod_protocol header + payload) awaiting delivery
 /// to a POD VT socket. `written` tracks partial non-blocking writes.
 pub const PodVtFrame = struct {
+    /// Backing buffer, which may be LONGER than the frame (see FramePool).
     bytes: []u8,
+    /// Logical frame length. Always use this, never `bytes.len`.
+    len: usize,
     written: usize = 0,
 };
 
@@ -577,6 +600,9 @@ pub const SessionStore = struct {
     /// tear that connection down (or trip the EBADF safety check). Two
     /// generations because a watcher error CQE for a directly-closed fd can
     /// surface one full loop iteration after the close.
+    /// Set once next_pane_id has wrapped, after which allocPaneId must check
+    /// for collisions with live panes.
+    pane_ids_wrapped: bool = false,
     closed_fds_cur: std.AutoHashMap(posix.fd_t, void),
     closed_fds_prev: std.AutoHashMap(posix.fd_t, void),
 
@@ -595,9 +621,36 @@ pub const SessionStore = struct {
         };
     }
 
+    /// Pre-size the closed-fd log so `noteClosedFd` cannot fail to allocate.
+    ///
+    /// That log is the ONLY thing stopping the pending-close processors from
+    /// `posix.close`-ing an fd number that was already closed and reused by a
+    /// brand-new connection -- the failure the comments around it describe in
+    /// detail. Swallowing a failed `put` therefore re-enabled exactly the
+    /// double-close it exists to prevent, silently tearing down a live client.
+    /// Reserved generously: it holds at most two event-loop generations of
+    /// closes, and reserving is far cheaper than the failure it rules out.
+    pub fn reserveClosedFdLog(self: *SessionStore) void {
+        const capacity: u32 = @intCast(core.constants.Limits.max_clients * 8);
+        self.closed_fds_cur.ensureTotalCapacity(capacity) catch |err| {
+            core.logging.logError("ses", "failed to reserve closed-fd log", err);
+        };
+        self.closed_fds_prev.ensureTotalCapacity(capacity) catch |err| {
+            core.logging.logError("ses", "failed to reserve closed-fd log", err);
+        };
+    }
+
     pub fn noteClosedFd(self: *SessionStore, fd: posix.fd_t) void {
+        // Capacity is reserved up front (see reserveClosedFdLog), so this
+        // should never fail. If it somehow does, say so loudly: the next
+        // pending-close pass may now close an fd number that a new connection
+        // already owns.
         self.closed_fds_cur.put(fd, {}) catch |err| {
-            core.logging.logError("ses", "failed to record closed fd", err);
+            core.logging.warn(
+                "ses",
+                "closed-fd log insert FAILED for fd={d} ({s}); a reused fd number may now be double-closed",
+                .{ fd, @errorName(err) },
+            );
         };
         // Free any pending MUX→POD input queue for this fd before its number can
         // be reused by a new connection (which would otherwise inherit stale
@@ -616,6 +669,8 @@ pub const SessionStore = struct {
     /// pending-close processing rounds, then stop shielding the fd number.
     pub fn rotateClosedFdLog(self: *SessionStore) void {
         std.mem.swap(std.AutoHashMap(posix.fd_t, void), &self.closed_fds_cur, &self.closed_fds_prev);
+        // clearRetainingCapacity, not clearAndFree: the reservation from
+        // reserveClosedFdLog is what makes noteClosedFd infallible.
         self.closed_fds_cur.clearRetainingCapacity();
     }
 
@@ -652,11 +707,43 @@ pub const SessionStore = struct {
         self.closed_fds_prev.deinit();
     }
 
+    /// Allocate a routing id that no live pane already holds.
+    ///
+    /// `pane_id` is the key for pane_id_to_pod_vt / pod_vt_to_pane_id /
+    /// pane_id_to_uuid. The counter is a u16 that wraps to 1, and it used to
+    /// hand the wrapped value out unconditionally — so after 65535 pane
+    /// creations in one daemon lifetime (very reachable for a multiplexer
+    /// opening and closing per-CWD floats over weeks) a new pane aliased a live
+    /// pane's routes: connectPodVt would overwrite them, and killing either
+    /// pane would tear down the other's routing.
+    ///
+    /// Before the first wrap the counter is strictly monotonic, so the common
+    /// path stays a plain increment with no scan.
     pub fn allocPaneId(self: *SessionStore) u16 {
-        const id = self.next_pane_id;
-        self.next_pane_id +%= 1;
-        if (self.next_pane_id == 0) self.next_pane_id = 1;
-        return id;
+        var attempts: usize = 0;
+        while (attempts <= std.math.maxInt(u16)) : (attempts += 1) {
+            const id = self.next_pane_id;
+            self.next_pane_id +%= 1;
+            if (self.next_pane_id == 0) {
+                self.next_pane_id = 1;
+                self.pane_ids_wrapped = true;
+            }
+            if (!self.pane_ids_wrapped) return id;
+            if (!self.paneIdInUse(id)) return id;
+        }
+        // Every id is live (65535 concurrent panes). Nothing better to do than
+        // hand one back; the caller is far past any sane resource limit.
+        core.logging.warn("ses", "pane id space exhausted; reusing {d}", .{self.next_pane_id});
+        return self.next_pane_id;
+    }
+
+    fn paneIdInUse(self: *const SessionStore, id: u16) bool {
+        if (self.pane_id_to_pod_vt.contains(id)) return true;
+        var it = self.panes.valueIterator();
+        while (it.next()) |pane| {
+            if (pane.pane_id == id) return true;
+        }
+        return false;
     }
 
     pub fn markDirty(self: *SessionStore) void {

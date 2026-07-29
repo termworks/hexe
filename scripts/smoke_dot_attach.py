@@ -10,6 +10,7 @@ Rounds alternate the two racy flows, with zero settle time:
   A) kill the frontend and IMMEDIATELY attach . from the session's directory
   B) attach . while the session is still attached elsewhere (steal)
 """
+import atexit
 import fcntl
 import os
 import pty
@@ -37,7 +38,7 @@ os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
 procs = []
 
 def pgrep(pattern):
-    r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+    r = subprocess.run(["pgrep", "-f", "--", pattern], capture_output=True, text=True)
     return [int(x) for x in r.stdout.split()] if r.returncode == 0 else []
 
 def spawn_frontend(argv):
@@ -85,6 +86,14 @@ def cleanup():
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+# Run teardown even when this script raises or is killed by a timeout.
+# Without this, cleanup() ran only on the success path and inside fail(),
+# so any unhandled exception left the daemon, its pods and their shells
+# alive. Hundreds of runs accumulate enough of them to slow the machine
+# down and make later smokes fail in ways that look like product bugs.
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
 log = open(os.path.join(SCRATCH, "smoke-dot.raw"), "wb")
 print(f"instance={INST} workdir={WORKDIR}")

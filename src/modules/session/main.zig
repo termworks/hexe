@@ -67,10 +67,23 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
 
     debugLog("txlog: checking {d} entries for incomplete transactions", .{entries.items.len});
 
+    // A replay that stopped at the size cap read only the OLDEST entries, so a
+    // `detach_start` may well have its `detach_commit` sitting just past the
+    // cutoff. Rolling those back deletes fully-committed detached sessions and
+    // orphans their panes -- catastrophically worse than leaving a genuinely
+    // half-done transaction in place, which the next clean run resolves.
+    if (ses_state.persistence.txlog.lastReadWasTruncated()) {
+        core.logging.warn("ses", "txlog replay hit the size cap; rolling nothing back (cannot prove completeness)", .{});
+        ses_state.persistence.txlog.truncate() catch |err| {
+            core.logging.logError("ses", "failed to truncate oversized txlog", err);
+        };
+        return;
+    }
+
     // Find incomplete transactions (start without commit) and keep the
     // operation type so recovery can roll back detaches without destroying a
     // still-valid detached session after a failed reattach.
-    var incomplete = try txlog.findIncompleteOperations(entries.items);
+    var incomplete = try txlog.findIncompleteOperations(allocator, entries.items);
     defer incomplete.deinit(allocator);
 
     if (incomplete.items.len == 0) {

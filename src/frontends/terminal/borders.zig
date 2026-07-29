@@ -127,6 +127,9 @@ fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Colo
 }
 
 /// Draw split borders between panes
+/// A contiguous run of rows (or columns) that a border line covers.
+const Span = struct { start: u16, end: u16 };
+
 pub fn drawSplitBorders(
     renderer: *Renderer,
     layout: *Layout,
@@ -207,99 +210,98 @@ pub fn drawSplitBorders(
 
     // Draw vertical lines - but only where there's actually a split boundary
     for (v_lines[0..v_line_count]) |x| {
-        for (0..content_height) |row| {
-            const y: u16 = @intCast(row);
+        // Collect the row spans this line covers in ONE pass over the panes.
+        //
+        // This used to re-run splitIterator() for every (line, row) pair, i.e.
+        // O(lines x rows x panes): with 20 splits on a 200x50 terminal that is
+        // ~100k hashmap iterations per frame, and the render is not
+        // region-limited so it happened on any frame at all.
+        var spans: [64]Span = undefined;
+        var span_count: usize = 0;
+        var pane_check = layout.splitIterator();
+        while (pane_check.next()) |pane| {
+            if (pane.*.x + pane.*.width != x) continue;
+            if (span_count >= spans.len) break;
+            spans[span_count] = .{
+                .start = pane.*.y,
+                .end = @min(pane.*.y + pane.*.height, @as(u16, @intCast(content_height))),
+            };
+            span_count += 1;
+        }
 
-            // Check if this row actually has a vertical boundary at this x
-            // A vertical line should only be drawn where a pane ends (right_edge == x)
-            // and that row is within that pane's y range
-            var should_draw = false;
-            var pane_check = layout.splitIterator();
-            while (pane_check.next()) |pane| {
-                const right_edge = pane.*.x + pane.*.width;
-                if (right_edge == x) {
-                    // Check if y is within this pane's vertical range
-                    if (y >= pane.*.y and y < pane.*.y + pane.*.height) {
-                        should_draw = true;
-                        break;
-                    }
-                }
-            }
+        for (spans[0..span_count]) |span| {
+            var y = span.start;
+            while (y < span.end) : (y += 1) {
+                var char = v_char;
 
-            if (!should_draw) continue;
-
-            var char = v_char;
-
-            // Check for junctions with horizontal lines
-            if (splits_cfg.style != null) {
-                for (h_lines[0..h_line_count]) |hy| {
-                    if (y == hy) {
-                        // Check if this is a cross, top_t, or bottom_t
-                        const at_top = (y == 0);
-                        const at_bottom = (y == content_height - 1);
-                        if (at_top) {
-                            char = top_t;
-                        } else if (at_bottom) {
-                            char = bottom_t;
-                        } else {
-                            char = cross_char;
+                // Check for junctions with horizontal lines
+                if (splits_cfg.style != null) {
+                    for (h_lines[0..h_line_count]) |hy| {
+                        if (y == hy) {
+                            // Check if this is a cross, top_t, or bottom_t
+                            const at_top = (y == 0);
+                            const at_bottom = (y == content_height - 1);
+                            if (at_top) {
+                                char = top_t;
+                            } else if (at_bottom) {
+                                char = bottom_t;
+                            } else {
+                                char = cross_char;
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
-            }
 
-            write_split_cell(renderer, x, y, char, color);
+                write_split_cell(renderer, x, y, char, color);
+            }
         }
     }
 
     // Draw horizontal lines - but only where there's actually a split boundary
     for (h_lines[0..h_line_count]) |y| {
-        for (0..term_width) |col| {
-            const x: u16 = @intCast(col);
+        // Same one-pass span collection as the vertical case above.
+        var spans: [64]Span = undefined;
+        var span_count: usize = 0;
+        var pane_check = layout.splitIterator();
+        while (pane_check.next()) |pane| {
+            if (pane.*.y + pane.*.height != y) continue;
+            if (span_count >= spans.len) break;
+            spans[span_count] = .{
+                .start = pane.*.x,
+                .end = @min(pane.*.x + pane.*.width, term_width),
+            };
+            span_count += 1;
+        }
 
-            // Skip if already drawn by vertical line (junction)
-            var is_junction = false;
-            for (v_lines[0..v_line_count]) |vx| {
-                if (x == vx) {
-                    is_junction = true;
-                    break;
-                }
-            }
-            if (is_junction) continue;
-
-            // Check if this column actually has a horizontal boundary at this y
-            // A horizontal line should only be drawn where a pane ends (bottom_edge == y)
-            // and that column is within that pane's x range
-            var should_draw = false;
-            var pane_check = layout.splitIterator();
-            while (pane_check.next()) |pane| {
-                const bottom_edge = pane.*.y + pane.*.height;
-                if (bottom_edge == y) {
-                    // Check if x is within this pane's horizontal range
-                    if (x >= pane.*.x and x < pane.*.x + pane.*.width) {
-                        should_draw = true;
+        for (spans[0..span_count]) |span| {
+            var x = span.start;
+            while (x < span.end) : (x += 1) {
+                // Skip if already drawn by a vertical line (junction).
+                var is_junction = false;
+                for (v_lines[0..v_line_count]) |vx| {
+                    if (x == vx) {
+                        is_junction = true;
                         break;
                     }
                 }
-            }
+                if (is_junction) continue;
 
-            if (!should_draw) continue;
+                var char = h_char;
 
-            var char = h_char;
-
-            // Check for edge junctions
-            if (splits_cfg.style != null) {
-                const at_left = (x == 0);
-                const at_right = (x == term_width - 1);
-                if (at_left) {
-                    char = left_t;
-                } else if (at_right) {
-                    char = right_t;
+                // Check for edge junctions
+                if (splits_cfg.style != null) {
+                    const at_left = (x == 0);
+                    const at_right = (x == term_width - 1);
+                    if (at_left) {
+                        char = left_t;
+                    } else if (at_right) {
+                        char = right_t;
+                    }
                 }
-            }
 
-            write_split_cell(renderer, x, y, char, color);
+                write_split_cell(renderer, x, y, char, color);
+            }
         }
     }
 }

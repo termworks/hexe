@@ -55,6 +55,11 @@ fn reattachStealAllowed(client: *const store_mod.Client, uuid: [32]u8) bool {
     return clientSnapshotHasFloat(client, uuid);
 }
 
+/// Budget for finishing a pane_exited frame that was only partly accepted.
+/// Small: the socket already took part of a 42-byte frame, so the peer is
+/// draining; this only bounds the pathological case.
+const PARTIAL_FRAME_COMPLETION_MS: i64 = 50;
+
 fn notifyPaneExitedBestEffort(fd: posix.fd_t, uuid: [32]u8) void {
     var msg: wire.PaneUuid = .{ .uuid = uuid };
     var hdr: wire.ControlHeader = .{
@@ -86,12 +91,40 @@ fn notifyPaneExitedBestEffort(fd: posix.fd_t, uuid: [32]u8) void {
         return;
     }
 
-    const n = posix.write(fd, &buf) catch |err| {
+    var written: usize = 0;
+    written = posix.write(fd, &buf) catch |err| {
         core.logging.logError("ses", "best-effort pane_exited notify write failed during pane takeover", err);
         return;
     };
-    if (n != buf.len) {
-        core.logging.warn("ses", "best-effort pane_exited notify wrote partial frame during pane takeover", .{});
+    if (written == buf.len) return;
+
+    // Partial write. Unlike every other CTL reply this one cannot go through
+    // the server's outbound queue (PLAN.md 1.5): this runs in the STATE layer,
+    // which has no handle on the Server, and threading one in reaches far
+    // wider than the queue is worth. But abandoning a half-written frame is not
+    // an option either — the peer would read the remaining bytes as the next
+    // frame's header and desync its whole control stream.
+    //
+    // So finish it, with a tight budget. The frame is 42 bytes and the socket
+    // just accepted part of it, so the peer is draining and the remainder lands
+    // almost immediately; the budget only bounds the pathological case.
+    const deadline = std.time.milliTimestamp() + PARTIAL_FRAME_COMPLETION_MS;
+    while (written < buf.len) {
+        const left = deadline - std.time.milliTimestamp();
+        if (left <= 0) {
+            core.logging.warn("ses", "pane_exited notify left a partial frame; old mux ctl stream is desynced", .{});
+            return;
+        }
+        var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+        const ok = posix.poll(&pfd, @intCast(@min(left, 25))) catch |err| {
+            core.logging.logError("ses", "pane_exited notify poll failed completing partial frame", err);
+            return;
+        };
+        if (ok == 0 or (pfd[0].revents & posix.POLL.OUT) == 0) continue;
+        written += posix.write(fd, buf[written..]) catch |err| {
+            core.logging.logError("ses", "pane_exited notify write failed completing partial frame", err);
+            return;
+        };
     }
 }
 
@@ -121,13 +154,7 @@ fn prunePaneFromDetachedSnapshot(
     }
 
     if (found_idx) |idx| {
-        var uuids = std.ArrayList([32]u8).fromOwnedSlice(detached.pane_uuids);
-        _ = uuids.orderedRemove(idx);
-        detached.pane_uuids = uuids.toOwnedSlice(detached.allocator) catch |err| {
-            core.logging.logError("ses", "failed to shrink detached pane UUID list after pruning", err);
-            detached.pane_uuids = uuids.items;
-            return;
-        };
+        detached.pane_uuids = snapshot_mod.removeUuidFromOwnedSlice(detached.allocator, detached.pane_uuids, idx);
     }
 
     snapshot_mod.removePaneFromSessionSnapshot(allocator, &detached.session_snapshot, pane_uuid);
@@ -259,14 +286,41 @@ pub fn attachPane(self: anytype, uuid: [32]u8, client_id: usize) !*store_mod.Pan
     return pane;
 }
 
+/// Backoff schedule for failed pod VT reconnects, in milliseconds. Each
+/// `connectPodVt` attempt BLOCKS the event loop (connect + ack read), so an
+/// unreachable-but-alive pod retried on every 1s tick froze the whole daemon
+/// once per second indefinitely. The first attempt is immediate; only repeated
+/// failures back off.
+const BACKLOG_REPLAY_BACKOFF_MS = [_]i64{ 0, 250, 1_000, 2_000, 5_000, 10_000, 30_000 };
+
+fn backlogReplayBackoffMs(attempts: u8) i64 {
+    const idx = @min(@as(usize, attempts), BACKLOG_REPLAY_BACKOFF_MS.len - 1);
+    return BACKLOG_REPLAY_BACKOFF_MS[idx];
+}
+
+/// How many pod VT dials one pass may perform.
+///
+/// Reattaching a session used to reconnect EVERY pane in a single pass, so all
+/// of their backlogs (up to REPLAY_TAIL_CAP each) landed in the client's one
+/// shared VT queue at once — the overflow that dropped the channel. Each dial
+/// also blocks the event loop, so an unbounded pass is an unbounded stall.
+/// Pacing a couple per pass spreads both costs; the caller runs passes at the
+/// 100ms tick, so a six-pane session is fully replayed in well under a second
+/// and the visible panes paint first.
+const BACKLOG_REPLAY_MAX_PER_PASS: usize = 2;
+
 pub fn processBacklogReplays(self: anytype) void {
     var stale_panes: std.ArrayList([32]u8) = .empty;
     defer stale_panes.deinit(self.allocator);
+
+    const now_ms = std.time.milliTimestamp();
+    var dialed: usize = 0;
 
     var iter = self.store.panes.iterator();
     while (iter.next()) |entry| {
         const pane = entry.value_ptr;
         if (!pane.needs_backlog_replay) continue;
+        if (now_ms < pane.backlog_replay_next_ms) continue;
 
         if (paneProcessDead(pane)) {
             ses.debugLog("processBacklogReplays: pruning dead pane uuid={s}", .{entry.key_ptr[0..8]});
@@ -292,13 +346,24 @@ pub fn processBacklogReplays(self: anytype) void {
             continue;
         }
 
+        if (dialed >= BACKLOG_REPLAY_MAX_PER_PASS) {
+            // Leave the flag (and the backoff) untouched: this is pacing, not
+            // a failure. The next pass picks the pane up ~100ms later.
+            continue;
+        }
+        dialed += 1;
+
         ses.debugLog("processBacklogReplays: uuid={s} pane_id={d}", .{
             entry.key_ptr[0..8],
             pane.pane_id,
         });
         if (self.connectPodVt(entry.key_ptr.*, pane.pod_socket_path, pane.pane_id)) {
             pane.needs_backlog_replay = false;
+            pane.backlog_replay_attempts = 0;
+            pane.backlog_replay_next_ms = 0;
         } else {
+            pane.backlog_replay_attempts +|= 1;
+            pane.backlog_replay_next_ms = now_ms + backlogReplayBackoffMs(pane.backlog_replay_attempts);
             if (paneProcessDead(pane)) {
                 ses.debugLog("processBacklogReplays: connect failed for dead pane uuid={s}", .{entry.key_ptr[0..8]});
                 stale_panes.append(self.allocator, entry.key_ptr.*) catch |err| {
@@ -309,7 +374,11 @@ pub fn processBacklogReplays(self: anytype) void {
 
             // Keep the flag set so periodic retries can reconnect once the pod
             // VT endpoint is ready.
-            ses.debugLog("processBacklogReplays: deferred retry uuid={s}", .{entry.key_ptr[0..8]});
+            ses.debugLog("processBacklogReplays: deferred retry uuid={s} attempt={d} next_in={d}ms", .{
+                entry.key_ptr[0..8],
+                pane.backlog_replay_attempts,
+                backlogReplayBackoffMs(pane.backlog_replay_attempts),
+            });
         }
     }
 
@@ -392,6 +461,15 @@ pub fn killPane(self: anytype, uuid: [32]u8) !void {
     } else {
         ses.debugLog("killPane: {s} pod_vt_fd=null, removing pane_id from routing", .{hex_uuid[0..8]});
         _ = self.store.pane_id_to_pod_vt.remove(pane.value.pane_id);
+        // pane_id_to_uuid must go on BOTH branches. Detach nulls pod_vt_fd, so
+        // every pane killed while detached (killDetachedSession,
+        // cleanupExpiredDetachedSessions, cleanupDetachedSessions,
+        // cleanupOrphanedPanes on a sticky pane) left a stale
+        // pane_id -> dead uuid entry behind. Those entries never expire, and
+        // every stale hit pushes findMuxVtForPane / muxVtFdOwnsPane onto their
+        // full-pane-table scan fallback — on the per-frame output hot path,
+        // twice per input frame.
+        _ = self.store.pane_id_to_uuid.remove(pane.value.pane_id);
     }
 
     // Never signal a pid that is no longer our pod: after pid reuse it may

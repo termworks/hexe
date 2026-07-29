@@ -40,7 +40,7 @@ def spawn():
     os.close(sl); procs.append(p); return p, m
 
 def dpids():
-    return subprocess.run(["pgrep", "-f", "ses daemon --instance " + INST], capture_output=True, text=True).stdout.split()
+    return subprocess.run(["pgrep", "-f", "--", "ses daemon --instance " + INST], capture_output=True, text=True).stdout.split()
 
 def drain(m, t):
     d = time.time() + t

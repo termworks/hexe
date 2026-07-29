@@ -991,8 +991,8 @@ test "TxLog: findIncompleteTransactions detects incomplete detach" {
         .payload = "",
     });
 
-    var incomplete = try txlog.findIncompleteTransactions(entries.items);
-    defer incomplete.deinit(page_alloc); // Use page_alloc since that's what findIncompleteTransactions uses
+    var incomplete = try txlog.findIncompleteTransactions(page_alloc, entries.items);
+    defer incomplete.deinit(page_alloc);
 
     try testing.expectEqual(@as(usize, 1), incomplete.items.len);
     try testing.expectEqualSlices(u8, &session_id_2, &incomplete.items[0]);
@@ -1012,7 +1012,7 @@ test "TxLog: findIncompleteOperations preserves reattach type" {
         .payload = "",
     });
 
-    var incomplete = try txlog.findIncompleteOperations(entries.items);
+    var incomplete = try txlog.findIncompleteOperations(page_alloc, entries.items);
     defer incomplete.deinit(page_alloc);
 
     try testing.expectEqual(@as(usize, 1), incomplete.items.len);
@@ -3189,6 +3189,82 @@ test "store.allocPaneId: increments, skips 0, wraps to 1" {
     try testing.expectEqual(std.math.maxInt(u16), store.allocPaneId());
     try testing.expectEqual(@as(u16, 1), store.next_pane_id);
     try testing.expectEqual(@as(u16, 1), store.allocPaneId());
+}
+
+test "store.allocPaneId: after wrapping, never aliases a live pane" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    // A live pane holding id 1. Before this fix the counter handed 1 straight
+    // back after wrapping, and connectPodVt then overwrote this pane's routes.
+    const live_uuid = [_]u8{'L'} ** 32;
+    try store.panes.put(live_uuid, .{
+        .uuid = live_uuid,
+        .pod_pid = 0,
+        .pod_socket_path = try store.allocator.dupe(u8, "/tmp/hexe-alloc-test"),
+        .child_pid = 0,
+        .state = .orphaned,
+        .pane_id = 1,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = null,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = store.allocator,
+    });
+
+    // Force the wrap.
+    store.next_pane_id = std.math.maxInt(u16);
+    try testing.expectEqual(std.math.maxInt(u16), store.allocPaneId());
+    try testing.expect(store.pane_ids_wrapped);
+
+    // 1 is taken, so the next id must skip past it.
+    const next = store.allocPaneId();
+    try testing.expect(next != 1);
+    try testing.expectEqual(@as(u16, 2), next);
+}
+
+test "findByNameOrPrefix: an ambiguous NAME resolves to nothing, not an arbitrary session" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    // Duplicate names are deliberately tolerated (cleanup keeps both, and
+    // persist.load can create a pair). Returning the first hashmap-order match
+    // meant `hexe kill-session dup` destroyed an arbitrary one of them.
+    const id_a = [_]u8{'a'} ** 16;
+    const id_b = [_]u8{'b'} ** 16;
+    try store.detached_sessions.put(id_a, .{
+        .session_id = id_a,
+        .session_snapshot = try state.SessionSnapshot.initMinimal(store.allocator, [_]u8{'1'} ** 32, "dup"),
+        .pane_uuids = try store.allocator.alloc([32]u8, 0),
+        .detached_at = 0,
+        .allocator = store.allocator,
+    });
+    try store.detached_sessions.put(id_b, .{
+        .session_id = id_b,
+        .session_snapshot = try state.SessionSnapshot.initMinimal(store.allocator, [_]u8{'2'} ** 32, "dup"),
+        .pane_uuids = try store.allocator.alloc([32]u8, 0),
+        .detached_at = 0,
+        .allocator = store.allocator,
+    });
+
+    const detached_sessions = @import("detached_sessions.zig");
+    try testing.expect(detached_sessions.findByNameOrPrefix(store, "dup") == null);
+
+    // A unique name still resolves.
+    const id_c = [_]u8{'c'} ** 16;
+    try store.detached_sessions.put(id_c, .{
+        .session_id = id_c,
+        .session_snapshot = try state.SessionSnapshot.initMinimal(store.allocator, [_]u8{'3'} ** 32, "solo"),
+        .pane_uuids = try store.allocator.alloc([32]u8, 0),
+        .detached_at = 0,
+        .allocator = store.allocator,
+    });
+    const found = detached_sessions.findByNameOrPrefix(store, "solo") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(u8, &id_c, &found);
 }
 
 test "store closed-fd log: two-generation shield ages an fd out after two rotations" {

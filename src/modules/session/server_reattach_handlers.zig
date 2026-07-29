@@ -9,17 +9,6 @@ const ses = @import("main.zig");
 const server = @import("server.zig");
 const Server = server.Server;
 
-/// Total budget for writing a reattach response, however many panes it carries.
-const REATTACH_RESPONSE_WRITE_MS: i64 = 3_000;
-
-/// Milliseconds left until `deadline`, never negative (0 makes the next write
-/// fail fast with Timeout rather than blocking).
-fn remainingBudget(deadline: i64) i32 {
-    const left = deadline - std.time.milliTimestamp();
-    if (left <= 0) return 0;
-    return @intCast(@min(left, @as(i64, std.math.maxInt(i32))));
-}
-
 /// Force-detach with full server-side fd bookkeeping. The state layer's
 /// forceDetachAttachedSession closes the owner's fds (noted), but only the
 /// server knows about watchers, binary_ctl_fds, pending pops and the per-fd
@@ -39,12 +28,13 @@ fn forceDetachWithPurge(self: *Server, session_id: [16]u8) bool {
 }
 
 pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.Detach)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "detach: payload too small for Detach header");
         return;
     }
-    const det = wire.readStructTimeout(wire.Detach, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const det = self.readPayloadStruct(wire.Detach) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "detach request read failed", err);
         self.sendBinaryError(fd, "detach: read failed");
@@ -52,7 +42,7 @@ pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
     };
     const extra_len = payload_len - @sizeOf(wire.Detach);
     if (extra_len > 0) {
-        self.skipBinaryPayload(fd, extra_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "detach: legacy state payload is no longer accepted");
         return;
     }
@@ -81,6 +71,17 @@ pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
     };
     // Lock will be released after detach completes
 
+    // Capture the client's mux fds before detachSession removes the record.
+    // detachSession does not close them (unlike every sibling removal path), so
+    // the teardown below has to — but only after the ack goes out, since the
+    // CTL fd is the connection this request arrived on.
+    var detached_ctl_fd: ?posix.fd_t = null;
+    var detached_vt_fd: ?posix.fd_t = null;
+    if (self.ses_state.getClient(client_id)) |client| {
+        detached_ctl_fd = client.mux_ctl_fd;
+        detached_vt_fd = client.mux_vt_fd;
+    }
+
     if (self.ses_state.detachSession(client_id, session_id, session_name)) {
         self.ses_state.markDirty();
         // The detach ack promises the session is recoverable: persist the
@@ -90,6 +91,9 @@ pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
         // Release lock after successful detach
         self.ses_state.releaseSessionLock(session_id);
         self.replyOrClose(fd, .session_detached, &.{});
+        // Ack is out and the frontend exits after a successful detach
+        // (performDetach -> requestExplicitDetachStop), so close our side.
+        self.closeDetachedMuxFds(detached_ctl_fd, detached_vt_fd);
     } else {
         // Release lock on failure too
         self.ses_state.releaseSessionLock(session_id);
@@ -99,22 +103,22 @@ pub fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
 
 pub fn handleBinaryReattach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.Reattach)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "invalid_payload");
         return;
     }
-    const ra = wire.readStructTimeout(wire.Reattach, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const ra = self.readPayloadStruct(wire.Reattach) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "reattach request read failed", err);
         self.sendBinaryError(fd, "reattach: read failed");
         return;
     };
     if (ra.id_len > buf.len or ra.id_len == 0) {
-        self.skipBinaryPayload(fd, ra.id_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "invalid_id");
         return;
     }
-    wire.readExactTimeout(fd, buf[0..ra.id_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    self.readPayloadInto(buf[0..ra.id_len]) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "reattach id read failed", err);
         self.sendBinaryError(fd, "reattach: id read failed");
@@ -393,41 +397,25 @@ pub fn completeReattach(self: *Server, fd: posix.fd_t, session_id: [16]u8, clien
     const uuid_data_len = reattach_result.pane_uuids.len * 32;
     const total_payload = @sizeOf(wire.SessionReattached) + session_json.len + uuid_data_len;
 
-    var ctrl_hdr: wire.ControlHeader = .{
-        .msg_type = @intFromEnum(wire.MsgType.session_reattached),
-        .request_id = self.responseRequestIdForFd(fd),
-        .payload_len = @intCast(total_payload),
-    };
     ses.debugLog("completeReattach: writing response payload={d}", .{total_payload});
 
-    // ONE deadline for the whole response, not one per write. These were plain
-    // writeAll (the 10s wire default) across 3 + pane_count calls, so a frontend
-    // that stopped reading mid-reattach — a suspended terminal, a slow ssh pipe —
-    // froze the daemon, and every other session with it, for 10s x (3 + panes):
-    // minutes with a fat session. Sharing a deadline keeps the total bounded no
-    // matter how many panes the session has.
-    const deadline = std.time.milliTimestamp() + REATTACH_RESPONSE_WRITE_MS;
-    wire.writeAllTimeout(fd, std.mem.asBytes(&ctrl_hdr), remainingBudget(deadline)) catch |err| {
-        core.logging.logError("ses", "reattach response header write failed", err);
+    // The reattach response is the biggest thing SES ever sends, and it used to
+    // go out as 3 + pane_count separate bounded writes. A frontend that stopped
+    // reading mid-reattach — a suspended terminal, a slow ssh pipe — froze the
+    // daemon, and every other session with it, for the budget times the number
+    // of writes: minutes with a fat session. It now goes through the outbound
+    // queue as ONE frame: whatever the socket takes is written inline and the
+    // rest drains on the tick, so a wedged frontend costs no stall at all.
+    // The uuids are a contiguous [32]u8 array, so they append as one slice.
+    if (!self.sendCtlFrame(
+        fd,
+        .session_reattached,
+        std.mem.asBytes(&resp),
+        &.{ session_json, std.mem.sliceAsBytes(reattach_result.pane_uuids) },
+        "reattach response",
+    )) {
         self.ses_state.releaseSessionLock(session_id);
         return;
-    };
-    wire.writeAllTimeout(fd, std.mem.asBytes(&resp), remainingBudget(deadline)) catch |err| {
-        core.logging.logError("ses", "reattach response body header write failed", err);
-        self.ses_state.releaseSessionLock(session_id);
-        return;
-    };
-    wire.writeAllTimeout(fd, session_json, remainingBudget(deadline)) catch |err| {
-        core.logging.logError("ses", "reattach response session json write failed", err);
-        self.ses_state.releaseSessionLock(session_id);
-        return;
-    };
-    for (reattach_result.pane_uuids) |uuid| {
-        wire.writeAllTimeout(fd, &uuid, remainingBudget(deadline)) catch |err| {
-            core.logging.logError("ses", "reattach response pane uuid write failed", err);
-            self.ses_state.releaseSessionLock(session_id);
-            return;
-        };
     }
     ses.debugLog("completeReattach: response sent", .{});
 }
@@ -435,12 +423,13 @@ pub fn completeReattach(self: *Server, fd: posix.fd_t, session_id: [16]u8, clien
 /// Returns false: the connection is consumed by the disconnect, so the
 /// watcher must stop polling it.
 pub fn handleBinaryDisconnect(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) bool {
+    _ = buf;
     if (payload_len < @sizeOf(wire.Disconnect)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "disconnect: payload too small");
         return true;
     }
-    const dc = wire.readStructTimeout(wire.Disconnect, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const dc = self.readPayloadStruct(wire.Disconnect) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "disconnect request read failed", err);
         return false;

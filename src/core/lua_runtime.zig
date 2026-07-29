@@ -16,6 +16,7 @@ const hexe_record_stop = api_bridge.hexe_record_stop;
 const hexe_record_toggle = api_bridge.hexe_record_toggle;
 const hexe_record_status = api_bridge.hexe_record_status;
 const hexe_api_exec = @import("lua_api_exec.zig").hexe_api_exec;
+const trust = @import("trust.zig");
 const CALLBACK_TABLE_KEY = "__hexe_cb_table";
 
 fn hexe_autocmd_on(L: ?*LuaState) callconv(.c) c_int {
@@ -315,12 +316,20 @@ pub const LuaRuntime = struct {
         try api_bridge.storeConfigBuilder(lua, builder);
 
         // Create runtime instance
-        const runtime = Self{
+        var runtime = Self{
             .lua = lua,
             .allocator = allocator,
             .unsafe_mode = unsafe,
             .config_builder = builder,
         };
+
+        // Safe mode withheld io/os/package but still bound `hexe.exec`, which
+        // shells out via `/bin/sh -c` — so an explicit HEXE_UNRESTRICTED_CONFIG
+        // opt-out did not actually remove command execution. Revoking here
+        // closes that, and reuses the exact path the untrusted-project-file
+        // sandbox takes. Done AFTER injectHexeModule so the bootstrap chunk's
+        // `hexe.exec` binding assertion still validates the wiring.
+        if (!unsafe) runtime.revokeUnsafeCapabilities();
 
         return runtime;
     }
@@ -339,6 +348,102 @@ pub const LuaRuntime = struct {
     /// Get the config builder for API functions to use
     pub fn getBuilder(self: *Self) ?*ConfigBuilder {
         return self.config_builder;
+    }
+
+    /// Revoke filesystem/process/shell capabilities from this runtime.
+    ///
+    /// The trust ledger only ever gated the DECLARATIVE `on_start`/`on_stop`
+    /// strings — but loading a project `.hexe.lua` *executes* it, with `io`,
+    /// `os` and `package` open by default and `hexe.exec` bound. So
+    /// `os.execute("...")` at file scope ran before the ledger was consulted at
+    /// all, and `hexe layout list` executed the cwd's `.hexe.lua` with no
+    /// prompt whatsoever. Revoking first is what makes the ledger meaningful.
+    ///
+    /// Idempotent, and safe to call after `init`: the bootstrap chunk that
+    /// asserts `hexe.exec` is bound has already run by then.
+    pub fn revokeUnsafeCapabilities(self: *Self) void {
+        self.lua.loadString(REVOKE_UNSAFE_CAPABILITIES_LUA) catch |err| {
+            log.warn("failed to compile capability revocation chunk: {}", .{err});
+            return;
+        };
+        self.lua.protectedCall(.{ .args = 0, .results = 0 }) catch |err| {
+            log.warn("failed to revoke unsafe Lua capabilities: {}", .{err});
+            self.lua.pop(1);
+            return;
+        };
+        // Swap the real `require` (which can load arbitrary modules when the
+        // runtime was unsafe) for the safe-mode one that only resolves "hexe".
+        setupSafeRequire(self.lua) catch |err| {
+            log.warn("failed to install safe require: {}", .{err});
+        };
+        self.unsafe_mode = false;
+    }
+
+    /// Load a project-local (untrusted-by-default) Lua file.
+    ///
+    /// Trusted via `hexe allow` -> loaded with full capabilities, exactly as
+    /// before. Otherwise the runtime is sandboxed first, so the file can still
+    /// declare layouts/floats/keybinds but cannot touch the filesystem or spawn
+    /// a shell while doing so.
+    ///
+    /// One-way: a runtime is never re-armed afterwards, so ordering (user's own
+    /// config first, project file second) is load-bearing — which is what every
+    /// call site already does.
+    /// Maximum project config size we will read into memory to hash + execute.
+    const MAX_PROJECT_CONFIG_BYTES: usize = 8 * 1024 * 1024;
+
+    pub fn loadProjectConfig(self: *Self, path: []const u8) !void {
+        // Read ONCE, then hash and execute those same bytes. Hashing via the
+        // path (trust.isTrusted) and separately letting Lua re-open it is a
+        // TOCTOU window: anyone able to write the working tree could present
+        // malicious content for execution and restore the blessed content
+        // before verification.
+        const bytes = std.fs.cwd().readFileAllocOptions(
+            self.allocator,
+            path,
+            MAX_PROJECT_CONFIG_BYTES,
+            null,
+            .of(u8),
+            0,
+        ) catch |err| switch (err) {
+            error.FileNotFound => return error.FileNotFound,
+            else => {
+                // Cannot read it => cannot vouch for it. Fall back to the
+                // sandboxed path-based load rather than granting capabilities.
+                self.revokeUnsafeCapabilities();
+                return self.loadConfig(path);
+            },
+        };
+        defer self.allocator.free(bytes);
+
+        if (!trust.bytesAreTrustedAt(self.allocator, path, bytes)) {
+            self.revokeUnsafeCapabilities();
+        }
+        return self.loadConfigBuffer(bytes, path);
+    }
+
+    /// Execute an already-read Lua chunk, reporting errors against `chunk_name`
+    /// so diagnostics still name the file.
+    fn loadConfigBuffer(self: *Self, bytes: [:0]const u8, chunk_name: []const u8) !void {
+        if (self.last_error) |err| {
+            self.allocator.free(err);
+            self.last_error = null;
+        }
+
+        const name_z = self.allocator.dupeZ(u8, chunk_name) catch return error.OutOfMemory;
+        defer self.allocator.free(name_z);
+
+        self.lua.loadBuffer(bytes, name_z, .binary_text) catch {
+            self.last_error = try self.allocator.dupe(u8, self.getErrorMessage());
+            return error.LuaError;
+        };
+
+        self.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+            self.last_error = try self.allocator.dupe(u8, self.getErrorMessage());
+            return error.LuaError;
+        };
+
+        try self.applyReturnedConfig();
     }
 
     /// Load a Lua config file and return the top-level table
@@ -914,6 +1019,24 @@ pub const LuaRuntime = struct {
 };
 
 // ===== Internal setup functions =====
+
+/// Lua source that revokes every capability able to reach the filesystem, the
+/// process environment, or a shell. Applied to the SHARED config runtime right
+/// before an untrusted project-local `.hexe.lua` is executed.
+///
+/// `os` keeps its pure clock/formatting helpers, which config legitimately
+/// uses; `os.execute`, `os.getenv`, `os.remove`, `os.rename` and `os.tmpname`
+/// go with the rest.
+/// `require` is NOT dropped here — `require('hexe')` is the documented way for
+/// a project file to reach the API, and safe-mode `require` (installed by
+/// `revokeUnsafeCapabilities`) already refuses everything else.
+const REVOKE_UNSAFE_CAPABILITIES_LUA =
+    "io = nil; package = nil; dofile = nil; loadfile = nil; " ++
+    "load = nil; loadstring = nil; debug = nil; " ++
+    "if type(os) == 'table' then " ++
+    "os = { time = os.time, date = os.date, clock = os.clock, difftime = os.difftime } " ++
+    "end; " ++
+    "if type(hexe) == 'table' then hexe.exec = nil end;";
 
 fn setupSafeRequire(lua: *Lua) !void {
     // In safe mode, only allow require("hexe")

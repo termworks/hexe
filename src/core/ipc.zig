@@ -106,12 +106,10 @@ pub const Server = struct {
 
     fn makeSocketParentPath(path: []const u8) !void {
         const dir = std.fs.path.dirname(path) orelse return;
-        if (std.fs.path.isAbsolute(dir)) {
-            var root = try std.fs.openDirAbsolute("/", .{});
-            defer root.close();
-            return root.makePath(dir[1..]);
-        }
-        return std.fs.cwd().makePath(dir);
+        // Same hazard as the log directory: with no XDG_RUNTIME_DIR the socket
+        // dir lands under world-writable /tmp, where anyone can pre-create or
+        // symlink it (PLAN.md A-6). Bind only into a directory we own.
+        return ensurePrivateDir(dir);
     }
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Server {
@@ -287,6 +285,20 @@ pub const Client = struct {
         }
 
         try setBlocking(fd);
+
+        // Verify the SERVER's uid, not just the client's (PLAN.md A-5).
+        // `verifyPeerUid` was called only on the accept side, so nothing
+        // checked who we had just connected TO. Combined with the `/tmp`
+        // fallback for the socket directory (A-6), another local user can bind
+        // `ses.sock` first; the real daemon then fails with AddressInUse and
+        // every frontend and CLI hands its session traffic — keystrokes
+        // included — to whoever got there first. Checking here closes that for
+        // every connect path at once, before a single handshake byte is sent.
+        if (!verifyPeerUid(fd)) {
+            log.warn("refusing to connect to {s}: socket is owned by another uid", .{path});
+            return error.PeerUidMismatch;
+        }
+
         return Client{ .fd = fd };
     }
 
@@ -503,13 +515,97 @@ const strings = @import("strings.zig");
 
 fn sanitizeInstanceName(out: []u8, raw: []const u8) []const u8 {
     // NOTE: Unix domain socket paths have tight limits; keep this short.
-    return strings.sanitize(out, raw, 24);
+    const sanitized = strings.sanitize(out, raw, 24);
+
+    // Reject names made only of dots (PLAN.md A-11). `strings.sanitize` maps
+    // `/` to `_`, so a separator cannot get through — but it deliberately keeps
+    // `.`, which leaves `HEXE_INSTANCE=..` free to place this instance's
+    // sockets, state and logs one directory ABOVE the namespace they are
+    // supposed to be confined to (and `.` to collide with the un-namespaced
+    // default). Returning empty makes every caller fall back to the plain
+    // non-instance path, which is the same thing an unset variable does.
+    for (sanitized) |ch| {
+        if (ch != '.') return sanitized;
+    }
+    return sanitized[0..0];
+}
+
+test "sanitizeInstanceName rejects dot-only names but keeps dots elsewhere" {
+    var buf: [32]u8 = undefined;
+
+    // Traversal / collision attempts collapse to empty (= no instance).
+    try testing.expectEqual(@as(usize, 0), sanitizeInstanceName(buf[0..], ".").len);
+    try testing.expectEqual(@as(usize, 0), sanitizeInstanceName(buf[0..], "..").len);
+    try testing.expectEqual(@as(usize, 0), sanitizeInstanceName(buf[0..], "....").len);
+
+    // A dot is still legal inside an otherwise ordinary name.
+    try testing.expectEqualStrings("my.instance", sanitizeInstanceName(buf[0..], "my.instance"));
+    try testing.expectEqualStrings("smk123", sanitizeInstanceName(buf[0..], "smk123"));
+
+    // Separators were already neutralised; confirm that still holds.
+    try testing.expectEqualStrings("_.._etc", sanitizeInstanceName(buf[0..], "/../etc"));
 }
 
 /// Get the socket directory path
+/// Per-user runtime directory to use when `XDG_RUNTIME_DIR` is unset.
+///
+/// Prefers `/run/user/<uid>` — the same directory the variable normally points
+/// at, created 0700 and owned by us on any logind system — before falling back
+/// to world-writable `/tmp` (PLAN.md A-6). Writing `buf`, returning a slice of
+/// it or a static string.
+///
+/// Note this narrows exposure rather than being the whole defence: sockets are
+/// bound through `makeSocketParentPath`, which runs `ensurePrivateDir` and
+/// refuses any directory we do not own. `/tmp` pre-created or symlinked by
+/// another user therefore fails closed already; this just stops us reaching for
+/// `/tmp` at all when a private runtime dir is right there.
+fn fallbackRuntimeDir(buf: []u8) []const u8 {
+    const candidate = std.fmt.bufPrint(buf, "/run/user/{d}", .{linux.getuid()}) catch return "/tmp";
+    var dir = std.fs.cwd().openDir(candidate, .{}) catch return "/tmp";
+    defer dir.close();
+    const st = std.posix.fstat(dir.fd) catch return "/tmp";
+    if (!std.posix.S.ISDIR(st.mode)) return "/tmp";
+    if (st.uid != linux.getuid()) return "/tmp";
+    return candidate;
+}
+
+test "fallbackRuntimeDir prefers a private /run/user over world-writable /tmp" {
+    var buf: [64]u8 = undefined;
+    const got = fallbackRuntimeDir(&buf);
+
+    var probe: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&probe, "/run/user/{d}", .{linux.getuid()});
+    const have_private_runtime = blk: {
+        var d = std.fs.cwd().openDir(expected, .{}) catch break :blk false;
+        d.close();
+        break :blk true;
+    };
+
+    if (have_private_runtime) {
+        try std.testing.expectEqualStrings(expected, got);
+    } else {
+        // No private runtime dir on this host: /tmp is the only option left,
+        // and ensurePrivateDir still refuses one we do not own.
+        try std.testing.expectEqualStrings("/tmp", got);
+    }
+}
+
+test "pod socket paths stay inside the sockaddr_un limit" {
+    // The reason relocating the socket directory is risky at all: AF_UNIX paths
+    // are capped at 108 bytes and Server.init rejects anything longer, so a
+    // deeper base directory can break pane creation rather than merely move it.
+    var buf: [64]u8 = undefined;
+    const base = fallbackRuntimeDir(&buf);
+
+    // Worst case the sanitiser permits: a 24-char instance name, plus the
+    // longest thing we ever put in that directory (a 32-hex pod socket).
+    const longest = base.len + "/hexe/".len + 24 + "/pod-".len + 32 + ".sock".len;
+    try std.testing.expect(longest < 108);
+}
+
 pub fn getSocketDir(allocator: std.mem.Allocator) ![]const u8 {
-    // Use XDG_RUNTIME_DIR if available, otherwise /tmp
-    const runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse "/tmp";
+    var fallback_buf: [64]u8 = undefined;
+    const runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse fallbackRuntimeDir(&fallback_buf);
 
     const instance_raw = std.posix.getenv("HEXE_INSTANCE");
     if (instance_raw) |inst| {
@@ -605,8 +701,84 @@ pub fn getSesStatePath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/hexe/ses_state.json", .{state_home});
 }
 
+/// Create `path` if needed and refuse to use it unless WE own it (PLAN.md A-6).
+///
+/// hexe's runtime and log directories used to be created with a bare
+/// `makePath` under world-writable `/tmp`, with no ownership or type check. A
+/// local attacker who pre-creates `/tmp/hexe/<instance>` — or symlinks it at
+/// one of the victim's files — gets hexe to write there, and the debug log
+/// carries cwds, command lines and pane metadata.
+///
+/// The check is deliberately asymmetric: a directory we do not own is an
+/// attack and hard-fails, while merely loose permissions on a directory we DO
+/// own are tightened where possible and warned about otherwise. That avoids
+/// bricking a daemon over a umask quirk while still refusing the real hazard.
+pub fn ensurePrivateDir(path: []const u8) !void {
+    std.fs.cwd().makePath(path) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    // Open the directory and verify the fd, rather than stat-ing the name:
+    // checking the path and then using it is a TOCTOU window.
+    var dir = std.fs.cwd().openDir(path, .{}) catch |err| {
+        log.warn("refusing to use {s}: cannot open it ({s})", .{ path, @errorName(err) });
+        return error.PrivateDirUnusable;
+    };
+    defer dir.close();
+
+    const st = std.posix.fstat(dir.fd) catch |err| {
+        log.warn("refusing to use {s}: cannot stat it ({s})", .{ path, @errorName(err) });
+        return error.PrivateDirUnusable;
+    };
+
+    if (!std.posix.S.ISDIR(st.mode)) {
+        log.warn("refusing to use {s}: not a directory", .{path});
+        return error.PrivateDirUnusable;
+    }
+    if (st.uid != linux.getuid()) {
+        log.warn("refusing to use {s}: owned by uid {d}, not {d}", .{ path, st.uid, linux.getuid() });
+        return error.PrivateDirUnusable;
+    }
+    if (st.mode & 0o022 != 0) {
+        // Ours, but group/world writable. Tighten it; warn if we cannot.
+        std.posix.fchmod(dir.fd, 0o700) catch {
+            log.warn("{s} is group/world writable and could not be tightened", .{path});
+        };
+    }
+}
+
+test "ensurePrivateDir accepts a directory we own and rejects a non-directory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+
+    // Fresh path: created and accepted.
+    const good = try std.fmt.allocPrint(std.testing.allocator, "{s}/nested/dir", .{base});
+    defer std.testing.allocator.free(good);
+    try ensurePrivateDir(good);
+    // Idempotent: an existing directory we own stays acceptable.
+    try ensurePrivateDir(good);
+
+    // A regular file where a directory is expected must be REFUSED, not used.
+    // The contract is "fails", not a specific error: `makePath` rejects this
+    // with NotDir before the ownership check is even reached, and pinning the
+    // exact error would make the test brittle against that ordering.
+    const file_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/afile", .{base});
+    defer std.testing.allocator.free(file_path);
+    (try std.fs.createFileAbsolute(file_path, .{})).close();
+    try std.testing.expect(if (ensurePrivateDir(file_path)) |_| false else |_| true);
+}
+
 /// Get the debug log file path.
-/// Returns /tmp/hexe/<instance>/log where instance defaults to "default".
+///
+/// Follows XDG_STATE_HOME (then `~/.local/state`), NOT a hardcoded `/tmp`
+/// (PLAN.md A-6): this file records cwds, command lines and pane metadata, so
+/// it belongs in the user's private state directory, not a world-writable one.
+/// `/tmp` remains only as a last resort when there is no HOME at all, and even
+/// then the directory must pass `ensurePrivateDir`.
 pub fn getLogPath(allocator: std.mem.Allocator) ![]const u8 {
     const instance_raw = posix.getenv("HEXE_INSTANCE");
     const instance = if (instance_raw) |inst| (if (inst.len > 0) inst else "default") else "default";
@@ -615,11 +787,19 @@ pub fn getLogPath(allocator: std.mem.Allocator) ![]const u8 {
     const sanitized = sanitizeInstanceName(sanitized_buf[0..], instance);
     const final_instance = if (sanitized.len > 0) sanitized else "default";
 
-    const dir = try std.fmt.allocPrint(allocator, "/tmp/hexe/{s}", .{final_instance});
-    defer allocator.free(dir);
-    try std.fs.cwd().makePath(dir);
+    const state_home_env = posix.getenv("XDG_STATE_HOME");
+    const state_home: []const u8 = state_home_env orelse blk: {
+        const home = posix.getenv("HOME") orelse break :blk "/tmp";
+        break :blk try std.fmt.allocPrint(allocator, "{s}/.local/state", .{home});
+    };
+    const owned_state_home = state_home_env == null and !std.mem.eql(u8, state_home, "/tmp");
+    defer if (owned_state_home) allocator.free(state_home);
 
-    return std.fmt.allocPrint(allocator, "/tmp/hexe/{s}/log", .{final_instance});
+    const dir = try std.fmt.allocPrint(allocator, "{s}/hexe/{s}", .{ state_home, final_instance });
+    defer allocator.free(dir);
+    try ensurePrivateDir(dir);
+
+    return std.fmt.allocPrint(allocator, "{s}/hexe/{s}/log", .{ state_home, final_instance });
 }
 
 /// Get the layout storage directory path (~/.config/hexe/layouts/).

@@ -11,11 +11,11 @@ const Server = server.Server;
 
 pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.CreatePane)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "create_pane: payload too small for CreatePane struct");
         return;
     }
-    const cp = wire.readStructTimeout(wire.CreatePane, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const cp = self.readPayloadStruct(wire.CreatePane) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "create_pane request read failed", err);
         self.sendBinaryError(fd, "create_pane: read failed");
@@ -25,12 +25,12 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
 
     // Read trailing: shell + cwd + sticky_pwd.
     if (trail_len > buf.len) {
-        self.skipBinaryPayload(fd, trail_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "payload_too_large");
         return;
     }
     if (trail_len > 0) {
-        wire.readExactTimeout(fd, buf[0..trail_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..trail_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "create_pane trail read failed", err);
             self.sendBinaryError(fd, "create_pane: trail read failed");
@@ -77,6 +77,17 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
         }
         const p = buf[offset .. offset + cp.isolation_profile_len];
         offset += cp.isolation_profile_len;
+        // Reject unknown profiles HERE, at the trust boundary (PLAN.md A-10).
+        // SES forwarded these as raw trail bytes, and the consumer matched
+        // names with std.mem.eql and fell through to a middle-strength default
+        // for anything unrecognised — so "Sandbox" or "none " silently got
+        // different isolation than the caller asked for. A security control
+        // that quietly downgrades is worse than one that errors.
+        if (core.isolation_voidbox.parseProfile(p) == null) {
+            core.logging.warn("ses", "create_pane refused: unknown isolation profile '{s}'", .{p});
+            self.sendBinaryError(fd, "unknown_isolation_profile");
+            return;
+        }
         break :blk p;
     } else null;
     const inherit_env_parent_uuid: ?[32]u8 = if (cp.inherit_env_parent_uuid_len > 0) blk: {
@@ -188,7 +199,7 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
 
                 // Force backlog replay for fresh renderer state in the new mux.
                 if (self.ses_state.getPane(existing.uuid)) |p| {
-                    p.needs_backlog_replay = true;
+                    p.requestBacklogReplay();
                 }
                 replayPaneBacklogNow(self, existing.uuid);
 
@@ -205,36 +216,53 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
         }
     }
 
-    const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, spawn_env, isolation_profile) catch |err| {
+    // Enforce the per-session pane cap. `allowNewPane` existed with no call
+    // site at all, so `max_panes_per_session` (and HEXE_MAX_PANES_PER_SESSION)
+    // did nothing: any same-uid peer could drive pane creation until the
+    // machine ran out of pids or fds. Every create_pane arrives on one
+    // already-established connection, so the connection rate limiter never
+    // applied here either.
+    const session_pane_count = if (self.ses_state.getClient(client_id)) |client|
+        client.pane_uuids.items.len
+    else
+        0;
+    if (!self.resource_monitor.allowNewPane(session_pane_count)) {
+        core.logging.warn("ses", "create_pane refused: session already has {d} panes (cap reached)", .{session_pane_count});
+        self.sendBinaryError(fd, "pane_limit_reached: session pane cap exceeded");
+        return;
+    }
+
+    // Fork the pod, but do NOT wait for its handshake here: that wait was a
+    // blocking read on the single-threaded loop, so one slow pod stalled every
+    // other session (PLAN.md 1.1). The reply is deferred to the tick that sees
+    // the handshake land, which keeps spawn-FAILURE reporting intact — the
+    // client still learns the outcome on this request, just a tick later.
+    const flight = self.ses_state.beginCreatePane(client_id, shell, cwd, sticky_pwd, sticky_key, spawn_env, isolation_profile) catch |err| {
         core.logging.logError("ses", "create_pane failed to spawn pane", err);
         self.sendBinaryError(fd, "create_failed");
         return;
     };
-    self.ses_state.markDirty();
-    ses.debugLog("binary: pane created {s} (pid={d}, pane_id={d})", .{ pane.uuid[0..8], pane.child_pid, pane.pane_id });
-
-    // Send PaneCreated response.
-    var resp = wire.PaneCreated{
-        .uuid = pane.uuid,
-        .pid = pane.child_pid,
-        .pane_id = pane.pane_id,
-        .socket_path_len = @intCast(pane.pod_socket_path.len),
+    self.trackPendingSpawn(flight, fd) catch |err| {
+        core.logging.logError("ses", "create_pane failed to track pending spawn", err);
+        var doomed = flight;
+        self.ses_state.abortCreatePane(&doomed);
+        self.sendBinaryError(fd, "create_failed");
+        return;
     };
-    self.replyOrCloseWithTrail(fd, .pane_created, std.mem.asBytes(&resp), pane.pod_socket_path);
 }
 
 pub fn replayPaneBacklogNow(self: *Server, uuid: [32]u8) void {
     const pane = self.ses_state.getPane(uuid) orelse return;
     const owner_id = pane.attached_to orelse {
-        pane.needs_backlog_replay = true;
+        pane.requestBacklogReplay();
         return;
     };
     const owner = self.ses_state.getClient(owner_id) orelse {
-        pane.needs_backlog_replay = true;
+        pane.requestBacklogReplay();
         return;
     };
     if (owner.mux_vt_fd == null) {
-        pane.needs_backlog_replay = true;
+        pane.requestBacklogReplay();
         return;
     }
 
@@ -245,29 +273,29 @@ pub fn replayPaneBacklogNow(self: *Server, uuid: [32]u8) void {
             updated.needs_backlog_replay = false;
         }
     } else if (self.ses_state.getPane(uuid)) |updated| {
-        updated.needs_backlog_replay = true;
+        updated.requestBacklogReplay();
     }
 }
 
 pub fn handleBinaryFindSticky(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.FindSticky)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "find_sticky: payload too small");
         return;
     }
-    const fs = wire.readStructTimeout(wire.FindSticky, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const fs = self.readPayloadStruct(wire.FindSticky) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "find_sticky request read failed", err);
         self.sendBinaryError(fd, "find_sticky: read failed");
         return;
     };
     if (fs.pwd_len > buf.len) {
-        self.skipBinaryPayload(fd, fs.pwd_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "find_sticky: pwd too large");
         return;
     }
     if (fs.pwd_len > 0) {
-        wire.readExactTimeout(fd, buf[0..fs.pwd_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..fs.pwd_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "find_sticky pwd read failed", err);
             self.sendBinaryError(fd, "find_sticky: pwd read failed");
@@ -336,7 +364,7 @@ pub fn handleBinaryFindSticky(self: *Server, fd: posix.fd_t, payload_len: u32, b
         // feels instant; keep needs_backlog_replay set if the mux VT/pod VT
         // endpoint is not ready yet so the periodic worker can retry.
         if (self.ses_state.getPane(pane.uuid)) |p| {
-            p.needs_backlog_replay = true;
+            p.requestBacklogReplay();
         }
         replayPaneBacklogNow(self, pane.uuid);
         ses.debugLog("find_sticky: requested immediate backlog replay for uuid={s}", .{pane.uuid[0..8]});
@@ -354,12 +382,13 @@ pub fn handleBinaryFindSticky(self: *Server, fd: posix.fd_t, payload_len: u32, b
 }
 
 pub fn handleBinaryOrphanPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.PaneUuid)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "orphan_pane: payload too small for PaneUuid");
         return;
     }
-    const pu = wire.readStructTimeout(wire.PaneUuid, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const pu = self.readPayloadStruct(wire.PaneUuid) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "orphan_pane request read failed", err);
         self.sendBinaryError(fd, "orphan_pane: read failed");
@@ -400,12 +429,13 @@ pub fn requesterMayReleasePane(self: *Server, uuid: [32]u8, requester: ?usize, c
 }
 
 pub fn handleBinaryAdoptPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.PaneUuid)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "adopt_pane: payload too small for PaneUuid");
         return;
     }
-    const pu = wire.readStructTimeout(wire.PaneUuid, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const pu = self.readPayloadStruct(wire.PaneUuid) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "adopt_pane request read failed", err);
         self.sendBinaryError(fd, "adopt_pane: read failed");
@@ -427,7 +457,7 @@ pub fn handleBinaryAdoptPane(self: *Server, fd: posix.fd_t, payload_len: u32, bu
     // run replay inline. Reconnecting POD VT sockets from the CTL handler
     // can stall attach/reattach; the periodic replay worker will pick this
     // up once the mux VT channel is ready.
-    pane.needs_backlog_replay = true;
+    pane.requestBacklogReplay();
     ses.debugLog("adopt_pane: queued deferred backlog replay for uuid={s}", .{pu.uuid[0..8]});
 
     self.ses_state.markDirty();
@@ -442,12 +472,13 @@ pub fn handleBinaryAdoptPane(self: *Server, fd: posix.fd_t, payload_len: u32, bu
 }
 
 pub fn handleBinaryKillPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.PaneUuid)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "kill_pane: payload too small for PaneUuid");
         return;
     }
-    const pu = wire.readStructTimeout(wire.PaneUuid, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const pu = self.readPayloadStruct(wire.PaneUuid) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "kill_pane request read failed", err);
         self.sendBinaryError(fd, "kill_pane: read failed");
@@ -476,23 +507,23 @@ pub fn handleBinaryKillPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf
 
 pub fn handleBinarySetSticky(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.SetSticky)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "set_sticky: payload too small");
         return;
     }
-    const ss = wire.readStructTimeout(wire.SetSticky, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const ss = self.readPayloadStruct(wire.SetSticky) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "set_sticky request read failed", err);
         self.sendBinaryError(fd, "set_sticky: read failed");
         return;
     };
     if (ss.pwd_len > buf.len) {
-        self.skipBinaryPayload(fd, ss.pwd_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "set_sticky: pwd too large");
         return;
     }
     if (ss.pwd_len > 0) {
-        wire.readExactTimeout(fd, buf[0..ss.pwd_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..ss.pwd_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "set_sticky pwd read failed", err);
             self.sendBinaryError(fd, "set_sticky: pwd read failed");
@@ -547,12 +578,13 @@ pub fn handleBinarySetSticky(self: *Server, fd: posix.fd_t, payload_len: u32, bu
 }
 
 pub fn handleBinaryGetPaneCwd(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.GetPaneCwd)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "get_pane_cwd: payload too small");
         return;
     }
-    const gpc = wire.readStructTimeout(wire.GetPaneCwd, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const gpc = self.readPayloadStruct(wire.GetPaneCwd) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "get_pane_cwd request read failed", err);
         self.sendBinaryError(fd, "get_pane_cwd: read failed");

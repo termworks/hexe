@@ -5,6 +5,7 @@ Reported bug: pasting into a float froze it — the pod's fixed 256K PTY input
 buffer silently dropped overflow bytes, tearing the bracketed-paste framing so
 the app stayed in paste mode swallowing all input. The buffer now grows.
 """
+import atexit
 import fcntl, os, pty, select, signal, struct, subprocess, sys, termios, time
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,7 +23,7 @@ PASTE_BYTES = 400_000
 SINK = os.path.join(SCRATCH, "paste-sink.bin")
 
 def pgrep(pat):
-    r = subprocess.run(["pgrep", "-f", pat], capture_output=True, text=True)
+    r = subprocess.run(["pgrep", "-f", "--", pat], capture_output=True, text=True)
     return [int(x) for x in r.stdout.split()] if r.returncode == 0 else []
 
 def cleanup():
@@ -34,6 +35,14 @@ def cleanup():
     for pid in pgrep(f"daemon --instance {INST}"):
         try: os.kill(pid, signal.SIGKILL)
         except ProcessLookupError: pass
+
+# Run teardown even when this script raises or is killed by a timeout.
+# Without this, cleanup() ran only on the success path and inside fail(),
+# so any unhandled exception left the daemon, its pods and their shells
+# alive. Hundreds of runs accumulate enough of them to slow the machine
+# down and make later smokes fail in ways that look like product bugs.
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
 def fail(msg):
     print(f"FAIL: {msg}"); cleanup(); sys.exit(1)

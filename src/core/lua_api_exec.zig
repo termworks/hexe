@@ -189,7 +189,17 @@ pub fn hexe_api_exec(L: ?*LuaState) callconv(.c) c_int {
     defer allocator.free(cache_key);
 
     ensureExecCacheTable(lua);
-    defer lua.pop(1); // cache table
+    // Remove the cache table BY INDEX, not with pop().
+    //
+    // Zig evaluates a `return` expression before running defers, so
+    // `defer lua.pop(1)` popped the result table that `pushExecResult` had just
+    // pushed and left the cache table on top. The function returns 1, so Lua
+    // received hexe's private exec cache instead of the result: every
+    // sync-path `hexe.exec()` saw `r.ok == nil` / `r.output == nil` and got a
+    // writable handle to internal state. Removing at the cache table's absolute
+    // index leaves the result on top however many values sit above it.
+    const cache_idx = lua.getTop();
+    defer lua.remove(cache_idx);
 
     // Lookup cache entry.
     _ = lua.pushString(cache_key);
@@ -299,6 +309,36 @@ fn callExecExpectError(lua: *Lua, cmd: []const u8, opt_key: []const u8, opt_valu
         return "";
     };
     return "";
+}
+
+test "hexe.exec returns the result table, not the internal cache table" {
+    // Zig runs defers AFTER evaluating the return expression, so
+    // `defer lua.pop(1)` on the exec cache table popped the RESULT that
+    // pushExecResult had just pushed and handed Lua the cache table instead:
+    // r.ok / r.output came back nil and user config got a writable reference to
+    // hexe's private cache.
+    //
+    // Deliberately runs a command that cannot succeed: pushExecResult builds
+    // the same shape whatever the exit status, so this asserts the shape only
+    // and stays deterministic without a stubbed shell.
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    _ = callExec(lua, "hexe-no-such-command-exists-9f3a", 500, 0);
+    try std.testing.expectEqual(zlua.LuaType.table, lua.typeOf(-1));
+
+    // The result table always carries these; the cache table carries neither.
+    _ = lua.getField(-1, "ok");
+    try std.testing.expectEqual(zlua.LuaType.boolean, lua.typeOf(-1));
+    lua.pop(1);
+
+    _ = lua.getField(-1, "code");
+    try std.testing.expectEqual(zlua.LuaType.number, lua.typeOf(-1));
+    lua.pop(1);
+
+    _ = lua.getField(-1, "stdout");
+    try std.testing.expectEqual(zlua.LuaType.string, lua.typeOf(-1));
+    lua.pop(2);
 }
 
 test "hexe.exec returns output and uses cache" {

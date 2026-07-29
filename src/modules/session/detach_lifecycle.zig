@@ -59,13 +59,7 @@ fn prunePaneFromDetachedSnapshot(
     }
 
     if (found_idx) |idx| {
-        var uuids = std.ArrayList([32]u8).fromOwnedSlice(detached.pane_uuids);
-        _ = uuids.orderedRemove(idx);
-        detached.pane_uuids = uuids.toOwnedSlice(detached.allocator) catch |err| {
-            core.logging.logError("ses", "failed to shrink detached pane UUID list after pruning", err);
-            detached.pane_uuids = uuids.items;
-            return;
-        };
+        detached.pane_uuids = snapshot_mod.removeUuidFromOwnedSlice(detached.allocator, detached.pane_uuids, idx);
     }
 
     snapshot_mod.removePaneFromSessionSnapshot(allocator, &detached.session_snapshot, pane_uuid);
@@ -315,6 +309,14 @@ pub fn detachSession(self: anytype, client_id: usize, session_id: [16]u8) bool {
         }
 
         var client = &self.store.clients.items[idx];
+        // Release every lock this client holds, not just the one the detach
+        // handler took for `session_id`. A client mid-attach on a DIFFERENT
+        // session leaves that lock orphaned otherwise, blocking every reattach
+        // of it until the expiry — the same failure `forceDetachAttachedSession`
+        // documents. The mux fds are closed by the caller (see
+        // `Server.closeDetachedMuxFds`): the CTL fd is the connection the detach
+        // request arrived on, so it must outlive the ack.
+        self.releaseClientLocks(client.id);
         client.deinit();
         _ = self.store.clients.orderedRemove(idx);
         self.store.dirty = true;

@@ -18,6 +18,10 @@ pub const PodUplink = struct {
     last_cwd: ?[]u8 = null,
     last_fg_process: ?[]u8 = null,
     last_fg_pid: ?i32 = null,
+    /// A cached value has changed but has not been successfully delivered yet.
+    /// Set when the cache is updated, cleared only after both uplink messages
+    /// are written, so a failed send is retried on the next tick.
+    send_pending: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, uuid: [32]u8) PodUplink {
         return .{ .allocator = allocator, .uuid = uuid };
@@ -64,7 +68,14 @@ pub const PodUplink = struct {
         const fg_pid = if (fg) |v| v.pid else null;
         if (!optStrEql(self.last_fg_process, fg_name)) changed = true;
         if (!optIntEql(i32, self.last_fg_pid, fg_pid)) changed = true;
-        if (!changed) return;
+        // `send_pending` survives a failed send, so a connect failure or a
+        // write timeout is retried. Without it the cache was committed BEFORE
+        // the send: the next tick then saw `changed == false` and the update
+        // was suppressed permanently -- a pane's cwd and foreground process
+        // stayed stale in SES and the statusbar until the user happened to
+        // change directory again. forceRefresh() only resets last_sent_ms, not
+        // the caches, so reattaching did not heal it either.
+        if (!changed and !self.send_pending) return;
 
         if (self.last_cwd) |s| self.allocator.free(s);
         self.last_cwd = if (proc_cwd) |s| self.allocator.dupe(u8, s) catch |err| blk: {
@@ -78,6 +89,7 @@ pub const PodUplink = struct {
             break :blk null;
         } else null;
         self.last_fg_pid = fg_pid;
+        self.send_pending = true;
 
         if (!self.ensureConnected()) return;
         const fd = self.fd.?;
@@ -108,6 +120,9 @@ pub const PodUplink = struct {
                 return;
             };
         }
+
+        // Both messages are on the wire; only now is the cache authoritative.
+        self.send_pending = false;
     }
 
     pub fn ensureConnected(self: *PodUplink) bool {

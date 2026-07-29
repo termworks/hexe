@@ -8,6 +8,8 @@ const sticky_panes = @import("sticky_panes.zig");
 const server_session_handlers = @import("server_session_handlers.zig");
 const server_pod_event_handlers = @import("server_pod_event_handlers.zig");
 const server_pane_meta_handlers = @import("server_pane_meta_handlers.zig");
+const pane_creation = @import("pane_creation.zig");
+const pane_spawn = @import("pane_spawn.zig");
 const server_pane_lifecycle_handlers = @import("server_pane_lifecycle_handlers.zig");
 const server_reattach_handlers = @import("server_reattach_handlers.zig");
 const server_cli_layout_handlers = @import("server_cli_layout_handlers.zig");
@@ -15,6 +17,10 @@ const server_reporting_handlers = @import("server_reporting_handlers.zig");
 const server_listing_handlers = @import("server_listing_handlers.zig");
 const server_register_handler = @import("server_register_handler.zig");
 const ses = @import("main.zig");
+const vt_stream_reader = core.stream_reader;
+const FramePool = @import("frame_pool.zig").FramePool;
+const CtlOutQueue = @import("ctl_out_queue.zig").CtlOutQueue;
+const VtStreamReader = vt_stream_reader.VtStreamReader;
 const xev = @import("xev").Dynamic;
 
 // Keep VT routing I/O short to avoid blocking the whole SES event loop when a
@@ -29,6 +35,27 @@ const xev = @import("xev").Dynamic;
 const VT_ROUTE_IO_TIMEOUT_MS: i32 = 500;
 const CTL_FRAME_IO_TIMEOUT_MS: i32 = 500;
 pub const HANDLER_IO_TIMEOUT_MS: i32 = 500;
+
+/// How long a FRONTEND control connection may sit accepted-but-unregistered
+/// before SES reclaims it (PLAN.md A-13).
+///
+/// Deliberately generous. A real frontend sends `register` as its first
+/// message, in milliseconds; this only reclaims sockets that completed a
+/// handshake and then went silent forever, which would otherwise hold an fd
+/// and a slot against the connection cap for the life of the daemon.
+const UNREGISTERED_CTL_TIMEOUT_MS: i64 = 120_000;
+
+/// How long `create_pane` may wait inline for the pod's handshake before the
+/// rest of the wait moves to the periodic tick (PLAN.md 1.1).
+///
+/// Purely a LATENCY optimisation, and the reason this is not simply
+/// tick-driven: measured spawns take 15ms/22ms/31ms (min/median/max under load
+/// ~58), while the tick fires every 100ms — so deferring unconditionally would
+/// make every split feel ~50ms slower for no benefit. 40ms sits just above the
+/// observed maximum, so the common case completes inline at its old speed and
+/// only a genuinely slow pod defers. The worst-case stall this can cost the
+/// loop is therefore 40ms, against 500ms before and 2s before that.
+const SPAWN_INLINE_GRACE_MS: i32 = 40;
 /// Whole-skip budget. The per-chunk timeouts above restart on every chunk, so
 /// only a total deadline actually bounds a peer that trickles a huge payload.
 const SKIP_TOTAL_TIMEOUT_MS: i64 = 2_000;
@@ -38,6 +65,20 @@ const SKIP_TOTAL_TIMEOUT_MS: i64 = 2_000;
 /// could do it again immediately.
 const CLI_HEADER_IO_TIMEOUT_MS: i32 = 500;
 const MUX_VT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Backpressure thresholds for the POD→MUX direction.
+///
+/// Overflowing the per-client queue used to DROP the frontend's VT channel,
+/// which the frontend heals with a full re-register + reattach — and that
+/// reattach replays every pane's backlog into the same queue, overflowing it
+/// again. With enough scrollback across enough panes that never converges: the
+/// session flaps every RECONNECT_RETRY_MS forever.
+///
+/// So instead of dropping, stop READING the pods that feed a deep queue. The
+/// unread bytes stay in the pod→SES socket, the pod's own bounded write starts
+/// failing, and it falls back to its backlog ring — which is exactly what the
+/// ring is for. Nothing is lost and no channel is torn down.
+const MUX_VT_QUEUE_HIGH_WATER: usize = MUX_VT_QUEUE_MAX_BYTES * 3 / 4;
+const MUX_VT_QUEUE_LOW_WATER: usize = MUX_VT_QUEUE_MAX_BYTES / 2;
 // Symmetric cap for the MUX→POD (input) direction. A frame is always accepted
 // onto an empty queue (so a single large paste is never undeliverable);
 // overflow only trips once backlog already exists, at which point the wedged
@@ -48,6 +89,65 @@ const VT_FRAME_TYPE_PASSWORD_MODE: u8 = @intFromEnum(core.pod_protocol.FrameType
 
 /// Maximum number of concurrent client connections (MUX instances).
 const MAX_CLIENTS: usize = core.constants.Limits.max_clients;
+
+/// pod_protocol header: [type:u8][len:u32 big-endian].
+fn podVtPayloadLen(hdr: []const u8) u32 {
+    return std.mem.readInt(u32, hdr[1..5], .big);
+}
+
+/// Payload length of a wire.ControlHeader, for the resumable CTL reader.
+fn ctlPayloadLen(hdr: []const u8) u32 {
+    const parsed = std.mem.bytesToValue(wire.ControlHeader, hdr[0..@sizeOf(wire.ControlHeader)]);
+    return parsed.payload_len;
+}
+
+/// Scratch for a whole CTL frame's payload.
+///
+/// Matches the 64KiB stack buffer the handlers already used, so a payload the
+/// handlers could never have processed is still rejected — just earlier, and
+/// without blocking.
+const CTL_PAYLOAD_BUF_LEN: usize = 65536;
+
+/// Scratch for assembling a CTL reply frame before it is written or queued.
+/// Sized to hold the common case outright; larger replies fall back to a heap
+/// assembly so a frame is still delivered as one all-or-nothing unit.
+const CTL_FRAME_STACK_LEN: usize = 65536;
+
+/// Cap on reply bytes buffered for one client. A peer that lets this much pile
+/// up is not reading its control socket; the connection is dropped rather than
+/// letting a dead client pin daemon memory. Generous enough for a full session
+/// state/layout dump plus the replies around it.
+const CTL_OUT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Cursor over a CTL payload that has already been read into memory.
+///
+/// Handlers used to read their payload straight off the fd with bounded
+/// BLOCKING reads, using the same fd they reply on. Making those reads
+/// non-blocking therefore meant separating "where the payload comes from" from
+/// "where the reply goes"; this cursor is the former, and `fd` stays the
+/// latter, so handler signatures are unchanged.
+const PayloadCursor = struct {
+    buf: []const u8 = &.{},
+    pos: usize = 0,
+
+    fn remaining(self: *const PayloadCursor) usize {
+        return self.buf.len - self.pos;
+    }
+
+    fn take(self: *PayloadCursor, n: usize) ![]const u8 {
+        if (n > self.remaining()) return error.PayloadTruncated;
+        const out = self.buf[self.pos .. self.pos + n];
+        self.pos += n;
+        return out;
+    }
+};
+
+/// wire.MuxVtHeader is an extern struct with align(1) fields, so `len` sits at
+/// a fixed offset and is native-endian.
+fn muxVtPayloadLen(hdr: []const u8) u32 {
+    const parsed = std.mem.bytesToValue(wire.MuxVtHeader, hdr[0..@sizeOf(wire.MuxVtHeader)]);
+    return parsed.len;
+}
 
 fn setNonBlocking(fd: posix.fd_t) void {
     const O_NONBLOCK: usize = 0o4000;
@@ -81,14 +181,23 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .running = true,
         .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(allocator),
         .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
+        .pending_spawns = .empty,
+        .ctl_unregistered_since = std.AutoHashMap(posix.fd_t, i64).init(allocator),
         .ctl_watchers = std.AutoHashMap(posix.fd_t, *CtlWatcher).init(allocator),
         .pending_ctl_close_fds = .empty,
         .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(allocator),
         .pending_vt_close_fds = .empty,
         .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(allocator),
+        .ctl_out_queues = std.AutoHashMap(posix.fd_t, CtlOutQueue).init(allocator),
+        .pending_handshakes = .empty,
+        .frame_pool = FramePool.init(allocator),
+        .ctl_payload_buf = allocator.alloc(u8, CTL_PAYLOAD_BUF_LEN) catch unreachable,
+        .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(allocator),
+        .ctl_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(allocator),
+        .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
         .deferred_destroy_ctl = .empty,
         .deferred_destroy_vt = .empty,
-        .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(allocator),
+        .pending_float_cli_fds = std.AutoHashMap([32]u8, PendingCliWait).init(allocator),
         .resource_monitor = core.resource_limits.ResourceMonitor.init(.{}),
         .vt_route_buf = allocator.alloc(u8, wire.MAX_PAYLOAD_LEN) catch unreachable,
     };
@@ -110,10 +219,39 @@ fn deinitTestServer(server: *Server) void {
     var mux_queue_it = server.mux_vt_queues.iterator();
     while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(server.allocator);
     server.mux_vt_queues.deinit();
+    var ctl_out_it = server.ctl_out_queues.iterator();
+    while (ctl_out_it.next()) |entry| entry.value_ptr.deinit(server.allocator);
+    server.ctl_out_queues.deinit();
+    server.paused_pod_vt_fds.deinit();
+    server.pending_handshakes.deinit(server.allocator);
+    var vr_it = server.vt_readers.valueIterator();
+    while (vr_it.next()) |r| r.deinit(server.allocator);
+    server.vt_readers.deinit();
+    var cr_it = server.ctl_readers.valueIterator();
+    while (cr_it.next()) |r| r.deinit(server.allocator);
+    server.ctl_readers.deinit();
+    server.frame_pool.deinit();
+    server.allocator.free(server.ctl_payload_buf);
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
+    server.pending_spawns.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
+    server.ctl_unregistered_since.deinit();
     server.allocator.free(server.vt_route_buf);
+}
+
+/// Stage a CTL payload for a handler invoked directly by a test.
+///
+/// In production `handleBinaryCtlMessage` reads the whole frame into
+/// `ctl_payload_buf` and points the cursor at it before dispatching; these
+/// tests call handlers directly, so they must do the same.
+fn setTestPayload(server: *Server, parts: []const []const u8) void {
+    var off: usize = 0;
+    for (parts) |part| {
+        @memcpy(server.ctl_payload_buf[off .. off + part.len], part);
+        off += part.len;
+    }
+    server.ctl_payload = .{ .buf = server.ctl_payload_buf[0..off], .pos = 0 };
 }
 
 fn expectBinaryError(fd: posix.fd_t, expected: []const u8) !void {
@@ -180,6 +318,41 @@ test "Server replies echo request id only to current request fd" {
     try std.testing.expectEqual(@as(u32, 0), other_hdr.request_id);
 }
 
+test "reapUnregisteredCtl reclaims a stale unregistered CTL fd but spares a fresh one" {
+    const allocator = std.testing.allocator;
+    // Needs real state: the reaper consults the client list and the pane table
+    // to decide what is registered / what is a pod uplink.
+    var ses_state = state.SesState.init(allocator);
+    defer ses_state.deinit();
+    var server = testServerWithState(allocator, &ses_state);
+    defer deinitTestServer(&server);
+
+    // Fake fd numbers: the reaper only queues them for deferred close, it does
+    // not touch the descriptors itself.
+    const stale_fd: posix.fd_t = 4242;
+    const fresh_fd: posix.fd_t = 4243;
+    const now = std.time.milliTimestamp();
+    try server.ctl_unregistered_since.put(stale_fd, now - UNREGISTERED_CTL_TIMEOUT_MS - 1_000);
+    try server.ctl_unregistered_since.put(fresh_fd, now);
+
+    server.reapUnregisteredCtl();
+
+    // Stale: queued for close and no longer tracked.
+    try std.testing.expect(!server.ctl_unregistered_since.contains(stale_fd));
+    var queued = false;
+    for (server.pending_ctl_close_fds.items) |pending| {
+        if (pending.fd == stale_fd) queued = true;
+    }
+    try std.testing.expect(queued);
+
+    // Fresh: still tracked, and NOT queued. A frontend gets its full grace
+    // period to send `register`.
+    try std.testing.expect(server.ctl_unregistered_since.contains(fresh_fd));
+    for (server.pending_ctl_close_fds.items) |pending| {
+        try std.testing.expect(pending.fd != fresh_fd);
+    }
+}
+
 test "Server.requireSnapshotTab rejects unknown tab with binary error" {
     const allocator = std.testing.allocator;
     const pair = try testSocketPair();
@@ -216,7 +389,7 @@ test "Server.handleBinarySessionRemoveTab rejects unknown snapshot tab" {
         .active_tab = 0,
         .has_active_tab = 0,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionRemoveTab(&server, pair.a, @sizeOf(wire.SessionRemoveTab), &buf);
@@ -241,8 +414,7 @@ test "Server.handleBinarySessionRenameTab rejects unknown snapshot tab" {
         .tab_uuid = [_]u8{'t'} ** 32,
         .name_len = @intCast(new_name.len),
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
-    try wire.writeAll(pair.b, new_name);
+    setTestPayload(&server, &.{ std.mem.asBytes(&msg), new_name });
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionRenameTab(&server, pair.a, @sizeOf(wire.SessionRenameTab) + @as(u32, new_name.len), &buf);
@@ -265,7 +437,7 @@ test "Server.handleBinarySessionRemoveFloat rejects unknown snapshot pane" {
     const msg = wire.SessionRemoveFloat{
         .pane_uuid = [_]u8{'p'} ** 32,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionRemoveFloat(&server, pair.a, @sizeOf(wire.SessionRemoveFloat), &buf);
@@ -294,7 +466,7 @@ test "Server.handleBinarySessionSplitPane rejects unknown snapshot tab" {
         .dir = 0,
         .has_focused_pane = 0,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionSplitPane(&server, pair.a, @sizeOf(wire.SessionSplitPane), &buf);
@@ -322,7 +494,7 @@ test "Server.handleBinarySessionReplaceSplitPane rejects unknown snapshot tab" {
         .active_tab = 0,
         .has_focused_pane = 0,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionReplaceSplitPane(&server, pair.a, @sizeOf(wire.SessionReplaceSplitPane), &buf);
@@ -349,7 +521,7 @@ test "Server.handleBinarySessionSetSplitRatio rejects unknown snapshot tab" {
         .active_tab = 0,
         .ratio = 0.5,
     };
-    try wire.writeAll(pair.b, std.mem.asBytes(&msg));
+    setTestPayload(&server, &.{std.mem.asBytes(&msg)});
 
     var buf: [128]u8 = undefined;
     server_session_handlers.handleBinarySessionSetSplitRatio(&server, pair.a, @sizeOf(wire.SessionSetSplitRatio), &buf);
@@ -359,6 +531,57 @@ test "Server.handleBinarySessionSetSplitRatio rejects unknown snapshot tab" {
 const PendingCtlClose = struct {
     fd: posix.fd_t,
     watcher: ?*CtlWatcher,
+};
+
+/// How long a freshly accepted connection may take to send its handshake
+/// preamble before we give up on it.
+const HANDSHAKE_PREAMBLE_TIMEOUT_MS: i64 = 5_000;
+
+/// A connection that has been accepted but whose handshake preamble has not
+/// fully arrived yet.
+///
+/// The accept path used to read the preamble with blocking bounded reads: 500ms
+/// for `[channel, version]`, then another 500ms for a frontend VT session id or
+/// a POD uuid. Any local process could connect, send nothing, and freeze every
+/// session for that long — repeatedly, and for free. The bytes are now
+/// accumulated without blocking; `dispatchNewConnection` still tries once
+/// inline, so a well-behaved peer (whose preamble is already in the socket
+/// buffer) is dispatched with no added latency at all.
+/// A `create_pane` whose pod has been forked but has not yet said hello.
+///
+/// SES used to block the whole event loop reading that handshake. The reply is
+/// deferred instead, which keeps spawn-FAILURE reporting intact: the client
+/// still learns the outcome on its original request, it just learns it a tick
+/// later (PLAN.md 1.1).
+const PendingSpawn = struct {
+    flight: pane_creation.InFlightPane,
+    /// Where the deferred `pane_created` (or error) goes. Validated against the
+    /// closed-fd log before use: by the time the handshake lands this frontend
+    /// may be gone and its fd number handed to somebody else.
+    reply_fd: posix.fd_t,
+    request_id: u32,
+};
+
+const PendingHandshake = struct {
+    /// 2 bytes of `[channel, version]` plus the largest follow-on: a 32-byte
+    /// frontend VT session id.
+    const MAX_PREAMBLE = 34;
+
+    fd: posix.fd_t,
+    buf: [MAX_PREAMBLE]u8 = undefined,
+    got: usize = 0,
+    need: usize = 2,
+    started_ms: i64,
+};
+
+/// A CLI process blocked in `wire.readControlHeaderBlocking` (an unbounded
+/// `poll(-1)`) waiting for a frontend to answer. `owner_ctl_fd` records WHICH
+/// frontend owes the answer, so its death can release the waiter instead of
+/// stranding it forever — `runExitIntent` is wired into the shell's exit hook,
+/// so a stranded waiter is a shell that can never exit.
+const PendingCliWait = struct {
+    cli_fd: posix.fd_t,
+    owner_ctl_fd: posix.fd_t,
 };
 
 const VtDirection = enum {
@@ -379,7 +602,11 @@ const PendingVtClose = struct {
 };
 
 const QueuedVtFrame = struct {
+    /// Backing buffer, which may be LONGER than the frame: buffers come from a
+    /// FramePool and are handed out with `len >= requested`.
     bytes: []u8,
+    /// Logical frame length. Always use this, never `bytes.len`.
+    len: usize,
     written: usize = 0,
 };
 
@@ -389,7 +616,7 @@ const MuxVtQueue = struct {
     head: usize = 0,
 
     fn frameHeader(frame: QueuedVtFrame) ?wire.MuxVtHeader {
-        if (frame.bytes.len < @sizeOf(wire.MuxVtHeader)) return null;
+        if (frame.len < @sizeOf(wire.MuxVtHeader)) return null;
         var hdr_buf: [@sizeOf(wire.MuxVtHeader)]u8 = undefined;
         @memcpy(&hdr_buf, frame.bytes[0..@sizeOf(wire.MuxVtHeader)]);
         return std.mem.bytesToValue(wire.MuxVtHeader, &hdr_buf);
@@ -429,7 +656,7 @@ const MuxVtQueue = struct {
                 continue;
             };
             if (frame.written == 0 and hdr.pane_id == pane_id and hdr.frame_type == frame_type) {
-                self.bytes -= frame.bytes.len;
+                self.bytes -= frame.len;
                 allocator.free(frame.bytes);
                 _ = self.frames.orderedRemove(i);
                 continue;
@@ -460,7 +687,7 @@ fn testQueuedMuxFrame(allocator: std.mem.Allocator, pane_id: u16, frame_type: u8
         .len = 0,
     };
     @memcpy(bytes, std.mem.asBytes(&hdr));
-    return .{ .bytes = bytes, .written = written };
+    return .{ .bytes = bytes, .len = bytes.len, .written = written };
 }
 
 test "MuxVtQueue coalesces only unwritten backlog_end frames for the same pane" {
@@ -622,11 +849,36 @@ pub const Server = struct {
     pending_pop_requests: std.AutoHashMap(posix.fd_t, posix.fd_t),
     // Track which fds use binary control protocol (MUX_CTL and POD_CTL connections).
     binary_ctl_fds: std.AutoHashMap(posix.fd_t, void),
+    /// Panes forked but still waiting on their pod's handshake (PLAN.md 1.1).
+    pending_spawns: std.ArrayList(PendingSpawn),
+    /// Frontend CTL fds still awaiting `register`, and when they arrived.
+    ctl_unregistered_since: std.AutoHashMap(posix.fd_t, i64),
     ctl_watchers: std.AutoHashMap(posix.fd_t, *CtlWatcher),
     pending_ctl_close_fds: std.ArrayList(PendingCtlClose),
     vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
     pending_vt_close_fds: std.ArrayList(PendingVtClose),
     mux_vt_queues: std.AutoHashMap(posix.fd_t, MuxVtQueue),
+    ctl_out_queues: std.AutoHashMap(posix.fd_t, CtlOutQueue),
+    /// Connections accepted but still waiting for their handshake preamble.
+    pending_handshakes: std.ArrayList(PendingHandshake),
+    /// Resumable HEADER readers, one per CTL fd. See handleBinaryCtlMessage.
+    ctl_readers: std.AutoHashMap(posix.fd_t, VtStreamReader),
+    /// Resumable frame readers, one per VT fd. Keyed by fd rather than held on
+    /// the watcher node because backpressure pause/resume destroys and recreates
+    /// that node, which would discard a half-read frame and desync the stream.
+    /// Reusable byte buffers for queued VT frames, so the routing hot path
+    /// stops paying an mmap/munmap per frame under page_allocator.
+    frame_pool: FramePool,
+    /// Scratch holding the CTL frame currently being dispatched.
+    ctl_payload_buf: []u8,
+    /// Cursor handlers read their payload through.
+    ctl_payload: PayloadCursor = .{},
+    vt_readers: std.AutoHashMap(posix.fd_t, VtStreamReader),
+    /// POD VT fds whose watcher is intentionally disarmed because the client
+    /// they feed is not draining fast enough. Re-armed by
+    /// `resumePausedPodVtWatchers` once the queue falls below the low-water
+    /// mark. See MUX_VT_QUEUE_HIGH_WATER.
+    paused_pod_vt_fds: std.AutoHashMap(posix.fd_t, void),
     // Deferred watcher destruction: nodes are kept alive for one loop iteration
     // after disarm so xev can finish processing their completions. Freeing
     // immediately causes use-after-free in ReleaseFast (xev still holds refs).
@@ -634,9 +886,9 @@ pub const Server = struct {
     deferred_destroy_vt: std.ArrayList(*VtWatcher),
     loop_ptr: ?*xev.Loop = null,
     // CLI fd waiting for exit_intent response.
-    pending_exit_intent_cli_fd: ?posix.fd_t = null,
+    pending_exit_intent_cli_fd: ?PendingCliWait = null,
     // CLI fds waiting for float result, keyed by float pane UUID.
-    pending_float_cli_fds: std.AutoHashMap([32]u8, posix.fd_t),
+    pending_float_cli_fds: std.AutoHashMap([32]u8, PendingCliWait),
     current_ctl_request_fd: ?posix.fd_t = null,
     current_ctl_request_id: u32 = 0,
 
@@ -645,8 +897,8 @@ pub const Server = struct {
     // Reused by the single-threaded VT router to avoid alloc/free per output frame.
     vt_route_buf: []u8,
 
-    /// Allocator is ignored — see `SesState.init` for the rationale. Everything
-    /// that outlives the fork runs on `page_allocator`.
+    /// Allocator is ignored — see `SesState.init`, which records the measured
+    /// reason this cannot simply be switched to a GeneralPurposeAllocator.
     pub fn init(_: std.mem.Allocator, ses_state: *state.SesState) !Server {
         const page_alloc = std.heap.page_allocator;
         const socket_path = try ipc.getSesSocketPath(page_alloc);
@@ -662,23 +914,32 @@ pub const Server = struct {
             .running = true,
             .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(page_alloc),
             .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
+            .pending_spawns = .empty,
+            .ctl_unregistered_since = std.AutoHashMap(posix.fd_t, i64).init(page_alloc),
             .ctl_watchers = std.AutoHashMap(posix.fd_t, *CtlWatcher).init(page_alloc),
             .pending_ctl_close_fds = .empty,
             .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(page_alloc),
             .pending_vt_close_fds = .empty,
             .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(page_alloc),
+            .ctl_out_queues = std.AutoHashMap(posix.fd_t, CtlOutQueue).init(page_alloc),
+            .pending_handshakes = .empty,
+            .frame_pool = FramePool.init(page_alloc),
+            .ctl_payload_buf = try page_alloc.alloc(u8, CTL_PAYLOAD_BUF_LEN),
+            .vt_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(page_alloc),
+            .ctl_readers = std.AutoHashMap(posix.fd_t, VtStreamReader).init(page_alloc),
+            .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .deferred_destroy_ctl = .empty,
             .deferred_destroy_vt = .empty,
-            .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
+            .pending_float_cli_fds = std.AutoHashMap([32]u8, PendingCliWait).init(page_alloc),
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
             .vt_route_buf = try page_alloc.alloc(u8, wire.MAX_PAYLOAD_LEN),
         };
     }
 
     pub fn deinit(self: *Server) void {
-        if (self.pending_exit_intent_cli_fd) |fd| posix.close(fd);
+        if (self.pending_exit_intent_cli_fd) |wait| posix.close(wait.cli_fd);
         var float_it = self.pending_float_cli_fds.iterator();
-        while (float_it.next()) |entry| posix.close(entry.value_ptr.*);
+        while (float_it.next()) |entry| posix.close(entry.value_ptr.cli_fd);
         self.pending_float_cli_fds.deinit();
         self.pending_pop_requests.deinit();
         var watch_it = self.ctl_watchers.iterator();
@@ -696,12 +957,29 @@ pub const Server = struct {
         self.pending_vt_close_fds.deinit(self.allocator);
         var mux_queue_it = self.mux_vt_queues.iterator();
         while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(self.allocator);
+        var ctl_out_it = self.ctl_out_queues.iterator();
+        while (ctl_out_it.next()) |entry| entry.value_ptr.deinit(self.allocator);
+        self.ctl_out_queues.deinit();
         self.mux_vt_queues.deinit();
+        self.paused_pod_vt_fds.deinit();
+        for (self.pending_handshakes.items) |ph| posix.close(ph.fd);
+        self.pending_handshakes.deinit(self.allocator);
+        var vt_reader_it = self.vt_readers.valueIterator();
+        while (vt_reader_it.next()) |r| r.deinit(self.allocator);
+        self.vt_readers.deinit();
+        var ctl_reader_it = self.ctl_readers.valueIterator();
+        while (ctl_reader_it.next()) |r| r.deinit(self.allocator);
+        self.ctl_readers.deinit();
+        self.frame_pool.deinit();
+        self.allocator.free(self.ctl_payload_buf);
         self.flushDeferredDestroys();
         self.deferred_destroy_ctl.deinit(self.allocator);
         self.deferred_destroy_vt.deinit(self.allocator);
 
+        for (self.pending_spawns.items) |*ps| self.ses_state.abortCreatePane(&ps.flight);
+        self.pending_spawns.deinit(self.allocator);
         self.binary_ctl_fds.deinit();
+        self.ctl_unregistered_since.deinit();
         self.allocator.free(self.vt_route_buf);
         self.socket.deinit();
     }
@@ -824,7 +1102,16 @@ pub const Server = struct {
                 ses.debugLog("processPendingCtlCloses: fd={d} already closed elsewhere, skipping", .{pending.fd});
                 continue;
             }
+            // Reply-then-close is common here (error replies, disconnect acks,
+            // the CLI request paths). The reply may still be sitting in the out
+            // queue, so give it one last chance to reach the peer before the fd
+            // goes away — dropCtlReader discards whatever is left.
+            _ = self.flushCtlQueue(pending.fd);
             _ = self.binary_ctl_fds.remove(pending.fd);
+            self.dropCtlReader(pending.fd);
+            // Covers a CTL fd with no client record (never registered, or the
+            // record is already gone); purgeMuxFdState handles the rest.
+            self.releasePendingCliWaiters(pending.fd);
 
             var client_id: ?usize = null;
             for (self.ses_state.store.clients.items) |client| {
@@ -876,20 +1163,135 @@ pub const Server = struct {
     /// pending-close processors (which would find either nothing or, worse, a
     /// brand-new connection that reused the fd number).
     pub fn purgeClientFdState(self: *Server, client_id: usize) void {
+        self.cancelPendingSpawnsForClient(client_id);
         const client = self.ses_state.getClient(client_id) orelse return;
-        if (client.mux_ctl_fd) |ctl_fd| {
-            _ = self.binary_ctl_fds.remove(ctl_fd);
-            self.disarmCtlWatcher(ctl_fd);
-            if (self.pending_pop_requests.fetchRemove(ctl_fd)) |kv| {
+        self.purgeMuxFdState(client.mux_ctl_fd, client.mux_vt_fd);
+    }
+
+    /// Drop spawns still in flight for a client that just lost its session.
+    ///
+    /// A `create_pane` that was mid-flight when the session got STOLEN would
+    /// otherwise complete a tick later and attach a brand-new pane to the OLD
+    /// client — resurrecting a frontend that was supposed to exit, which is the
+    /// "stolen frontend did not exit" failure.
+    ///
+    /// `finishCreatePane` only guards against the client being GONE
+    /// (`ClientNotFound`). A steal is the case that slips through: it leaves the
+    /// client alive and merely paneless, so the pane lands successfully on a
+    /// frontend nobody expects to still be running. Making pane creation
+    /// asynchronous is what opened this window — synchronously, the pane always
+    /// existed before the steal could begin.
+    pub fn cancelPendingSpawnsForClient(self: *Server, client_id: usize) void {
+        var i: usize = 0;
+        while (i < self.pending_spawns.items.len) {
+            const ps = &self.pending_spawns.items[i];
+            if (ps.flight.client_id != client_id) {
+                i += 1;
+                continue;
+            }
+            self.failPendingSpawn(ps, "session_taken_over");
+            _ = self.pending_spawns.swapRemove(i);
+        }
+    }
+
+    /// Release every CLI process blocked waiting on this frontend to answer.
+    ///
+    /// `pending_exit_intent_cli_fd` and `pending_float_cli_fds` were only ever
+    /// cleaned in `deinit` or when a newer request displaced them — neither
+    /// `processPendingCtlCloses` nor `purgeClientFdState` touched them, though
+    /// both handle `pending_pop_requests`. So if the frontend crashed, was
+    /// SIGKILLed, or had its session stolen while a request was outstanding,
+    /// the CLI stayed parked in an unbounded `poll(-1)` forever and the daemon
+    /// leaked its fd. Since `runExitIntent` is wired into the shell's exit hook,
+    /// that presented as a shell that could never exit.
+    ///
+    /// Answer rather than just closing: with the frontend gone nothing can veto
+    /// an exit, so `allow = 1` is the correct verdict, and a float that will
+    /// never run should report failure rather than an ambiguous EOF.
+    fn releasePendingCliWaiters(self: *Server, owner_ctl_fd: posix.fd_t) void {
+        if (self.pending_exit_intent_cli_fd) |wait| {
+            if (wait.owner_ctl_fd == owner_ctl_fd) {
+                ses.debugLog("releasing exit_intent CLI waiter fd={d} (owner mux fd={d} gone)", .{ wait.cli_fd, owner_ctl_fd });
+                const allow = wire.ExitIntentResult{ .allow = 1 };
+                self.replyOrClose(wait.cli_fd, .exit_intent_result, std.mem.asBytes(&allow));
+                self.queueCtlClose(wait.cli_fd, null);
+                self.pending_exit_intent_cli_fd = null;
+            }
+        }
+
+        // Collect first: replyOrClose/queueCtlClose must not run while the map
+        // is being iterated.
+        var orphaned: std.ArrayList([32]u8) = .empty;
+        defer orphaned.deinit(self.allocator);
+        var it = self.pending_float_cli_fds.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.owner_ctl_fd != owner_ctl_fd) continue;
+            orphaned.append(self.allocator, entry.key_ptr.*) catch |err| {
+                core.logging.logError("ses", "failed to collect orphaned float CLI waiter", err);
+                break;
+            };
+        }
+        for (orphaned.items) |key| {
+            const entry = self.pending_float_cli_fds.fetchRemove(key) orelse continue;
+            ses.debugLog("releasing float CLI waiter fd={d} (owner mux fd={d} gone)", .{ entry.value.cli_fd, owner_ctl_fd });
+            const result = wire.FloatResult{
+                .uuid = key,
+                .exit_code = 1,
+                .output_len = 0,
+            };
+            self.replyOrClose(entry.value.cli_fd, .float_result, std.mem.asBytes(&result));
+            self.queueCtlClose(entry.value.cli_fd, null);
+        }
+    }
+
+    /// fd-keyed core of `purgeClientFdState`. Split out so the detach path can
+    /// purge AFTER the client record is gone: `detachSession` removes the
+    /// client, so a client_id lookup at that point finds nothing.
+    pub fn purgeMuxFdState(self: *Server, ctl_fd: ?posix.fd_t, vt_fd: ?posix.fd_t) void {
+        if (ctl_fd) |cfd| {
+            self.releasePendingCliWaiters(cfd);
+            self.dropCtlReader(cfd);
+            _ = self.binary_ctl_fds.remove(cfd);
+            self.disarmCtlWatcher(cfd);
+            if (self.pending_pop_requests.fetchRemove(cfd)) |kv| {
                 self.ses_state.store.noteClosedFd(kv.value);
                 posix.close(kv.value);
             }
         }
-        if (client.mux_vt_fd) |vt_fd| {
-            self.disarmVtWatcher(vt_fd);
-            if (self.mux_vt_queues.fetchRemove(vt_fd)) |entry| {
+        if (vt_fd) |vfd| {
+            self.disarmVtWatcher(vfd);
+            self.dropVtReader(vfd);
+            if (self.mux_vt_queues.fetchRemove(vfd)) |entry| {
                 var queue = entry.value;
                 queue.deinit(self.allocator);
+            }
+        }
+    }
+
+    /// Purge and close a detached client's mux fds.
+    ///
+    /// `detachSession` removes the client record without closing these — every
+    /// sibling removal path (`removeClient`, `removeClientGraceful`,
+    /// `shutdownClient`, `forceDetachAttachedSession`) calls `closeClientFds`,
+    /// but detach did not. That left both fds open with armed watchers and a
+    /// queued-output entry owned by no client; if the frontend re-registered on
+    /// the same CTL fd instead of hanging up, the new client got
+    /// `mux_vt_fd = null` while the old VT fd was still armed and queued.
+    ///
+    /// Must run only AFTER the detach ack has been written, since the CTL fd is
+    /// the connection the request arrived on.
+    pub fn closeDetachedMuxFds(self: *Server, ctl_fd: ?posix.fd_t, vt_fd: ?posix.fd_t) void {
+        self.purgeMuxFdState(ctl_fd, vt_fd);
+        if (vt_fd) |vfd| {
+            self.ses_state.store.noteClosedFd(vfd);
+            posix.close(vfd);
+        }
+        if (ctl_fd) |cfd| {
+            // Guard the (not expected, but cheap to rule out) aliasing case so
+            // a double close cannot land on a recycled fd number.
+            if (vt_fd == null or vt_fd.? != cfd) {
+                self.ses_state.store.noteClosedFd(cfd);
+                posix.close(cfd);
             }
         }
     }
@@ -938,6 +1340,10 @@ pub const Server = struct {
                 ses.debugLog("processPendingVtCloses: fd={d} removing MUX VT", .{pending.fd});
                 self.removeMuxVtFd(pending.fd);
             }
+            _ = self.paused_pod_vt_fds.remove(pending.fd);
+            // A reused fd number must never inherit the previous
+            // connection's half-read frame.
+            self.dropVtReader(pending.fd);
             if (self.mux_vt_queues.fetchRemove(pending.fd)) |entry| {
                 var queue = entry.value;
                 queue.deinit(self.allocator);
@@ -953,6 +1359,172 @@ pub const Server = struct {
             ses.debugLog("processPendingVtCloses: fd={d} closed", .{pending.fd});
         }
         self.pending_vt_close_fds.clearRetainingCapacity();
+    }
+
+    /// Connections this daemon is actually holding right now.
+    ///
+    /// The cap used to read `stats.active_connections`, which the periodic tick
+    /// refreshed at most once every 5s from `clients.items.len` — i.e. from
+    /// REGISTERED clients only (PLAN.md A-13). Anything accepted but not yet
+    /// registered was invisible to it, so a burst could blow straight past
+    /// `max_connections` while the cap still saw the old, lower number.
+    ///
+    /// Derived from the live maps rather than kept as a counter on purpose: an
+    /// increment/decrement pair that misses one close path would drift upward
+    /// forever and eventually refuse every connection — a worse failure than
+    /// the one being fixed, and one that only shows up after hours of uptime.
+    fn liveConnectionCount(self: *const Server) usize {
+        return self.ctl_watchers.count() + self.vt_watchers.count() + self.pending_handshakes.items.len;
+    }
+
+    /// Reclaim frontend CTL connections that handshaked and then never
+    /// registered (PLAN.md A-13).
+    ///
+    /// Scoped tightly on purpose. A REGISTERED frontend may legitimately sit
+    /// idle for hours (a user away from the keyboard sends no control traffic),
+    /// so idleness alone must never close anything — only the absence of a
+    /// client record does. Pod uplinks share `binary_ctl_fds` but are never
+    /// registered as clients, so they are excluded explicitly; `pane.pod_ctl_fd`
+    /// is assigned before the fd is added to that map, so there is no window in
+    /// which a live pod looks unregistered.
+    fn reapUnregisteredCtl(self: *Server) void {
+        if (self.ctl_unregistered_since.count() == 0) return;
+        const now = std.time.milliTimestamp();
+
+        var doomed: [16]posix.fd_t = undefined;
+        var doomed_n: usize = 0;
+
+        var it = self.ctl_unregistered_since.iterator();
+        while (it.next()) |entry| {
+            const fd = entry.key_ptr.*;
+            if (self.findClientForCtlFd(fd) != null) {
+                // Registered: stop tracking it, never reap it.
+                doomed[doomed_n] = fd;
+                doomed_n += 1;
+                if (doomed_n == doomed.len) break;
+                continue;
+            }
+            if (now - entry.value_ptr.* <= UNREGISTERED_CTL_TIMEOUT_MS) continue;
+            if (self.isPodCtlFd(fd)) continue;
+
+            core.logging.warn("ses", "closing CTL fd={d}: handshaked but never registered", .{fd});
+            self.queueCtlClose(fd, null);
+            doomed[doomed_n] = fd;
+            doomed_n += 1;
+            if (doomed_n == doomed.len) break;
+        }
+        // Mutate the map only after iteration.
+        for (doomed[0..doomed_n]) |fd| _ = self.ctl_unregistered_since.remove(fd);
+    }
+
+    fn isPodCtlFd(self: *const Server, fd: posix.fd_t) bool {
+        var panes = self.ses_state.store.panes.valueIterator();
+        while (panes.next()) |pane| {
+            if (pane.pod_ctl_fd) |pod_fd| {
+                if (pod_fd == fd) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Take ownership of an in-flight pane and remember where to answer.
+    ///
+    /// Gives the pod a brief inline grace period first (see
+    /// SPAWN_INLINE_GRACE_MS) so an ordinary split keeps its old latency; a pod
+    /// that misses it finishes on the tick instead, with the reply deferred.
+    pub fn trackPendingSpawn(self: *Server, flight: pane_creation.InFlightPane, reply_fd: posix.fd_t) !void {
+        try self.pending_spawns.append(self.allocator, .{
+            .flight = flight,
+            .reply_fd = reply_fd,
+            .request_id = self.current_ctl_request_id,
+        });
+
+        const stdout_fd = self.pending_spawns.items[self.pending_spawns.items.len - 1].flight.spawn.stdout_file.handle;
+        wire.waitReadableTimeout(stdout_fd, SPAWN_INLINE_GRACE_MS) catch {};
+        self.processPendingSpawns();
+    }
+
+    /// Send a reply that belongs to a request we answered LATER than dispatch.
+    ///
+    /// `replyOrClose*` derive the request id from `current_ctl_request_*`, which
+    /// only the dispatch path sets, so a deferred reply has to restore that pair
+    /// around the send. It also has to check the fd is still ours: by now the
+    /// requesting frontend may be gone and its fd number reused, and injecting a
+    /// stale `pane_created` into somebody else's control stream would be worse
+    /// than dropping the reply.
+    fn replyDeferred(
+        self: *Server,
+        fd: posix.fd_t,
+        request_id: u32,
+        msg_type: wire.MsgType,
+        payload: []const u8,
+        trail: []const u8,
+    ) void {
+        if (self.ses_state.store.closedFdNoted(fd)) {
+            ses.debugLog("deferred reply dropped: fd={d} was closed", .{fd});
+            return;
+        }
+        const prev_fd = self.current_ctl_request_fd;
+        const prev_id = self.current_ctl_request_id;
+        self.current_ctl_request_fd = fd;
+        self.current_ctl_request_id = request_id;
+        defer {
+            self.current_ctl_request_fd = prev_fd;
+            self.current_ctl_request_id = prev_id;
+        }
+        self.replyOrCloseWithTrail(fd, msg_type, payload, trail);
+    }
+
+    fn failPendingSpawn(self: *Server, ps: *PendingSpawn, reason: []const u8) void {
+        core.logging.warn("ses", "create_pane failed: {s} (uuid={s})", .{ reason, ps.flight.uuid[0..8] });
+        self.ses_state.abortCreatePane(&ps.flight);
+        const err_payload = wire.Error{ .msg_len = @intCast(reason.len) };
+        self.replyDeferred(ps.reply_fd, ps.request_id, .@"error", std.mem.asBytes(&err_payload), reason);
+    }
+
+    /// Drive forked-but-unannounced pods. Runs on the periodic tick, so a slow
+    /// pod costs latency for its own pane instead of freezing every session
+    /// (PLAN.md 1.1).
+    fn processPendingSpawns(self: *Server) void {
+        if (self.pending_spawns.items.len == 0) return;
+        const now = std.time.milliTimestamp();
+
+        var i: usize = 0;
+        while (i < self.pending_spawns.items.len) {
+            const ps = &self.pending_spawns.items[i];
+            switch (pane_spawn.pollPodHandshake(&ps.flight.spawn)) {
+                .pending => {
+                    if (!ps.flight.spawn.expired(now)) {
+                        i += 1;
+                        continue;
+                    }
+                    self.failPendingSpawn(ps, "pod_spawn_timeout");
+                },
+                .failed => self.failPendingSpawn(ps, "pod_bad_handshake"),
+                .ready => |child_pid| {
+                    if (self.ses_state.finishCreatePane(&ps.flight, child_pid)) |pane| {
+                        self.ses_state.markDirty();
+                        ses.debugLog("binary: pane created {s} (pid={d}, pane_id={d})", .{ pane.uuid[0..8], pane.child_pid, pane.pane_id });
+                        const resp = wire.PaneCreated{
+                            .uuid = pane.uuid,
+                            .pid = pane.child_pid,
+                            .pane_id = pane.pane_id,
+                            .socket_path_len = @intCast(pane.pod_socket_path.len),
+                        };
+                        // NOTE: read pod_socket_path from the STORE's pane, not
+                        // from the flight — finishCreatePane transferred
+                        // ownership and the flight's copy is stale.
+                        self.replyDeferred(ps.reply_fd, ps.request_id, .pane_created, std.mem.asBytes(&resp), pane.pod_socket_path);
+                    } else |err| {
+                        core.logging.logError("ses", "create_pane failed to finish", err);
+                        const reason = "create_failed";
+                        const err_payload = wire.Error{ .msg_len = @intCast(reason.len) };
+                        self.replyDeferred(ps.reply_fd, ps.request_id, .@"error", std.mem.asBytes(&err_payload), reason);
+                    }
+                },
+            }
+            _ = self.pending_spawns.swapRemove(i);
+        }
     }
 
     /// Enqueue an fd for deferred close, deduped by fd. Shared by the CTL and
@@ -982,13 +1554,172 @@ pub const Server = struct {
         queuePendingClose(PendingVtClose, &self.pending_vt_close_fds, self.allocator, .{ .fd = fd, .watcher = watcher }, "VT");
     }
 
+    /// Send a whole CTL frame without ever waiting for the peer (PLAN.md 1.5).
+    ///
+    /// Writes inline for as long as the socket accepts bytes, then buffers the
+    /// rest. Returns false if the connection is dead or has exceeded its
+    /// backlog cap, in which case the caller should close it.
+    ///
+    /// Ordering is the subtle part: if ANYTHING is already queued for this fd,
+    /// the whole frame must queue behind it. Writing inline in that case would
+    /// interleave this frame ahead of the pending bytes and desync the peer's
+    /// control stream.
+    pub fn writeCtlBytes(self: *Server, fd: posix.fd_t, bytes: []const u8) bool {
+        if (bytes.len == 0) return true;
+
+        var off: usize = 0;
+        const queued = if (self.ctl_out_queues.getPtr(fd)) |q| q.pending() else 0;
+        if (queued == 0) {
+            while (off < bytes.len) {
+                const n = posix.write(fd, bytes[off..]) catch |err| switch (err) {
+                    error.WouldBlock => break,
+                    else => {
+                        ses.debugLog("ctl reply: write failed fd={d}: {s}", .{ fd, @errorName(err) });
+                        return false;
+                    },
+                };
+                if (n == 0) return false;
+                off += n;
+            }
+            if (off == bytes.len) return true;
+        }
+        return self.enqueueCtlBytes(fd, bytes[off..]);
+    }
+
+    /// Buffer the unwritten tail of a frame. Overflow closes the connection: a
+    /// peer that has let this much reply data pile up is not reading its
+    /// control socket at all, and the alternative (dropping bytes) would leave
+    /// a truncated frame on the wire.
+    fn enqueueCtlBytes(self: *Server, fd: posix.fd_t, bytes: []const u8) bool {
+        var entry = self.ctl_out_queues.getOrPut(fd) catch |err| {
+            core.logging.logError("ses", "failed to allocate CTL out queue", err);
+            return false;
+        };
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        if (entry.value_ptr.pending() + bytes.len > CTL_OUT_QUEUE_MAX_BYTES) {
+            core.logging.warnWithSource(
+                "ses",
+                "CTL reply backlog exceeded: fd={d} pending={d} max={d}",
+                .{ fd, entry.value_ptr.pending(), CTL_OUT_QUEUE_MAX_BYTES },
+                @src(),
+            );
+            return false;
+        }
+        entry.value_ptr.append(self.allocator, bytes) catch |err| {
+            core.logging.logError("ses", "failed to queue CTL reply", err);
+            return false;
+        };
+        return true;
+    }
+
+    /// Push whatever the socket will now take. Returns false on a permanent
+    /// failure (EPIPE/ECONNRESET), so the caller can drop the connection.
+    fn flushCtlQueue(self: *Server, fd: posix.fd_t) bool {
+        const queue = self.ctl_out_queues.getPtr(fd) orelse return true;
+        defer queue.compact();
+
+        while (queue.pending() > 0) {
+            const n = posix.write(fd, queue.unsent()) catch |err| switch (err) {
+                error.WouldBlock => break,
+                else => {
+                    ses.debugLog("ctl reply: queued write failed fd={d}: {s}", .{ fd, @errorName(err) });
+                    return false;
+                },
+            };
+            if (n == 0) return false;
+            queue.consume(n);
+        }
+        return true;
+    }
+
+    fn flushCtlQueues(self: *Server) void {
+        // Mirrors flushMuxVtQueues: a peer that never drains would otherwise
+        // pin its backlog forever. queueCtlClose only appends to a pending
+        // list, so closing mid-iteration does not mutate this map.
+        var it = self.ctl_out_queues.iterator();
+        while (it.next()) |entry| {
+            if (!self.flushCtlQueue(entry.key_ptr.*)) {
+                self.queueCtlClose(entry.key_ptr.*, null);
+            }
+        }
+    }
+
+    /// Serialize `[header][fixed][trails...]` into `scratch` when it fits.
+    /// Returns null if it does not, so the caller can fall back rather than
+    /// emit a partial frame.
+    fn buildCtlFrame(
+        scratch: []u8,
+        msg_type: wire.MsgType,
+        request_id: u32,
+        fixed: []const u8,
+        trails: []const []const u8,
+    ) ?[]const u8 {
+        var total: usize = fixed.len;
+        for (trails) |t| total += t.len;
+        const frame_len = @sizeOf(wire.ControlHeader) + total;
+        if (frame_len > scratch.len) return null;
+
+        const hdr = wire.ControlHeader{
+            .msg_type = @intFromEnum(msg_type),
+            .request_id = request_id,
+            .payload_len = @intCast(total),
+        };
+        @memcpy(scratch[0..@sizeOf(wire.ControlHeader)], std.mem.asBytes(&hdr));
+        var off: usize = @sizeOf(wire.ControlHeader);
+        if (fixed.len > 0) {
+            @memcpy(scratch[off .. off + fixed.len], fixed);
+            off += fixed.len;
+        }
+        for (trails) |t| {
+            if (t.len == 0) continue;
+            @memcpy(scratch[off .. off + t.len], t);
+            off += t.len;
+        }
+        return scratch[0..frame_len];
+    }
+
+    /// Build and send a CTL frame, closing the connection if it cannot be
+    /// delivered. The single funnel for every SES reply.
+    pub fn sendCtlFrame(
+        self: *Server,
+        fd: posix.fd_t,
+        msg_type: wire.MsgType,
+        fixed: []const u8,
+        trails: []const []const u8,
+        comptime what: []const u8,
+    ) bool {
+        var stack: [CTL_FRAME_STACK_LEN]u8 = undefined;
+        const request_id = self.responseRequestIdForFd(fd);
+
+        if (buildCtlFrame(&stack, msg_type, request_id, fixed, trails)) |frame| {
+            if (self.writeCtlBytes(fd, frame)) return true;
+            core.logging.warnWithSource("ses", what ++ " failed: fd={d} type={s}", .{ fd, @tagName(msg_type) }, @src());
+            self.queueCtlClose(fd, null);
+            return false;
+        }
+
+        // Rare: a reply bigger than the stack frame (large layout/state JSON).
+        // Heap-assemble rather than write piecewise, so the frame still reaches
+        // writeCtlBytes as one all-or-nothing unit.
+        var total: usize = fixed.len;
+        for (trails) |t| total += t.len;
+        const heap = self.allocator.alloc(u8, @sizeOf(wire.ControlHeader) + total) catch |err| {
+            core.logging.logError("ses", what ++ ": failed to allocate reply frame", err);
+            self.queueCtlClose(fd, null);
+            return false;
+        };
+        defer self.allocator.free(heap);
+        const frame = buildCtlFrame(heap, msg_type, request_id, fixed, trails).?;
+        if (self.writeCtlBytes(fd, frame)) return true;
+        core.logging.warnWithSource("ses", what ++ " failed: fd={d} type={s}", .{ fd, @tagName(msg_type) }, @src());
+        self.queueCtlClose(fd, null);
+        return false;
+    }
+
     /// Write a control reply to a client fd; on failure log and queue the
     /// connection for close so stale fds don't accumulate.
     pub fn replyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
-        wire.writeControlWithRequestIdTimeout(fd, msg_type, self.responseRequestIdForFd(fd), payload, HANDLER_IO_TIMEOUT_MS) catch |err| {
-            core.logging.warnWithSource("ses", "reply failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
-            self.queueCtlClose(fd, null);
-        };
+        _ = self.sendCtlFrame(fd, msg_type, payload, &.{}, "reply");
     }
 
     /// Same as replyOrClose but for messages with a trailing byte blob.
@@ -999,10 +1730,7 @@ pub const Server = struct {
         payload: []const u8,
         trail: []const u8,
     ) void {
-        wire.writeControlWithTrailAndRequestIdTimeout(fd, msg_type, self.responseRequestIdForFd(fd), payload, trail, HANDLER_IO_TIMEOUT_MS) catch |err| {
-            core.logging.warnWithSource("ses", "reply-with-trail failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
-            self.queueCtlClose(fd, null);
-        };
+        _ = self.sendCtlFrame(fd, msg_type, payload, &.{trail}, "reply-with-trail");
     }
 
     pub fn responseRequestIdForFd(self: *const Server, fd: posix.fd_t) u32 {
@@ -1080,6 +1808,15 @@ pub const Server = struct {
         }
         for (self.ses_state.polling.pending_remove_poll_fds.items) |fd| {
             ses.debugLog("processPendingWatcherUpdates: disarm fd={d}", .{fd});
+            // These fds were closed by the STATE layer (connectPodVt replacing
+            // a pod dial, detachSession, killPane), which has no handle on the
+            // server's per-fd readers. Without dropping the reader here, a
+            // half-read frame outlives the connection and the next connection
+            // to reuse the fd number inherits it — the stream desyncs and that
+            // pane goes silent. This queue is the one place all three of those
+            // paths funnel through.
+            self.dropVtReader(fd);
+            self.dropCtlReader(fd);
             if (self.binary_ctl_fds.contains(fd)) {
                 self.disarmCtlWatcher(fd);
             }
@@ -1296,7 +2033,13 @@ pub const Server = struct {
         // orphaned node and stop polling.
         const current = server.vt_watchers.get(watch.fd);
         if (current == null or current.? != watch) {
-            server.allocator.destroy(watch);
+            // Defer, do NOT destroy inline. The CTL path handles the identical
+            // stale-CQE case with deferDestroyCtlWatcher, and the comment in
+            // processPendingVtCloses states outright that an immediate free here
+            // is a use-after-free in ReleaseFast because xev may still reference
+            // the completion until the loop batch finishes. This path was the
+            // one place that broke that rule.
+            server.deferDestroyVtWatcher(watch);
             return .disarm;
         }
 
@@ -1305,6 +2048,14 @@ pub const Server = struct {
             server.queueVtClose(watch.fd, watch);
             return .disarm;
         };
+
+        // Backpressure gate: decided BEFORE reading, so the unread bytes stay
+        // in the pod's socket rather than being dropped or forced into an
+        // already-deep queue.
+        if (watch.direction == .pod_to_mux and server.shouldPausePodVt(watch.fd)) {
+            server.pausePodVtWatcher(watch.fd, watch);
+            return .disarm;
+        }
 
         const ok = switch (watch.direction) {
             .pod_to_mux => server.routePodToMux(watch.fd),
@@ -1347,8 +2098,15 @@ pub const Server = struct {
         const now_ms = std.time.milliTimestamp();
         periodic.last_fire = now_ms;
 
+        // Advance connections whose handshake preamble has not fully arrived.
+        periodic.server.processPendingHandshakes();
+        periodic.server.reapUnregisteredCtl();
+        periodic.server.processPendingSpawns();
         periodic.server.flushMuxVtQueues();
         periodic.server.flushPodVtQueues();
+        periodic.server.flushCtlQueues();
+        // Queues just drained; re-arm anything paused for backpressure.
+        periodic.server.resumePausedPodVtWatchers();
 
         if (periodic.server.ses_state.store.dirty and now_ms - periodic.last_save >= 1000) {
             // Keep the store dirty when the save fails (disk full, EIO) so
@@ -1360,7 +2118,8 @@ pub const Server = struct {
         if (now_ms - periodic.last_stats_update >= 5000) {
             const detached_sessions = periodic.server.ses_state.store.detached_sessions.count();
             const total_panes = periodic.server.ses_state.store.panes.count();
-            const active_connections = periodic.server.ses_state.store.clients.items.len;
+            // Report what the cap actually enforces, not just registered clients.
+            const active_connections = periodic.server.liveConnectionCount();
 
             periodic.server.resource_monitor.updateStats(
                 active_connections,
@@ -1371,14 +2130,19 @@ pub const Server = struct {
             periodic.last_stats_update = now_ms;
         }
 
+        // Backlog reconnects run on the fast tick, not the 1s cleanup sweep:
+        // each pass dials at most BACKLOG_REPLAY_MAX_PER_PASS pods, so pacing
+        // them at 100ms replays a whole session in well under a second while
+        // keeping any single pass's blocking cost (and the resulting VT queue
+        // depth) small. At the 1s cadence the same cap would have made attach
+        // visibly slow.
+        periodic.server.ses_state.processBacklogReplays();
+
         if (now_ms - periodic.last_cleanup >= 1000) {
             // Reap exited pods: they are direct children spawned without a
             // matching wait, so each would otherwise linger as a zombie and
             // keep its /proc entry alive for pid-liveness checks.
             reapExitedPods();
-            // Retry any deferred backlog reconnects. This avoids attach-time
-            // races where a pod VT endpoint is not ready on the first attempt.
-            periodic.server.ses_state.processBacklogReplays();
             periodic.server.ses_state.cleanupOrphanedPanes();
             periodic.server.ses_state.cleanupExpiredDetachedSessions();
             periodic.last_cleanup = now_ms;
@@ -1416,76 +2180,164 @@ pub const Server = struct {
             return;
         }
 
-        // Check resource limits and rate limiting
-        if (!self.resource_monitor.allowNewConnection()) {
-            ses.debugLog("reject: connection limit or rate limit exceeded", .{});
-            // Try to send error message before closing
-            const err_msg = "server_overloaded: connection/rate limit exceeded";
+        // Only the hard COUNT ceiling here — the per-minute rate limit moved to
+        // dispatchWithPreamble, where the channel type is known (PLAN.md A-14).
+        // Applying the rate limit at accept time meant pod reconnects, which
+        // retry from a ~1s tick, could exhaust the window and lock the user out
+        // of attach; a human gets one try, a dozen pods get sixty.
+        if (self.liveConnectionCount() >= self.resource_monitor.limits.max_connections) {
+            ses.debugLog("reject: connection count limit exceeded (live={d})", .{self.liveConnectionCount()});
+            const err_msg = "server_overloaded: connection limit exceeded";
             const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
             self.replyOrCloseWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
             var tmp = conn;
             tmp.close();
             return;
         }
-        self.resource_monitor.recordConnection();
 
-        // Read versioned handshake: [channel_type, version]
-        var handshake: [2]u8 = undefined;
-        wire.readExactTimeout(conn.fd, &handshake, CTL_FRAME_IO_TIMEOUT_MS) catch |err| {
-            core.logging.logError("ses", "connection handshake read failed", err);
-            var tmp = conn;
-            tmp.close();
-            return;
-        };
+        // Accumulate the handshake preamble without blocking. The common case
+        // (preamble already buffered) completes inside this call.
+        var pending = PendingHandshake{ .fd = conn.fd, .started_ms = std.time.milliTimestamp() };
+        if (self.advanceHandshake(&pending) == .pending) {
+            self.pending_handshakes.append(self.allocator, pending) catch |err| {
+                core.logging.logError("ses", "failed to track pending handshake", err);
+                self.ses_state.store.noteClosedFd(conn.fd);
+                posix.close(conn.fd);
+            };
+        }
+    }
 
-        // Validate protocol version with negotiation.
-        const client_version = handshake[1];
+    const HandshakeProgress = enum { done, pending };
+
+    /// Read as much of the preamble as is available right now. `.done` means the
+    /// connection was dispatched or closed and the entry must be dropped.
+    fn advanceHandshake(self: *Server, ph: *PendingHandshake) HandshakeProgress {
+        while (ph.got < ph.need) {
+            const n = posix.read(ph.fd, ph.buf[ph.got..ph.need]) catch |err| switch (err) {
+                error.WouldBlock => return .pending,
+                else => {
+                    core.logging.logError("ses", "connection handshake read failed", err);
+                    self.closeHandshakeFd(ph.fd);
+                    return .done;
+                },
+            };
+            if (n == 0) {
+                // Peer hung up before completing the preamble.
+                self.closeHandshakeFd(ph.fd);
+                return .done;
+            }
+            ph.got += n;
+
+            if (ph.got == 2 and ph.need == 2) {
+                // Decide the version verdict now, before waiting on any
+                // follow-on bytes a rejected peer would never send.
+                if (!self.acceptHandshakeVersion(ph.fd, ph.buf[0], ph.buf[1])) return .done;
+                ph.need = switch (ph.buf[0]) {
+                    wire.SES_HANDSHAKE_FRONTEND_VT => 2 + 32,
+                    wire.SES_HANDSHAKE_POD_CTL => 2 + 16,
+                    else => 2,
+                };
+            }
+        }
+
+        self.dispatchWithPreamble(ipc.Connection{ .fd = ph.fd }, ph.buf[0..ph.got]);
+        return .done;
+    }
+
+    fn closeHandshakeFd(self: *Server, fd: posix.fd_t) void {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
+
+    /// Drive handshakes that could not complete inline. Runs on the periodic
+    /// tick, so a peer that trickles its preamble costs latency instead of
+    /// freezing the loop.
+    fn processPendingHandshakes(self: *Server) void {
+        if (self.pending_handshakes.items.len == 0) return;
+        const now = std.time.milliTimestamp();
+        var i: usize = 0;
+        while (i < self.pending_handshakes.items.len) {
+            const ph = &self.pending_handshakes.items[i];
+            if (self.advanceHandshake(ph) == .done) {
+                _ = self.pending_handshakes.swapRemove(i);
+                continue;
+            }
+            if (now - ph.started_ms > HANDSHAKE_PREAMBLE_TIMEOUT_MS) {
+                core.logging.warn("ses", "handshake preamble timed out on fd={d} ({d}/{d} bytes)", .{ ph.fd, ph.got, ph.need });
+                self.closeHandshakeFd(ph.fd);
+                _ = self.pending_handshakes.swapRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    /// Version gate. Returns false if the connection was rejected and closed.
+    fn acceptHandshakeVersion(self: *Server, fd: posix.fd_t, channel: u8, client_version: u8) bool {
         if (!wire.isProtocolVersionSupported(client_version)) {
             ses.debugLog("reject: unsupported protocol version {d} (supported: {d}-{d})", .{
                 client_version,
                 wire.MIN_PROTOCOL_VERSION,
                 wire.PROTOCOL_VERSION,
             });
-            // Send error message if this is a CTL channel (can receive error responses)
-            if (handshake[0] == wire.SES_HANDSHAKE_FRONTEND_CTL or handshake[0] == wire.SES_HANDSHAKE_POD_CTL) {
-                // Send version mismatch error with version range
+            if (channel == wire.SES_HANDSHAKE_FRONTEND_CTL or channel == wire.SES_HANDSHAKE_POD_CTL) {
                 const err_msg = std.fmt.allocPrint(
                     self.allocator,
                     "protocol_version_mismatch: client={d} supported={d}-{d}",
                     .{ client_version, wire.MIN_PROTOCOL_VERSION, wire.PROTOCOL_VERSION },
                 ) catch "protocol_version_mismatch";
                 defer if (!std.mem.eql(u8, err_msg, "protocol_version_mismatch")) self.allocator.free(err_msg);
-
                 const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
-                self.replyOrCloseWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
+                self.replyOrCloseWithTrail(fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
             }
-            var tmp = conn;
-            tmp.close();
-            return;
+            self.closeHandshakeFd(fd);
+            return false;
         }
 
-        // Log deprecation warning if client is using old version
         if (wire.isProtocolVersionDeprecated(client_version)) {
             ses.debugLog("warning: client using deprecated protocol version {d} (current: {d})", .{
                 client_version,
                 wire.PROTOCOL_VERSION,
             });
-            // Send deprecation notice if this is a CTL channel
-            if (handshake[0] == wire.SES_HANDSHAKE_FRONTEND_CTL) {
+            if (channel == wire.SES_HANDSHAKE_FRONTEND_CTL) {
                 const warn_msg = std.fmt.allocPrint(
                     self.allocator,
                     "Protocol version {d} is deprecated. Please update to version {d}.",
                     .{ client_version, wire.PROTOCOL_VERSION },
                 ) catch "";
                 defer if (warn_msg.len > 0) self.allocator.free(warn_msg);
-
                 if (warn_msg.len > 0) {
                     const notify = wire.Notify{ .msg_len = @intCast(warn_msg.len) };
-                    self.replyOrCloseWithTrail(conn.fd, .notify, std.mem.asBytes(&notify), warn_msg);
+                    self.replyOrCloseWithTrail(fd, .notify, std.mem.asBytes(&notify), warn_msg);
                 }
             }
         }
+        return true;
+    }
 
+    /// Dispatch a connection whose full preamble has been read.
+    fn dispatchWithPreamble(self: *Server, conn: ipc.Connection, preamble: []const u8) void {
+        const handshake: [2]u8 = .{ preamble[0], preamble[1] };
+
+        // Rate-limit only what a person or a script drives. POD channels are
+        // exempt: they reconnect on their own timer, so counting them is what
+        // starved interactive attach after a daemon restart (PLAN.md A-14).
+        // Every connection is still bounded by the count ceiling at accept.
+        const is_pod = handshake[0] == wire.SES_HANDSHAKE_POD_CTL;
+        if (!is_pod) {
+            if (!self.resource_monitor.allowNewConnectionRate()) {
+                ses.debugLog("reject: connection rate limit exceeded", .{});
+                const err_msg = "server_overloaded: connection rate limit exceeded";
+                const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
+                self.replyOrCloseWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg);
+                var tmp = conn;
+                tmp.close();
+                return;
+            }
+            self.resource_monitor.recordConnection();
+        }
+
+        // Version was validated at the 2-byte boundary in advanceHandshake.
         switch (handshake[0]) {
             wire.SES_HANDSHAKE_FRONTEND_CTL => {
                 wire.sendServerHello(conn.fd) catch |err| {
@@ -1496,6 +2348,7 @@ pub const Server = struct {
                 };
                 // Frontend binary control channel.
                 ses.debugLog("accept: frontend ctl channel fd={d}", .{conn.fd});
+                self.ctl_unregistered_since.put(conn.fd, std.time.milliTimestamp()) catch {};
                 self.binary_ctl_fds.put(conn.fd, {}) catch |err| {
                     core.logging.logError("ses", "failed to register frontend CTL fd", err);
                     var tmp = conn;
@@ -1512,13 +2365,14 @@ pub const Server = struct {
             wire.SES_HANDSHAKE_FRONTEND_VT => {
                 // Frontend VT data channel — read 32-byte session_id to identify client.
                 ses.debugLog("accept: frontend VT channel fd={d}", .{conn.fd});
-                var sid: [32]u8 = undefined;
-                wire.readExactTimeout(conn.fd, &sid, HANDLER_IO_TIMEOUT_MS) catch |err| {
-                    core.logging.logError("ses", "frontend VT session id read failed", err);
+                if (preamble.len < 2 + 32) {
+                    core.logging.warn("ses", "frontend VT preamble too short fd={d}", .{conn.fd});
                     var tmp = conn;
                     tmp.close();
                     return;
-                };
+                }
+                var sid: [32]u8 = undefined;
+                @memcpy(&sid, preamble[2..34]);
                 // Convert 32-char hex to 16-byte session_id for lookup.
                 const session_id = core.uuid.hexToBin(sid) orelse {
                     // Invalid hex — close connection.
@@ -1573,13 +2427,14 @@ pub const Server = struct {
             wire.SES_HANDSHAKE_POD_CTL => {
                 // POD control uplink — read 16-byte binary UUID.
                 ses.debugLog("accept: POD ctl uplink fd={d}", .{conn.fd});
-                var uuid_bin: [16]u8 = undefined;
-                wire.readExactTimeout(conn.fd, &uuid_bin, HANDLER_IO_TIMEOUT_MS) catch |err| {
-                    core.logging.logError("ses", "POD ctl uuid read failed", err);
+                if (preamble.len < 2 + 16) {
+                    core.logging.warn("ses", "POD ctl preamble too short fd={d}", .{conn.fd});
                     var tmp = conn;
                     tmp.close();
                     return;
-                };
+                }
+                var uuid_bin: [16]u8 = undefined;
+                @memcpy(&uuid_bin, preamble[2..18]);
                 // Convert 16 binary bytes → 32-char hex UUID key.
                 const uuid_hex = core.uuid.binToHex(uuid_bin);
                 // Store fd in the pane's pod_ctl_fd.
@@ -1643,8 +2498,8 @@ pub const Server = struct {
             return error.QueueFull;
         }
 
-        const frame = try self.allocator.alloc(u8, frame_len);
-        errdefer self.allocator.free(frame);
+        const frame = try self.frame_pool.acquire(frame_len);
+        errdefer self.frame_pool.release(frame);
         const mux_hdr = wire.MuxVtHeader{
             .pane_id = pane_id,
             .frame_type = frame_type,
@@ -1652,9 +2507,9 @@ pub const Server = struct {
         };
         @memcpy(frame[0..@sizeOf(wire.MuxVtHeader)], std.mem.asBytes(&mux_hdr));
         if (payload.len > 0) {
-            @memcpy(frame[@sizeOf(wire.MuxVtHeader)..], payload);
+            @memcpy(frame[@sizeOf(wire.MuxVtHeader)..frame_len], payload);
         }
-        try entry.value_ptr.frames.append(self.allocator, .{ .bytes = frame });
+        try entry.value_ptr.frames.append(self.allocator, .{ .bytes = frame, .len = frame_len });
         entry.value_ptr.bytes += frame_len;
     }
 
@@ -1669,7 +2524,7 @@ pub const Server = struct {
 
         while (queue.pendingLen() > 0) {
             var frame = &queue.frames.items[queue.head];
-            const n = posix.write(mux_vt_fd, frame.bytes[frame.written..]) catch |err| {
+            const n = posix.write(mux_vt_fd, frame.bytes[frame.written..frame.len]) catch |err| {
                 switch (err) {
                     error.WouldBlock => {},
                     else => {
@@ -1681,19 +2536,102 @@ pub const Server = struct {
             };
             if (n == 0) return false;
             frame.written += n;
-            if (frame.written < frame.bytes.len) break;
+            if (frame.written < frame.len) break;
 
-            queue.bytes -= frame.bytes.len;
-            self.allocator.free(frame.bytes);
+            queue.bytes -= frame.len;
+            self.frame_pool.release(frame.bytes);
             queue.head += 1;
         }
         return true;
     }
 
+    /// Queued bytes waiting to reach this client, without allocating.
+    fn muxVtQueueBytes(self: *Server, mux_vt_fd: posix.fd_t) usize {
+        const queue = self.mux_vt_queues.getPtr(mux_vt_fd) orelse return 0;
+        return queue.bytes;
+    }
+
+    /// Resolve where a POD VT fd's output would go, consuming no bytes. Used to
+    /// decide backpressure BEFORE reading a frame off the socket.
+    fn muxVtTargetForPodVt(self: *Server, pod_vt_fd: posix.fd_t) ?posix.fd_t {
+        const pane_id = self.ses_state.store.pod_vt_to_pane_id.get(pod_vt_fd) orelse return null;
+        return self.findMuxVtForPane(pane_id);
+    }
+
+    /// Whether this pod's output should stop being read for now.
+    fn shouldPausePodVt(self: *Server, pod_vt_fd: posix.fd_t) bool {
+        const mux_vt_fd = self.muxVtTargetForPodVt(pod_vt_fd) orelse return false;
+        return self.muxVtQueueBytes(mux_vt_fd) >= MUX_VT_QUEUE_HIGH_WATER;
+    }
+
+    /// Disarm a POD VT watcher for backpressure and remember to re-arm it.
+    /// Only valid from the watcher callback immediately before it returns
+    /// `.disarm` — the CQE is consumed at that point, so the node is safe to
+    /// defer-destroy (same contract as processPendingVtCloses).
+    fn pausePodVtWatcher(self: *Server, fd: posix.fd_t, watcher: *VtWatcher) void {
+        self.paused_pod_vt_fds.put(fd, {}) catch |err| {
+            // Without a pause record nothing would ever re-arm this fd and the
+            // pane would go permanently silent. Keep reading instead: a deep
+            // queue is far better than a dead pane.
+            core.logging.logError("ses", "failed to record paused POD VT fd", err);
+            return;
+        };
+        // Defer-destroy on BOTH branches, matching processPendingVtCloses: the
+        // callback returns .disarm right after this either way, so no further
+        // CQE can arrive for the node and freeing it at the next safe point is
+        // correct whether or not it was still the map's current watcher.
+        _ = self.disarmVtWatcherMatching(fd, watcher);
+        self.deferDestroyVtWatcher(watcher);
+        ses.debugLog("vt pod->mux: pausing pod_vt_fd={d} (client queue above high water)", .{fd});
+    }
+
+    /// Re-arm pod VT watchers whose destination has drained. Also releases the
+    /// pause when the destination went away entirely — otherwise a client that
+    /// disconnected while a pod was paused would leave that pod silent forever.
+    fn resumePausedPodVtWatchers(self: *Server) void {
+        if (self.paused_pod_vt_fds.count() == 0) return;
+
+        var resume_fds: std.ArrayList(posix.fd_t) = .empty;
+        defer resume_fds.deinit(self.allocator);
+
+        var it = self.paused_pod_vt_fds.keyIterator();
+        while (it.next()) |fd_ptr| {
+            const fd = fd_ptr.*;
+            const still_paused = blk: {
+                const mux_vt_fd = self.muxVtTargetForPodVt(fd) orelse break :blk false;
+                break :blk self.muxVtQueueBytes(mux_vt_fd) > MUX_VT_QUEUE_LOW_WATER;
+            };
+            if (still_paused) continue;
+            resume_fds.append(self.allocator, fd) catch |err| {
+                core.logging.logError("ses", "failed to collect resumable POD VT fd", err);
+                break;
+            };
+        }
+
+        for (resume_fds.items) |fd| {
+            _ = self.paused_pod_vt_fds.remove(fd);
+            // A pod fd closed while paused is no longer pollable; armVtWatcher
+            // refuses it and we simply drop the pause record.
+            if (self.armVtWatcher(fd, .pod_to_mux)) {
+                ses.debugLog("vt pod->mux: resuming pod_vt_fd={d}", .{fd});
+            }
+        }
+    }
+
     fn flushMuxVtQueues(self: *Server) void {
+        // Drop a connection whose queued write failed permanently (EPIPE,
+        // ECONNRESET), exactly as flushPodVtQueues does for the other
+        // direction. Discarding the result left a dead frontend's queue pinning
+        // up to MUX_VT_QUEUE_MAX_BYTES and being retried at 10Hz forever; it
+        // was only ever cleaned up incidentally, when a new pod frame happened
+        // to route to the same fd — which never happens for an idle pane.
+        // queueVtClose only appends to the pending-close list (no map
+        // mutation), so closing mid-iteration is safe.
         var it = self.mux_vt_queues.iterator();
         while (it.next()) |entry| {
-            _ = self.flushMuxVtQueue(entry.key_ptr.*);
+            if (!self.flushMuxVtQueue(entry.key_ptr.*)) {
+                self.queueVtClose(entry.key_ptr.*, null);
+            }
         }
     }
 
@@ -1713,14 +2651,20 @@ pub const Server = struct {
             return error.QueueFull;
         }
 
+        // Deliberately NOT pooled: this queue is owned by the STORE and is
+        // freed from paths that have no handle on the server's pool
+        // (noteClosedFd, store teardown). Handing it server-owned buffers is a
+        // cross-allocator free waiting to happen -- the unit tests caught
+        // exactly that. The mux direction, which the server owns end to end,
+        // is pooled instead, and it is the higher-volume one.
         const frame = try store.allocator.alloc(u8, frame_len);
         errdefer store.allocator.free(frame);
         frame[0] = frame_type;
         std.mem.writeInt(u32, frame[1..5], @intCast(payload.len), .big);
         if (payload.len > 0) {
-            @memcpy(frame[5..], payload);
+            @memcpy(frame[5..frame_len], payload);
         }
-        try entry.value_ptr.frames.append(store.allocator, .{ .bytes = frame });
+        try entry.value_ptr.frames.append(store.allocator, .{ .bytes = frame, .len = frame_len });
         entry.value_ptr.bytes += frame_len;
     }
 
@@ -1733,7 +2677,7 @@ pub const Server = struct {
 
         while (queue.pendingLen() > 0) {
             var frame = &queue.frames.items[queue.head];
-            const n = posix.write(pod_vt_fd, frame.bytes[frame.written..]) catch |err| {
+            const n = posix.write(pod_vt_fd, frame.bytes[frame.written..frame.len]) catch |err| {
                 switch (err) {
                     error.WouldBlock => {},
                     else => {
@@ -1745,9 +2689,9 @@ pub const Server = struct {
             };
             if (n == 0) return false;
             frame.written += n;
-            if (frame.written < frame.bytes.len) break;
+            if (frame.written < frame.len) break;
 
-            queue.bytes -= frame.bytes.len;
+            queue.bytes -= frame.len;
             store.allocator.free(frame.bytes);
             queue.head += 1;
         }
@@ -1765,130 +2709,177 @@ pub const Server = struct {
         }
     }
 
+    /// Frames routed per wakeup before yielding, so one loud pane cannot
+    /// starve the others. The reader keeps any partial frame, so a budget
+    /// boundary is never a desync.
+    const VT_FRAMES_PER_WAKEUP: usize = 32;
+
+    fn vtReaderFor(self: *Server, fd: posix.fd_t, hdr_len: u8, len_fn: vt_stream_reader.PayloadLenFn) ?*VtStreamReader {
+        const entry = self.vt_readers.getOrPut(fd) catch |err| {
+            core.logging.logError("ses", "failed to allocate VT stream reader", err);
+            return null;
+        };
+        if (!entry.found_existing) entry.value_ptr.* = VtStreamReader.init(hdr_len, len_fn);
+        return entry.value_ptr;
+    }
+
+    fn ctlReaderFor(self: *Server, fd: posix.fd_t) ?*VtStreamReader {
+        const entry = self.ctl_readers.getOrPut(fd) catch |err| {
+            core.logging.logError("ses", "failed to allocate CTL header reader", err);
+            return null;
+        };
+        if (!entry.found_existing) {
+            entry.value_ptr.* = VtStreamReader.init(@sizeOf(wire.ControlHeader), ctlPayloadLen);
+        }
+        return entry.value_ptr;
+    }
+
+    /// Read a fixed struct from the CTL payload currently being dispatched.
+    pub fn readPayloadStruct(self: *Server, comptime T: type) !T {
+        const bytes = try self.ctl_payload.take(@sizeOf(T));
+        return std.mem.bytesToValue(T, bytes[0..@sizeOf(T)]);
+    }
+
+    /// Copy `dest.len` bytes out of the current CTL payload.
+    pub fn readPayloadInto(self: *Server, dest: []u8) !void {
+        const bytes = try self.ctl_payload.take(dest.len);
+        @memcpy(dest, bytes);
+    }
+
+    /// Discard the rest of the current CTL payload. Always succeeds: the frame
+    /// is already in memory, so there is nothing left to fail on.
+    pub fn skipPayloadRest(self: *Server) void {
+        self.ctl_payload.pos = self.ctl_payload.buf.len;
+    }
+
+    /// Drop all per-fd CTL stream state: the resumable reader AND the outbound
+    /// reply queue. Both are keyed by fd number and both are lethal if they
+    /// outlive the connection — a reused fd number would inherit a half-read
+    /// frame on the way in, or unsent reply bytes prepended to a brand-new
+    /// client's stream on the way out. They are dropped together so the
+    /// several cleanup paths that call this cannot cover one and miss the
+    /// other.
+    pub fn dropCtlReader(self: *Server, fd: posix.fd_t) void {
+        if (self.ctl_readers.fetchRemove(fd)) |kv| {
+            var reader = kv.value;
+            reader.deinit(self.allocator);
+        }
+        _ = self.ctl_unregistered_since.remove(fd);
+        if (self.ctl_out_queues.fetchRemove(fd)) |kv| {
+            var queue = kv.value;
+            if (queue.pending() > 0) {
+                ses.debugLog("ctl reply: dropping {d} unsent bytes for fd={d}", .{ queue.pending(), fd });
+            }
+            queue.deinit(self.allocator);
+        }
+    }
+
+    pub fn dropVtReader(self: *Server, fd: posix.fd_t) void {
+        if (self.vt_readers.fetchRemove(fd)) |kv| {
+            var reader = kv.value;
+            reader.deinit(self.allocator);
+        }
+    }
+
+    /// Route VT data from POD -> MUX.
+    ///
+    /// Drains without blocking: the reader retains any partial frame, so a pod
+    /// that stalls mid-frame costs nothing instead of freezing every session for
+    /// the read timeout. Because the payload is always fully in hand before
+    /// routing, an unroutable frame is simply discarded — no `skipBytes`, and
+    /// therefore no way to leave the stream desynced.
     fn routePodToMux(self: *Server, pod_vt_fd: posix.fd_t) bool {
-        // Read 5-byte pod_protocol header (type:u8 + len:u32 big-endian).
-        var hdr: [5]u8 = undefined;
-        wire.readExactTimeout(pod_vt_fd, &hdr, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            core.logging.logError("ses", "failed to read POD VT frame header", err);
-            return false;
-        };
+        const reader = self.vtReaderFor(pod_vt_fd, 5, podVtPayloadLen) orelse return false;
 
-        const frame_type = hdr[0];
-        const payload_len = std.mem.readInt(u32, hdr[1..5], .big);
-
-        // Safety cap.
-        if (payload_len > wire.MAX_PAYLOAD_LEN) {
-            core.logging.warn("ses", "POD VT frame too large: fd={d} len={d}", .{ pod_vt_fd, payload_len });
-            return false;
-        }
-
-        // Look up pane_id.
-        const pane_id = self.ses_state.store.pod_vt_to_pane_id.get(pod_vt_fd) orelse {
-            ses.debugLog("vt pod->mux: pod_vt_fd={d} NOT in routing table, draining {d} bytes", .{ pod_vt_fd, payload_len });
-            self.skipBytes(pod_vt_fd, payload_len);
-            return true;
-        };
-        ses.debugLog("vt pod->mux: pane_id={d} type={d} len={d} pod_vt_fd={d}", .{ pane_id, frame_type, payload_len, pod_vt_fd });
-
-        // Find the MUX VT fd for this pane.
-        const mux_vt_fd = self.findMuxVtForPane(pane_id) orelse {
-            // No MUX connected — skip payload.
-            core.logging.warn("ses", "POD VT frame has no mux target: pod_vt_fd={d} pane_id={d}", .{ pod_vt_fd, pane_id });
-            self.skipBytes(pod_vt_fd, payload_len);
-            return true;
-        };
-
-        if (payload_len > self.vt_route_buf.len) {
-            core.logging.warn("ses", "POD VT frame exceeds route buffer: fd={d} len={d}", .{ pod_vt_fd, payload_len });
-            self.skipBytes(pod_vt_fd, payload_len);
-            return true;
-        }
-        const payload = self.vt_route_buf[0..payload_len];
-
-        wire.readExactTimeout(pod_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            core.logging.logError("ses", "failed to read POD VT payload", err);
-            self.queueVtClose(pod_vt_fd, null);
-            return true;
-        };
-
-        self.enqueueMuxVtFrame(mux_vt_fd, pane_id, frame_type, payload) catch |err| {
-            core.logging.logError("ses", "failed to queue MUX VT frame", err);
-            self.queueVtClose(mux_vt_fd, null);
-            return true;
-        };
-        if (!self.flushMuxVtQueue(mux_vt_fd)) {
-            self.queueVtClose(mux_vt_fd, null);
+        var routed: usize = 0;
+        while (routed < VT_FRAMES_PER_WAKEUP) : (routed += 1) {
+            switch (reader.next(pod_vt_fd, self.vt_route_buf, self.allocator)) {
+                .none => return true,
+                .closed => {
+                    ses.debugLog("vt pod->mux: pod_vt_fd={d} closed", .{pod_vt_fd});
+                    return false;
+                },
+                .failed => {
+                    core.logging.logError("ses", "POD VT read failed", error.BrokenPipe);
+                    return false;
+                },
+                .oversize => |len| {
+                    core.logging.warn("ses", "POD VT frame too large: fd={d} len={d}; dropping connection", .{ pod_vt_fd, len });
+                    return false;
+                },
+                .frame => |frame| {
+                    const frame_type = frame.hdr[0];
+                    const pane_id = self.ses_state.store.pod_vt_to_pane_id.get(pod_vt_fd) orelse {
+                        ses.debugLog("vt pod->mux: pod_vt_fd={d} not routed, discarding {d} bytes", .{ pod_vt_fd, frame.payload.len });
+                        continue;
+                    };
+                    const mux_vt_fd = self.findMuxVtForPane(pane_id) orelse {
+                        core.logging.warn("ses", "POD VT frame has no mux target: pod_vt_fd={d} pane_id={d}", .{ pod_vt_fd, pane_id });
+                        continue;
+                    };
+                    self.enqueueMuxVtFrame(mux_vt_fd, pane_id, frame_type, frame.payload) catch |err| {
+                        // See enqueueMuxVtFrame: dropping one frame beats
+                        // dropping the client's channel and re-triggering the
+                        // replay that overflowed the queue.
+                        core.logging.warn("ses", "mux VT queue full: dropping frame pane_id={d} len={d} ({s})", .{
+                            pane_id,
+                            frame.payload.len,
+                            @errorName(err),
+                        });
+                        continue;
+                    };
+                    if (!self.flushMuxVtQueue(mux_vt_fd)) {
+                        self.queueVtClose(mux_vt_fd, null);
+                    }
+                },
+            }
         }
         return true;
     }
 
-    /// Route VT data from MUX → POD.
-    /// Reads a 7-byte MuxVtHeader + payload from mux_vt_fd,
-    /// wraps it in a 5-byte pod_protocol header, and writes to the POD VT channel.
-    /// Returns false if the connection should be removed.
+    /// Route VT data from MUX -> POD. Same non-blocking contract as above.
     fn routeMuxToPod(self: *Server, mux_vt_fd: posix.fd_t) bool {
-        // Read 7-byte MuxVtHeader.
-        var mux_hdr_buf: [@sizeOf(wire.MuxVtHeader)]u8 = undefined;
-        wire.readExactTimeout(mux_vt_fd, &mux_hdr_buf, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            ses.debugLog("vt mux->pod: mux disconnected: {s}", .{@errorName(err)});
-            return false;
-        };
-        const mux_hdr = std.mem.bytesToValue(wire.MuxVtHeader, &mux_hdr_buf);
-        ses.debugLog("vt mux->pod: pane_id={d} type={d} len={d} mux_vt_fd={d}", .{ mux_hdr.pane_id, mux_hdr.frame_type, mux_hdr.len, mux_vt_fd });
+        const reader = self.vtReaderFor(mux_vt_fd, @sizeOf(wire.MuxVtHeader), muxVtPayloadLen) orelse return false;
 
-        // Safety cap.
-        if (mux_hdr.len > wire.MAX_PAYLOAD_LEN) {
-            core.logging.warn("ses", "MUX VT frame too large: fd={d} len={d}", .{ mux_vt_fd, mux_hdr.len });
-            return false;
-        }
-
-        // Look up pod_vt_fd from pane_id.
-        const pod_vt_fd = self.ses_state.store.pane_id_to_pod_vt.get(mux_hdr.pane_id) orelse {
-            // Unknown pane — skip payload.
-            core.logging.warn("ses", "MUX VT frame for unknown pane_id={d} fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
-            self.skipBytes(mux_vt_fd, mux_hdr.len);
-            return true;
-        };
-
-        // Ownership gate: only the pane's current owner may inject input.
-        // Float steals notify the old mux best-effort, so a client with a
-        // stale view can keep sending keystrokes for a pane that now renders
-        // in another mux — without this check they land in the new owner's
-        // shell (cross-client input injection).
-        if (!self.muxVtFdOwnsPane(mux_vt_fd, mux_hdr.pane_id)) {
-            ses.debugLog("vt mux->pod: dropping frame for pane_id={d} from non-owner fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
-            self.skipBytes(mux_vt_fd, mux_hdr.len);
-            return true;
-        }
-
-        // Read the full payload from the MUX first, so a POD that exits
-        // mid-frame never receives a header without its payload. Reuse the
-        // shared route buffer — the event loop is single-threaded, so this is
-        // never reentrant with the POD→MUX path that also uses it.
-        if (mux_hdr.len > self.vt_route_buf.len) {
-            core.logging.warn("ses", "MUX VT frame exceeds route buffer: fd={d} len={d}", .{ mux_vt_fd, mux_hdr.len });
-            self.skipBytes(mux_vt_fd, mux_hdr.len);
-            return true;
-        }
-        const payload = self.vt_route_buf[0..mux_hdr.len];
-        wire.readExactTimeout(mux_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            ses.debugLog("vt mux->pod: failed to read payload from mux: {s}", .{@errorName(err)});
-            return false;
-        };
-
-        // Enqueue for non-blocking delivery. A wedged POD (child not draining
-        // its VT input) must never block the SES event loop on a synchronous
-        // write, so writes go through a bounded per-POD queue drained by the
-        // periodic tick — symmetric with the POD→MUX path. On overflow drop the
-        // whole POD VT connection (reconnected by backlog-replay if the pod is
-        // still alive) rather than silently losing keystrokes.
-        self.enqueuePodVtFrame(pod_vt_fd, mux_hdr.frame_type, payload) catch |err| {
-            ses.debugLog("vt mux->pod: pod queue overflow fd={d}: {s}, dropping", .{ pod_vt_fd, @errorName(err) });
-            self.queueVtClose(pod_vt_fd, null);
-            return true;
-        };
-        if (!self.flushPodVtQueue(pod_vt_fd)) {
-            self.queueVtClose(pod_vt_fd, null);
+        var routed: usize = 0;
+        while (routed < VT_FRAMES_PER_WAKEUP) : (routed += 1) {
+            switch (reader.next(mux_vt_fd, self.vt_route_buf, self.allocator)) {
+                .none => return true,
+                .closed => {
+                    ses.debugLog("vt mux->pod: mux_vt_fd={d} closed", .{mux_vt_fd});
+                    return false;
+                },
+                .failed => {
+                    ses.debugLog("vt mux->pod: read failed fd={d}", .{mux_vt_fd});
+                    return false;
+                },
+                .oversize => |len| {
+                    core.logging.warn("ses", "MUX VT frame too large: fd={d} len={d}; dropping connection", .{ mux_vt_fd, len });
+                    return false;
+                },
+                .frame => |frame| {
+                    const mux_hdr = std.mem.bytesToValue(wire.MuxVtHeader, frame.hdr[0..@sizeOf(wire.MuxVtHeader)]);
+                    const pod_vt_fd = self.ses_state.store.pane_id_to_pod_vt.get(mux_hdr.pane_id) orelse {
+                        core.logging.warn("ses", "MUX VT frame for unknown pane_id={d} fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
+                        continue;
+                    };
+                    // Ownership gate: only the pane's current owner may inject
+                    // input, or a client with a stale view keeps typing into a
+                    // pane that now renders elsewhere.
+                    if (!self.muxVtFdOwnsPane(mux_vt_fd, mux_hdr.pane_id)) {
+                        ses.debugLog("vt mux->pod: dropping frame for pane_id={d} from non-owner fd={d}", .{ mux_hdr.pane_id, mux_vt_fd });
+                        continue;
+                    }
+                    self.enqueuePodVtFrame(pod_vt_fd, mux_hdr.frame_type, frame.payload) catch |err| {
+                        ses.debugLog("vt mux->pod: pod queue overflow fd={d}: {s}, dropping", .{ pod_vt_fd, @errorName(err) });
+                        self.queueVtClose(pod_vt_fd, null);
+                        continue;
+                    };
+                    if (!self.flushPodVtQueue(pod_vt_fd)) {
+                        self.queueVtClose(pod_vt_fd, null);
+                    }
+                },
+            }
         }
         return true;
     }
@@ -1949,6 +2940,11 @@ pub const Server = struct {
 
     fn removePodVtFd(self: *Server, fd: posix.fd_t) void {
         ses.debugLog("remove pod_vt fd={d}", .{fd});
+        // Drop any backpressure pause for this fd: the number can be reused by
+        // a new connection, and re-arming it later would attach a pod_to_mux
+        // watcher to something else entirely.
+        _ = self.paused_pod_vt_fds.remove(fd);
+        self.dropVtReader(fd);
         const pane_id = if (self.ses_state.store.pod_vt_to_pane_id.fetchRemove(fd)) |kv| blk: {
             _ = self.ses_state.store.pane_id_to_pod_vt.remove(kv.value);
             _ = self.ses_state.store.pane_id_to_uuid.remove(kv.value);
@@ -1976,7 +2972,7 @@ pub const Server = struct {
                             entry.key_ptr[0..8],
                             pane_id,
                         });
-                        pane.needs_backlog_replay = true;
+                        pane.requestBacklogReplay();
                         return;
                     }
 
@@ -2008,6 +3004,7 @@ pub const Server = struct {
 
     fn removeMuxVtFd(self: *Server, fd: posix.fd_t) void {
         ses.debugLog("remove mux_vt fd={d}", .{fd});
+        self.dropVtReader(fd);
         for (self.ses_state.store.clients.items) |*client| {
             if (client.mux_vt_fd) |vt_fd| {
                 if (vt_fd == fd) {
@@ -2025,24 +3022,6 @@ pub const Server = struct {
     /// inside the budget never trips it. With a 4MB max payload and 4KB chunks
     /// that is 1024 chunks x 500ms = ~8.5 MINUTES of frozen daemon. The total
     /// deadline below is what actually bounds it.
-    fn skipBytes(_: *Server, fd: posix.fd_t, len: u32) void {
-        var remaining: usize = len;
-        var buf: [4096]u8 = undefined;
-        const deadline = std.time.milliTimestamp() + SKIP_TOTAL_TIMEOUT_MS;
-        while (remaining > 0) {
-            if (std.time.milliTimestamp() >= deadline) {
-                core.logging.warn("ses", "giving up skipping VT payload ({d} bytes left)", .{remaining});
-                return;
-            }
-            const chunk = @min(remaining, buf.len);
-            wire.readExactTimeout(fd, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-                core.logging.logError("ses", "failed to skip VT payload", err);
-                return;
-            };
-            remaining -= chunk;
-        }
-    }
-
     /// Find client_id for a binary CTL fd.
     pub fn findClientForCtlFd(self: *Server, fd: posix.fd_t) ?usize {
         for (self.ses_state.store.clients.items) |client| {
@@ -2053,9 +3032,53 @@ pub const Server = struct {
 
     /// Handle a binary control message. Returns false if connection should be removed.
     fn handleBinaryCtlMessage(self: *Server, fd: posix.fd_t) bool {
-        const hdr = wire.readControlHeaderTimeout(fd, CTL_FRAME_IO_TIMEOUT_MS) catch |err| {
-            core.logging.logError("ses", "failed to read control header", err);
-            return false;
+        // Read the header RESUMABLY and without blocking.
+        //
+        // `readControlHeaderTimeout` blocked for up to CTL_FRAME_IO_TIMEOUT_MS
+        // once any part of the 10-byte header had arrived — the cheapest stall
+        // vector there was: send one byte, wait, repeat, and every session
+        // freezes each time. Splitting a header across writes is not just a
+        // hostile act either; `writeAllTimeout` produces it whenever the peer's
+        // socket buffer is briefly full under load, which is exactly what made
+        // the frontend's own header read busy-spin before it was fixed.
+        //
+        // The PAYLOAD is read here too, in the same resumable pass. Handlers
+        // used to pull it off this fd themselves with bounded blocking reads,
+        // which reopened the same stall vector one level down: a client that
+        // sent a header and then dribbled its payload froze every session for
+        // the timeout. They now read it through `ctl_payload`, so a handler
+        // cannot block on the socket at all. That is why the fd argument they
+        // still take is a REPLY SINK only, never a read source.
+        const reader = self.ctlReaderFor(fd) orelse return false;
+        const hdr = switch (reader.next(fd, self.ctl_payload_buf, self.allocator)) {
+            .none => return true, // frame still in flight; resume on next wakeup
+            .closed => {
+                ses.debugLog("ctl: fd={d} closed", .{fd});
+                return false;
+            },
+            .failed => {
+                core.logging.logError("ses", "failed to read control frame", error.BrokenPipe);
+                return false;
+            },
+            .oversize => |len| {
+                // Bigger than any handler could ever process (they all used a
+                // 64KiB stack buffer). Rejected here rather than drained,
+                // because a payload that large means the stream is desynced and
+                // cannot be resynchronised by skipping.
+                core.logging.warnWithSource(
+                    "ses",
+                    "ctl payload too large: len={d} max={d} fd={d}",
+                    .{ len, CTL_PAYLOAD_BUF_LEN, fd },
+                    @src(),
+                );
+                return false;
+            },
+            .frame => |frame| blk: {
+                // The whole payload is now in memory; handlers read it through
+                // the cursor instead of blocking on the socket.
+                self.ctl_payload = .{ .buf = frame.payload, .pos = 0 };
+                break :blk std.mem.bytesToValue(wire.ControlHeader, frame.hdr[0..@sizeOf(wire.ControlHeader)]);
+            },
         };
         // Cap payload length before any allocation or chunked read. A
         // misbehaving or malicious client cannot coerce us into a giant
@@ -2074,11 +3097,17 @@ pub const Server = struct {
         var buf: [65536]u8 = undefined;
         const prev_request_fd = self.current_ctl_request_fd;
         const prev_request_id = self.current_ctl_request_id;
+        const prev_payload = self.ctl_payload;
         self.current_ctl_request_fd = fd;
         self.current_ctl_request_id = hdr.request_id;
         defer {
             self.current_ctl_request_fd = prev_request_fd;
             self.current_ctl_request_id = prev_request_id;
+            // Restored with the rest of the per-request state. Nothing reenters
+            // this function today, but the cursor borrows a SHARED scratch
+            // buffer, so leaving it dangling past the dispatch would hand the
+            // next caller a stale window into a buffer that has been refilled.
+            self.ctl_payload = prev_payload;
         }
 
         switch (msg_type) {
@@ -2119,14 +3148,14 @@ pub const Server = struct {
             },
             .pane_info => {
                 if (hdr.payload_len < @sizeOf(wire.PaneUuid)) {
-                    self.skipBinaryPayload(fd, hdr.payload_len, &buf);
+                    self.skipPayloadRest();
                     self.replyOrClose(fd, .@"error", &.{});
                     return false;
                 }
-                const pu = wire.readStructTimeout(wire.PaneUuid, fd, HANDLER_IO_TIMEOUT_MS) catch |err| {
-                    self.ctlStreamDesynced(fd, "mid-message read failed");
+                const pu = self.readPayloadStruct(wire.PaneUuid) catch |err| {
                     core.logging.logError("ses", "failed to read pane_info payload", err);
-                    return false;
+                    self.replyOrClose(fd, .@"error", &.{});
+                    return true;
                 };
                 server_reporting_handlers.handleBinaryPaneInfo(self, fd, pu.uuid);
             },
@@ -2207,12 +3236,12 @@ pub const Server = struct {
             // here until it's categorized (PLAN.md 2.1 — no silently-dropped
             // messages). Behavior matches the former `else`: skip + error.
             .registered, .pane_created, .destroy_pane, .session_state, .notify, .pop_confirm, .pop_choose, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .send_keys, .broadcast_notify, .targeted_notify, .status, .focus_move, .exit_intent, .float_request, .float_created, .pane_exited, .kill_session, .kill_target, .clear_sessions, .clear_orphaned_panes, .get_layout, .apply_layout, .get_session_state, .session_stolen, .bell, .shp_shell_event => {
-                self.skipBinaryPayload(fd, hdr.payload_len, &buf);
+                self.skipPayloadRest();
                 self.replyOrClose(fd, .@"error", &.{});
             },
             // Unknown wire value (not a named MsgType) — same safe handling.
             _ => {
-                self.skipBinaryPayload(fd, hdr.payload_len, &buf);
+                self.skipPayloadRest();
                 self.replyOrClose(fd, .@"error", &.{});
             },
         }
@@ -2309,11 +3338,11 @@ pub const Server = struct {
                     return;
                 };
                 // Close any previous pending exit_intent CLI fd.
-                if (self.pending_exit_intent_cli_fd) |old_fd| {
-                    self.ses_state.store.noteClosedFd(old_fd);
-                    posix.close(old_fd);
+                if (self.pending_exit_intent_cli_fd) |old_wait| {
+                    self.ses_state.store.noteClosedFd(old_wait.cli_fd);
+                    posix.close(old_wait.cli_fd);
                 }
-                self.pending_exit_intent_cli_fd = fd;
+                self.pending_exit_intent_cli_fd = .{ .cli_fd = fd, .owner_ctl_fd = mux_fd };
                 // Forward to MUX.
                 wire.writeControlTimeout(mux_fd, .exit_intent, std.mem.asBytes(&ei), HANDLER_IO_TIMEOUT_MS) catch |err| {
                     core.logging.logError("ses", "failed to forward exit_intent to mux", err);
@@ -2373,10 +3402,10 @@ pub const Server = struct {
                 // A second concurrent float request would overwrite (and leak)
                 // the previous waiter's fd; close the stale one first.
                 if (self.pending_float_cli_fds.fetchRemove(zero_uuid)) |stale| {
-                    self.ses_state.store.noteClosedFd(stale.value);
-                    posix.close(stale.value);
+                    self.ses_state.store.noteClosedFd(stale.value.cli_fd);
+                    posix.close(stale.value.cli_fd);
                 }
-                self.pending_float_cli_fds.put(zero_uuid, fd) catch |err| {
+                self.pending_float_cli_fds.put(zero_uuid, .{ .cli_fd = fd, .owner_ctl_fd = mux_fd }) catch |err| {
                     core.logging.logError("ses", "failed to track pending float CLI request", err);
                     self.sendBinaryError(fd, "track_failed");
                     posix.close(fd);

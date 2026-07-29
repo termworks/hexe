@@ -434,7 +434,7 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     };
 
     // Local config exists; canonical local config must use hexe.setup({ prompt = ... }).
-    runtime.loadConfig(local_path) catch {
+    runtime.loadProjectConfig(local_path) catch {
         // Failed to load local config, but global is already loaded
         return config;
     };

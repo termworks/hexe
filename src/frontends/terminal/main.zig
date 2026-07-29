@@ -30,6 +30,14 @@ var global_state: std.atomic.Value(?*State) = std.atomic.Value(?*State).init(nul
 
 /// SIGHUP handler: set detach mode and stop the main loop.
 /// This is called when the terminal closes unexpectedly.
+/// Set by SIGWINCH; consumed by the main loop's resize poll. Async-signal-safe:
+/// the handler only does a relaxed atomic store.
+pub var winch_pending: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
+
+fn sigwinchHandler(_: c_int) callconv(.c) void {
+    winch_pending.store(true, .release);
+}
+
 fn sighupHandler(_: c_int) callconv(.c) void {
     if (global_state.load(.acquire)) |state| {
         state.runtime.requestFrontendDisconnectStop();
@@ -321,6 +329,18 @@ pub fn run(terminal_args: TerminalArgs) !void {
     };
     _ = std.os.linux.sigaction(posix.SIG.TERM, &sigterm_action, null);
     _ = std.os.linux.sigaction(posix.SIG.INT, &sigterm_action, null);
+
+    // Handle SIGWINCH: the terminal size only ever changes here, so the main
+    // loop can stop issuing a TIOCGWINSZ ioctl on every single iteration. That
+    // loop is spun hard by pane output and the 100ms ticker, so it was
+    // thousands of syscalls a second for a value that changes when the user
+    // drags a window edge.
+    const sigwinch_action = std.os.linux.Sigaction{
+        .handler = .{ .handler = sigwinchHandler },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(posix.SIG.WINCH, &sigwinch_action, null);
 
     // Redirect stderr to a log file or /dev/null to avoid display corruption.
     // When --log is set without --logfile, default to instance-specific log.

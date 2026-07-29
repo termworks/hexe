@@ -22,6 +22,10 @@ pub const VT = struct {
         height: u32,
         data_len: usize,
         data_hash: u64,
+        /// Address of the payload we last uploaded. An unchanged image keeps
+        /// its buffer, so this lets syncKittyImages skip re-hashing megabytes
+        /// every frame; a retransmit reallocates and falls through to the hash.
+        data_ptr: usize,
         format_tag: u8,
     };
 

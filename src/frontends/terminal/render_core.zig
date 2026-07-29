@@ -11,6 +11,17 @@ pub const CursorInfo = struct {
 };
 
 /// Differential renderer that tracks state and only emits changed cells.
+/// Static ASCII lookup table — `ascii_lut[c..][0..1]` is a valid single-byte
+/// slice with static lifetime, so ASCII cells need no arena allocation at all.
+/// Mirrors the same table in vt_bridge.zig.
+const ascii_lut: [128]u8 = initAsciiLut();
+
+fn initAsciiLut() [128]u8 {
+    var table: [128]u8 = undefined;
+    for (0..128) |i| table[i] = @intCast(i);
+    return table;
+}
+
 pub const Renderer = struct {
     allocator: std.mem.Allocator,
     vx: vaxis.Vaxis,
@@ -50,12 +61,22 @@ pub const Renderer = struct {
         if (x >= self.vx.screen.width or y >= self.vx.screen.height) return;
 
         var stable = cell;
-        if (cell.char.grapheme.len > 0) {
+        const grapheme = cell.char.grapheme;
+        if (grapheme.len == 1 and grapheme[0] < ascii_lut.len) {
+            // Single-byte ASCII — the vast majority of cells, and every cell of
+            // a background fill — points at static storage instead of the frame
+            // arena. Duping unconditionally made the arena grow ~200KB/s with
+            // one medium float on screen (drawBorderFrame alone fills a float's
+            // whole rect one putChar at a time), so every ~30s it crossed the
+            // 8MB reset threshold and forced an invalidate + full repaint that
+            // the user sees as a periodic flash.
+            stable.char.grapheme = ascii_lut[grapheme[0]..][0..1];
+        } else if (grapheme.len > 0) {
             // The screen stores this slice across frames; a transient caller
             // buffer must never leak into it (grapheme iteration over a dead
             // pointer is a segfault). On OOM, drop the glyph rather than
             // store the caller's pointer.
-            stable.char.grapheme = self.frame_arena.allocator().dupe(u8, cell.char.grapheme) catch " ";
+            stable.char.grapheme = self.frame_arena.allocator().dupe(u8, grapheme) catch " ";
         }
         self.vx.screen.writeCell(x, y, stable);
     }

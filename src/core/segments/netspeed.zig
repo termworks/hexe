@@ -8,10 +8,31 @@ var last_rx_bytes: u64 = 0;
 var last_tx_bytes: u64 = 0;
 var last_time_ns: i128 = 0;
 var initialized: bool = false;
+// Last computed speeds, reported again for calls inside the sample interval.
+var last_rx_speed: u64 = 0;
+var last_tx_speed: u64 = 0;
+
+/// Minimum spacing between real samples.
+///
+/// The statusbar evaluates every module TWICE per frame — once to measure its
+/// width, once to draw it — and the drawn value comes from the second call. A
+/// rate derived from "bytes since the previous call" therefore divided by the
+/// few microseconds between those two calls, so the number actually displayed
+/// was inflated by roughly four orders of magnitude. (The width was computed
+/// from the sane one, so the field was mis-sized too.)
+///
+/// Gating here fixes the reported value and, because it returns before the
+/// `/sys/class/net` walk, also removes a full directory scan plus two
+/// open+read per interface from every extra call.
+const MIN_SAMPLE_INTERVAL_NS: i128 = 250 * std.time.ns_per_ms;
 
 /// Netspeed segment - displays cumulative network upload/download speed across all interfaces
 /// Format: ▲468K | ▼130K
 pub fn render(ctx: *Context) ?[]const Segment {
+    if (initialized and std.time.nanoTimestamp() - last_time_ns < MIN_SAMPLE_INTERVAL_NS) {
+        return renderSpeeds(ctx, last_tx_speed, last_rx_speed);
+    }
+
     // Read total bytes from all interfaces
     const rx_bytes = getTotalBytes("/statistics/rx_bytes") orelse return null;
     const tx_bytes = getTotalBytes("/statistics/tx_bytes") orelse return null;
@@ -40,13 +61,17 @@ pub fn render(ctx: *Context) ?[]const Segment {
     last_tx_bytes = tx_bytes;
     last_time_ns = now_ns;
     initialized = true;
+    last_rx_speed = rx_speed;
+    last_tx_speed = tx_speed;
 
     // Format the output (shows 0K on first render)
+    return renderSpeeds(ctx, tx_speed, rx_speed);
+}
+
+fn renderSpeeds(ctx: *Context, tx_speed: u64, rx_speed: u64) ?[]const Segment {
     const tx_str = formatBytes(ctx, tx_speed) orelse return null;
     const rx_str = formatBytes(ctx, rx_speed) orelse return null;
-
     const text = ctx.allocFmt("▲{s} | ▼{s}", .{ tx_str, rx_str }) catch return null;
-
     return ctx.addSegment(text, Style{}) catch return null;
 }
 

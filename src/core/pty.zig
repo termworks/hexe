@@ -62,9 +62,29 @@ pub const Pty = struct {
         else
             null;
 
-        // Create sync pipes for parent-child user namespace coordination
+        // Create sync pipes for parent-child user namespace coordination.
+        //
+        // Every fd opened between here and the fork needs an errdefer: there
+        // was none, so a failure part-way leaked whatever had already been
+        // opened -- 6 fds if the fork itself failed. fork() fails with EAGAIN
+        // precisely under process pressure, i.e. exactly when a caller would
+        // retry, so each retry burned another 6 fds until the process could no
+        // longer spawn anything at all. The errdefers are cancelled by
+        // `spawn_committed` once the fork succeeds and ownership moves to the
+        // parent/child split below.
+        var spawn_committed = false;
+
         const sync_pipe = if (isolated) try posix.pipe() else .{ @as(posix.fd_t, -1), @as(posix.fd_t, -1) };
+        errdefer if (isolated and !spawn_committed) {
+            posix.close(sync_pipe[0]);
+            posix.close(sync_pipe[1]);
+        };
+
         const done_pipe = if (isolated) try posix.pipe() else .{ @as(posix.fd_t, -1), @as(posix.fd_t, -1) };
+        errdefer if (isolated and !spawn_committed) {
+            posix.close(done_pipe[0]);
+            posix.close(done_pipe[1]);
+        };
 
         // Get current terminal size to pass to the new PTY
         var ws: c.winsize = undefined;
@@ -78,8 +98,13 @@ pub const Pty = struct {
         if (c.openpty(&master_fd, &slave_fd, null, null, &ws) != 0) {
             return error.OpenPtyFailed;
         }
+        errdefer if (!spawn_committed) {
+            posix.close(master_fd);
+            posix.close(slave_fd);
+        };
 
         const pid = try posix.fork();
+        spawn_committed = true;
         if (pid == 0) {
             // ============================================================
             // CHILD PROCESS
@@ -260,12 +285,25 @@ pub const Pty = struct {
         const allocator = std.heap.c_allocator;
         var env_list: std.ArrayList(?[*:0]const u8) = .empty;
 
-        var skip_keys: [16][]const u8 = undefined;
+        var skip_keys: [24][]const u8 = undefined;
         var skip_count: usize = 0;
         skip_keys[skip_count] = "BOX";
         skip_count += 1;
         skip_keys[skip_count] = "TERM";
         skip_count += 1;
+        // Never hand the daemon's security opt-outs to a pane's shell
+        // (PLAN.md A-8). These exist so an operator can loosen hexe's own
+        // checks; inherited by every process a pane runs, they would silently
+        // loosen them for anything that re-enters hexe from inside a pane —
+        // including a `.hexe.lua` that would otherwise be sandboxed.
+        for ([_][]const u8{
+            "HEXE_TRUST_ALL_PROJECTS",
+            "HEXE_ALLOW_CROSS_UID",
+            "HEXE_UNRESTRICTED_CONFIG",
+        }) |key| {
+            skip_keys[skip_count] = key;
+            skip_count += 1;
+        }
         if (extra_env) |extras| {
             for (extras) |kv| {
                 if (skip_count < skip_keys.len) {

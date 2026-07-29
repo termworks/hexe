@@ -228,26 +228,41 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
         const ghost_id = entry.key_ptr.*;
         const img = entry.value_ptr.*;
         const fmt = imageFormatToVaxis(img.format) orelse continue;
-        const data_hash = std.hash.Wyhash.hash(0, img.data);
         const fmt_tag: u8 = switch (fmt) {
             .rgb => 1,
             .rgba => 2,
             .png => 3,
         };
 
+        // Avoid re-hashing an unchanged image.
+        //
+        // syncKittyImages runs once per pane per frame, and this hashed the
+        // whole payload every time: a single 2 MiB image cost 2 MiB of Wyhash
+        // per frame, ~120 MB/s at the 60fps cap, to conclude nothing had
+        // changed. An image that has not been retransmitted keeps the same
+        // buffer, so matching address + length + dimensions + format is
+        // conclusive without touching the pixels. A retransmit reallocates and
+        // falls through to the hash, which still suppresses a pointless
+        // re-upload when the new buffer holds identical bytes.
+        const data_ptr = @intFromPtr(img.data.ptr);
+        var data_hash: u64 = 0;
+        var hashed = false;
         if (vt.kitty_image_cache.get(ghost_id)) |cached| {
-            if (cached.width == img.width and
+            const shape_match = cached.width == img.width and
                 cached.height == img.height and
                 cached.data_len == img.data.len and
-                cached.data_hash == data_hash and
-                cached.format_tag == fmt_tag)
-            {
-                continue;
+                cached.format_tag == fmt_tag;
+            if (shape_match and cached.data_ptr == data_ptr) continue;
+            if (shape_match) {
+                data_hash = std.hash.Wyhash.hash(0, img.data);
+                hashed = true;
+                if (cached.data_hash == data_hash) continue;
             }
 
             vx.freeImage(&writer.interface, cached.vaxis_id);
             _ = vt.kitty_image_cache.remove(ghost_id);
         }
+        if (!hashed) data_hash = std.hash.Wyhash.hash(0, img.data);
 
         const w: u16 = @intCast(@min(img.width, std.math.maxInt(u16)));
         const h: u16 = @intCast(@min(img.height, std.math.maxInt(u16)));
@@ -270,6 +285,7 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
             .height = img.height,
             .data_len = img.data.len,
             .data_hash = data_hash,
+            .data_ptr = data_ptr,
             .format_tag = fmt_tag,
         }) catch |err| {
             core.logging.logError("terminal", "failed to cache Kitty image metadata", err);

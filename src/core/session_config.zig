@@ -5,6 +5,7 @@ const LuaRuntime = lua_runtime.LuaRuntime;
 const logging = @import("logging.zig");
 const config_mod = @import("config.zig");
 const session_model = @import("session_model.zig");
+const trust = @import("trust.zig");
 
 /// Direction of a split in session config.
 pub const SplitDir = enum {
@@ -380,7 +381,9 @@ pub fn parseSessionLua(allocator: std.mem.Allocator, path: []const u8) !SessionC
     var runtime = try LuaRuntime.init(allocator);
     defer runtime.deinit();
 
-    runtime.loadConfig(path) catch |err| {
+    // Project-local file: sandboxed unless `hexe allow`ed. Loading EXECUTES
+    // it, so this must gate the load itself, not just the hooks it declares.
+    runtime.loadProjectConfig(path) catch |err| {
         if (err == error.FileNotFound) return err;
         if (runtime.last_error) |msg| {
             std.debug.print("Error loading {s}: {s}\n", .{ path, msg });
@@ -405,7 +408,9 @@ pub fn parseSessionLuaOnce(allocator: std.mem.Allocator, path: []const u8) !Pars
     var runtime = try LuaRuntime.init(allocator);
     defer runtime.deinit();
 
-    runtime.loadConfig(path) catch |err| {
+    // Project-local file: sandboxed unless `hexe allow`ed. Loading EXECUTES
+    // it, so this must gate the load itself, not just the hooks it declares.
+    runtime.loadProjectConfig(path) catch |err| {
         if (err == error.FileNotFound) return err;
         if (runtime.last_error) |msg| {
             std.debug.print("Error loading {s}: {s}\n", .{ path, msg });
@@ -482,7 +487,9 @@ pub fn parseSessionLayoutLua(allocator: std.mem.Allocator, path: []const u8) !co
     var runtime = try LuaRuntime.init(allocator);
     defer runtime.deinit();
 
-    runtime.loadConfig(path) catch |err| {
+    // Project-local file: sandboxed unless `hexe allow`ed. Loading EXECUTES
+    // it, so this must gate the load itself, not just the hooks it declares.
+    runtime.loadProjectConfig(path) catch |err| {
         if (err == error.FileNotFound) return err;
         if (runtime.last_error) |msg| {
             std.debug.print("Error loading {s}: {s}\n", .{ path, msg });
@@ -779,6 +786,108 @@ test "parseSessionLua rejects old top-level layout wrapper" {
     try std.testing.expectError(error.InvalidConfig, parseSessionLua(std.testing.allocator, path));
 }
 
+/// Point the trust ledger at `tmp` and mark `file_path` trusted, so a test
+/// fixture that legitimately needs `io`/`os` is loaded with full capabilities.
+/// Untrusted project files are sandboxed (see `LuaRuntime.loadProjectConfig`),
+/// which is asserted separately below.
+fn trustFixtureForTest(dir_path: []const u8, file_path: []const u8) !void {
+    const ledger_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/trust-ledger", .{dir_path});
+    defer std.testing.allocator.free(ledger_path);
+    trust.setenvForTest("HEXE_TRUST_LEDGER", ledger_path);
+    try trust.allow(std.testing.allocator, file_path);
+}
+
+test "loadProjectConfig sandboxes an UNTRUSTED project file" {
+    // The trust ledger used to gate only the declarative on_start/on_stop
+    // strings, while LOADING the file executed it with io/os/package open and
+    // hexe.exec bound. A hostile repo therefore got arbitrary execution at file
+    // scope before the ledger was ever consulted.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    // Point the ledger somewhere empty so the fixture is definitively untrusted
+    // (and so this test can never consult the developer's real ledger).
+    const prev_ledger = std.posix.getenv("HEXE_TRUST_LEDGER");
+    defer trust.restoreEnvForTest("HEXE_TRUST_LEDGER", prev_ledger);
+    const ledger_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/empty-ledger", .{dir_path});
+    defer std.testing.allocator.free(ledger_path);
+    trust.setenvForTest("HEXE_TRUST_LEDGER", ledger_path);
+
+    // Each probe reports through a tab name, so the assertions read the parsed
+    // layout rather than depending on how the sandbox reports a denial.
+    const code = try std.fmt.allocPrint(std.testing.allocator,
+        \\local wrote = pcall(function()
+        \\  local f = io.open('{s}/pwned', 'w'); f:write('x'); f:close()
+        \\end)
+        \\local can_exec = (type(os) == 'table' and os.execute ~= nil)
+        \\local can_require_os = pcall(function() return require('os') end)
+        \\local hexe = require('hexe')
+        \\return hexe.setup({{ ses = {{ layouts = {{ hexe.layout('sandboxed', {{
+        \\  root = '.',
+        \\  tabs = {{
+        \\    hexe.tab(wrote and 'IO-ESCAPED' or 'io-blocked', {{ root = hexe.pane({{ command = 'sh' }}) }}),
+        \\    hexe.tab(can_exec and 'EXEC-ESCAPED' or 'exec-blocked', {{ root = hexe.pane({{ command = 'sh' }}) }}),
+        \\    hexe.tab(can_require_os and 'REQUIRE-ESCAPED' or 'require-blocked', {{ root = hexe.pane({{ command = 'sh' }}) }}),
+        \\  }},
+        \\}}) }} }} }})
+    , .{dir_path});
+    defer std.testing.allocator.free(code);
+
+    try tmp.dir.writeFile(.{ .sub_path = "layout.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.lua");
+    defer std.testing.allocator.free(path);
+
+    var layout = try parseSessionLayoutLua(std.testing.allocator, path);
+    defer layout.deinit(std.testing.allocator);
+
+    // A sandboxed file must still be able to DECLARE configuration.
+    try std.testing.expectEqualStrings("sandboxed", layout.name);
+    try std.testing.expectEqual(@as(usize, 3), layout.tabs.len);
+    try std.testing.expectEqualStrings("io-blocked", layout.tabs[0].name);
+    try std.testing.expectEqualStrings("exec-blocked", layout.tabs[1].name);
+    try std.testing.expectEqualStrings("require-blocked", layout.tabs[2].name);
+
+    // ...and must not have touched the filesystem on the way.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("pwned", .{}));
+}
+
+test "loadProjectConfig keeps full capabilities for a TRUSTED project file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    const code = try std.fmt.allocPrint(std.testing.allocator,
+        \\local wrote = pcall(function()
+        \\  local f = io.open('{s}/allowed', 'w'); f:write('x'); f:close()
+        \\end)
+        \\local hexe = require('hexe')
+        \\return hexe.setup({{ ses = {{ layouts = {{ hexe.layout('trusted', {{
+        \\  root = '.',
+        \\  tabs = {{ hexe.tab(wrote and 'io-ok' or 'IO-BLOCKED', {{ root = hexe.pane({{ command = 'sh' }}) }}) }},
+        \\}}) }} }} }})
+    , .{dir_path});
+    defer std.testing.allocator.free(code);
+
+    try tmp.dir.writeFile(.{ .sub_path = "layout.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.lua");
+    defer std.testing.allocator.free(path);
+
+    const prev_ledger = std.posix.getenv("HEXE_TRUST_LEDGER");
+    defer trust.restoreEnvForTest("HEXE_TRUST_LEDGER", prev_ledger);
+    try trustFixtureForTest(dir_path, path);
+
+    var layout = try parseSessionLayoutLua(std.testing.allocator, path);
+    defer layout.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("io-ok", layout.tabs[0].name);
+    try tmp.dir.access("allowed", .{});
+}
+
 test "parseSessionLuaOnce: canonical layout carries on_start and executes the file once" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -802,6 +911,10 @@ test "parseSessionLuaOnce: canonical layout carries on_start and executes the fi
     try tmp.dir.writeFile(.{ .sub_path = "layout.lua", .data = code });
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.lua");
     defer std.testing.allocator.free(path);
+
+    const prev_ledger = std.posix.getenv("HEXE_TRUST_LEDGER");
+    defer trust.restoreEnvForTest("HEXE_TRUST_LEDGER", prev_ledger);
+    try trustFixtureForTest(counter_path, path);
 
     var parsed = try parseSessionLuaOnce(std.testing.allocator, path);
     switch (parsed) {
@@ -847,6 +960,10 @@ test "parseSessionLuaOnce: legacy fallback still executes the file once" {
     try tmp.dir.writeFile(.{ .sub_path = "cfg.lua", .data = code });
     const path = try tmp.dir.realpathAlloc(std.testing.allocator, "cfg.lua");
     defer std.testing.allocator.free(path);
+
+    const prev_ledger = std.posix.getenv("HEXE_TRUST_LEDGER");
+    defer trust.restoreEnvForTest("HEXE_TRUST_LEDGER", prev_ledger);
+    try trustFixtureForTest(counter_path, path);
 
     var parsed = try parseSessionLuaOnce(std.testing.allocator, path);
     switch (parsed) {

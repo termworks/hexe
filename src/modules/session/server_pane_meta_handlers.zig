@@ -10,23 +10,23 @@ const Server = server.Server;
 
 pub fn handleBinaryUpdatePaneName(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.UpdatePaneName)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "update_pane_name: payload too small");
         return;
     }
-    const upn = wire.readStructTimeout(wire.UpdatePaneName, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const upn = self.readPayloadStruct(wire.UpdatePaneName) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "update_pane_name request read failed", err);
         self.sendBinaryError(fd, "update_pane_name: read failed");
         return;
     };
     if (upn.name_len > wire.MAX_PAYLOAD_LEN or upn.name_len > buf.len) {
-        self.skipBinaryPayload(fd, upn.name_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "update_pane_name: name too large");
         return;
     }
     if (upn.name_len > 0) {
-        wire.readExactTimeout(fd, buf[0..upn.name_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..upn.name_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "update_pane_name name read failed", err);
             self.sendBinaryError(fd, "update_pane_name: name read failed");
@@ -51,12 +51,13 @@ pub fn handleBinaryUpdatePaneName(self: *Server, fd: posix.fd_t, payload_len: u3
 }
 
 pub fn handleBinaryUpdatePaneAux(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.UpdatePaneAux)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "update_pane_aux: payload too small");
         return;
     }
-    const upa = wire.readStructTimeout(wire.UpdatePaneAux, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const upa = self.readPayloadStruct(wire.UpdatePaneAux) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "update_pane_aux request read failed", err);
         self.sendBinaryError(fd, "update_pane_aux: read failed");
@@ -87,11 +88,11 @@ pub fn handleBinaryUpdatePaneAux(self: *Server, fd: posix.fd_t, payload_len: u32
 
 pub fn handleBinaryUpdatePaneShell(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.UpdatePaneShell)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "update_pane_shell: payload too small");
         return;
     }
-    const ups = wire.readStructTimeout(wire.UpdatePaneShell, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const ups = self.readPayloadStruct(wire.UpdatePaneShell) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "update_pane_shell request read failed", err);
         self.sendBinaryError(fd, "update_pane_shell: read failed");
@@ -99,12 +100,12 @@ pub fn handleBinaryUpdatePaneShell(self: *Server, fd: posix.fd_t, payload_len: u
     };
     const trail_len = payload_len - @sizeOf(wire.UpdatePaneShell);
     if (trail_len > wire.MAX_PAYLOAD_LEN or trail_len > buf.len) {
-        self.skipBinaryPayload(fd, trail_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "update_pane_shell: payload too large");
         return;
     }
     if (trail_len > 0) {
-        wire.readExactTimeout(fd, buf[0..trail_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        self.readPayloadInto(buf[0..trail_len]) catch |err| {
             self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "update_pane_shell trail read failed", err);
             self.sendBinaryError(fd, "update_pane_shell: trail read failed");

@@ -18,6 +18,8 @@ Assertions read a reconstructed SCREEN, not the raw pty bytes: the frontend
 emits cell diffs, so a marker often arrives split across cursor moves even when
 it rendered perfectly.
 """
+import atexit
+import signal
 import fcntl, os, pty, select, struct, subprocess, sys, termios, time
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -51,7 +53,7 @@ procs = [fe]
 
 
 def dpids():
-    return subprocess.run(["pgrep", "-f", "daemon --instance " + INST],
+    return subprocess.run(["pgrep", "-f", "--", "daemon --instance " + INST],
                           capture_output=True, text=True).stdout.split()
 
 
@@ -62,6 +64,14 @@ def cleanup():
     for pid in dpids():
         try: os.kill(int(pid), 9)
         except Exception: pass
+
+# Run teardown even when this script raises or is killed by a timeout.
+# Without this, cleanup() ran only on the success path and inside fail(),
+# so any unhandled exception left the daemon, its pods and their shells
+# alive. Hundreds of runs accumulate enough of them to slow the machine
+# down and make later smokes fail in ways that look like product bugs.
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
 
 def fail(msg):

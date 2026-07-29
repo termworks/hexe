@@ -31,6 +31,58 @@ const containsClearSeq = buffering.containsClearSeq;
 
 const POD_CTL_IO_TIMEOUT_MS: i32 = 2000;
 
+/// How long a peer may take to deliver its 2-byte handshake before the pod
+/// reaps the connection. Generous — the cost of a slow peer is now latency for
+/// that peer alone, not a frozen pod.
+const POD_HANDSHAKE_TIMEOUT_MS: i64 = 5000;
+
+/// Kind of one-shot request a pending connection is delivering.
+const PendingRequestKind = enum { shp, aux_input };
+
+/// Largest request body the pod will buffer for a one-shot connection. Matches
+/// the stack buffers the inline handlers used before they were deferred.
+const POD_REQUEST_BUF_LEN: usize = 8192;
+
+/// Payload length of a wire.ControlHeader, for the SHP request reader.
+fn shpPayloadLen(hdr: []const u8) u32 {
+    const parsed = std.mem.bytesToValue(wire.ControlHeader, hdr[0..@sizeOf(wire.ControlHeader)]);
+    return parsed.payload_len;
+}
+
+/// Payload length of a 5-byte pod_protocol frame header (big-endian u32).
+fn auxPayloadLen(hdr: []const u8) u32 {
+    return std.mem.readInt(u32, hdr[1..5], .big);
+}
+
+/// A one-shot request connection whose body has not fully arrived yet.
+///
+/// SHP did THREE bounded blocking reads (~6s) and aux input two, all inside the
+/// accept callback that drains the entire listen backlog — so a handful of
+/// silent connections wedged the pod, and the user's shell with it, for a
+/// minute and a half (PLAN.md C-4). The body is now read resumably.
+const PendingPodRequest = struct {
+    fd: posix.fd_t,
+    kind: PendingRequestKind,
+    reader: core.StreamReader,
+    started_ms: i64,
+};
+
+/// A connection accepted but whose handshake has not fully arrived yet.
+///
+/// The pod used to read this preamble with a BLOCKING bounded read inside the
+/// accept callback, and that callback drains the whole listen backlog in a
+/// loop. Any local process could therefore connect, send nothing, and freeze
+/// the pod — and with it the user's shell — for the timeout, once per queued
+/// connection (PLAN.md C-4). Now the read is attempted inline (so a
+/// well-behaved peer pays nothing) and anything incomplete moves here, drained
+/// from the periodic tick.
+const PendingPodHandshake = struct {
+    fd: posix.fd_t,
+    buf: [2]u8 = undefined,
+    got: usize = 0,
+    started_ms: i64,
+};
+
 var pod_debug: bool = false;
 
 inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
@@ -404,6 +456,9 @@ const REPLAY_TAIL_CAP: usize = 1024 * 1024;
 const PTY_WRITE_BUF_MAX: usize = 16 * 1024 * 1024;
 const POD_EXIT_ATTACH_GRACE_MS: i64 = 300;
 
+/// Working-set buffer for PTY and client reads. See the allocation site.
+const IO_BUF_LEN: usize = 64 * 1024;
+
 /// Cadence of the socket-file / accept-watcher self-heal check.
 const POD_SOCKET_HEAL_MS: i64 = 5_000;
 
@@ -415,6 +470,8 @@ fn applyPasswordMode(backlog: *RingBuffer, password_mode: *bool, enabled: bool) 
 
 const Pod = struct {
     allocator: std.mem.Allocator,
+    pending_handshakes: std.ArrayList(PendingPodHandshake) = .empty,
+    pending_requests: std.ArrayList(PendingPodRequest) = .empty,
     uuid: [32]u8,
     pty: core.Pty,
     server: core.IpcServer,
@@ -500,6 +557,13 @@ const Pod = struct {
     }
 
     pub fn deinit(self: *Pod) void {
+        for (self.pending_handshakes.items) |ph| posix.close(ph.fd);
+        self.pending_handshakes.deinit(self.allocator);
+        for (self.pending_requests.items) |*pr| {
+            pr.reader.deinit(self.allocator);
+            posix.close(pr.fd);
+        }
+        self.pending_requests.deinit(self.allocator);
         if (self.client) |*client| {
             client.close();
         }
@@ -536,7 +600,16 @@ const Pod = struct {
         var drain_ticker = try xev.Timer.init();
         defer drain_ticker.deinit();
 
-        const buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
+        // Shared I/O buffer for the PTY read path and the client read path.
+        //
+        // This was MAX_FRAME_LEN (4 MiB) -- the protocol's maximum SINGLE
+        // MESSAGE size, not a working-set size -- and it is fully touched, so
+        // every pod paid it in RSS. A PTY master read never returns more than
+        // the tty's own buffer (tens of KB), and the client path feeds
+        // pod_protocol.Reader incrementally, so a smaller buffer just means
+        // another loop iteration. Sizing it here also caps the output frames a
+        // pod emits, which keeps SES's routing scratch bounded too.
+        const buf = try self.allocator.alloc(u8, IO_BUF_LEN);
         defer self.allocator.free(buf);
         const backlog_tmp = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(backlog_tmp);
@@ -778,6 +851,46 @@ const Pod = struct {
         accept_ctx.watcher_armed = true;
     }
 
+    /// Re-settle watchers after a connection was dispatched.
+    ///
+    /// This MUST run on every path that can install a new VT client, not just
+    /// the inline accept path. A handshake that cannot complete immediately is
+    /// deferred to the periodic tick (PLAN.md C-4), so `acceptVtClient` may now
+    /// run from the timer — and skipping this there left the pod never watching
+    /// the new client fd, i.e. permanently deaf to input. `smoke_reconnect`
+    /// caught exactly that: after a SES restart re-dialled the pod, the pane
+    /// never echoed again.
+    fn settleAfterAccept(accept_ctx: *AcceptContext) void {
+        // If the client fd changed (old was closed+replaced by acceptVtClient),
+        // clear the stale watched_fd. The old fd was closed so epoll silently
+        // deregistered it — clientCallback will never fire to clear watched_fd.
+        if (accept_ctx.client_ctx.watched_fd) |old_watched| {
+            const cur_fd = if (accept_ctx.pod.client) |cl| cl.fd else null;
+            if (cur_fd == null or cur_fd.? != old_watched) {
+                debugLog("settleAfterAccept: clearing stale watched_fd={d} (client now={?d})", .{ old_watched, cur_fd });
+                accept_ctx.client_ctx.watched_fd = null;
+            }
+        }
+        if (accept_ctx.pod.client) |client| {
+            armClientWatcher(accept_ctx.client_ctx, client.fd);
+        }
+        debugLog("settleAfterAccept: after armClient, watched_fd={?d}", .{accept_ctx.client_ctx.watched_fd});
+        // Resume for ANY consumer. Back-pressure pauses the PTY when the ring
+        // fills with nothing attached; gating the resume on `client` alone
+        // meant an observer (`hexe pod record`) could attach, receive the
+        // backlog, and then sit there while the child shell stayed blocked on
+        // its PTY writes forever — the reader that was supposed to unblock it
+        // was attached and ignored. armPtyWatcher itself early-returns while
+        // pty_paused is set, so the flag must be cleared first.
+        if ((accept_ctx.pod.client != null or accept_ctx.pod.observers.items.len > 0) and
+            accept_ctx.pod.pty_paused)
+        {
+            debugLog("settleAfterAccept: re-arming pty watcher (was paused)", .{});
+            accept_ctx.pod.pty_paused = false;
+            armPtyWatcher(accept_ctx.pty_ctx);
+        }
+    }
+
     fn acceptCallback(
         ctx: ?*AcceptContext,
         _: *xev.Loop,
@@ -820,25 +933,7 @@ const Pod = struct {
                 accept_ctx.pod.pty_paused,
                 accept_ctx.pty_ctx.armed.*,
             });
-            // If the client fd changed (old was closed+replaced by acceptVtClient),
-            // clear the stale watched_fd. The old fd was closed so epoll silently
-            // deregistered it — clientCallback will never fire to clear watched_fd.
-            if (accept_ctx.client_ctx.watched_fd) |old_watched| {
-                const cur_fd = if (accept_ctx.pod.client) |cl| cl.fd else null;
-                if (cur_fd == null or cur_fd.? != old_watched) {
-                    debugLog("acceptCallback: clearing stale watched_fd={d} (client now={?d})", .{ old_watched, cur_fd });
-                    accept_ctx.client_ctx.watched_fd = null;
-                }
-            }
-            if (accept_ctx.pod.client) |client| {
-                armClientWatcher(accept_ctx.client_ctx, client.fd);
-            }
-            debugLog("acceptCallback: after armClient, watched_fd={?d}", .{accept_ctx.client_ctx.watched_fd});
-            if (accept_ctx.pod.client != null and accept_ctx.pod.pty_paused) {
-                debugLog("acceptCallback: re-arming pty watcher (was paused)", .{});
-                accept_ctx.pod.pty_paused = false;
-                armPtyWatcher(accept_ctx.pty_ctx);
-            }
+            settleAfterAccept(accept_ctx);
         }
 
         return .rearm;
@@ -939,6 +1034,20 @@ const Pod = struct {
 
         debugLog("clientCallback: read {d} bytes from fd={d}", .{ n, slot.fd });
         client_ctx.pod.reader.feed(client_ctx.io_buf[0..n], @ptrCast(client_ctx.pod), podFrameCallback);
+
+        // A header declaring a length past MAX_FRAME_LEN cannot be skipped past
+        // -- the reader would sit in `skipping` for up to 4 GiB while the pane
+        // stayed deaf to input and output kept flowing, which looks exactly
+        // like a hung shell and never recovers. Drop the connection; SES
+        // re-dials and the backlog replays.
+        if (client_ctx.pod.reader.hasProtocolError()) {
+            debugLog("clientCallback: protocol error on fd={d}, dropping client", .{slot.fd});
+            client_ctx.pod.reader.reset();
+            if (client_ctx.pod.client) |*conn| conn.close();
+            client_ctx.pod.client = null;
+            client_ctx.watched_fd = null;
+            return .disarm;
+        }
         return .rearm;
     }
 
@@ -1152,6 +1261,19 @@ const Pod = struct {
             return .disarm;
         };
 
+        // Peers whose handshake did not complete inline (PLAN.md C-4).
+        {
+            const client_before = if (timer_ctx.pod.client) |cl| cl.fd else null;
+            timer_ctx.pod.processPendingHandshakes(timer_ctx.accept_ctx.backlog_tmp);
+            timer_ctx.pod.processPendingRequests();
+            const client_after = if (timer_ctx.pod.client) |cl| cl.fd else null;
+            // A deferred handshake can install a VT client from here, which
+            // needs the same watcher settling the inline accept path does.
+            if (client_before != client_after or timer_ctx.pod.pty_paused) {
+                settleAfterAccept(timer_ctx.accept_ctx);
+            }
+        }
+
         const uplink_attached = timer_ctx.pod.client != null or timer_ctx.pod.observers.items.len > 0;
         timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid, uplink_attached);
 
@@ -1208,14 +1330,67 @@ const Pod = struct {
         }
         setNonBlocking(conn.fd);
 
-        var handshake: [2]u8 = undefined;
-        wire.readExactTimeout(conn.fd, &handshake, POD_CTL_IO_TIMEOUT_MS) catch |err| {
-            debugLog("reject: handshake read failed fd={d}: {s}", .{ conn.fd, @errorName(err) });
-            var tmp_conn = conn;
-            tmp_conn.close();
-            return;
-        };
+        // Accumulate the handshake without blocking. The common case (the peer
+        // wrote both bytes before we accepted) completes inside this call, so a
+        // well-behaved connection is no slower than the old blocking read.
+        var pending = PendingPodHandshake{ .fd = conn.fd, .started_ms = std.time.milliTimestamp() };
+        if (self.advancePodHandshake(&pending, backlog_tmp) == .pending) {
+            self.pending_handshakes.append(self.allocator, pending) catch |err| {
+                debugLog("failed to track pending handshake fd={d}: {s}", .{ conn.fd, @errorName(err) });
+                posix.close(conn.fd);
+            };
+        }
+    }
 
+    const PodHandshakeProgress = enum { done, pending };
+
+    /// Read what is available of the preamble right now. `.done` means the
+    /// connection was dispatched or closed, and the entry must be dropped.
+    fn advancePodHandshake(self: *Pod, ph: *PendingPodHandshake, backlog_tmp: []u8) PodHandshakeProgress {
+        while (ph.got < ph.buf.len) {
+            const n = posix.read(ph.fd, ph.buf[ph.got..]) catch |err| switch (err) {
+                error.WouldBlock => return .pending,
+                else => {
+                    debugLog("reject: handshake read failed fd={d}: {s}", .{ ph.fd, @errorName(err) });
+                    posix.close(ph.fd);
+                    return .done;
+                },
+            };
+            if (n == 0) {
+                debugLog("reject: handshake read failed fd={d}: ConnectionClosed", .{ph.fd});
+                posix.close(ph.fd);
+                return .done;
+            }
+            ph.got += n;
+        }
+        self.dispatchHandshake(core.IpcConnection{ .fd = ph.fd }, ph.buf, backlog_tmp);
+        return .done;
+    }
+
+    /// Drive handshakes that could not complete inline. Runs on the periodic
+    /// tick, so a peer that trickles (or withholds) its preamble costs latency
+    /// for itself instead of freezing the pod.
+    fn processPendingHandshakes(self: *Pod, backlog_tmp: []u8) void {
+        if (self.pending_handshakes.items.len == 0) return;
+        const now = std.time.milliTimestamp();
+        var i: usize = 0;
+        while (i < self.pending_handshakes.items.len) {
+            const ph = &self.pending_handshakes.items[i];
+            if (self.advancePodHandshake(ph, backlog_tmp) == .done) {
+                _ = self.pending_handshakes.swapRemove(i);
+                continue;
+            }
+            if (now - ph.started_ms > POD_HANDSHAKE_TIMEOUT_MS) {
+                debugLog("handshake preamble timed out on fd={d} ({d}/2 bytes)", .{ ph.fd, ph.got });
+                posix.close(ph.fd);
+                _ = self.pending_handshakes.swapRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    fn dispatchHandshake(self: *Pod, conn: core.IpcConnection, handshake: [2]u8, backlog_tmp: []u8) void {
         if (!wire.isProtocolVersionSupported(handshake[1])) {
             debugLog("reject: unsupported protocol version {d} fd={d}", .{ handshake[1], conn.fd });
             var tmp_conn = conn;
@@ -1231,10 +1406,10 @@ const Pod = struct {
             self.acceptVtClient(conn, backlog_tmp);
         } else if (handshake[0] == wire.POD_HANDSHAKE_SHP_CTL) {
             debugLog("accept: SHP ctl fd={d}", .{conn.fd});
-            self.handleBinaryShpConnection(conn);
+            self.beginPodRequest(conn, .shp);
         } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_INPUT) {
             debugLog("accept: aux input fd={d}", .{conn.fd});
-            self.handleAuxInput(conn);
+            self.beginPodRequest(conn, .aux_input);
         } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_OBSERVER) {
             debugLog("accept: aux observer fd={d}", .{conn.fd});
             self.acceptObserver(conn, backlog_tmp);
@@ -1266,16 +1441,23 @@ const Pod = struct {
             n,
             REPLAY_TAIL_CAP,
         );
+        // Bounded writes, like the VT client path. The fd was just set
+        // non-blocking and Connection.send is a bare write loop with no
+        // readiness wait, so plain writeFrame returned WouldBlock as soon as
+        // the socket buffer filled — a few hundred KB in. Any pane with real
+        // scrollback therefore dropped the observer mid-replay, before it was
+        // ever appended to self.observers: `hexe pod record` failed
+        // deterministically with a truncated cast and no error surfaced.
         while (off < n) {
             const chunk = @min(@as(usize, 16 * 1024), n - off);
-            pod_protocol.writeFrame(&obs_conn, .output, backlog_tmp[off .. off + chunk]) catch {
+            pod_protocol.writeFrameBounded(&obs_conn, .output, backlog_tmp[off .. off + chunk], CLIENT_WRITE_TIMEOUT_MS) catch {
                 var tmp = obs_conn;
                 tmp.close();
                 return;
             };
             off += chunk;
         }
-        pod_protocol.writeFrame(&obs_conn, .backlog_end, &[_]u8{}) catch {
+        pod_protocol.writeFrameBounded(&obs_conn, .backlog_end, &[_]u8{}, CLIENT_WRITE_TIMEOUT_MS) catch {
             var tmp = obs_conn;
             tmp.close();
             return;
@@ -1297,7 +1479,9 @@ const Pod = struct {
         var i: usize = 0;
         while (i < self.observers.items.len) {
             const obs = &self.observers.items[i];
-            pod_protocol.writeFrame(obs, .output, data) catch {
+            // Same reasoning as the replay above: one transient EAGAIN on a
+            // live observer used to evict it permanently.
+            pod_protocol.writeFrameBounded(obs, .output, data, CLIENT_WRITE_TIMEOUT_MS) catch {
                 obs.close();
                 _ = self.observers.swapRemove(i);
                 continue;
@@ -1464,97 +1648,120 @@ const Pod = struct {
         // leaving the PTY watcher permanently disarmed after reconnect.
     }
 
-    /// Handle a binary SHP control connection (channel ⑤).
-    /// Reads one ShpShellEvent from SHP and forwards as binary shell_event on POD uplink.
-    fn handleBinaryShpConnection(self: *Pod, conn: core.IpcConnection) void {
-        debugLog("shp connection fd={d}", .{conn.fd});
-        // Read the binary control header.
-        const hdr = wire.readControlHeaderTimeout(conn.fd, POD_CTL_IO_TIMEOUT_MS) catch {
-            var tmp = conn;
-            tmp.close();
-            return;
+    /// Register a one-shot request connection, trying to complete it inline so
+    /// a peer that already wrote its request pays no extra latency.
+    fn beginPodRequest(self: *Pod, conn: core.IpcConnection, kind: PendingRequestKind) void {
+        var pending = PendingPodRequest{
+            .fd = conn.fd,
+            .kind = kind,
+            .reader = switch (kind) {
+                .shp => core.StreamReader.init(@sizeOf(wire.ControlHeader), shpPayloadLen),
+                .aux_input => core.StreamReader.init(5, auxPayloadLen),
+            },
+            .started_ms = std.time.milliTimestamp(),
         };
-
-        const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-        if (msg_type != .shp_shell_event or hdr.payload_len < @sizeOf(wire.ShpShellEvent)) {
-            var tmp = conn;
-            tmp.close();
-            return;
-        }
-
-        // Read the fixed struct.
-        const evt = wire.readStructTimeout(wire.ShpShellEvent, conn.fd, POD_CTL_IO_TIMEOUT_MS) catch {
-            var tmp = conn;
-            tmp.close();
-            return;
-        };
-
-        // Read trailing variable data (cmd + cwd).
-        var trail_buf: [8192]u8 = undefined;
-        const trail_len: usize = @as(usize, evt.cmd_len) + @as(usize, evt.cwd_len);
-        if (trail_len > trail_buf.len) {
-            var tmp = conn;
-            tmp.close();
-            return;
-        }
-        if (trail_len > 0) {
-            wire.readExactTimeout(conn.fd, trail_buf[0..trail_len], POD_CTL_IO_TIMEOUT_MS) catch {
-                var tmp = conn;
-                tmp.close();
-                return;
+        if (self.advancePodRequest(&pending) == .pending) {
+            self.pending_requests.append(self.allocator, pending) catch |err| {
+                debugLog("failed to track pending request fd={d}: {s}", .{ conn.fd, @errorName(err) });
+                pending.reader.deinit(self.allocator);
+                posix.close(conn.fd);
             };
         }
+    }
 
-        var tmp = conn;
-        tmp.close();
+    /// Read what is available of a one-shot request. `.done` means the
+    /// connection was served or dropped and its entry must go.
+    fn advancePodRequest(self: *Pod, pr: *PendingPodRequest) PodHandshakeProgress {
+        var scratch: [POD_REQUEST_BUF_LEN]u8 = undefined;
+        switch (pr.reader.next(pr.fd, &scratch, self.allocator)) {
+            .none => return .pending,
+            .closed, .failed => {
+                debugLog("pod request: stream ended early fd={d}", .{pr.fd});
+                self.finishPodRequest(pr);
+                return .done;
+            },
+            .oversize => |len| {
+                debugLog("pod request: frame too large len={d} fd={d}", .{ len, pr.fd });
+                self.finishPodRequest(pr);
+                return .done;
+            },
+            .frame => |frame| {
+                switch (pr.kind) {
+                    .shp => self.handleShpRequest(frame.hdr, frame.payload),
+                    .aux_input => self.handleAuxInputRequest(frame.hdr, frame.payload),
+                }
+                self.finishPodRequest(pr);
+                return .done;
+            },
+        }
+    }
 
-        // Forward as binary shell_event on the POD uplink (channel ④).
+    fn finishPodRequest(self: *Pod, pr: *PendingPodRequest) void {
+        pr.reader.deinit(self.allocator);
+        posix.close(pr.fd);
+    }
+
+    /// Drive one-shot requests that could not complete inline, from the
+    /// periodic tick.
+    fn processPendingRequests(self: *Pod) void {
+        if (self.pending_requests.items.len == 0) return;
+        const now = std.time.milliTimestamp();
+        var i: usize = 0;
+        while (i < self.pending_requests.items.len) {
+            const pr = &self.pending_requests.items[i];
+            if (self.advancePodRequest(pr) == .done) {
+                _ = self.pending_requests.swapRemove(i);
+                continue;
+            }
+            if (now - pr.started_ms > POD_HANDSHAKE_TIMEOUT_MS) {
+                debugLog("pod request timed out fd={d}", .{pr.fd});
+                self.finishPodRequest(pr);
+                _ = self.pending_requests.swapRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    /// Act on a fully-buffered SHP request. Takes bytes, never an fd, so it
+    /// cannot block the pod.
+    fn handleShpRequest(self: *Pod, hdr_bytes: []const u8, payload: []const u8) void {
+        const hdr = std.mem.bytesToValue(wire.ControlHeader, hdr_bytes[0..@sizeOf(wire.ControlHeader)]);
+        const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+        if (msg_type != .shp_shell_event or payload.len < @sizeOf(wire.ShpShellEvent)) return;
+
+        const evt = std.mem.bytesToValue(wire.ShpShellEvent, payload[0..@sizeOf(wire.ShpShellEvent)]);
+        const trail = payload[@sizeOf(wire.ShpShellEvent)..];
+
+        // Cross-validate the STRUCT's declared lengths against the frame's.
+        // Without this a peer could declare a payload of 21 bytes and cmd_len
+        // of 8000, then have the pod forward an event to SES whose trail
+        // lengths disagreed with the header it was given.
+        const trail_len: usize = @as(usize, evt.cmd_len) + @as(usize, evt.cwd_len);
+        if (trail_len != trail.len) {
+            debugLog("shp: trail length mismatch (struct={d} frame={d})", .{ trail_len, trail.len });
+            return;
+        }
+
         if (!self.uplink.ensureConnected()) return;
         const uplink_fd = self.uplink.fd orelse return;
-        wire.writeControlWithTrailTimeout(uplink_fd, .shell_event, std.mem.asBytes(&evt), trail_buf[0..trail_len], CLIENT_WRITE_TIMEOUT_MS) catch {
+        wire.writeControlWithTrailTimeout(uplink_fd, .shell_event, std.mem.asBytes(&evt), trail, CLIENT_WRITE_TIMEOUT_MS) catch {
             self.uplink.disconnect();
         };
     }
 
-    /// Handle auxiliary input connection (e.g., `hexe pod send`).
-    /// Reads pod_protocol frames and writes input directly to the PTY
-    /// without replacing the main VT client.
-    fn handleAuxInput(self: *Pod, conn: core.IpcConnection) void {
-        var hdr: [5]u8 = undefined;
-        wire.readExactTimeout(conn.fd, &hdr, POD_CTL_IO_TIMEOUT_MS) catch |err| {
-            debugLog("handleAuxInput: frame header read failed fd={d}: {s}", .{ conn.fd, @errorName(err) });
-            var tmp = conn;
-            tmp.close();
-            return;
-        };
-
-        const frame_type_byte = hdr[0];
-        const payload_len = std.mem.readInt(u32, hdr[1..5], .big);
-        var buf: [4096]u8 = undefined;
-        if (payload_len > buf.len) {
-            debugLog("handleAuxInput: frame too large len={d}", .{payload_len});
-            var tmp = conn;
-            tmp.close();
-            return;
-        }
-        wire.readExactTimeout(conn.fd, buf[0..payload_len], POD_CTL_IO_TIMEOUT_MS) catch |err| {
-            debugLog("handleAuxInput: frame payload read failed fd={d}: {s}", .{ conn.fd, @errorName(err) });
-            var tmp = conn;
-            tmp.close();
-            return;
-        };
-
+    /// Act on a fully-buffered aux-input frame.
+    fn handleAuxInputRequest(self: *Pod, hdr_bytes: []const u8, payload: []const u8) void {
+        const frame_type_byte = hdr_bytes[0];
         if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.input)) {
-            self.queuePtyWrite(buf[0..payload_len]);
-        } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize) and payload_len >= 4) {
-            const cols = std.mem.readInt(u16, buf[0..2], .big);
-            const rows = std.mem.readInt(u16, buf[2..4], .big);
+            self.queuePtyWrite(payload);
+        } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize) and payload.len >= 4) {
+            const cols = std.mem.readInt(u16, payload[0..2], .big);
+            const rows = std.mem.readInt(u16, payload[2..4], .big);
             self.pty.setSize(cols, rows) catch |err| {
                 debugLog("handleAuxInput: resize to {d}x{d} failed: {s}", .{ cols, rows, @errorName(err) });
             };
         }
-        var tmp = conn;
-        tmp.close();
     }
 
     fn lastOsc7Cwd(self: *Pod) ?[]const u8 {

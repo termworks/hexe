@@ -18,6 +18,7 @@ Cases exercised here:
 The invariant behind (F) is the one that broke before: candidates are filtered
 to the current directory only.
 """
+import atexit
 import fcntl
 import os
 import pty
@@ -59,7 +60,7 @@ log = open(os.path.join(SCRATCH, "smoke-chooser.raw"), "wb")
 
 
 def pgrep(pattern):
-    r = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+    r = subprocess.run(["pgrep", "-f", "--", pattern], capture_output=True, text=True)
     return [int(x) for x in r.stdout.split()] if r.returncode == 0 else []
 
 
@@ -200,6 +201,14 @@ def cleanup():
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+# Run teardown even when this script raises or is killed by a timeout.
+# Without this, cleanup() ran only on the success path and inside fail(),
+# so any unhandled exception left the daemon, its pods and their shells
+# alive. Hundreds of runs accumulate enough of them to slow the machine
+# down and make later smokes fail in ways that look like product bugs.
+atexit.register(cleanup)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
 
 
 print(f"instance={INST} dirA={DIR_A} dirB={DIR_B} dirC={DIR_C}")

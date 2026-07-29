@@ -164,12 +164,13 @@ pub fn handleBinaryListSessions(self: *Server, fd: posix.fd_t, buf: []u8) void {
 }
 
 pub fn handleBinaryPopResponse(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.PopResponse)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "pop_response: payload too small");
         return;
     }
-    const pr = wire.readStructTimeout(wire.PopResponse, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const pr = self.readPayloadStruct(wire.PopResponse) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "pop_response request read failed", err);
         self.sendBinaryError(fd, "pop_response: read failed");
@@ -189,12 +190,13 @@ pub fn handleBinaryPopResponse(self: *Server, fd: posix.fd_t, payload_len: u32, 
 }
 
 pub fn handleBinaryExited(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.Exited)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         core.logging.warnWithSource("ses", "exited payload too small: fd={d} len={d}", .{ fd, payload_len }, @src());
         return;
     }
-    const ex = wire.readStructTimeout(wire.Exited, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const ex = self.readPayloadStruct(wire.Exited) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.warnWithSource("ses", "exited read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
         return;

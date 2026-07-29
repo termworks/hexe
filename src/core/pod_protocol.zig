@@ -66,6 +66,10 @@ pub const Reader = struct {
     payload_len: usize = 0,
     skipping: bool = false,
     skip_len: usize = 0,
+    /// Set when a header declares a length past MAX_FRAME_LEN. The stream
+    /// cannot be resynchronised from that point, so the caller must drop the
+    /// connection rather than keep feeding it.
+    protocol_error: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, max_len: usize) !Reader {
         return .{ .payload_buf = try allocator.alloc(u8, max_len) };
@@ -82,6 +86,12 @@ pub const Reader = struct {
         self.payload_len = 0;
         self.skipping = false;
         self.skip_len = 0;
+        self.protocol_error = false;
+    }
+
+    /// Whether the stream is unrecoverable and the connection must be dropped.
+    pub fn hasProtocolError(self: *const Reader) bool {
+        return self.protocol_error;
     }
 
     pub fn feed(self: *Reader, data: []const u8, ctx: *anyopaque, on_frame: *const fn (*anyopaque, Frame) void) void {
@@ -112,6 +122,18 @@ pub const Reader = struct {
                         const unknown_len = std.mem.readInt(u32, self.header[1..5], .big);
                         self.payload_len = 0;
                         self.frame_len = 0;
+                        if (unknown_len > MAX_FRAME_LEN) {
+                            // A length past the protocol maximum is not a frame
+                            // we can resynchronise past -- it is a desynced or
+                            // hostile stream. Skipping it put the reader into
+                            // `skipping` for up to 4 GiB, during which the pane
+                            // stayed deaf to input while output kept flowing:
+                            // indistinguishable from a hung shell, and it never
+                            // recovered. Report it so the caller drops the
+                            // connection instead.
+                            self.protocol_error = true;
+                            return;
+                        }
                         if (unknown_len > 0) {
                             self.skipping = true;
                             self.skip_len = unknown_len;
@@ -122,6 +144,12 @@ pub const Reader = struct {
                     };
                     self.frame_len = std.mem.readInt(u32, self.header[1..5], .big);
                     self.payload_len = 0;
+
+                    if (self.frame_len > MAX_FRAME_LEN) {
+                        // Same reasoning as the unknown-type branch above.
+                        self.protocol_error = true;
+                        return;
+                    }
 
                     if (self.frame_len > self.payload_buf.len) {
                         self.skipping = true;
@@ -304,4 +332,68 @@ test "writeFrameBounded: wedged peer yields Timeout, not a hang" {
     );
     const elapsed = std.time.milliTimestamp() - started;
     try std.testing.expect(elapsed < 5_000);
+}
+
+test "Reader rejects a length past MAX_FRAME_LEN instead of skipping it" {
+    var buf: [64]u8 = undefined;
+    var reader = Reader{ .payload_buf = &buf };
+
+    const Sink = struct {
+        var frames: usize = 0;
+        fn onFrame(_: *anyopaque, _: Frame) void {
+            frames += 1;
+        }
+    };
+    Sink.frames = 0;
+    var ctx: u8 = 0;
+
+    // A KNOWN frame type declaring 4 GiB. Skipping that put the reader into
+    // `skipping` for the whole 4 GiB, during which the pane went deaf.
+    var hdr: [5]u8 = undefined;
+    hdr[0] = @intFromEnum(FrameType.input);
+    std.mem.writeInt(u32, hdr[1..5], std.math.maxInt(u32), .big);
+    reader.feed(&hdr, @ptrCast(&ctx), Sink.onFrame);
+
+    try testing.expect(reader.hasProtocolError());
+    try testing.expect(!reader.skipping);
+    try testing.expectEqual(@as(usize, 0), Sink.frames);
+
+    // An UNKNOWN frame type with an absurd length is rejected the same way.
+    reader.reset();
+    try testing.expect(!reader.hasProtocolError());
+    hdr[0] = 0xFE;
+    std.mem.writeInt(u32, hdr[1..5], std.math.maxInt(u32), .big);
+    reader.feed(&hdr, @ptrCast(&ctx), Sink.onFrame);
+    try testing.expect(reader.hasProtocolError());
+}
+
+test "Reader still skips an unknown frame type of sane length" {
+    var buf: [64]u8 = undefined;
+    var reader = Reader{ .payload_buf = &buf };
+
+    const Sink = struct {
+        var frames: usize = 0;
+        var last_len: usize = 0;
+        fn onFrame(_: *anyopaque, f: Frame) void {
+            frames += 1;
+            last_len = f.payload.len;
+        }
+    };
+    Sink.frames = 0;
+    var ctx: u8 = 0;
+
+    // Unknown type, 3-byte payload, then a real frame behind it. The unknown
+    // one must be skipped WITHOUT desyncing the frame that follows.
+    var stream: [5 + 3 + 5 + 2]u8 = undefined;
+    stream[0] = 0xFE;
+    std.mem.writeInt(u32, stream[1..5], 3, .big);
+    @memcpy(stream[5..8], "xxx");
+    stream[8] = @intFromEnum(FrameType.input);
+    std.mem.writeInt(u32, stream[9..13], 2, .big);
+    @memcpy(stream[13..15], "hi");
+
+    reader.feed(&stream, @ptrCast(&ctx), Sink.onFrame);
+    try testing.expect(!reader.hasProtocolError());
+    try testing.expectEqual(@as(usize, 1), Sink.frames);
+    try testing.expectEqual(@as(usize, 2), Sink.last_len);
 }

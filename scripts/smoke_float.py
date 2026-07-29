@@ -26,7 +26,7 @@ os.close(sl); time.sleep(3.5)
 procs = [fe]
 
 def dpids():
-    return subprocess.run(["pgrep", "-f", "daemon --instance " + INST], capture_output=True, text=True).stdout.split()
+    return subprocess.run(["pgrep", "-f", "--", "daemon --instance " + INST], capture_output=True, text=True).stdout.split()
 
 def drain(t):
     d = time.time() + t

@@ -642,7 +642,7 @@ pub const SesConfig = struct {
         };
 
         // Local config exists, load it and merge/overwrite
-        runtime.loadConfig(local_path) catch {
+        runtime.loadProjectConfig(local_path) catch {
             // Failed to load local config, but global is already loaded
             if (runtime.getBuilder()) |builder| {
                 if (builder.ses) |ses_builder| {
@@ -947,7 +947,7 @@ pub const Config = struct {
         log.info("loading local config from: {s}", .{local_path});
 
         // Local config exists, load it and merge/overwrite
-        runtime.loadConfig(local_path) catch |err| {
+        runtime.loadProjectConfig(local_path) catch |err| {
             // Failed to load local config, but global is already loaded
             log.warn("failed to load local config: {}", .{err});
             applyBuilderConfig(runtime, &config, allocator);

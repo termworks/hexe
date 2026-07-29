@@ -59,6 +59,10 @@ const Entry = struct {
     last_code: i32 = 0,
     /// When the last run completed (0 = never).
     last_done_ms: i64 = 0,
+    /// When this entry was last requested. Drives eviction: keys are built
+    /// from user-controllable strings, so a config that composes a command
+    /// dynamically mints a new one every frame.
+    last_used_ms: i64 = 0,
     /// How often to re-run.
     refresh_ms: i64 = DEFAULT_REFRESH_MS,
 
@@ -80,6 +84,20 @@ pub const Result = struct {
 /// Cap on fire-and-forget children awaiting reap. They are backgrounded by the
 /// shell and exit almost immediately, so this only bounds a pathological case.
 pub const MAX_DETACHED: usize = 256;
+
+/// Upper bound on distinct cached commands.
+///
+/// `entries` had no cap, no TTL and no eviction, while its keys come straight
+/// from user-controllable strings ("exec\x1f{timeout}\x1f{cmd}", per-cwd git
+/// keys, every segment command and `when` condition). A config that composes a
+/// command dynamically therefore minted a fresh entry every frame — each one
+/// spawning a child on creation and then retaining its key, argv copy, output
+/// buffer and last value forever, in a process that runs for days.
+pub const MAX_ENTRIES: usize = 512;
+
+/// Entries untouched for this long are dropped even below the cap, so segments
+/// removed by a config reload do not linger.
+pub const ENTRY_IDLE_TTL_MS: i64 = 5 * std.time.ms_per_min;
 
 /// Kill a child and reap it WITHOUT ever blocking. Returns true if it was
 /// reaped here.
@@ -145,7 +163,9 @@ pub const AsyncCmdCache = struct {
             const e = entry_ptr.*;
             if (e.child) |*c| {
                 // Must not block: a command that ignores SIGTERM would other-
-                // wise keep the whole process from ever exiting.
+                // wise keep the whole process from ever exiting. Unlike
+                // eviction there is no reaper left to adopt the corpse, so
+                // this path deliberately does not adopt.
                 var child = c.*;
                 _ = killNoWait(&child);
             }
@@ -226,14 +246,82 @@ pub const AsyncCmdCache = struct {
         }
     }
 
+    /// Free one entry's owned memory, killing any in-flight child first.
+    fn destroyEntry(self: *AsyncCmdCache, e: *Entry) void {
+        if (e.child) |*c| {
+            var child = c.*;
+            // Never block here: a command ignoring SIGTERM must not stall the
+            // caller. The corpse is handed to the detached reaper.
+            if (!killNoWait(&child)) _ = self.adoptForReaping(child);
+        }
+        e.out_buf.deinit(self.allocator);
+        if (e.env) |*env| env.deinit();
+        if (e.last_value) |v| self.allocator.free(v);
+        if (e.argv_owned) |argv| {
+            for (argv) |a| self.allocator.free(a);
+            self.allocator.free(argv);
+        }
+        self.allocator.free(e.key);
+        self.allocator.destroy(e);
+    }
+
+    /// Drop idle entries, then the least recently used ones, until the map is
+    /// back under `MAX_ENTRIES`. In-flight entries are never evicted — killing
+    /// a running command to reclaim a map slot would lose its result and leave
+    /// the caller waiting forever.
+    fn evictEntries(self: *AsyncCmdCache, now: i64) void {
+        var stale: std.ArrayList([]const u8) = .empty;
+        defer stale.deinit(self.allocator);
+
+        var it = self.entries.iterator();
+        while (it.next()) |kv| {
+            const e = kv.value_ptr.*;
+            if (e.inFlight()) continue;
+            if (e.last_used_ms != 0 and now - e.last_used_ms < ENTRY_IDLE_TTL_MS) continue;
+            stale.append(self.allocator, kv.key_ptr.*) catch break;
+        }
+        for (stale.items) |key| {
+            if (self.entries.fetchRemove(key)) |removed| self.destroyEntry(removed.value);
+        }
+
+        while (self.entries.count() >= MAX_ENTRIES) {
+            var oldest_key: ?[]const u8 = null;
+            var oldest_ms: i64 = std.math.maxInt(i64);
+            var scan = self.entries.iterator();
+            while (scan.next()) |kv| {
+                const e = kv.value_ptr.*;
+                if (e.inFlight()) continue;
+                if (e.last_used_ms < oldest_ms) {
+                    oldest_ms = e.last_used_ms;
+                    oldest_key = kv.key_ptr.*;
+                }
+            }
+            const victim = oldest_key orelse break; // everything is in flight
+            if (self.entries.fetchRemove(victim)) |removed| {
+                self.destroyEntry(removed.value);
+            } else break;
+        }
+    }
+
     fn getOrCreate(self: *AsyncCmdCache, key: []const u8, refresh_ms: i64) ?*Entry {
-        if (self.entries.get(key)) |e| return e;
+        const now = std.time.milliTimestamp();
+        if (self.entries.get(key)) |e| {
+            e.last_used_ms = now;
+            return e;
+        }
+        if (self.entries.count() >= MAX_ENTRIES) {
+            self.evictEntries(now);
+            if (self.entries.count() >= MAX_ENTRIES) {
+                logging.warn("async-cmd", "command cache full ({d} entries); refusing new key", .{self.entries.count()});
+                return null;
+            }
+        }
         const owned_key = self.allocator.dupe(u8, key) catch return null;
         const e = self.allocator.create(Entry) catch {
             self.allocator.free(owned_key);
             return null;
         };
-        e.* = .{ .key = owned_key, .refresh_ms = refresh_ms };
+        e.* = .{ .key = owned_key, .refresh_ms = refresh_ms, .last_used_ms = now };
         self.entries.put(owned_key, e) catch {
             self.allocator.free(owned_key);
             self.allocator.destroy(e);
@@ -780,4 +868,38 @@ test "AsyncCmdCache: spawnDetached refuses to grow without bound" {
         }
     }.f;
     try testing.expect(pumpUntil(&cache, 15_000, all_reaped));
+}
+
+test "AsyncCmdCache: entries are capped and least-recently-used keys evicted" {
+    var cache = AsyncCmdCache.init(testing.allocator);
+    defer cache.deinit();
+
+    // The map had no cap at all, so a config composing a command dynamically
+    // grew it without bound in a process that runs for days.
+    var i: usize = 0;
+    var key_buf: [64]u8 = undefined;
+    while (i < MAX_ENTRIES + 32) : (i += 1) {
+        const key = try std.fmt.bufPrint(&key_buf, "probe-key-{d}", .{i});
+        // Entries are created but never spawned here, so none are in flight
+        // and all are evictable.
+        _ = cache.getOrCreate(key, 1000);
+    }
+    try testing.expect(cache.entries.count() <= MAX_ENTRIES);
+
+    // The most recent key must have survived; the very first must not.
+    const newest = try std.fmt.bufPrint(&key_buf, "probe-key-{d}", .{MAX_ENTRIES + 31});
+    try testing.expect(cache.entries.get(newest) != null);
+    const oldest = try std.fmt.bufPrint(&key_buf, "probe-key-0", .{});
+    try testing.expect(cache.entries.get(oldest) == null);
+}
+
+test "AsyncCmdCache: repeated lookups of one key do not grow the map" {
+    var cache = AsyncCmdCache.init(testing.allocator);
+    defer cache.deinit();
+
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        _ = cache.getOrCreate("stable-key", 1000);
+    }
+    try testing.expectEqual(@as(usize, 1), cache.entries.count());
 }

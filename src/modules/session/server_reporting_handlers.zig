@@ -12,18 +12,20 @@ const Server = server.Server;
 
 /// Handle exit_intent_result from MUX — forward to waiting CLI.
 pub fn handleBinaryExitIntentResult(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
     if (payload_len < @sizeOf(wire.ExitIntentResult)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "exit_intent_result: payload too small");
         return;
     }
-    const result = wire.readStructTimeout(wire.ExitIntentResult, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const result = self.readPayloadStruct(wire.ExitIntentResult) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "exit_intent_result request read failed", err);
         self.sendBinaryError(fd, "exit_intent_result: read failed");
         return;
     };
-    if (self.pending_exit_intent_cli_fd) |cli_fd| {
+    if (self.pending_exit_intent_cli_fd) |wait| {
+        const cli_fd = wait.cli_fd;
         // Same single-owner rule as float_result: replyOrClose queues the
         // fd on write failure, so a direct close here would double-close
         // it. Route the success path through the queue too.
@@ -38,11 +40,11 @@ pub fn handleBinaryExitIntentResult(self: *Server, fd: posix.fd_t, payload_len: 
 /// Handle float_result from MUX — forward to waiting CLI.
 pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.FloatResult)) {
-        self.skipBinaryPayload(fd, payload_len, buf);
+        self.skipPayloadRest();
         self.sendBinaryError(fd, "float_result: payload too small");
         return;
     }
-    const result = wire.readStructTimeout(wire.FloatResult, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+    const result = self.readPayloadStruct(wire.FloatResult) catch |err| {
         self.ctlStreamDesynced(fd, "mid-message read failed");
         core.logging.logError("ses", "float_result request read failed", err);
         self.sendBinaryError(fd, "float_result: read failed");
@@ -53,12 +55,12 @@ pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, 
     // Find CLI fd by UUID.
     var cli_fd: ?posix.fd_t = null;
     if (self.pending_float_cli_fds.fetchRemove(result.uuid)) |entry| {
-        cli_fd = entry.value;
+        cli_fd = entry.value.cli_fd;
     } else {
         // Try zero UUID (pending assignment).
         const zero_uuid: [32]u8 = .{0} ** 32;
         if (self.pending_float_cli_fds.fetchRemove(zero_uuid)) |entry| {
-            cli_fd = entry.value;
+            cli_fd = entry.value.cli_fd;
         }
     }
 
@@ -70,7 +72,7 @@ pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, 
         // reused by then). queueCtlClose dedups, so routing the success
         // path through it too gives the fd exactly one owner.
         if (trail_len > 0 and trail_len <= buf.len) {
-            wire.readExactTimeout(fd, buf[0..trail_len], server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+            self.readPayloadInto(buf[0..trail_len]) catch |err| {
                 self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.warnWithSource("ses", "float_result trail read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
                 self.queueCtlClose(cfd, null);
@@ -79,7 +81,7 @@ pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, 
             self.replyOrCloseWithTrail(cfd, .float_result, std.mem.asBytes(&result), buf[0..trail_len]);
         } else if (trail_len > buf.len) {
             core.logging.warn("ses", "float_result trail too large: fd={d} len={d}", .{ fd, trail_len });
-            self.skipBinaryPayload(fd, @intCast(trail_len), buf);
+            self.skipPayloadRest();
             self.sendBinaryError(cfd, "float_result: trail too large");
         } else {
             self.replyOrClose(cfd, .float_result, std.mem.asBytes(&result));
@@ -88,7 +90,7 @@ pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, 
     } else {
         // No CLI waiting — skip trailing data.
         core.logging.warn("ses", "float_result arrived without pending CLI fd for uuid={s}", .{result.uuid[0..8]});
-        if (trail_len > 0) self.skipBinaryPayload(fd, @intCast(trail_len), buf);
+        if (trail_len > 0) self.skipPayloadRest();
     }
 }
 

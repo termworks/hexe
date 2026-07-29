@@ -48,12 +48,11 @@ pub fn removePaneFromDetachedSessions(
         }
         const idx = found_idx orelse continue;
 
-        var pane_uuids = std.ArrayList([32]u8).fromOwnedSlice(entry.value_ptr.pane_uuids);
-        _ = pane_uuids.orderedRemove(idx);
-        entry.value_ptr.pane_uuids = pane_uuids.toOwnedSlice(entry.value_ptr.allocator) catch {
-            entry.value_ptr.pane_uuids = pane_uuids.items;
-            continue;
-        };
+        entry.value_ptr.pane_uuids = snapshot_mod.removeUuidFromOwnedSlice(
+            entry.value_ptr.allocator,
+            entry.value_ptr.pane_uuids,
+            idx,
+        );
         snapshot_mod.removePaneFromSessionSnapshot(allocator, &entry.value_ptr.session_snapshot, pane_uuid);
 
         if (entry.value_ptr.pane_uuids.len == 0) {
@@ -101,11 +100,22 @@ pub fn findByNameOrPrefix(store: *const store_mod.SessionStore, id: []const u8) 
     // an arbitrary same-prefixed session.
     var prefix_match: ?[16]u8 = null;
     var prefix_count: usize = 0;
+    // Names must match uniquely for exactly the same reason uuid prefixes do.
+    // Returning the FIRST name match meant hashmap iteration order decided
+    // which session `hexe kill-session foo` destroyed -- and duplicate names
+    // are deliberately tolerated: cleanup.zig logs "duplicate live detached
+    // sessions named '{s}'; keeping both", and persist.load can create a pair
+    // by restoring an already-detached session alongside the crash-recovered
+    // attached entry for the same name.
+    var name_match: ?[16]u8 = null;
+    var name_count: usize = 0;
     var iter = store.detached_sessions.iterator();
     while (iter.next()) |entry| {
         const session = entry.value_ptr;
         if (std.mem.eql(u8, session.session_snapshot.session_name, id)) {
-            return entry.key_ptr.*;
+            name_match = entry.key_ptr.*;
+            name_count += 1;
+            continue;
         }
 
         const hex_id = std.fmt.bytesToHex(entry.key_ptr.*, .lower);
@@ -114,6 +124,9 @@ pub fn findByNameOrPrefix(store: *const store_mod.SessionStore, id: []const u8) 
             prefix_count += 1;
         }
     }
+    // An exact name still wins over a uuid prefix, but only when unambiguous.
+    if (name_count == 1) return name_match;
+    if (name_count > 1) return null;
     if (prefix_count == 1) return prefix_match;
     return null;
 }

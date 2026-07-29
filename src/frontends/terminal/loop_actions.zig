@@ -1211,6 +1211,37 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
 
     if (!state.runtime.isConnected()) return error.SesUnavailable;
     const env_parent = if (float_def.attributes.inherit_env) parent_uuid else null;
+
+    // Carry declared cgroup limits to the pod.
+    //
+    // `isolation_voidbox.applyParentCgroups` reads HEXE_CGROUP_MEM_MAX /
+    // _CPU_MAX / _PIDS_MAX from the environment, and NOTHING in the tree ever
+    // set them — so `memory`/`cpu`/`pids` from init.lua were parsed, stored and
+    // then silently dropped, while docs/isolation.md advertised contained fork
+    // bombs and memory kills. spawnPod already overlays caller-supplied env
+    // onto the pod's environment, so this needs no protocol change.
+    var cgroup_env_buf: [3][]const u8 = undefined;
+    var cgroup_env_len: usize = 0;
+    defer for (cgroup_env_buf[0..cgroup_env_len]) |e| state.allocator.free(@constCast(e));
+    if (float_def.isolation) |iso| {
+        const pairs = [_]struct { key: []const u8, value: ?[]const u8 }{
+            .{ .key = "HEXE_CGROUP_MEM_MAX", .value = iso.memory },
+            .{ .key = "HEXE_CGROUP_CPU_MAX", .value = iso.cpu },
+            .{ .key = "HEXE_CGROUP_PIDS_MAX", .value = iso.pids },
+        };
+        for (pairs) |pair| {
+            const value = pair.value orelse continue;
+            if (value.len == 0) continue;
+            const entry = std.fmt.allocPrint(state.allocator, "{s}={s}", .{ pair.key, value }) catch |err| {
+                terminal_main.debugLog("createNamedFloat: failed to build cgroup env entry: {s}", .{@errorName(err)});
+                continue;
+            };
+            cgroup_env_buf[cgroup_env_len] = entry;
+            cgroup_env_len += 1;
+        }
+    }
+    const spawn_env: ?[]const []const u8 = if (cgroup_env_len > 0) cgroup_env_buf[0..cgroup_env_len] else null;
+
     const NamedFloatPaneResult = struct {
         uuid: [32]u8,
         pane_id: u16,
@@ -1237,7 +1268,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
                 }
             }
         }
-        const created = try state.runtime.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent);
+        const created = try state.runtime.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, spawn_env, isolation_profile, env_parent);
         break :blk .{
             .uuid = created.uuid,
             .pane_id = created.pane_id,

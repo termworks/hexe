@@ -11,6 +11,7 @@ const loop_input = @import("loop_input.zig");
 const loop_mouse = @import("loop_mouse.zig");
 const loop_render = @import("loop_render.zig");
 const terminal = @import("terminal.zig");
+const terminal_main = @import("main.zig");
 
 const TERMINAL_QUERY_TIMEOUT_MS: i64 = 1200;
 
@@ -120,7 +121,25 @@ fn finalizeCapabilities(state: *State, now_ms: i64) void {
     logTerminalCapabilities(state, timed_out);
 }
 
+/// Backstop cadence for the resize check. SIGWINCH is the primary trigger; this
+/// bounds the damage if one is ever missed, since a terminal stuck at the wrong
+/// size is far worse than one ioctl every few seconds.
+const RESIZE_BACKSTOP_MS: i64 = 2_000;
+var last_resize_check_ms: i64 = 0;
+
 fn pollResize(state: *State) void {
+    // Only ask the kernel when SIGWINCH says the size may have changed. This
+    // used to run an unconditional TIOCGWINSZ ioctl on every pass of the main
+    // loop, which pane output and the 100ms ticker spin thousands of times a
+    // second. The flag starts set so the initial size is still read once.
+    const signalled = terminal_main.winch_pending.swap(false, .acquire);
+    if (!signalled) {
+        const now = std.time.milliTimestamp();
+        if (now - last_resize_check_ms < RESIZE_BACKSTOP_MS) return;
+        last_resize_check_ms = now;
+    } else {
+        last_resize_check_ms = std.time.milliTimestamp();
+    }
     const new_size = terminal.getTermSize();
     if (new_size.cols != state.term_width or new_size.rows != state.term_height) {
         state.applyTerminalResize(new_size.cols, new_size.rows);

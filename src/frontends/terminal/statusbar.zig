@@ -624,23 +624,39 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
     rt.lua.pushInteger(@intCast(ctx.now_ms));
     rt.lua.setField(-2, "now_ms");
 
-    var env_map_opt = std.process.getEnvMap(rt.allocator) catch |err| blk: {
-        core.logging.logError("terminal", "statusbar Lua query failed to copy environment", err);
-        break :blk null;
-    };
-    if (env_map_opt) |*env_map| {
-        defer env_map.deinit();
-        rt.lua.createTable(0, @intCast(env_map.count()));
-        var it = env_map.iterator();
-        while (it.next()) |entry| {
-            _ = rt.lua.pushString(entry.key_ptr.*);
-            _ = rt.lua.pushString(entry.value_ptr.*);
-            rt.lua.setTable(-3);
-        }
+    // The frontend's own environment does not change while it runs, but this
+    // used to call getEnvMap() -- allocate and copy every variable -- and then
+    // push all of them into a fresh Lua table for EVERY Context. A Context is
+    // built per statusbar draw and per visible float title, on frames driven by
+    // pane output rather than the status tick, so with a few floats this ran
+    // hundreds of times a second. Build it once and hand out the same table.
+    const env_cache_global = "__hexe_statusbar_env";
+    const cached_env = rt.lua.getGlobal(env_cache_global) catch .nil;
+    if (cached_env == .table) {
         rt.lua.setField(-2, "env");
     } else {
-        rt.lua.createTable(0, 0);
-        rt.lua.setField(-2, "env");
+        rt.lua.pop(1);
+        var env_map_opt = std.process.getEnvMap(rt.allocator) catch |err| blk: {
+            core.logging.logError("terminal", "statusbar Lua query failed to copy environment", err);
+            break :blk null;
+        };
+        if (env_map_opt) |*env_map| {
+            defer env_map.deinit();
+            rt.lua.createTable(0, @intCast(env_map.count()));
+            var it = env_map.iterator();
+            while (it.next()) |entry| {
+                _ = rt.lua.pushString(entry.key_ptr.*);
+                _ = rt.lua.pushString(entry.value_ptr.*);
+                rt.lua.setTable(-3);
+            }
+            // Keep one reference for reuse, set the other on ctx.
+            rt.lua.pushValue(-1);
+            rt.lua.setGlobal(env_cache_global);
+            rt.lua.setField(-2, "env");
+        } else {
+            rt.lua.createTable(0, 0);
+            rt.lua.setField(-2, "env");
+        }
     }
 
     // Build pane lookup maps: numeric index, uuid, and tab focus.
@@ -745,12 +761,11 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
         "hexe.status=hexe.status or {}; " ++
         "hexe.status.pane=ctx.pane; " ++
         "end";
-    const pane_api_z = rt.allocator.dupeZ(u8, pane_api) catch {
-        rt.lua.setGlobal("ctx");
-        return;
-    };
-    defer rt.allocator.free(pane_api_z);
-    rt.lua.loadString(pane_api_z) catch {
+    // `pane_api` is a compile-time constant, so the old per-call
+    // `dupeZ` + free was pure waste on a path that runs for every Context —
+    // and a Context is built per statusbar draw AND per visible float title,
+    // on frames driven by pane output rather than the status tick.
+    rt.lua.loadString(pane_api) catch {
         rt.lua.setGlobal("ctx");
         return;
     };
@@ -1065,6 +1080,18 @@ fn evalLuaBuiltinDescCached(code: []const u8, ctx: *shp.Context) BuiltinDesc {
     return desc;
 }
 
+/// Report a malformed field in a Lua builtin descriptor.
+///
+/// These checks used to call `lua.raiseError()`, but this whole function runs
+/// AFTER `beginLuaEval` returned — plain Zig, with no `lua_pcall` frame on the
+/// stack. `lua_error` with no handler invokes Lua's default panic function,
+/// which `abort()`s the process, so a single mistyped config value
+/// (`prefix = { output = 5 }`) killed the terminal and every attached pane's UI.
+/// A bad field degrades to its default instead.
+fn warnBadBuiltinField(comptime field: []const u8) void {
+    core.logging.warn("terminal", "statusbar builtin: " ++ field ++ " must be a string; ignoring", .{});
+}
+
 fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
     var desc: BuiltinDesc = .{};
     const trace_start_ms = std.time.milliTimestamp();
@@ -1139,8 +1166,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     @memcpy(desc.prefix_buf[0..n], s[0..n]);
                     desc.prefix_len = n;
                 } else if (rt.lua.typeOf(-1) != .nil) {
-                    _ = rt.lua.pushString("builtin.prefix.output must be string");
-                    rt.lua.raiseError();
+                    warnBadBuiltinField("builtin.prefix.output");
                 }
                 rt.lua.pop(1);
 
@@ -1149,8 +1175,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     const s = rt.lua.toString(-1) catch "";
                     desc.prefix_style = shp.Style.parse(s);
                 } else if (rt.lua.typeOf(-1) != .nil) {
-                    _ = rt.lua.pushString("builtin.prefix.style must be string");
-                    rt.lua.raiseError();
+                    warnBadBuiltinField("builtin.prefix.style");
                 }
                 rt.lua.pop(1);
             }
@@ -1170,8 +1195,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     @memcpy(desc.suffix_buf[0..n], s[0..n]);
                     desc.suffix_len = n;
                 } else if (rt.lua.typeOf(-1) != .nil) {
-                    _ = rt.lua.pushString("builtin.suffix.output must be string");
-                    rt.lua.raiseError();
+                    warnBadBuiltinField("builtin.suffix.output");
                 }
                 rt.lua.pop(1);
 
@@ -1180,8 +1204,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     const s = rt.lua.toString(-1) catch "";
                     desc.suffix_style = shp.Style.parse(s);
                 } else if (rt.lua.typeOf(-1) != .nil) {
-                    _ = rt.lua.pushString("builtin.suffix.style must be string");
-                    rt.lua.raiseError();
+                    warnBadBuiltinField("builtin.suffix.style");
                 }
                 rt.lua.pop(1);
             }
@@ -1197,8 +1220,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                         @memcpy(desc.suffix_buf[0..n], s[0..n]);
                         desc.suffix_len = n;
                     } else if (rt.lua.typeOf(-1) != .nil) {
-                        _ = rt.lua.pushString("builtin.sufix.output must be string");
-                        rt.lua.raiseError();
+                        warnBadBuiltinField("builtin.sufix.output");
                     }
                     rt.lua.pop(1);
 
@@ -1207,8 +1229,7 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                         const s = rt.lua.toString(-1) catch "";
                         desc.suffix_style = shp.Style.parse(s);
                     } else if (rt.lua.typeOf(-1) != .nil) {
-                        _ = rt.lua.pushString("builtin.sufix.style must be string");
-                        rt.lua.raiseError();
+                        warnBadBuiltinField("builtin.sufix.style");
                     }
                     rt.lua.pop(1);
                 }
@@ -2150,7 +2171,14 @@ fn measureTabsWidth(tab_names: []const []const u8, separator: []const u8, left_a
 
 pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: *const core.config.Segment, start_x: u16, y: u16, hovered: bool) u16 {
     var x = start_x;
-    _ = query;
+
+    // `when` was parsed onto every Segment (config_builder.zig, config.zig) and
+    // implemented here as passesWhen/passesWhenClause, but nothing ever called
+    // it — both this and calcModuleWidth discarded their PaneQuery. So a segment
+    // configured `when = { float = true }` was always drawn and always measured.
+    // The shell prompt path honours it (modules/shell/main.zig), which is what
+    // makes this a terminal-side regression rather than an intentional removal.
+    if (!passesWhen(ctx, query, mod.*)) return start_x;
 
     const prev_module_style = ctx.module_default_style;
     defer ctx.module_default_style = prev_module_style;
@@ -2400,7 +2428,8 @@ pub fn drawFormatted(renderer: *Renderer, ctx: *shp.Context, start_x: u16, y: u1
 }
 
 pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *const core.config.Segment) u16 {
-    _ = query;
+    // Must agree with drawModule or the bar's layout and its contents disagree.
+    if (!passesWhen(ctx, query, mod.*)) return 0;
 
     const prev_module_style = ctx.module_default_style;
     defer ctx.module_default_style = prev_module_style;
