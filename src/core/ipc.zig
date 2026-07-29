@@ -287,6 +287,20 @@ pub const Client = struct {
         }
 
         try setBlocking(fd);
+
+        // Verify the SERVER's uid, not just the client's (PLAN.md A-5).
+        // `verifyPeerUid` was called only on the accept side, so nothing
+        // checked who we had just connected TO. Combined with the `/tmp`
+        // fallback for the socket directory (A-6), another local user can bind
+        // `ses.sock` first; the real daemon then fails with AddressInUse and
+        // every frontend and CLI hands its session traffic — keystrokes
+        // included — to whoever got there first. Checking here closes that for
+        // every connect path at once, before a single handshake byte is sent.
+        if (!verifyPeerUid(fd)) {
+            log.warn("refusing to connect to {s}: socket is owned by another uid", .{path});
+            return error.PeerUidMismatch;
+        }
+
         return Client{ .fd = fd };
     }
 
@@ -503,7 +517,35 @@ const strings = @import("strings.zig");
 
 fn sanitizeInstanceName(out: []u8, raw: []const u8) []const u8 {
     // NOTE: Unix domain socket paths have tight limits; keep this short.
-    return strings.sanitize(out, raw, 24);
+    const sanitized = strings.sanitize(out, raw, 24);
+
+    // Reject names made only of dots (PLAN.md A-11). `strings.sanitize` maps
+    // `/` to `_`, so a separator cannot get through — but it deliberately keeps
+    // `.`, which leaves `HEXE_INSTANCE=..` free to place this instance's
+    // sockets, state and logs one directory ABOVE the namespace they are
+    // supposed to be confined to (and `.` to collide with the un-namespaced
+    // default). Returning empty makes every caller fall back to the plain
+    // non-instance path, which is the same thing an unset variable does.
+    for (sanitized) |ch| {
+        if (ch != '.') return sanitized;
+    }
+    return sanitized[0..0];
+}
+
+test "sanitizeInstanceName rejects dot-only names but keeps dots elsewhere" {
+    var buf: [32]u8 = undefined;
+
+    // Traversal / collision attempts collapse to empty (= no instance).
+    try testing.expectEqual(@as(usize, 0), sanitizeInstanceName(buf[0..], ".").len);
+    try testing.expectEqual(@as(usize, 0), sanitizeInstanceName(buf[0..], "..").len);
+    try testing.expectEqual(@as(usize, 0), sanitizeInstanceName(buf[0..], "....").len);
+
+    // A dot is still legal inside an otherwise ordinary name.
+    try testing.expectEqualStrings("my.instance", sanitizeInstanceName(buf[0..], "my.instance"));
+    try testing.expectEqualStrings("smk123", sanitizeInstanceName(buf[0..], "smk123"));
+
+    // Separators were already neutralised; confirm that still holds.
+    try testing.expectEqualStrings("_.._etc", sanitizeInstanceName(buf[0..], "/../etc"));
 }
 
 /// Get the socket directory path
