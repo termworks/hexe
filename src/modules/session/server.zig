@@ -1248,6 +1248,22 @@ pub const Server = struct {
         self.pending_vt_close_fds.clearRetainingCapacity();
     }
 
+    /// Connections this daemon is actually holding right now.
+    ///
+    /// The cap used to read `stats.active_connections`, which the periodic tick
+    /// refreshed at most once every 5s from `clients.items.len` — i.e. from
+    /// REGISTERED clients only (PLAN.md A-13). Anything accepted but not yet
+    /// registered was invisible to it, so a burst could blow straight past
+    /// `max_connections` while the cap still saw the old, lower number.
+    ///
+    /// Derived from the live maps rather than kept as a counter on purpose: an
+    /// increment/decrement pair that misses one close path would drift upward
+    /// forever and eventually refuse every connection — a worse failure than
+    /// the one being fixed, and one that only shows up after hours of uptime.
+    fn liveConnectionCount(self: *const Server) usize {
+        return self.ctl_watchers.count() + self.vt_watchers.count() + self.pending_handshakes.items.len;
+    }
+
     /// Enqueue an fd for deferred close, deduped by fd. Shared by the CTL and
     /// VT channels so the enqueue path can't drift between them (PLAN.md 2.5).
     /// The channel-specific *drain* (processPending{Ctl,Vt}Closes) stays
@@ -1837,7 +1853,8 @@ pub const Server = struct {
         if (now_ms - periodic.last_stats_update >= 5000) {
             const detached_sessions = periodic.server.ses_state.store.detached_sessions.count();
             const total_panes = periodic.server.ses_state.store.panes.count();
-            const active_connections = periodic.server.ses_state.store.clients.items.len;
+            // Report what the cap actually enforces, not just registered clients.
+            const active_connections = periodic.server.liveConnectionCount();
 
             periodic.server.resource_monitor.updateStats(
                 active_connections,
@@ -1903,8 +1920,8 @@ pub const Server = struct {
         // Applying the rate limit at accept time meant pod reconnects, which
         // retry from a ~1s tick, could exhaust the window and lock the user out
         // of attach; a human gets one try, a dozen pods get sixty.
-        if (!self.resource_monitor.allowNewConnectionCount()) {
-            ses.debugLog("reject: connection count limit exceeded", .{});
+        if (self.liveConnectionCount() >= self.resource_monitor.limits.max_connections) {
+            ses.debugLog("reject: connection count limit exceeded (live={d})", .{self.liveConnectionCount()});
             const err_msg = "server_overloaded: connection limit exceeded";
             const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
             self.replyOrCloseWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg);

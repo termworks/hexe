@@ -29,8 +29,9 @@ pub const ResourceStats = struct {
 
 /// Resource limits configuration
 pub const ResourceLimits = struct {
-    /// Maximum concurrent client connections (default: 64)
-    max_connections: usize = constants.Limits.max_clients,
+    /// Maximum concurrent socket connections (default: 512). Counts every fd
+    /// SES holds, not just registered frontends — see Limits.max_connections.
+    max_connections: usize = constants.Limits.max_connections,
 
     /// Maximum panes per session (default: 1000)
     max_panes_per_session: usize = 1000,

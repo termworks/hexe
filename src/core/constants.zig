@@ -59,9 +59,22 @@ pub const Timing = struct {
 
 /// Connection and client limits
 pub const Limits = struct {
-    /// Maximum number of concurrent clients for SES daemon
+    /// Maximum number of concurrent registered CLIENTS (frontends) for SES.
     /// Used in: src/modules/session/server.zig
     pub const max_clients: usize = 64;
+
+    /// Maximum concurrent SOCKET connections SES will hold.
+    ///
+    /// Distinct from `max_clients`, and much larger, because it counts every
+    /// fd — not just registered frontends. SES holds two connections per pane
+    /// (the pod's CTL uplink and its VT channel) plus two per frontend, so a
+    /// 30-pane session already sits near 62. Reusing the 64-client number here
+    /// would start refusing connections at roughly 32 panes.
+    ///
+    /// It exists so that accepted-but-unregistered connections cannot evade the
+    /// cap (PLAN.md A-13) — the DoS vector — while leaving ordinary large
+    /// sessions far below the ceiling. 512 allows ~250 panes.
+    pub const max_connections: usize = 512;
 
     /// Maximum retry attempts for wire protocol operations
     /// Used in: src/core/wire.zig
