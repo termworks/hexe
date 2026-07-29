@@ -8,6 +8,8 @@ const sticky_panes = @import("sticky_panes.zig");
 const server_session_handlers = @import("server_session_handlers.zig");
 const server_pod_event_handlers = @import("server_pod_event_handlers.zig");
 const server_pane_meta_handlers = @import("server_pane_meta_handlers.zig");
+const pane_creation = @import("pane_creation.zig");
+const pane_spawn = @import("pane_spawn.zig");
 const server_pane_lifecycle_handlers = @import("server_pane_lifecycle_handlers.zig");
 const server_reattach_handlers = @import("server_reattach_handlers.zig");
 const server_cli_layout_handlers = @import("server_cli_layout_handlers.zig");
@@ -42,6 +44,18 @@ pub const HANDLER_IO_TIMEOUT_MS: i32 = 500;
 /// handshake and then went silent forever, which would otherwise hold an fd
 /// and a slot against the connection cap for the life of the daemon.
 const UNREGISTERED_CTL_TIMEOUT_MS: i64 = 120_000;
+
+/// How long `create_pane` may wait inline for the pod's handshake before the
+/// rest of the wait moves to the periodic tick (PLAN.md 1.1).
+///
+/// Purely a LATENCY optimisation, and the reason this is not simply
+/// tick-driven: measured spawns take 15ms/22ms/31ms (min/median/max under load
+/// ~58), while the tick fires every 100ms — so deferring unconditionally would
+/// make every split feel ~50ms slower for no benefit. 40ms sits just above the
+/// observed maximum, so the common case completes inline at its old speed and
+/// only a genuinely slow pod defers. The worst-case stall this can cost the
+/// loop is therefore 40ms, against 500ms before and 2s before that.
+const SPAWN_INLINE_GRACE_MS: i32 = 40;
 /// Whole-skip budget. The per-chunk timeouts above restart on every chunk, so
 /// only a total deadline actually bounds a peer that trickles a huge payload.
 const SKIP_TOTAL_TIMEOUT_MS: i64 = 2_000;
@@ -167,6 +181,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .running = true,
         .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(allocator),
         .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
+        .pending_spawns = .empty,
         .ctl_unregistered_since = std.AutoHashMap(posix.fd_t, i64).init(allocator),
         .ctl_watchers = std.AutoHashMap(posix.fd_t, *CtlWatcher).init(allocator),
         .pending_ctl_close_fds = .empty,
@@ -219,6 +234,7 @@ fn deinitTestServer(server: *Server) void {
     server.allocator.free(server.ctl_payload_buf);
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
+    server.pending_spawns.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
     server.ctl_unregistered_since.deinit();
     server.allocator.free(server.vt_route_buf);
@@ -531,6 +547,21 @@ const HANDSHAKE_PREAMBLE_TIMEOUT_MS: i64 = 5_000;
 /// accumulated without blocking; `dispatchNewConnection` still tries once
 /// inline, so a well-behaved peer (whose preamble is already in the socket
 /// buffer) is dispatched with no added latency at all.
+/// A `create_pane` whose pod has been forked but has not yet said hello.
+///
+/// SES used to block the whole event loop reading that handshake. The reply is
+/// deferred instead, which keeps spawn-FAILURE reporting intact: the client
+/// still learns the outcome on its original request, it just learns it a tick
+/// later (PLAN.md 1.1).
+const PendingSpawn = struct {
+    flight: pane_creation.InFlightPane,
+    /// Where the deferred `pane_created` (or error) goes. Validated against the
+    /// closed-fd log before use: by the time the handshake lands this frontend
+    /// may be gone and its fd number handed to somebody else.
+    reply_fd: posix.fd_t,
+    request_id: u32,
+};
+
 const PendingHandshake = struct {
     /// 2 bytes of `[channel, version]` plus the largest follow-on: a 32-byte
     /// frontend VT session id.
@@ -818,6 +849,8 @@ pub const Server = struct {
     pending_pop_requests: std.AutoHashMap(posix.fd_t, posix.fd_t),
     // Track which fds use binary control protocol (MUX_CTL and POD_CTL connections).
     binary_ctl_fds: std.AutoHashMap(posix.fd_t, void),
+    /// Panes forked but still waiting on their pod's handshake (PLAN.md 1.1).
+    pending_spawns: std.ArrayList(PendingSpawn),
     /// Frontend CTL fds still awaiting `register`, and when they arrived.
     ctl_unregistered_since: std.AutoHashMap(posix.fd_t, i64),
     ctl_watchers: std.AutoHashMap(posix.fd_t, *CtlWatcher),
@@ -881,6 +914,7 @@ pub const Server = struct {
             .running = true,
             .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(page_alloc),
             .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
+            .pending_spawns = .empty,
             .ctl_unregistered_since = std.AutoHashMap(posix.fd_t, i64).init(page_alloc),
             .ctl_watchers = std.AutoHashMap(posix.fd_t, *CtlWatcher).init(page_alloc),
             .pending_ctl_close_fds = .empty,
@@ -942,6 +976,8 @@ pub const Server = struct {
         self.deferred_destroy_ctl.deinit(self.allocator);
         self.deferred_destroy_vt.deinit(self.allocator);
 
+        for (self.pending_spawns.items) |*ps| self.ses_state.abortCreatePane(&ps.flight);
+        self.pending_spawns.deinit(self.allocator);
         self.binary_ctl_fds.deinit();
         self.ctl_unregistered_since.deinit();
         self.allocator.free(self.vt_route_buf);
@@ -1362,6 +1398,106 @@ pub const Server = struct {
             }
         }
         return false;
+    }
+
+    /// Take ownership of an in-flight pane and remember where to answer.
+    ///
+    /// Gives the pod a brief inline grace period first (see
+    /// SPAWN_INLINE_GRACE_MS) so an ordinary split keeps its old latency; a pod
+    /// that misses it finishes on the tick instead, with the reply deferred.
+    pub fn trackPendingSpawn(self: *Server, flight: pane_creation.InFlightPane, reply_fd: posix.fd_t) !void {
+        try self.pending_spawns.append(self.allocator, .{
+            .flight = flight,
+            .reply_fd = reply_fd,
+            .request_id = self.current_ctl_request_id,
+        });
+
+        const stdout_fd = self.pending_spawns.items[self.pending_spawns.items.len - 1].flight.spawn.stdout_file.handle;
+        wire.waitReadableTimeout(stdout_fd, SPAWN_INLINE_GRACE_MS) catch {};
+        self.processPendingSpawns();
+    }
+
+    /// Send a reply that belongs to a request we answered LATER than dispatch.
+    ///
+    /// `replyOrClose*` derive the request id from `current_ctl_request_*`, which
+    /// only the dispatch path sets, so a deferred reply has to restore that pair
+    /// around the send. It also has to check the fd is still ours: by now the
+    /// requesting frontend may be gone and its fd number reused, and injecting a
+    /// stale `pane_created` into somebody else's control stream would be worse
+    /// than dropping the reply.
+    fn replyDeferred(
+        self: *Server,
+        fd: posix.fd_t,
+        request_id: u32,
+        msg_type: wire.MsgType,
+        payload: []const u8,
+        trail: []const u8,
+    ) void {
+        if (self.ses_state.store.closedFdNoted(fd)) {
+            ses.debugLog("deferred reply dropped: fd={d} was closed", .{fd});
+            return;
+        }
+        const prev_fd = self.current_ctl_request_fd;
+        const prev_id = self.current_ctl_request_id;
+        self.current_ctl_request_fd = fd;
+        self.current_ctl_request_id = request_id;
+        defer {
+            self.current_ctl_request_fd = prev_fd;
+            self.current_ctl_request_id = prev_id;
+        }
+        self.replyOrCloseWithTrail(fd, msg_type, payload, trail);
+    }
+
+    fn failPendingSpawn(self: *Server, ps: *PendingSpawn, reason: []const u8) void {
+        core.logging.warn("ses", "create_pane failed: {s} (uuid={s})", .{ reason, ps.flight.uuid[0..8] });
+        self.ses_state.abortCreatePane(&ps.flight);
+        const err_payload = wire.Error{ .msg_len = @intCast(reason.len) };
+        self.replyDeferred(ps.reply_fd, ps.request_id, .@"error", std.mem.asBytes(&err_payload), reason);
+    }
+
+    /// Drive forked-but-unannounced pods. Runs on the periodic tick, so a slow
+    /// pod costs latency for its own pane instead of freezing every session
+    /// (PLAN.md 1.1).
+    fn processPendingSpawns(self: *Server) void {
+        if (self.pending_spawns.items.len == 0) return;
+        const now = std.time.milliTimestamp();
+
+        var i: usize = 0;
+        while (i < self.pending_spawns.items.len) {
+            const ps = &self.pending_spawns.items[i];
+            switch (pane_spawn.pollPodHandshake(&ps.flight.spawn)) {
+                .pending => {
+                    if (!ps.flight.spawn.expired(now)) {
+                        i += 1;
+                        continue;
+                    }
+                    self.failPendingSpawn(ps, "pod_spawn_timeout");
+                },
+                .failed => self.failPendingSpawn(ps, "pod_bad_handshake"),
+                .ready => |child_pid| {
+                    if (self.ses_state.finishCreatePane(&ps.flight, child_pid)) |pane| {
+                        self.ses_state.markDirty();
+                        ses.debugLog("binary: pane created {s} (pid={d}, pane_id={d})", .{ pane.uuid[0..8], pane.child_pid, pane.pane_id });
+                        const resp = wire.PaneCreated{
+                            .uuid = pane.uuid,
+                            .pid = pane.child_pid,
+                            .pane_id = pane.pane_id,
+                            .socket_path_len = @intCast(pane.pod_socket_path.len),
+                        };
+                        // NOTE: read pod_socket_path from the STORE's pane, not
+                        // from the flight — finishCreatePane transferred
+                        // ownership and the flight's copy is stale.
+                        self.replyDeferred(ps.reply_fd, ps.request_id, .pane_created, std.mem.asBytes(&resp), pane.pod_socket_path);
+                    } else |err| {
+                        core.logging.logError("ses", "create_pane failed to finish", err);
+                        const reason = "create_failed";
+                        const err_payload = wire.Error{ .msg_len = @intCast(reason.len) };
+                        self.replyDeferred(ps.reply_fd, ps.request_id, .@"error", std.mem.asBytes(&err_payload), reason);
+                    }
+                },
+            }
+            _ = self.pending_spawns.swapRemove(i);
+        }
     }
 
     /// Enqueue an fd for deferred close, deduped by fd. Shared by the CTL and
@@ -1938,6 +2074,7 @@ pub const Server = struct {
         // Advance connections whose handshake preamble has not fully arrived.
         periodic.server.processPendingHandshakes();
         periodic.server.reapUnregisteredCtl();
+        periodic.server.processPendingSpawns();
         periodic.server.flushMuxVtQueues();
         periodic.server.flushPodVtQueues();
         periodic.server.flushCtlQueues();

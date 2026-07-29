@@ -232,22 +232,23 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
         return;
     }
 
-    const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, spawn_env, isolation_profile) catch |err| {
+    // Fork the pod, but do NOT wait for its handshake here: that wait was a
+    // blocking read on the single-threaded loop, so one slow pod stalled every
+    // other session (PLAN.md 1.1). The reply is deferred to the tick that sees
+    // the handshake land, which keeps spawn-FAILURE reporting intact — the
+    // client still learns the outcome on this request, just a tick later.
+    const flight = self.ses_state.beginCreatePane(client_id, shell, cwd, sticky_pwd, sticky_key, spawn_env, isolation_profile) catch |err| {
         core.logging.logError("ses", "create_pane failed to spawn pane", err);
         self.sendBinaryError(fd, "create_failed");
         return;
     };
-    self.ses_state.markDirty();
-    ses.debugLog("binary: pane created {s} (pid={d}, pane_id={d})", .{ pane.uuid[0..8], pane.child_pid, pane.pane_id });
-
-    // Send PaneCreated response.
-    var resp = wire.PaneCreated{
-        .uuid = pane.uuid,
-        .pid = pane.child_pid,
-        .pane_id = pane.pane_id,
-        .socket_path_len = @intCast(pane.pod_socket_path.len),
+    self.trackPendingSpawn(flight, fd) catch |err| {
+        core.logging.logError("ses", "create_pane failed to track pending spawn", err);
+        var doomed = flight;
+        self.ses_state.abortCreatePane(&doomed);
+        self.sendBinaryError(fd, "create_failed");
+        return;
     };
-    self.replyOrCloseWithTrail(fd, .pane_created, std.mem.asBytes(&resp), pane.pod_socket_path);
 }
 
 pub fn replayPaneBacklogNow(self: *Server, uuid: [32]u8) void {

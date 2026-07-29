@@ -12,6 +12,125 @@ fn killPaneLogged(self: anytype, pane_uuid: [32]u8, comptime context: []const u8
     };
 }
 
+/// Everything `createPane` does BEFORE the pod's handshake is known.
+///
+/// Returned to the caller so the wait can happen off the event loop
+/// (PLAN.md 1.1). The returned value OWNS `name`, `pod_socket_path`,
+/// `sticky_pwd` and the forked pod: exactly one of `finishCreatePane` or
+/// `abortCreatePane` must be called on it.
+pub const InFlightPane = struct {
+    client_id: usize,
+    uuid: [32]u8,
+    name: []const u8,
+    pod_socket_path: []const u8,
+    sticky_pwd: ?[]const u8,
+    sticky_key: ?u8,
+    spawn: pane_spawn.PendingPodSpawn,
+};
+
+pub fn beginCreatePane(
+    self: anytype,
+    client_id: usize,
+    shell: []const u8,
+    cwd: ?[]const u8,
+    sticky_pwd: ?[]const u8,
+    sticky_key: ?u8,
+    env: ?[]const []const u8,
+    isolation_profile: ?[]const u8,
+) !InFlightPane {
+    _ = self.getClient(client_id) orelse return error.ClientNotFound;
+
+    const uuid = ipc.generateUuid();
+    const base_name = ipc.generatePaneName();
+    const name = try pane_spawn.generateUniquePaneName(self.allocator, &self.store, base_name);
+    errdefer self.allocator.free(name);
+    const pod_socket_path = try ipc.getPodSocketPath(self.allocator, &uuid);
+    errdefer self.allocator.free(pod_socket_path);
+
+    const owned_pwd: ?[]const u8 = if (sticky_pwd) |pwd| try self.allocator.dupe(u8, pwd) else null;
+    errdefer if (owned_pwd) |pwd| self.allocator.free(pwd);
+
+    const spawn = try pane_spawn.startPodSpawn(self.allocator, uuid, name, pod_socket_path, shell, cwd, env, isolation_profile);
+
+    return .{
+        .client_id = client_id,
+        .uuid = uuid,
+        .name = name,
+        .pod_socket_path = pod_socket_path,
+        .sticky_pwd = owned_pwd,
+        .sticky_key = sticky_key,
+        .spawn = spawn,
+    };
+}
+
+/// Insert the pane now that the pod has reported its shell pid. Consumes
+/// `flight` either way — on failure it reaps the pod and frees the strings.
+pub fn finishCreatePane(self: anytype, flight: *InFlightPane, child_pid: std.posix.pid_t) !*store_mod.Pane {
+    flight.spawn.deinit();
+
+    var pane_inserted = false;
+    // Same hazard as the synchronous path: a forked pod with no store record is
+    // an orphan holding a pty, a shell and a socket that no sweep can find.
+    errdefer if (!pane_inserted) {
+        if (sticky_panes.podPidMatchesPane(flight.spawn.pod_pid, flight.uuid)) {
+            _ = std.c.kill(flight.spawn.pod_pid, std.c.SIG.TERM);
+        }
+        self.allocator.free(flight.name);
+        self.allocator.free(flight.pod_socket_path);
+        if (flight.sticky_pwd) |pwd| self.allocator.free(pwd);
+    };
+
+    const pane = store_mod.Pane{
+        .uuid = flight.uuid,
+        .name = flight.name,
+        .pod_pid = flight.spawn.pod_pid,
+        .pod_socket_path = flight.pod_socket_path,
+        .child_pid = child_pid,
+        .state = .attached,
+        .sticky_pwd = flight.sticky_pwd,
+        .sticky_key = flight.sticky_key,
+        .attached_to = flight.client_id,
+        .session_id = null,
+        .created_at = std.time.timestamp(),
+        .orphaned_at = null,
+        .pane_id = self.allocPaneId(),
+        .allocator = self.allocator,
+    };
+
+    try self.store.panes.put(flight.uuid, pane);
+    pane_inserted = true;
+    self.store.dirty = true;
+
+    if (!self.connectPodVt(flight.uuid, flight.pod_socket_path, pane.pane_id)) {
+        killPaneLogged(self, flight.uuid, "killPane failed after POD VT attach failure");
+        return error.PodVtAttachFailed;
+    }
+
+    if (self.getClient(flight.client_id)) |client| {
+        client.appendUuid(flight.uuid) catch |err| {
+            killPaneLogged(self, flight.uuid, "killPane failed after client pane-list append failure");
+            return err;
+        };
+    } else {
+        killPaneLogged(self, flight.uuid, "killPane failed after createPane client disappeared");
+        return error.ClientNotFound;
+    }
+
+    return self.store.panes.getPtr(flight.uuid).?;
+}
+
+/// Give up on an in-flight pane: reap the forked pod and free what it owns.
+pub fn abortCreatePane(self: anytype, flight: *InFlightPane) void {
+    flight.spawn.deinit();
+    if (sticky_panes.podPidMatchesPane(flight.spawn.pod_pid, flight.uuid)) {
+        ses.debugLog("abortCreatePane: reaping pod pid={d}", .{flight.spawn.pod_pid});
+        _ = std.c.kill(flight.spawn.pod_pid, std.c.SIG.TERM);
+    }
+    self.allocator.free(flight.name);
+    self.allocator.free(flight.pod_socket_path);
+    if (flight.sticky_pwd) |pwd| self.allocator.free(pwd);
+}
+
 pub fn createPane(
     self: anytype,
     client_id: usize,
