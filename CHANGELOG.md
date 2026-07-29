@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.2.0] - 2026-07-29
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Prefer private runtime dir over tmp
+- Reap ctl sockets that never register
+- Bind trust ledger entries to a real path
+- Move debug log out of world-writable tmp
+- Count live connections against the cap
+- Harden env, profiles, key timers, rate cap
+- Harden connect uid and instance names
+- Stop pod attach evicting the pane's mux client
+- Thread the allocator through txlog recovery
+- Make the closed-fd log infallible
+- Keep crash-recovered panes tied to their session
+- Stop txlog growth from destroying valid sessions on restart
+- Retry failed uplink sends, validate SHP trail lengths
+- Bound what the client will read off a desynced stream
+- Reject oversized frames instead of going deaf or losing the channel
+- Exit non-zero when a required argument is missing
+- Stop handing out uuid slices that mismatch their allocation
+- Tab focus, ambiguous names, txlog layout, orphaned pods
+- Close fds on every spawn error path
+- Bound the command cache
+- Sample /proc-backed segments once per interval
+- Don't let reconnect backoff delay daemon restart
+- Stop leaking and aliasing pane routing ids
+- Don't abort the frontend on a malformed config field
+- Repair pod attach input framing and observer delivery
+- Honor when clauses, fix exec return, tab_visible and VT desync
+- Stop dropping keystrokes and stranding blocked CLI waiters
+- Close .hexe.lua trust-ledger bypass
+- Stop attach flapping and daemon-wide stalls
+
+### <!-- 2 -->🚜 Refactor
+
+- Split pod spawn from its handshake read
+
+### <!-- 4 -->⚡ Performance
+
+- Create panes without blocking on pod spawn
+- Bound pod spawn stall from measurement
+- Stop blocking the pod on peer handshakes
+- Queue CTL replies instead of blocking on peers
+- Read CTL payloads without blocking the loop
+- Pool the VT frame buffers on the routing hot path
+- Collect split-border spans in one pass over panes
+- Stop re-hashing unchanged kitty images every frame
+- Size the I/O buffer to its working set, fix ring tail copy
+- Drive resize from SIGWINCH, not a per-iteration ioctl
+- Stop duping ASCII graphemes into the frame arena
+- Stop rebuilding the Lua context every frame
+- Read CTL headers resumably, without blocking
+- Make VT routing non-blocking and batched
+- Make the accept path non-blocking
+
+### <!-- 6 -->🧪 Testing
+
+- Fix cleanup that never actually killed anything
+
 ## [0.1.2] - 2026-07-23
 
 ### <!-- 0 -->⛰️  Features
