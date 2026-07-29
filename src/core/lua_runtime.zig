@@ -416,7 +416,7 @@ pub const LuaRuntime = struct {
         };
         defer self.allocator.free(bytes);
 
-        if (!trust.bytesAreTrusted(self.allocator, bytes)) {
+        if (!trust.bytesAreTrustedAt(self.allocator, path, bytes)) {
             self.revokeUnsafeCapabilities();
         }
         return self.loadConfigBuffer(bytes, path);
