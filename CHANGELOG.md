@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.1] - 2026-07-31
+
+### <!-- 0 -->⛰️  Features
+
+- Improve reattach experience for high-output panes
+
 ## [0.2.0] - 2026-07-29
 
 ### <!-- 1 -->🐛 Bug Fixes
