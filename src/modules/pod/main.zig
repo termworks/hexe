@@ -449,6 +449,12 @@ const PTY_WRITE_BUF_CAP: usize = 256 * 1024;
 /// scrollback, small enough that a reattach never feels stuck. A torn head is
 /// the same status quo as a wrapped ring.
 const REPLAY_TAIL_CAP: usize = 1024 * 1024;
+
+/// How far `alignReplayToLine` will scan for a line boundary before giving up
+/// and replaying from the raw offset. Generous enough to clear any escape
+/// sequence or long single line, small enough that we never discard real
+/// history chasing a newline that is not coming.
+const REPLAY_ALIGN_SCAN: usize = 64 * 1024;
 /// Hard ceiling for the PTY input buffer. Dropping input bytes is NEVER okay
 /// short of this: a torn bracketed paste (lost ESC[201~) leaves the shell or
 /// app in paste mode swallowing every later keystroke — the pane looks
@@ -1434,13 +1440,20 @@ const Pod = struct {
         // Replay current backlog to new observer unless password mode is
         // active; password-mode output is live-only and never recorded.
         const n = if (self.password_mode) 0 else self.backlog.copyOut(backlog_tmp);
+        const obs_ring_start = self.backlog_abs -| self.backlog.len;
         var off: usize = buffering.replaySkipBytes(
             self.alt_tracker.in_alt,
             self.alt_tracker.alt_enter_offset,
-            self.backlog_abs -| self.backlog.len,
+            obs_ring_start,
             n,
             REPLAY_TAIL_CAP,
         );
+        // Same two hazards as the VT path: never begin mid-escape-sequence, and
+        // never paint a fullscreen app onto the observer's main screen.
+        off = buffering.alignReplayToLine(backlog_tmp[0..n], off, REPLAY_ALIGN_SCAN);
+        if (buffering.replayNeedsAltEnter(self.alt_tracker.in_alt, self.alt_tracker.alt_enter_offset, obs_ring_start, off)) {
+            pod_protocol.writeFrameBounded(&obs_conn, .output, buffering.ALT_ENTER_SEQ, CLIENT_WRITE_TIMEOUT_MS) catch {};
+        }
         // Bounded writes, like the VT client path. The fd was just set
         // non-blocking and Connection.send is a bare write loop with no
         // readiness wait, so plain writeFrame returned WouldBlock as soon as
@@ -1609,13 +1622,25 @@ const Pod = struct {
         // Bounded window: reattaching to tens of thousands of lines used to
         // replay the whole 4MB ring, wedging the frontend. Start at the alt
         // enter for fullscreen apps, else the last REPLAY_TAIL_CAP bytes.
+        const ring_start = self.backlog_abs -| self.backlog.len;
         var off: usize = buffering.replaySkipBytes(
             self.alt_tracker.in_alt,
             self.alt_tracker.alt_enter_offset,
-            self.backlog_abs -| self.backlog.len,
+            ring_start,
             n,
             REPLAY_TAIL_CAP,
         );
+        // The skip above is pure arithmetic, so it can land mid-escape-sequence
+        // and desync the frontend's parser. Start on a line boundary instead.
+        off = buffering.alignReplayToLine(backlog_tmp[0..n], off, REPLAY_ALIGN_SCAN);
+        // If that window begins after the app entered the alt screen, the
+        // frontend would paint a fullscreen app onto its MAIN screen — the
+        // content lands in scrollback and scrolling fights every redraw. Put it
+        // in the right mode first.
+        if (buffering.replayNeedsAltEnter(self.alt_tracker.in_alt, self.alt_tracker.alt_enter_offset, ring_start, off)) {
+            debugLog("acceptVtClient: re-sending alt-screen enter (replay starts past it)", .{});
+            pod_protocol.writeFrameBounded(&self.client.?, .output, buffering.ALT_ENTER_SEQ, CLIENT_WRITE_TIMEOUT_MS) catch {};
+        }
         if (off > 0) debugLog("acceptVtClient: replay skipping {d} of {d} backlog bytes (alt={})", .{ off, n, self.alt_tracker.in_alt });
         while (off < n) {
             const chunk = @min(@as(usize, 16 * 1024), n - off);
