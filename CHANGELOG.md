@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.2] - 2026-07-31
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Use musl targets for static release builds
+
 ## [0.2.1] - 2026-07-31
 
 ### <!-- 0 -->⛰️  Features

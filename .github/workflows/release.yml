@@ -21,16 +21,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64. The ABI must be -gnu: a bare "x86_64-linux" target
-          # resolves to musl, whose signal.h SIG_ERR macro fails translate-c
-          # inside the libvoid dependency.
+          # Released binaries are STATIC musl: no dynamic loader, no glibc
+          # version to match, so one artifact runs on any Linux of that arch.
+          # Zig links its bundled musl statically for every *-linux-musl target,
+          # so this needs no extra linkage flag.
+          #
+          # An older note here claimed musl was impossible because "signal.h
+          # SIG_ERR fails translate-c inside libvoid". That was about a BARE
+          # "x86_64-linux" target (which resolves to musl implicitly) and no
+          # longer reproduces on Zig 0.15.2 + libvoid 0.0.13: an explicit
+          # x86_64-linux-musl build was verified locally, with libvoid genuinely
+          # linked in (its CapabilityDropFailed symbol is present in the
+          # stripped binary, so isolation is not silently compiled out).
           - os: ubuntu-24.04
-            target: x86_64-linux-gnu
+            target: x86_64-linux-musl
             artifact_name: hexe-x86_64-linux
 
-          # Linux aarch64 (native runner, avoids C cross-compilation issues)
+          # Linux aarch64 (native runner, avoids C cross-compilation issues).
+          # musl here is NOT locally verified — there is no arm64 machine to try
+          # it on. `fail-fast: false` above means if this one breaks it does not
+          # take the x86_64 artifact down with it; fall back to
+          # aarch64-linux-gnu if CI rejects it.
           - os: ubuntu-24.04-arm
-            target: aarch64-linux-gnu
+            target: aarch64-linux-musl
             artifact_name: hexe-aarch64-linux
 
     steps:
@@ -51,6 +64,23 @@ jobs:
         # Both targets run natively on their runner, so a basic invocation
         # catches a broken artifact before it ships.
         run: zig-out/bin/hexe --help
+
+      - name: Assert the artifact is statically linked
+        # The whole point of the musl target is a binary with no glibc
+        # dependency. A silently-dynamic artifact would still pass --help here
+        # on the runner and only fail on a user's machine, so check it
+        # explicitly rather than trusting the target triple.
+        run: |
+          file zig-out/bin/hexe
+          if ! file zig-out/bin/hexe | grep -q "statically linked"; then
+            echo "::error::artifact is not statically linked" >&2
+            exit 1
+          fi
+          if ldd zig-out/bin/hexe 2>&1 | grep -qv "not a dynamic executable"; then
+            echo "::error::artifact has dynamic dependencies:" >&2
+            ldd zig-out/bin/hexe >&2
+            exit 1
+          fi
 
       - name: Prepare artifact
         run: |

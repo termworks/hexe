@@ -1,6 +1,19 @@
-.PHONY: build test smoke smoke-clean smoke-heavy install release
+.PHONY: build build-gnu test smoke smoke-clean smoke-heavy install release
+
+# Static musl by default. Zig links its bundled musl STATICALLY for any
+# *-linux-musl target, so this needs no extra linkage flag — the result has no
+# dynamic loader and no glibc dependency, and runs on any x86_64 Linux.
+#
+# CPU stays at the target default (baseline) rather than `native`: a static
+# binary exists to be portable, and the SIMD-heavy VT paths dispatch on the CPU
+# at runtime anyway, so baseline costs nothing that matters here.
+TARGET ?= x86_64-linux-musl
 
 build:
+	zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=$(TARGET)
+
+# Escape hatch: link against the host's glibc instead.
+build-gnu:
 	zig build -Doptimize=ReleaseFast -Dstrip=true
 
 test:
