@@ -424,6 +424,92 @@ test "AltScreenTracker: sequence split across feeds; multi-param; non-alt ignore
     try testing.expectEqual(@as(?u64, 50), t2.alt_enter_offset);
 }
 
+/// Nudge a replay start offset forward to the next line boundary.
+///
+/// `replaySkipBytes` picks a byte offset arithmetically (`ring_len - tail_cap`),
+/// which lands wherever it lands — including the MIDDLE of an escape sequence.
+/// The frontend then starts parsing at, say, the `[` of a `\x1b[38;5;250m` and
+/// its VT desyncs: colours smear, the screen garbles, and scrollback is wrong
+/// until something happens to resynchronise it. Only panes with more than
+/// `tail_cap` of output ever skip at all, which is why this shows up on a busy
+/// TUI and never on a quiet shell.
+///
+/// A newline can never appear inside an ANSI escape sequence, so the first LF
+/// at or after the cut is always a safe place to begin. The scan is bounded:
+/// if no newline turns up within `max_scan`, keep the original offset rather
+/// than discard a large amount of history (a garbled first line beats losing
+/// the screen).
+pub fn alignReplayToLine(data: []const u8, skip: usize, max_scan: usize) usize {
+    if (skip == 0 or skip >= data.len) return skip;
+    const limit = @min(data.len, skip +| max_scan);
+    if (std.mem.indexOfScalarPos(u8, data[0..limit], skip, '\n')) |nl| {
+        // Start just AFTER the newline: the line it terminates was cut off.
+        return @min(nl + 1, data.len);
+    }
+    return skip;
+}
+
+/// Whether a replay starting at `skip` omits the alt-screen entry the app is
+/// currently inside.
+///
+/// `replaySkipBytes` returns `@max(alt_skip, cap_skip)`, so an app that has
+/// written more than `tail_cap` since entering the alt screen has its
+/// `\x1b[?1049h` skipped over — and the enter can also have been evicted from
+/// the ring entirely. Either way the frontend replays a full-screen app's paint
+/// while its VT is still on the MAIN screen: the alt content lands in
+/// scrollback, and scrolling misbehaves because every redraw overwrites it.
+/// The caller re-sends the enter sequence when this returns true.
+pub fn replayNeedsAltEnter(
+    in_alt: bool,
+    alt_enter_offset: ?u64,
+    ring_start_abs: u64,
+    skip: usize,
+) bool {
+    if (!in_alt) return false;
+    const enter = alt_enter_offset orelse return true; // in alt, enter unknown
+    if (enter < ring_start_abs) return true; // enter evicted from the ring
+    return @as(usize, @intCast(enter - ring_start_abs)) < skip; // skipped past it
+}
+
+/// What to prepend so the frontend's VT enters the alt screen before the
+/// replayed paint arrives. Matches what the app itself sent.
+pub const ALT_ENTER_SEQ = "\x1b[?1049h";
+
+test "alignReplayToLine never starts inside an escape sequence" {
+    const data = "aaaa\x1b[38;5;250mBBBB\nCCCC\n";
+    // A cut landing inside the CSI (offset 5 is the '[') must move to after the
+    // next newline rather than feed a half-sequence to the parser.
+    const aligned = alignReplayToLine(data, 5, 1024);
+    try testing.expect(aligned > 5);
+    try testing.expectEqualStrings("CCCC\n", data[aligned..]);
+
+    // Offset 0 is already a clean start.
+    try testing.expectEqual(@as(usize, 0), alignReplayToLine(data, 0, 1024));
+
+    // No newline within the budget: keep the original offset rather than
+    // throwing away history.
+    const no_nl = "abcdefghij";
+    try testing.expectEqual(@as(usize, 4), alignReplayToLine(no_nl, 4, 1024));
+
+    // Bounded scan: a newline beyond max_scan must not be chased.
+    const far = "ab" ++ ("x" ** 100) ++ "\n";
+    try testing.expectEqual(@as(usize, 2), alignReplayToLine(far, 2, 10));
+}
+
+test "replayNeedsAltEnter spots a window that skipped the alt entry" {
+    // Ring holds [1000..5000). Entered alt at 3000 -> skip 2000 includes it.
+    try testing.expect(!replayNeedsAltEnter(true, 3000, 1000, 2000));
+    // Same enter, but the tail cap pushed the window past it: must re-send.
+    try testing.expect(replayNeedsAltEnter(true, 3000, 1000, 2500));
+    // Enter fell off the ring entirely.
+    try testing.expect(replayNeedsAltEnter(true, 500, 1000, 3000));
+    // In alt but we never saw the enter.
+    try testing.expect(replayNeedsAltEnter(true, null, 1000, 0));
+    // Main screen: never.
+    try testing.expect(!replayNeedsAltEnter(false, null, 1000, 3000));
+    try testing.expect(!replayNeedsAltEnter(false, 3000, 1000, 3500));
+}
+
 test "replaySkipBytes: alt enter inside ring wins; tail cap otherwise" {
     // Ring holds [1000..5000); alt entered at 3000 -> skip 2000.
     try testing.expectEqual(@as(usize, 2000), replaySkipBytes(true, 3000, 1000, 4000, 1_000_000));
