@@ -231,6 +231,16 @@ pub const FrontendRegistered = extern struct {
 };
 pub const Registered = FrontendRegistered;
 
+/// Internal marker env entry understood by SES on `create_pane`.
+///
+/// A float's `add_path` directories ride along in the normal env list as
+/// `HEXE_PATH_PREPEND=/a:/b` instead of getting their own CreatePane field:
+/// only SES knows the base environment the pane will actually spawn with
+/// (the parent pane's environ for `inherit_env`, else its own), so PATH has
+/// to be composed there. SES consumes and strips these entries — they never
+/// reach the pane's process.
+pub const path_prepend_env_key = "HEXE_PATH_PREPEND";
+
 /// CreatePane: lengths of variable fields.
 /// Followed by: shell bytes, cwd bytes, sticky_pwd bytes, isolation_profile bytes,
 /// optionally inherit_env_parent_uuid bytes (32 bytes when inherit_env_parent_uuid_len > 0),

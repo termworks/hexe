@@ -46,6 +46,44 @@ And toggled via keybindings:
 
 ---
 
+## Environment (`add_env`, `add_path`)
+
+A float can carry its own environment, independent of the rest of the session:
+
+```lua
+hexe.float("claude", {
+  key     = "2",
+  command = "claude",
+  attrs   = { per_cwd = true, inherit_env = true },
+  add_env  = { ANTHROPIC_MODEL = "opus", NO_COLOR = "1" },
+  add_path = { "~/.local/bin", "/opt/toolchain/bin" },
+})
+```
+
+`add_env` sets variables for this float's process only. A variable set here
+wins over whatever the process would otherwise inherit — from `inherit_env`,
+from the daemon, or from your shell — so it can override as well as add.
+Values may be strings, numbers, or booleans. The array form works too, if you
+prefer it: `add_env = { "NO_COLOR=1" }`.
+
+`add_path` prepends directories to this float's `PATH`, so a binary that is
+not on your normal `PATH` becomes runnable inside the float — or one that is
+shadowed by another copy earlier on `PATH` wins instead. Pass a single string
+or a list. The entries are searched first, in the order you declare them; a
+directory that is already on the inherited `PATH` is *moved* to the front
+rather than duplicated (every stale copy of it is dropped), because adding a
+path you already have is a request to raise its priority. Everything else
+keeps its original order. `~` is not expanded — use an absolute path, or set
+the full `PATH` via `add_env`.
+
+Both apply when the float's process is **spawned**. Toggling an existing float
+back into view reuses its process, so changes take effect the next time the
+float is created (a new `per_cwd` directory, a fresh session, or after a
+`destroy`). Note that an interactive shell started as the float's command may
+re-order `PATH` itself from your rc files.
+
+---
+
 ## Sizing and position
 
 | Field | Default | Description |

@@ -170,6 +170,8 @@ hexe.float("git", {
 | `attrs.sticky` | `false` | Reuse by key and directory policy |
 | `attrs.per_cwd` | `false` | Separate instance per directory |
 | `attrs.inherit_env` | `false` | Inherit environment from parent pane |
+| `add_env` | `{}` | Extra env vars for this float, overriding inherited ones |
+| `add_path` | `{}` | Directories prepended to this float's `PATH` |
 
 ## Nested Splits
 

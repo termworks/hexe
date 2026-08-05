@@ -1220,9 +1220,13 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     // then silently dropped, while docs/isolation.md advertised contained fork
     // bombs and memory kills. spawnPod already overlays caller-supplied env
     // onto the pod's environment, so this needs no protocol change.
-    var cgroup_env_buf: [3][]const u8 = undefined;
-    var cgroup_env_len: usize = 0;
-    defer for (cgroup_env_buf[0..cgroup_env_len]) |e| state.allocator.free(@constCast(e));
+    var env_entries: std.ArrayList([]const u8) = .empty;
+    defer env_entries.deinit(state.allocator);
+    var owned_env: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned_env.items) |e| state.allocator.free(e);
+        owned_env.deinit(state.allocator);
+    }
     if (float_def.isolation) |iso| {
         const pairs = [_]struct { key: []const u8, value: ?[]const u8 }{
             .{ .key = "HEXE_CGROUP_MEM_MAX", .value = iso.memory },
@@ -1236,11 +1240,36 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
                 terminal_main.debugLog("createNamedFloat: failed to build cgroup env entry: {s}", .{@errorName(err)});
                 continue;
             };
-            cgroup_env_buf[cgroup_env_len] = entry;
-            cgroup_env_len += 1;
+            owned_env.append(state.allocator, entry) catch {
+                state.allocator.free(entry);
+                continue;
+            };
+            env_entries.append(state.allocator, entry) catch {};
         }
     }
-    const spawn_env: ?[]const []const u8 = if (cgroup_env_len > 0) cgroup_env_buf[0..cgroup_env_len] else null;
+
+    // `add_env` from the layout. These land after any inherited environment on
+    // the SES side, so they override rather than merely supplement.
+    for (float_def.env) |entry| {
+        env_entries.append(state.allocator, entry) catch |err| {
+            terminal_main.debugLog("createNamedFloat: failed to queue add_env entry: {s}", .{@errorName(err)});
+        };
+    }
+
+    // `add_path` travels as a marker entry; SES turns it into the final PATH
+    // because only SES knows the base environment this pane spawns with.
+    if (float_def.path_add.len > 0) path_blk: {
+        const dirs = std.mem.join(state.allocator, ":", float_def.path_add) catch break :path_blk;
+        defer state.allocator.free(dirs);
+        const entry = std.fmt.allocPrint(state.allocator, "{s}={s}", .{ wire.path_prepend_env_key, dirs }) catch break :path_blk;
+        owned_env.append(state.allocator, entry) catch {
+            state.allocator.free(entry);
+            break :path_blk;
+        };
+        env_entries.append(state.allocator, entry) catch break :path_blk;
+    }
+
+    const spawn_env: ?[]const []const u8 = if (env_entries.items.len > 0) env_entries.items else null;
 
     const NamedFloatPaneResult = struct {
         uuid: [32]u8,

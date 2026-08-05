@@ -1164,6 +1164,117 @@ pub fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.S
     return parseSegmentAtPath(lua, idx, allocator, "segment");
 }
 
+/// Parse a float's `add_env` table into owned "KEY=VALUE" entries.
+///
+/// Both shapes are accepted, because both read naturally in a config:
+///   add_env = { FOO = "bar", DEBUG = 1 }   -- map form
+///   add_env = { "FOO=bar", "DEBUG=1" }     -- array form
+/// Values may be strings, numbers or booleans; anything else is skipped.
+fn parseFloatEnv(lua: *Lua, idx: i32, allocator: std.mem.Allocator) []const []const u8 {
+    const table_idx = lua.absIndex(idx);
+    _ = lua.getField(table_idx, "add_env");
+    defer lua.pop(1);
+    if (lua.typeOf(-1) != .table) return &.{};
+    const env_idx = lua.getTop();
+
+    var list = std.ArrayList([]const u8).empty;
+    errdefer {
+        for (list.items) |e| allocator.free(@constCast(e));
+        list.deinit(allocator);
+    }
+
+    lua.pushNil();
+    while (lua.next(env_idx)) {
+        // Stack: ... key value. Never call toString on the key itself: for a
+        // numeric key that rewrites it in place and derails `next`.
+        const key_type = lua.typeOf(-2);
+        const entry: ?[]u8 = blk: {
+            const value = luaScalarToString(lua, -1, allocator) orelse break :blk null;
+            defer allocator.free(value);
+            if (key_type == .string) {
+                const key = lua.toString(-2) catch break :blk null;
+                if (key.len == 0) break :blk null;
+                break :blk std.fmt.allocPrint(allocator, "{s}={s}", .{ key, value }) catch null;
+            }
+            // Array form: the value must already be KEY=VALUE.
+            if (std.mem.indexOfScalar(u8, value, '=') == null) break :blk null;
+            break :blk allocator.dupe(u8, value) catch null;
+        };
+        if (entry) |e| {
+            list.append(allocator, e) catch allocator.free(e);
+        }
+        lua.pop(1); // pop value, keep key for next()
+    }
+
+    return list.toOwnedSlice(allocator) catch {
+        for (list.items) |e| allocator.free(@constCast(e));
+        list.deinit(allocator);
+        return &.{};
+    };
+}
+
+/// Stringify a string/number/boolean at `index` into an owned buffer.
+fn luaScalarToString(lua: *Lua, index: i32, allocator: std.mem.Allocator) ?[]u8 {
+    return switch (lua.typeOf(index)) {
+        .string => blk: {
+            const s = lua.toString(index) catch break :blk null;
+            break :blk allocator.dupe(u8, s) catch null;
+        },
+        .number => blk: {
+            const n = lua.toNumber(index) catch break :blk null;
+            if (!std.math.isFinite(n)) break :blk null;
+            if (n == @trunc(n)) {
+                break :blk std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))}) catch null;
+            }
+            break :blk std.fmt.allocPrint(allocator, "{d}", .{n}) catch null;
+        },
+        .boolean => allocator.dupe(u8, if (lua.toBoolean(index)) "1" else "0") catch null,
+        else => null,
+    };
+}
+
+/// Parse a float's `add_path` into owned directory strings.
+/// Accepts a single string or an array of strings.
+fn parseFloatPathAdd(lua: *Lua, idx: i32, allocator: std.mem.Allocator) []const []const u8 {
+    const table_idx = lua.absIndex(idx);
+    _ = lua.getField(table_idx, "add_path");
+    defer lua.pop(1);
+
+    var list = std.ArrayList([]const u8).empty;
+    const append = struct {
+        fn call(l: *std.ArrayList([]const u8), a: std.mem.Allocator, raw: []const u8) void {
+            const trimmed = std.mem.trim(u8, raw, " \t");
+            if (trimmed.len == 0) return;
+            const duped = a.dupe(u8, trimmed) catch return;
+            l.append(a, duped) catch a.free(duped);
+        }
+    }.call;
+
+    switch (lua.typeOf(-1)) {
+        .string => {
+            const s = lua.toString(-1) catch return &.{};
+            append(&list, allocator, s);
+        },
+        .table => {
+            const len = lua.rawLen(-1);
+            var i: i32 = 1;
+            while (i <= len) : (i += 1) {
+                _ = lua.rawGetIndex(-1, i);
+                defer lua.pop(1);
+                const s = lua.toString(-1) catch continue;
+                append(&list, allocator, s);
+            }
+        },
+        else => return &.{},
+    }
+
+    return list.toOwnedSlice(allocator) catch {
+        for (list.items) |p| allocator.free(@constCast(p));
+        list.deinit(allocator);
+        return &.{};
+    };
+}
+
 /// Parse a LayoutFloatDef from a Lua table at idx
 fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.LayoutFloatDef {
     if (lua.typeOf(idx) != .table) {
@@ -1381,6 +1492,9 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         float_def.isolation = isolation;
     }
     lua.pop(1); // pop isolation table
+
+    float_def.env = parseFloatEnv(lua, idx, allocator);
+    float_def.path_add = parseFloatPathAdd(lua, idx, allocator);
 
     return float_def;
 }
@@ -1972,6 +2086,70 @@ test "parseLayoutFloat reads canonical attrs table" {
     try std.testing.expect(float.attributes.global);
     try std.testing.expect(float.attributes.per_cwd);
     try std.testing.expect(float.attributes.inherit_env);
+}
+
+test "parseLayoutFloat reads add_env map form and add_path list" {
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    const chunk =
+        "float = {" ++
+        "key='g'," ++
+        "command='lazygit'," ++
+        "add_env={ EDITOR='hx', DEBUG=1 }," ++
+        "add_path={ '/opt/bin', ' /home/me/.local/bin ' }" ++
+        "}";
+    const z = try std.testing.allocator.dupeZ(u8, chunk);
+    defer std.testing.allocator.free(z);
+    try lua.loadString(z);
+    try lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try lua.getGlobal("float");
+    defer lua.pop(1);
+
+    var float = parseLayoutFloat(lua, -1, std.testing.allocator) orelse return error.TestUnexpectedResult;
+    defer float.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), float.env.len);
+    var saw_editor = false;
+    var saw_debug = false;
+    for (float.env) |entry| {
+        if (std.mem.eql(u8, entry, "EDITOR=hx")) saw_editor = true;
+        if (std.mem.eql(u8, entry, "DEBUG=1")) saw_debug = true;
+    }
+    try std.testing.expect(saw_editor);
+    try std.testing.expect(saw_debug);
+
+    try std.testing.expectEqual(@as(usize, 2), float.path_add.len);
+    try std.testing.expectEqualStrings("/opt/bin", float.path_add[0]);
+    try std.testing.expectEqualStrings("/home/me/.local/bin", float.path_add[1]);
+}
+
+test "parseLayoutFloat reads add_env array form and rejects entries without '='" {
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    const chunk =
+        "float = {" ++
+        "key='g'," ++
+        "add_env={ 'FOO=bar', 'nonsense' }," ++
+        "add_path='/single/dir'" ++
+        "}";
+    const z = try std.testing.allocator.dupeZ(u8, chunk);
+    defer std.testing.allocator.free(z);
+    try lua.loadString(z);
+    try lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try lua.getGlobal("float");
+    defer lua.pop(1);
+
+    var float = parseLayoutFloat(lua, -1, std.testing.allocator) orelse return error.TestUnexpectedResult;
+    defer float.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), float.env.len);
+    try std.testing.expectEqualStrings("FOO=bar", float.env[0]);
+    try std.testing.expectEqual(@as(usize, 1), float.path_add.len);
+    try std.testing.expectEqualStrings("/single/dir", float.path_add[0]);
 }
 
 test "parseLayoutDef canonicalizes split directions and child sizes" {

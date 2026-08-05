@@ -9,6 +9,94 @@ const ses = @import("main.zig");
 const server = @import("server.zig");
 const Server = server.Server;
 
+const path_prepend_prefix = wire.path_prepend_env_key ++ "=";
+const path_env_prefix = "PATH=";
+
+/// Value of the last `HEXE_PATH_PREPEND=` marker in `entries`, if any.
+fn findPathPrepend(entries: []const []const u8) ?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (entries) |entry| {
+        if (std.mem.startsWith(u8, entry, path_prepend_prefix)) {
+            found = entry[path_prepend_prefix.len..];
+        }
+    }
+    return found;
+}
+
+fn stripPathPrependEntries(list: *std.ArrayList([]const u8)) void {
+    var i: usize = 0;
+    while (i < list.items.len) {
+        if (std.mem.startsWith(u8, list.items[i], path_prepend_prefix)) {
+            _ = list.orderedRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// The PATH that `add_path` extends: an explicit `add_env` PATH wins, then the
+/// inherited parent environment, then SES's own.
+fn basePathFor(entries: []const []const u8, parent_env: ?[]const []const u8) []const u8 {
+    var i = entries.len;
+    while (i > 0) {
+        i -= 1;
+        if (std.mem.startsWith(u8, entries[i], path_env_prefix)) return entries[i][path_env_prefix.len..];
+    }
+    if (parent_env) |env| {
+        var j = env.len;
+        while (j > 0) {
+            j -= 1;
+            if (std.mem.startsWith(u8, env[j], path_env_prefix)) return env[j][path_env_prefix.len..];
+        }
+    }
+    return posix.getenv("PATH") orelse "";
+}
+
+fn containsDir(dirs: []const []const u8, dir: []const u8) bool {
+    for (dirs) |candidate| {
+        if (std.mem.eql(u8, candidate, dir)) return true;
+    }
+    return false;
+}
+
+/// `add_path` dirs go to the FRONT, in the order they were declared, and a dir
+/// already on `base` is moved there rather than duplicated — adding a path you
+/// already have is a request to raise its priority, not a no-op. Base segments
+/// otherwise keep their order (and their duplicates: rearranging PATH is the
+/// job here, tidying someone else's is not).
+fn buildPrependedPath(allocator: std.mem.Allocator, prepend: []const u8, base: []const u8) ![]u8 {
+    var added: std.ArrayList([]const u8) = .empty;
+    defer added.deinit(allocator);
+    var prepend_it = std.mem.splitScalar(u8, prepend, ':');
+    while (prepend_it.next()) |dir| {
+        if (dir.len == 0) continue;
+        if (containsDir(added.items, dir)) continue; // declared twice
+        try added.append(allocator, dir);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, path_env_prefix);
+
+    var wrote_any = false;
+    for (added.items) |dir| {
+        if (wrote_any) try out.append(allocator, ':');
+        try out.appendSlice(allocator, dir);
+        wrote_any = true;
+    }
+    if (base.len > 0) {
+        var base_it = std.mem.splitScalar(u8, base, ':');
+        while (base_it.next()) |segment| {
+            if (containsDir(added.items, segment)) continue; // moved to the front
+            if (wrote_any) try out.append(allocator, ':');
+            try out.appendSlice(allocator, segment);
+            wrote_any = true;
+        }
+    }
+    if (!wrote_any) return error.EmptyPath;
+    return out.toOwnedSlice(allocator);
+}
+
 pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.CreatePane)) {
         self.skipPayloadRest();
@@ -136,6 +224,27 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
     if (inherit_env_parent_uuid) |parent_uuid| {
         if (self.ses_state.getPane(parent_uuid)) |parent_pane| {
             parent_env = parent_pane.getProcEnviron(self.allocator);
+        }
+    }
+
+    // Resolve `add_path`: the frontend cannot compose PATH itself because the
+    // base it must extend lives here (the parent pane's environ for
+    // inherit_env, otherwise SES's own). Strip the markers either way — they
+    // are transport, not something a pane's shell should ever see.
+    var path_entry: ?[]u8 = null;
+    defer if (path_entry) |p| self.allocator.free(p);
+    if (findPathPrepend(env_list.items)) |prepend| {
+        stripPathPrependEntries(&env_list);
+        const base = basePathFor(env_list.items, parent_env);
+        if (buildPrependedPath(self.allocator, prepend, base)) |composed| {
+            path_entry = composed;
+            env_list.append(self.allocator, composed) catch |err| {
+                core.logging.logError("ses", "create_pane PATH prepend append failed", err);
+                self.sendBinaryError(fd, "create_pane: env list alloc failed");
+                return;
+            };
+        } else |err| {
+            core.logging.logError("ses", "create_pane PATH prepend build failed", err);
         }
     }
 
@@ -602,4 +711,66 @@ pub fn handleBinaryGetPaneCwd(self: *Server, fd: posix.fd_t, payload_len: u32, b
     // No CWD available.
     var resp = wire.PaneCwd{ .uuid = gpc.uuid, .cwd_len = 0 };
     self.replyOrClose(fd, .get_pane_cwd, std.mem.asBytes(&resp));
+}
+
+test "add_path prepends dirs ahead of the inherited PATH" {
+    const alloc = std.testing.allocator;
+    const entries = [_][]const u8{ path_prepend_prefix ++ "/opt/bin:/opt/other", "EDITOR=hx" };
+    const parent = [_][]const u8{ "PATH=/usr/bin:/bin", "HOME=/home/me" };
+
+    const prepend = findPathPrepend(&entries) orelse return error.TestUnexpectedResult;
+    const base = basePathFor(&entries, &parent);
+    const composed = try buildPrependedPath(alloc, prepend, base);
+    defer alloc.free(composed);
+
+    try std.testing.expectEqualStrings("PATH=/opt/bin:/opt/other:/usr/bin:/bin", composed);
+}
+
+test "add_path extends an add_env PATH, keeping declaration order" {
+    const alloc = std.testing.allocator;
+    const entries = [_][]const u8{ "PATH=/custom/bin", path_prepend_prefix ++ "/custom/bin:/extra/bin" };
+    const composed = try buildPrependedPath(
+        alloc,
+        findPathPrepend(&entries) orelse return error.TestUnexpectedResult,
+        basePathFor(&entries, null),
+    );
+    defer alloc.free(composed);
+
+    try std.testing.expectEqualStrings("PATH=/custom/bin:/extra/bin", composed);
+}
+
+test "add_path promotes a dir already on PATH instead of leaving it where it was" {
+    const alloc = std.testing.allocator;
+    const composed = try buildPrependedPath(alloc, "/usr/local/bin", "/usr/bin:/usr/local/bin:/bin");
+    defer alloc.free(composed);
+
+    // Not a no-op: the dir the user asked for is now searched first.
+    try std.testing.expectEqualStrings("PATH=/usr/local/bin:/usr/bin:/bin", composed);
+}
+
+test "add_path collapses every copy of a promoted dir, and dedupes its own list" {
+    const alloc = std.testing.allocator;
+    const composed = try buildPrependedPath(
+        alloc,
+        "/home/me/.local/bin:/opt/bin:/home/me/.local/bin",
+        "/home/me/.local/bin:/usr/bin:/home/me/.local/bin:/bin",
+    );
+    defer alloc.free(composed);
+
+    try std.testing.expectEqualStrings("PATH=/home/me/.local/bin:/opt/bin:/usr/bin:/bin", composed);
+}
+
+test "path prepend markers are stripped from the spawned environment" {
+    const alloc = std.testing.allocator;
+    var list: std.ArrayList([]const u8) = .empty;
+    defer list.deinit(alloc);
+    try list.append(alloc, "FOO=bar");
+    try list.append(alloc, path_prepend_prefix ++ "/opt/bin");
+    try list.append(alloc, "BAZ=qux");
+
+    stripPathPrependEntries(&list);
+
+    try std.testing.expectEqual(@as(usize, 2), list.items.len);
+    try std.testing.expectEqualStrings("FOO=bar", list.items[0]);
+    try std.testing.expectEqualStrings("BAZ=qux", list.items[1]);
 }
