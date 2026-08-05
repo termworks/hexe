@@ -502,6 +502,12 @@ pub const LayoutFloatDef = struct {
     pos_x: ?u8 = null,
     pos_y: ?u8 = null,
     isolation: ?IsolationConfig = null,
+    /// Extra environment entries ("KEY=VALUE") for the float's process, from
+    /// `add_env`. These overlay (and override) whatever the process would
+    /// otherwise inherit.
+    env: []const []const u8 = &.{},
+    /// Directories prepended to PATH for the float's process, from `add_path`.
+    path_add: []const []const u8 = &.{},
 
     pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
         if (self.command) |c| freeSlice(allocator, @constCast(c));
@@ -510,6 +516,10 @@ pub const LayoutFloatDef = struct {
             var isolation = @constCast(iso);
             isolation.deinit(allocator);
         }
+        for (self.env) |e| freeSlice(allocator, @constCast(e));
+        if (self.env.len > 0) freeSlice(allocator, @constCast(self.env));
+        for (self.path_add) |p| freeSlice(allocator, @constCast(p));
+        if (self.path_add.len > 0) freeSlice(allocator, @constCast(self.path_add));
     }
 };
 

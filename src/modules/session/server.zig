@@ -3800,3 +3800,9 @@ pub const Server = struct {
         self.running = false;
     }
 };
+
+test {
+    // A test root only collects tests from files it explicitly references, so
+    // the handlers split out of this file need to be pulled back in here.
+    _ = @import("server_pane_lifecycle_handlers.zig");
+}
