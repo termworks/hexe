@@ -155,11 +155,44 @@ fn render(state: *State) !void {
     try loop_render.renderTo(state, stdout);
 }
 
+/// How long a pane may hold the screen with DEC 2026 before it is presented regardless.
+///
+/// **A program that dies between the begin and the end must not freeze the terminal.** Every real
+/// implementation caps the wait for that reason; 150ms is the usual figure and is far longer than
+/// any honest frame.
+const SYNC_HOLD_MS: i64 = 150;
+
+/// Whether any visible pane is mid-frame under synchronized output (DEC private mode 2026).
+///
+/// Asked of every pane rather than only the focused one, because they share one screen: presenting
+/// while any of them is half-drawn tears that pane, whichever one holds the cursor.
+fn outputHeld(state: *State) bool {
+    if (state.view.tab_views.items.len > 0) {
+        var split_it = state.currentLayout().splitIterator();
+        while (split_it.next()) |pane| {
+            if (pane.*.vt.outputSynchronized()) return true;
+        }
+    }
+    for (state.view.float_views.items) |pane| {
+        if (pane.vt.outputSynchronized()) return true;
+    }
+    return false;
+}
+
 fn renderIfDue(state: *State, last_render_ms: *i64) void {
     if (!state.needs_render) return;
 
     const render_now = std.time.milliTimestamp();
     if (render_now - last_render_ms.* < 16) return; // ~60fps
+
+    // **Hold the frame while a pane is still building one.** Otherwise a full-screen repaint
+    // reaches the screen half-finished — the top of the new frame above the bottom of the old —
+    // which is what tearing is, and is the whole reason DEC 2026 exists.
+    //
+    // Bounded, so a program killed between `?2026h` and `?2026l` costs one late frame rather than
+    // a terminal that has stopped drawing. `needs_render` is deliberately left set: the next pass
+    // through the loop tries again and nothing is dropped.
+    if (outputHeld(state) and render_now - last_render_ms.* < SYNC_HOLD_MS) return;
 
     render(state) catch |err| {
         core.logging.logError("terminal", "terminal render failed", err);

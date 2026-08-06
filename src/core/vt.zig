@@ -130,6 +130,20 @@ pub const VT = struct {
         return self.terminal.modes.get(.cursor_visible);
     }
 
+    /// Whether this pane has asked for its updates to be presented all at once.
+    ///
+    /// DEC private mode 2026, "synchronized output": a program brackets a whole frame with
+    /// `CSI ? 2026 h` … `CSI ? 2026 l` and the terminal presents nothing in between. Without it a
+    /// full-screen repaint can reach the screen half-finished — the top of the new frame above the
+    /// bottom of the old — which is what tearing is, and on a list of rows it reads as lines
+    /// flickering in and out.
+    ///
+    /// ghostty's parser has always tracked this mode; nothing here ever asked it. See
+    /// `renderIfDue`, which is where the answer is used.
+    pub fn outputSynchronized(self: *VT) bool {
+        return self.terminal.modes.get(.synchronized_output);
+    }
+
     /// Check if in alternate screen mode
     pub fn inAltScreen(self: *VT) bool {
         return self.terminal.screens.active_key == .alternate;
