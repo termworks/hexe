@@ -33,6 +33,20 @@ pub const Context = struct {
     cmd_duration_ms: ?u64 = null,
     jobs: u16 = 0,
 
+    /// Which language the prompt is reading, when the shell has more than one.
+    ///
+    /// `"sh"` or `"lua"` under oslo, which runs both at one prompt and switches between them
+    /// mid-session. `null` for bash, zsh and fish, which have nothing to say here — so a segment
+    /// that renders it vanishes on those shells instead of printing a constant.
+    language: ?[]const u8 = null,
+
+    /// The shell's line-editing mode, when it is modal: `"insert"`, `"normal"`, `"replace"`,
+    /// `"visual"`.
+    ///
+    /// Passed in rather than probed, because only the shell knows the instant it changed — and a
+    /// prompt that shows the mode is redrawn on that instant or it is wrong.
+    vimode: ?[]const u8 = null,
+
     // Shell metadata (for mux status bar mode)
     last_command: ?[]const u8 = null,
     title: ?[]const u8 = null,

@@ -604,6 +604,11 @@ pub fn main() !void {
     try shp_prompt.addArg(Arg.booleanOption("right", 'r', null));
     try shp_prompt.addArg(Arg.singleValueOption("shell", 'S', null));
     try shp_prompt.addArg(Arg.singleValueOption("jobs", 'j', null));
+    // What a shell with more to say than bash can supply. Both are optional, and a shell that has
+    // no answer simply omits them — but the parser is strict, so they must be declared here or
+    // passing one is a hard error rather than an ignored flag.
+    try shp_prompt.addArg(Arg.singleValueOption("language", null, null));
+    try shp_prompt.addArg(Arg.singleValueOption("vimode", null, null));
 
     var shp_init = app.createCommand("init", "Print shell initialization script");
     try shp_init.addArg(Arg.positional("shell", null, null));

@@ -107,6 +107,18 @@ fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
     }
     runtime.lua.pushInteger(ctx.jobs);
     runtime.lua.setField(-2, "jobs");
+
+    // Absent rather than an empty string when the shell has no answer, so a config writes
+    // `if ctx.language then` and a segment disappears on bash instead of rendering a blank.
+    if (ctx.language) |language| {
+        _ = runtime.lua.pushString(language);
+        runtime.lua.setField(-2, "language");
+    }
+    if (ctx.vimode) |vimode| {
+        _ = runtime.lua.pushString(vimode);
+        runtime.lua.setField(-2, "vimode");
+    }
+
     runtime.lua.pushInteger(ctx.terminal_width);
     runtime.lua.setField(-2, "terminal_width");
     runtime.lua.pushInteger(@intCast(ctx.now_ms));
