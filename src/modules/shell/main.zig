@@ -30,6 +30,9 @@ pub const PopArgs = struct {
     right: bool = false,
     shell: ?[]const u8 = null,
     jobs: i64 = 0,
+    /// What a shell with more to say than bash supplies. `null` on the shells that have no answer.
+    language: ?[]const u8 = null,
+    vimode: ?[]const u8 = null,
 
     // shell-event extended fields
     shell_phase: ?[]const u8 = null,
@@ -46,14 +49,21 @@ pub fn run(args: PopArgs) !void {
     if (args.init_shell) |shell| {
         try printInit(shell, args.no_comms);
     } else if (args.prompt) {
-        // Build args array for renderPrompt
-        var prompt_args: [6][]const u8 = undefined;
+        // Build args array for renderPrompt.
+        //
+        // **The size is load-bearing.** These are rebuilt from `PopArgs` rather than forwarded, so
+        // a flag declared in `cli/app.zig` and parsed in `renderPrompt` still arrives nowhere
+        // unless it is also added *here* — and if this array is too small for the flags added, the
+        // write past the end is a crash rather than a missing segment.
+        var prompt_args: [8][]const u8 = undefined;
         var argc: usize = 0;
 
         var status_buf: [32]u8 = undefined;
         var duration_buf: [32]u8 = undefined;
         var jobs_buf: [32]u8 = undefined;
         var shell_buf: [64]u8 = undefined;
+        var language_buf: [64]u8 = undefined;
+        var vimode_buf: [64]u8 = undefined;
 
         if (args.status != 0) {
             prompt_args[argc] = std.fmt.bufPrint(&status_buf, "--status={d}", .{args.status}) catch "--status=0";
@@ -74,6 +84,20 @@ pub fn run(args: PopArgs) !void {
         if (args.jobs != 0) {
             prompt_args[argc] = std.fmt.bufPrint(&jobs_buf, "--jobs={d}", .{args.jobs}) catch "--jobs=0";
             argc += 1;
+        }
+        // Only when the shell actually said something. An empty value means "no answer", and
+        // passing `--language=` for it would be indistinguishable from not passing it at all.
+        if (args.language) |language| {
+            if (language.len != 0) {
+                prompt_args[argc] = std.fmt.bufPrint(&language_buf, "--language={s}", .{language}) catch "";
+                argc += 1;
+            }
+        }
+        if (args.vimode) |vimode| {
+            if (vimode.len != 0) {
+                prompt_args[argc] = std.fmt.bufPrint(&vimode_buf, "--vimode={s}", .{vimode}) catch "";
+                argc += 1;
+            }
         }
 
         try renderPrompt(allocator, prompt_args[0..argc]);

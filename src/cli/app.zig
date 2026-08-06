@@ -1107,7 +1107,15 @@ pub fn main() !void {
             const status = try parseOptionalI64(m.getSingleValue("status"), "status");
             const duration = try parseOptionalI64(m.getSingleValue("duration"), "duration");
             const jobs = try parseOptionalI64(m.getSingleValue("jobs"), "jobs");
-            try runShpPrompt(status, duration, m.containsArg("right"), m.getSingleValue("shell") orelse "", jobs);
+            try runShpPrompt(
+                status,
+                duration,
+                m.containsArg("right"),
+                m.getSingleValue("shell") orelse "",
+                jobs,
+                m.getSingleValue("language") orelse "",
+                m.getSingleValue("vimode") orelse "",
+            );
             return;
         }
         if (shp_matches.subcommandMatches("init")) |m| {
@@ -1418,7 +1426,15 @@ fn runTerminalAttach(name: []const u8, log_level: ?core.logging.Level, log_file:
     }
 }
 
-fn runShpPrompt(status: i64, duration: i64, right: bool, shell: []const u8, jobs: i64) !void {
+fn runShpPrompt(
+    status: i64,
+    duration: i64,
+    right: bool,
+    shell: []const u8,
+    jobs: i64,
+    language: []const u8,
+    vimode: []const u8,
+) !void {
     try shp.run(.{
         .prompt = true,
         .status = status,
@@ -1426,6 +1442,9 @@ fn runShpPrompt(status: i64, duration: i64, right: bool, shell: []const u8, jobs
         .right = right,
         .shell = if (shell.len > 0) shell else null,
         .jobs = jobs,
+        // Empty means the shell has no such notion, which is not the same as a value of "".
+        .language = if (language.len > 0) language else null,
+        .vimode = if (vimode.len > 0) vimode else null,
     });
 }
 
