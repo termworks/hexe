@@ -10,6 +10,8 @@ const render_modules = @import("render_modules.zig");
 const bash_init = @import("shell/bash.zig");
 const zsh_init = @import("shell/zsh.zig");
 const fish_init = @import("shell/fish.zig");
+// Emits Lua rather than shell — see the note on `oslo.printInit`.
+const oslo_init = @import("shell/oslo.zig");
 
 const ShpConfig = struct {
     left: []const core.Segment,
@@ -142,9 +144,12 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
         try zsh_init.printInit(stdout, no_comms);
     } else if (std.mem.eql(u8, shell, "fish")) {
         try fish_init.printInit(stdout, no_comms);
+    } else if (std.mem.eql(u8, shell, "oslo")) {
+        // The only one whose output is not shell. See `oslo.printInit`.
+        try oslo_init.printInit(stdout, no_comms);
     } else {
         var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Unknown shell: {s}\nSupported shells: bash, zsh, fish\n", .{shell}) catch return;
+        const msg = std.fmt.bufPrint(&buf, "Unknown shell: {s}\nSupported shells: bash, zsh, fish, oslo\n", .{shell}) catch return;
         try stdout.writeAll(msg);
     }
 }
@@ -167,6 +172,13 @@ fn renderPrompt(allocator: std.mem.Allocator, args: []const []const u8) !void {
             ctx.jobs = std.fmt.parseInt(u16, arg[7..], 10) catch 0;
         } else if (std.mem.startsWith(u8, arg, "--shell=")) {
             shell = arg[8..];
+        } else if (std.mem.startsWith(u8, arg, "--language=")) {
+            // Empty means "the shell has no such notion", which is not the same as `"sh"`.
+            const value = arg[11..];
+            ctx.language = if (value.len == 0) null else value;
+        } else if (std.mem.startsWith(u8, arg, "--vimode=")) {
+            const value = arg[9..];
+            ctx.vimode = if (value.len == 0) null else value;
         }
     }
 
