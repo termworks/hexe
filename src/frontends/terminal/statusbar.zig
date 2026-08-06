@@ -619,6 +619,20 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
 
     rt.lua.pushInteger(ctx.jobs);
     rt.lua.setField(-2, "jobs");
+
+    // Absent rather than empty when the shell has no answer, so a config writes
+    // `if ctx.language then` and the segment disappears on bash instead of drawing a blank.
+    // Kept in step with `modules/shell/render_modules.zig` — there are two of these builders and
+    // a field added to only one is a field that works in some segments and not others.
+    if (ctx.language) |language| {
+        _ = rt.lua.pushString(language);
+        rt.lua.setField(-2, "language");
+    }
+    if (ctx.vimode) |vimode| {
+        _ = rt.lua.pushString(vimode);
+        rt.lua.setField(-2, "vimode");
+    }
+
     rt.lua.pushInteger(ctx.terminal_width);
     rt.lua.setField(-2, "terminal_width");
     rt.lua.pushInteger(@intCast(ctx.now_ms));
