@@ -212,7 +212,23 @@ pub const FrontendCapabilityFlag = struct {
 
 /// Register: session_id[32] + keepalive(u8) + frontend_kind(u8) +
 /// transport_kind(u8) + capability_flags(u32) + name_len(u16) + base_root_len(u16)
+/// + frontend_pid(i32)
 /// Followed by: name bytes, then base_root bytes.
+///
+/// `frontend_pid` lets SES read the registering frontend's environment from
+/// `/proc/<pid>/environ` and use it as the base environment for every pane this
+/// session spawns. Without it SES falls back to its own environ — which is
+/// whatever shell happened to start the daemon, possibly days and several
+/// projects ago, so panes came up with a foreign PATH and a foreign direnv. A
+/// session is the unit that owns an environment; tabs, splits and floats
+/// inherit it from there.
+///
+/// The pid travels instead of the environment itself because a real nix/direnv
+/// environment runs well past the 64KiB CTL payload ceiling. It is meaningful
+/// only for same-host transports; remote frontends send 0 and keep the
+/// fallback. `/proc/<pid>/environ` is readable only within the same uid, and
+/// the SES socket is already uid-scoped, so a client cannot reach an
+/// environment it could not read directly.
 pub const FrontendRegister = extern struct {
     session_id: [32]u8 align(1),
     keepalive: u8 align(1),
@@ -221,6 +237,7 @@ pub const FrontendRegister = extern struct {
     capability_flags: u32 align(1),
     name_len: u16 align(1),
     base_root_len: u16 align(1),
+    frontend_pid: i32 align(1) = 0,
 };
 pub const Register = FrontendRegister;
 

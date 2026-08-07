@@ -735,6 +735,14 @@ pub const SesClient = struct {
             self.session_name,
         });
 
+        // Only meaningful when SES shares our /proc. Re-sent on every register,
+        // so reattaching a session refreshes its environment from the shell
+        // that reattached rather than keeping the one it was born with.
+        const frontend_pid: i32 = switch (self.transportKind()) {
+            .local_ipc, .preconnected => @intCast(std.os.linux.getpid()),
+            .liblink => 0,
+        };
+
         var reg: wire.FrontendRegister = .{
             .session_id = self.session_id,
             .keepalive = if (self.keepalive) 1 else 0,
@@ -743,8 +751,12 @@ pub const SesClient = struct {
             .capability_flags = defaultCapabilityFlags(self.frontend_kind, self.transportKind()),
             .name_len = @intCast(self.session_name.len),
             .base_root_len = @intCast(@min(self.base_root.len, std.math.maxInt(u16))),
+            .frontend_pid = frontend_pid,
         };
-        const trails: []const []const u8 = &.{ self.session_name, self.base_root[0..reg.base_root_len] };
+        const trails: []const []const u8 = &.{
+            self.session_name,
+            self.base_root[0..reg.base_root_len],
+        };
         const request_id = try self.writeControlMsgRequest(fd, .register, std.mem.asBytes(&reg), trails);
 
         // Wait for registered response.

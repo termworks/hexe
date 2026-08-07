@@ -40,6 +40,121 @@ pub fn generateUniquePaneName(
     }
 }
 
+/// Variables that describe the frontend *process*, not the session it opens.
+/// Carried into a session env they would reach every pane: a pane claiming its
+/// parent's uuid, or a stale session id from the shell hexe was launched in.
+/// PWD/OLDPWD/BOX/TERM are restated per-pane by `Pty.buildEnv`.
+fn isPerProcessEnvKey(key: []const u8) bool {
+    for ([_][]const u8{
+        "HEXE_PANE_UUID",
+        "HEXE_POD_NAME",
+        "HEXE_POD_SOCKET",
+        "HEXE_SESSION",
+        "HEXE_FLOAT",
+        "HEXE_FLOAT_NAME",
+        "PWD",
+        "OLDPWD",
+        "BOX",
+        "TERM",
+    }) |skip| {
+        if (std.mem.eql(u8, key, skip)) return true;
+    }
+    return false;
+}
+
+/// Read a registering frontend's environment from `/proc/<pid>/environ`.
+///
+/// This is the environment the frontend was *exec'd* with — the launching
+/// shell's, including its direnv/nix profile — which is exactly what the
+/// session should hand to its panes. Returns a NUL-separated blob for the
+/// caller to own, or null when the pid is unusable (remote frontend, exited,
+/// different uid).
+pub fn readFrontendEnv(allocator: std.mem.Allocator, pid: i32) ?[]u8 {
+    if (pid <= 0) return null;
+
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/environ", .{pid}) catch return null;
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
+        if (err != error.FileNotFound) {
+            core.logging.logError("ses", "failed to open frontend environ", err);
+        }
+        return null;
+    };
+    defer file.close();
+
+    const data = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
+        core.logging.logError("ses", "failed to read frontend environ", err);
+        return null;
+    };
+    defer allocator.free(data);
+
+    var blob: std.ArrayList(u8) = .empty;
+    errdefer blob.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, data, 0);
+    while (it.next()) |entry| {
+        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+        if (eq == 0) continue;
+        if (isPerProcessEnvKey(entry[0..eq])) continue;
+        blob.appendSlice(allocator, entry) catch return null;
+        blob.append(allocator, 0) catch return null;
+    }
+
+    if (blob.items.len == 0) {
+        blob.deinit(allocator);
+        return null;
+    }
+    return blob.toOwnedSlice(allocator) catch null;
+}
+
+/// Split a NUL-separated session env blob into `KEY=VALUE` entries.
+///
+/// Entries borrow `blob`, which is owned by the Client for as long as it is
+/// registered — every spawn path copies them into an EnvMap before returning,
+/// so nothing outlives the borrow. Only the returned slice needs freeing.
+pub fn parseSessionEnv(allocator: std.mem.Allocator, blob: []const u8) !?[]const []const u8 {
+    var entries: std.ArrayList([]const u8) = .empty;
+    errdefer entries.deinit(allocator);
+
+    var it = std.mem.splitScalar(u8, blob, 0);
+    while (it.next()) |entry| {
+        if (entry.len == 0) continue;
+        if (std.mem.indexOfScalar(u8, entry, '=') == null) continue;
+        try entries.append(allocator, entry);
+    }
+
+    if (entries.items.len == 0) {
+        entries.deinit(allocator);
+        return null;
+    }
+    return try entries.toOwnedSlice(allocator);
+}
+
+/// Look a key up in parsed session env entries. Later entries win, matching
+/// how the environment itself resolves duplicates.
+pub fn lookupSessionEnv(entries: ?[]const []const u8, key: []const u8) ?[]const u8 {
+    const items = entries orelse return null;
+    var i = items.len;
+    while (i > 0) {
+        i -= 1;
+        if (items[i].len > key.len and
+            std.mem.startsWith(u8, items[i], key) and
+            items[i][key.len] == '=')
+        {
+            return items[i][key.len + 1 ..];
+        }
+    }
+    return null;
+}
+
+fn putEnvEntries(env_map: *std.process.EnvMap, entries: []const []const u8) !void {
+    for (entries) |entry| {
+        const sep = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+        if (sep == 0) continue;
+        try env_map.put(entry[0..sep], entry[sep + 1 ..]);
+    }
+}
+
 /// Fork `hexe pod daemon` and return immediately, WITHOUT reading its
 /// handshake. The caller polls `pollPodHandshake` until it resolves.
 pub fn startPodSpawn(
@@ -49,6 +164,7 @@ pub fn startPodSpawn(
     pod_socket_path: []const u8,
     shell: []const u8,
     cwd: ?[]const u8,
+    base_env: ?[]const []const u8,
     env: ?[]const []const u8,
     isolation_profile: ?[]const u8,
 ) !PendingPodSpawn {
@@ -124,19 +240,21 @@ pub fn startPodSpawn(
         (test_only_env != null and test_only_env.?.len > 0) or
         (isolation_profile != null and isolation_profile.?.len > 0);
 
-    if (env != null or needs_runtime_env) {
-        // Start from the current SES environment so spawned pods keep
-        // basic runtime variables like PATH, HOME, and XDG_RUNTIME_DIR.
-        // Ad-hoc float env is meant to overlay this, not replace it.
-        var env_map = try std.process.getEnvMap(allocator);
+    if (env != null or base_env != null or needs_runtime_env) {
+        // `base_env` is the session's own environment, captured from the
+        // frontend at register. Falling back to SES's environ is the legacy
+        // path: the daemon outlives every session, so its environment is
+        // whichever shell first started it and belongs to no session at all.
+        var env_map = if (base_env) |base| blk: {
+            var map = std.process.EnvMap.init(allocator);
+            errdefer map.deinit();
+            try putEnvEntries(&map, base);
+            break :blk map;
+        } else try std.process.getEnvMap(allocator);
+        errdefer env_map.deinit();
 
-        if (env) |vars| {
-            for (vars) |entry| {
-                const sep = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
-                if (sep == 0 or sep + 1 > entry.len) continue;
-                try env_map.put(entry[0..sep], entry[sep + 1 ..]);
-            }
-        }
+        // Ad-hoc float env overlays the base, so it can override as well as add.
+        if (env) |vars| try putEnvEntries(&env_map, vars);
 
         // Force instance/test-only values from this ses process.
         // This prevents user-provided env overrides from escaping the instance namespace.
@@ -257,10 +375,11 @@ pub fn spawnPod(
     pod_socket_path: []const u8,
     shell: []const u8,
     cwd: ?[]const u8,
+    base_env: ?[]const []const u8,
     env: ?[]const []const u8,
     isolation_profile: ?[]const u8,
 ) !SpawnResult {
-    var sp = try startPodSpawn(allocator, uuid, name, pod_socket_path, shell, cwd, env, isolation_profile);
+    var sp = try startPodSpawn(allocator, uuid, name, pod_socket_path, shell, cwd, base_env, env, isolation_profile);
     defer sp.deinit();
 
     while (true) {

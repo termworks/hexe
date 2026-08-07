@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const layout_template = @import("layout_template.zig");
 const client_session_snapshot = @import("client_session_snapshot.zig");
+const pane_spawn = @import("pane_spawn.zig");
 
 pub fn applyClientSessionLayoutTemplate(
     self: anytype,
@@ -63,10 +64,21 @@ pub fn applyClientSessionLayoutTemplate(
         created_uuids.deinit(self.allocator);
     }
 
+    // Panes here belong to the client's session, so they spawn with the
+    // session's environment and its SHELL — not the daemon's, which belongs to
+    // whichever shell happened to start it.
+    var session_env: ?[]const []const u8 = null;
+    defer if (session_env) |entries| self.allocator.free(entries);
+    if (client.session_env) |blob| {
+        session_env = pane_spawn.parseSessionEnv(self.allocator, blob) catch null;
+    }
+    const shell = pane_spawn.lookupSessionEnv(session_env, "SHELL") orelse
+        std.posix.getenv("SHELL") orelse "/bin/sh";
+
     var leaf_idx: usize = 1;
     while (leaf_idx < leaf_count) : (leaf_idx += 1) {
         const cwd = if (leaf_idx < cwds.items.len) cwds.items[leaf_idx] else null;
-        const pane = try self.createPane(client_id, std.posix.getenv("SHELL") orelse "/bin/sh", cwd, null, null, null, null);
+        const pane = try self.createPane(client_id, shell, cwd, null, null, session_env, null, null);
         pane.requestBacklogReplay();
         try leaf_uuids.append(self.allocator, pane.uuid);
         try created_uuids.append(self.allocator, pane.uuid);

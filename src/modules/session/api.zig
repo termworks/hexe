@@ -159,15 +159,15 @@ pub fn paneAttachedToClient(self: anytype, uuid: [32]u8, client_id: usize) bool 
 
 /// Synchronous pane creation: forks the pod AND waits for its handshake.
 /// Used by `layout_apply`, which consumes each pane as it builds the tree.
-pub fn createPane(self: anytype, client_id: usize, shell: []const u8, cwd: ?[]const u8, sticky_pwd: ?[]const u8, sticky_key: ?u8, env: ?[]const []const u8, isolation_profile: ?[]const u8) !*store_mod.Pane {
-    return pane_creation.createPane(self, client_id, shell, cwd, sticky_pwd, sticky_key, env, isolation_profile);
+pub fn createPane(self: anytype, client_id: usize, shell: []const u8, cwd: ?[]const u8, sticky_pwd: ?[]const u8, sticky_key: ?u8, base_env: ?[]const []const u8, env: ?[]const []const u8, isolation_profile: ?[]const u8) !*store_mod.Pane {
+    return pane_creation.createPane(self, client_id, shell, cwd, sticky_pwd, sticky_key, base_env, env, isolation_profile);
 }
 
 /// Fork the pod and return WITHOUT waiting for its handshake (PLAN.md 1.1).
 /// The caller polls the returned flight and then calls exactly one of
 /// `finishCreatePane` / `abortCreatePane`.
-pub fn beginCreatePane(self: anytype, client_id: usize, shell: []const u8, cwd: ?[]const u8, sticky_pwd: ?[]const u8, sticky_key: ?u8, env: ?[]const []const u8, isolation_profile: ?[]const u8) !pane_creation.InFlightPane {
-    return pane_creation.beginCreatePane(self, client_id, shell, cwd, sticky_pwd, sticky_key, env, isolation_profile);
+pub fn beginCreatePane(self: anytype, client_id: usize, shell: []const u8, cwd: ?[]const u8, sticky_pwd: ?[]const u8, sticky_key: ?u8, base_env: ?[]const []const u8, env: ?[]const []const u8, isolation_profile: ?[]const u8) !pane_creation.InFlightPane {
+    return pane_creation.beginCreatePane(self, client_id, shell, cwd, sticky_pwd, sticky_key, base_env, env, isolation_profile);
 }
 
 pub fn finishCreatePane(self: anytype, flight: *pane_creation.InFlightPane, child_pid: std.posix.pid_t) !*store_mod.Pane {

@@ -62,7 +62,7 @@ hexe.float("claude", {
 
 `add_env` sets variables for this float's process only. A variable set here
 wins over whatever the process would otherwise inherit — from `inherit_env`,
-from the daemon, or from your shell — so it can override as well as add.
+or from the session — so it can override as well as add.
 Values may be strings, numbers, or booleans. The array form works too, if you
 prefer it: `add_env = { "NO_COLOR=1" }`.
 

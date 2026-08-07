@@ -59,6 +59,7 @@ smoke: smoke-clean
 	python3 -u scripts/smoke_slow_segments.py
 	python3 -u scripts/smoke_startup_chooser.py
 	python3 -u scripts/smoke_bad_config.py
+	python3 -u scripts/smoke_session_env.py
 
 # Heavy-load scenario: splits + floats + fullscreen apps + huge buffers +
 # pastes, then chaos rounds. Needs a ReleaseFast build (Debug VT parsing is

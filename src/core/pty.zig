@@ -281,6 +281,14 @@ pub const Pty = struct {
         _ = posix.write(posix.STDERR_FILENO, msg) catch 0;
     }
 
+    fn extraEnvHasKey(extra_env: ?[]const [2][]const u8, key: []const u8) bool {
+        const extras = extra_env orelse return false;
+        for (extras) |kv| {
+            if (std.mem.eql(u8, kv[0], key)) return true;
+        }
+        return false;
+    }
+
     fn buildEnv(extra_env: ?[]const [2][]const u8) ![*:null]const ?[*:0]const u8 {
         const allocator = std.heap.c_allocator;
         var env_list: std.ArrayList(?[*:0]const u8) = .empty;
@@ -290,6 +298,16 @@ pub const Pty = struct {
         skip_keys[skip_count] = "BOX";
         skip_count += 1;
         skip_keys[skip_count] = "TERM";
+        skip_count += 1;
+        // The child has already chdir'd, but an inherited PWD/OLDPWD still
+        // names the directory the SES daemon was started in. Anything that
+        // trusts $PWD over getcwd() — direnv, prompts, `hexe shp`, most build
+        // wrappers — then acts on a foreign directory. Drop both and restate
+        // PWD from the real cwd below; a fresh shell has no previous dir, so
+        // OLDPWD is simply not set.
+        skip_keys[skip_count] = "PWD";
+        skip_count += 1;
+        skip_keys[skip_count] = "OLDPWD";
         skip_count += 1;
         // Never hand the daemon's security opt-outs to a pane's shell
         // (PLAN.md A-8). These exist so an operator can loosen hexe's own
@@ -326,6 +344,19 @@ pub const Pty = struct {
 
         try env_list.append(allocator, "BOX=1");
         try env_list.append(allocator, "TERM=xterm-256color");
+
+        // Runs in the forked child after chdir and after any isolation has been
+        // applied, so this is the directory the shell actually starts in.
+        // Skipped when extra_env sets PWD itself — that is an explicit request.
+        if (!extraEnvHasKey(extra_env, "PWD")) {
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (posix.getcwd(&cwd_buf)) |real_cwd| {
+                const entry = try allocator.allocSentinel(u8, 4 + real_cwd.len, 0);
+                @memcpy(entry[0..4], "PWD=");
+                @memcpy(entry[4..][0..real_cwd.len], real_cwd);
+                try env_list.append(allocator, entry.ptr);
+            } else |_| {}
+        }
 
         if (extra_env) |extras| {
             for (extras) |kv| {

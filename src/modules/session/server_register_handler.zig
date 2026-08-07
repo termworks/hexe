@@ -7,6 +7,7 @@ const core = @import("core");
 const wire = core.wire;
 const ses = @import("main.zig");
 const server = @import("server.zig");
+const pane_spawn = @import("pane_spawn.zig");
 const Server = server.Server;
 
 pub fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -107,6 +108,15 @@ pub fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf
                     return;
                 };
             }
+        }
+        // Replaced on every register, so a reattach refreshes the session's
+        // environment instead of keeping the one it was first opened with. A
+        // failed read leaves the previous value alone rather than dropping the
+        // session back onto the daemon's environment.
+        if (pane_spawn.readFrontendEnv(client.allocator, reg.frontend_pid)) |env_blob| {
+            if (client.session_env) |old| client.allocator.free(old);
+            client.session_env = env_blob;
+            ses.debugLog("register: session env captured from pid={d} ({d} bytes)", .{ reg.frontend_pid, env_blob.len });
         }
         // Store the resolved name (duplicated since resolved_name will be freed)
         if (resolved_name) |rn| {

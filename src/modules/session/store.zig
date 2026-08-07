@@ -412,6 +412,10 @@ pub const Client = struct {
     pending_reattach_started_at: i64 = 0,
     session_name: ?[]const u8,
     base_root: ?[]const u8,
+    /// The registering frontend's environment, NUL-separated, used as the base
+    /// environment for panes this session spawns. Null falls back to SES's own
+    /// environ (see `wire.FrontendRegister`).
+    session_env: ?[]const u8 = null,
     session_snapshot: ?session_model.SessionSnapshot,
     frontend_kind: u8 = 0,
     transport_kind: u8 = 0,
@@ -439,6 +443,7 @@ pub const Client = struct {
         self.pane_uuids.deinit(self.allocator);
         if (self.session_name) |name| self.allocator.free(name);
         if (self.base_root) |root| self.allocator.free(root);
+        if (self.session_env) |env| self.allocator.free(env);
         if (self.session_snapshot) |*snapshot| snapshot.deinit();
     }
 
