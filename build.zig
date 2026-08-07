@@ -5,6 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const strip = b.option(bool, "strip", "Strip debug info and symbols from the installed hexe binary") orelse false;
     const runtime_epoch = computeRuntimeEpoch(b);
+    const version = manifestVersion(b);
 
     // Pack the Pokemon sprites into a compressed archive at build time and
     // expose it as the "sprites_pack" module (consumed by
@@ -91,6 +92,7 @@ pub fn build(b: *std.Build) void {
     });
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "runtime_epoch", runtime_epoch);
+    build_options.addOption([]const u8, "version", version);
     core_module.addOptions("build_options", build_options);
     if (ghostty_vt_mod) |vt| {
         core_module.addImport("ghostty-vt", vt);
@@ -564,6 +566,29 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_frontend_core_tests.step);
     test_step.dependOn(&run_web_host_tests.step);
     test_step.dependOn(&run_syslink_host_tests.step);
+}
+
+fn manifestVersion(b: *std.Build) []const u8 {
+    const source = std.fs.cwd().readFileAllocOptions(
+        b.allocator,
+        "build.zig.zon",
+        1024 * 1024,
+        null,
+        .of(u8),
+        0,
+    ) catch @panic("failed to read build.zig.zon");
+    defer b.allocator.free(source);
+
+    const Manifest = struct { version: []const u8 };
+    const manifest = std.zon.parse.fromSlice(
+        Manifest,
+        b.allocator,
+        source,
+        null,
+        .{ .ignore_unknown_fields = true },
+    ) catch @panic("failed to parse build.zig.zon version");
+    _ = std.SemanticVersion.parse(manifest.version) catch @panic("invalid build.zig.zon version");
+    return manifest.version;
 }
 
 fn computeRuntimeEpoch(b: *std.Build) []const u8 {

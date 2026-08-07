@@ -548,6 +548,33 @@ test "DSR replies use pane-local coordinates across every query split" {
     try std.testing.expectEqualStrings("\x1b[?24;80R", decxcpr.payload[16..]);
 }
 
+test "XTVERSION replies return to the pane across every query split" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+    var expected_buf: [128]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buf, "\x1bP>|hexe({s})\x1b\\", .{
+        core.build_options.version,
+    });
+
+    const query = "\x1b[>0q";
+    for (0..query.len + 1) |split| {
+        pane.feedPodOutput(query[0..split]);
+        pane.feedPodOutput(query[split..]);
+        const frame = try readTestFrame(fds[1], &frame_buf);
+        try std.testing.expectEqualStrings(expected, frame.payload[16..]);
+    }
+}
+
 test "consumed OSC notifications and progress survive every split" {
     var fds: [2]std.posix.fd_t = undefined;
     const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);

@@ -51,6 +51,13 @@ pub fn csiDisposition(vt: *core.VT, final: u8, params: []const u8, reply_buf: []
         }
     }
 
+    if (final == 'q' and (std.mem.eql(u8, params, ">") or std.mem.eql(u8, params, ">0"))) {
+        const reply = std.fmt.bufPrint(reply_buf, "\x1bP>|hexe({s})\x1b\\", .{
+            core.build_options.version,
+        }) catch return .ignore;
+        return .{ .reply = reply };
+    }
+
     if (final == 'c') {
         if (params.len == 0 or std.mem.eql(u8, params, "0") or params[0] == '>') {
             return .forward_to_host;
@@ -159,4 +166,20 @@ test "DSR reports pane-local one-based cursor coordinates" {
     try vt.feed("\x1b[24;80H");
     try expectReply(csiDisposition(&vt, 'n', "6", &reply), "\x1b[24;80R");
     try std.testing.expect(csiDisposition(&vt, 'n', "?5", &reply) == .ignore);
+}
+
+test "XTVERSION reports the manifest version" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 80, 24);
+    defer vt.deinit();
+    var reply: [128]u8 = undefined;
+    var expected: [128]u8 = undefined;
+    const expected_reply = try std.fmt.bufPrint(&expected, "\x1bP>|hexe({s})\x1b\\", .{
+        core.build_options.version,
+    });
+
+    try expectReply(csiDisposition(&vt, 'q', ">0", &reply), expected_reply);
+    try expectReply(csiDisposition(&vt, 'q', ">", &reply), expected_reply);
+    try std.testing.expect(csiDisposition(&vt, 'q', ">1", &reply) == .ignore);
+    try std.testing.expect(csiDisposition(&vt, 'q', "0", &reply) == .ignore);
 }
