@@ -6,6 +6,7 @@ const pod_protocol = core.pod_protocol;
 const wire = core.wire;
 
 const pane_output = @import("pane_output.zig");
+const pane_osc = @import("pane_osc.zig");
 const vt_write_queue = @import("vt_write_queue.zig");
 const widgets = pop.widgets;
 
@@ -107,6 +108,10 @@ pub const Pane = struct {
     osc_pending_esc: bool = false,
     osc_prev_esc: bool = false,
     osc_expected_responses: u16 = 0,
+    osc_consumer: pane_osc.Consumer = .{},
+    osc_notifications: std.ArrayList(pane_osc.Notification) = .empty,
+    osc_progress: pane_osc.Progress = .{},
+    osc_progress_changed: bool = false,
 
     // Pane-local DCS query capture (DECRQSS support)
     dcs_query_state: DcsQueryState = .idle,
@@ -134,6 +139,17 @@ pub const Pane = struct {
         const v = self.osc_expected_responses;
         self.osc_expected_responses = 0;
         return v;
+    }
+
+    pub fn takeOscNotification(self: *Pane) ?pane_osc.Notification {
+        if (self.osc_notifications.items.len == 0) return null;
+        return self.osc_notifications.orderedRemove(0);
+    }
+
+    pub fn takeOscProgressChanged(self: *Pane) bool {
+        const changed = self.osc_progress_changed;
+        self.osc_progress_changed = false;
+        return changed;
     }
 
     pub fn takeCsiExpectedResponses(self: *Pane) u16 {
@@ -167,6 +183,7 @@ pub const Pane = struct {
     pub fn deinit(self: *Pane) void {
         self.vt.deinit();
         self.osc_buf.deinit(self.allocator);
+        self.osc_notifications.deinit(self.allocator);
         if (self.notifications_initialized) {
             self.notifications.deinit();
         }
@@ -196,6 +213,10 @@ pub const Pane = struct {
         self.osc_pending_esc = false;
         self.osc_prev_esc = false;
         self.osc_buf.clearRetainingCapacity();
+        self.osc_consumer.reset();
+        self.osc_notifications.clearRetainingCapacity();
+        self.osc_progress = .{};
+        self.osc_progress_changed = false;
         self.dcs_query_state = .idle;
         self.dcs_query_len = 0;
         self.csi_query_state = .idle;

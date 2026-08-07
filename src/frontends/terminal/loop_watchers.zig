@@ -5,6 +5,7 @@ const frontend_core = @import("frontend_core");
 const xev = @import("xev").Dynamic;
 
 const State = @import("state.zig").State;
+const Pane = @import("pane.zig").Pane;
 const HostHooks = @import("loop_host_hooks.zig").HostHooks;
 const terminal_main = @import("main.zig");
 const loop_ipc = @import("loop_ipc.zig");
@@ -47,6 +48,41 @@ pub const SesVtWatcher = struct {
 const SesVtDispatchContext = struct {
     state: *State,
 };
+
+fn presentPaneNotification(state: *State, pane: *Pane, notification: anytype) void {
+    var message_buf: [768]u8 = undefined;
+    const message = if (notification.title().len > 0 and notification.body().len > 0)
+        std.fmt.bufPrint(&message_buf, "[{s}] {s}: {s}", .{ pane.uuid[0..8], notification.title(), notification.body() }) catch return
+    else
+        std.fmt.bufPrint(&message_buf, "[{s}] {s}", .{
+            pane.uuid[0..8],
+            if (notification.body().len > 0) notification.body() else notification.title(),
+        }) catch return;
+    state.notifications.show(message);
+
+    if (frontend_core.defaultCapabilities(.terminal).desktop_notify) {
+        var title_buf: [256]u8 = undefined;
+        const title = if (notification.title().len > 0)
+            std.fmt.bufPrint(&title_buf, "hexe {s} — {s}", .{ pane.uuid[0..8], notification.title() }) catch return
+        else
+            std.fmt.bufPrint(&title_buf, "hexe {s}", .{pane.uuid[0..8]}) catch return;
+        const body = if (notification.body().len > 0) notification.body() else notification.title();
+        const stdout = std.fs.File.stdout();
+        var writer_buf: [512]u8 = undefined;
+        var writer = stdout.writer(&writer_buf);
+        state.renderer.vx.notify(&writer.interface, title, body) catch |err| {
+            core.logging.logError("terminal", "pane desktop notification failed", err);
+        };
+    }
+    state.needs_render = true;
+}
+
+fn drainPaneOscEvents(state: *State, pane: *Pane, present: bool) void {
+    while (pane.takeOscNotification()) |notification| {
+        if (present) presentPaneNotification(state, pane, &notification);
+    }
+    if (pane.takeOscProgressChanged()) state.needs_render = true;
+}
 
 const SesCtlSlot = struct {
     state: *State,
@@ -301,6 +337,7 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
             .output => {
                 terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ vt_event.pane_id, vt_event.payload_len });
                 pane.feedPodOutput(payload);
+                drainPaneOscEvents(state, pane, !pane.backlog_replaying);
                 const osc_responses = pane.takeOscExpectedResponses();
                 if (osc_responses > 0) {
                     var j: u16 = 0;

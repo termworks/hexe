@@ -272,8 +272,10 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
             self.osc_pending_esc = false;
             self.osc_prev_esc = false;
 
-            if (shouldPassthroughOsc(self.osc_buf.items)) {
-                const code = parseOscCode(self.osc_buf.items) orelse 0;
+            const code = parseOscCode(self.osc_buf.items) orelse 0;
+            if (isConsumedOscCode(code)) {
+                consumeOsc(self, self.osc_buf.items);
+            } else if (shouldPassthroughOsc(self.osc_buf.items)) {
                 if (isOscQuery(self.osc_buf.items)) {
                     if (!handleOscQuery(self, code)) {
                         self.osc_expected_responses +|= 1;
@@ -292,6 +294,30 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
 
             self.osc_buf.clearRetainingCapacity();
         }
+    }
+}
+
+fn consumeOsc(self: *Pane, seq: []const u8) void {
+    switch (self.osc_consumer.consume(seq, std.time.milliTimestamp())) {
+        .ignore => {},
+        .notification => |notification| {
+            if (self.osc_notifications.items.len >= 16) return;
+            self.osc_notifications.append(self.allocator, notification) catch |err| {
+                core.logging.logError("terminal", "queue pane OSC notification", err);
+            };
+        },
+        .progress => |progress| {
+            self.osc_progress = progress;
+            self.osc_progress_changed = true;
+        },
+        .kitty_query => |query| {
+            var reply_buf: [160]u8 = undefined;
+            const reply = if (query.id().len > 0)
+                std.fmt.bufPrint(&reply_buf, "\x1b]99;i={s}:p=?;p=title,body\x1b\\", .{query.id()}) catch return
+            else
+                std.fmt.bufPrint(&reply_buf, "\x1b]99;p=?;p=title,body\x1b\\", .{}) catch return;
+            writeResponse(self, reply, "OSC 99 capability response write failed");
+        },
     }
 }
 
@@ -348,6 +374,10 @@ fn isPassthroughOscCode(code: u32) bool {
     return false;
 }
 
+fn isConsumedOscCode(code: u32) bool {
+    return code == 9 or code == 99 or code == 777;
+}
+
 fn isQueryReplyOscCode(code: u32) bool {
     if (code == 4 or code == 5 or code == 104 or code == 105) return true;
     if (code >= 10 and code <= 19) return true;
@@ -366,6 +396,9 @@ test "OSC passthrough keeps color feedback families including OSC 51" {
     try std.testing.expect(isOscQuery("\x1b]51;?\x07"));
     try std.testing.expect(isOscQuery("\x1b]119;?\x07"));
     try std.testing.expect(!shouldPassthroughOsc("\x1b]99;?\x07"));
+    try std.testing.expect(isConsumedOscCode(9));
+    try std.testing.expect(isConsumedOscCode(99));
+    try std.testing.expect(isConsumedOscCode(777));
 }
 
 test "CSI scanner preserves query state across every split" {
@@ -513,6 +546,61 @@ test "DSR replies use pane-local coordinates across every query split" {
     pane.feedPodOutput("\x1b[?6n");
     const decxcpr = try readTestFrame(fds[1], &frame_buf);
     try std.testing.expectEqualStrings("\x1b[?24;80R", decxcpr.payload[16..]);
+}
+
+test "consumed OSC notifications and progress survive every split" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+
+    const notification_seq = "\x1b]777;notify;Build;done\x1b\\";
+    for (0..notification_seq.len + 1) |split| {
+        pane.feedPodOutput(notification_seq[0..split]);
+        pane.feedPodOutput(notification_seq[split..]);
+        const notification = pane.takeOscNotification() orelse return error.TestExpectedNotification;
+        try std.testing.expectEqualStrings("Build", notification.title());
+        try std.testing.expectEqualStrings("done", notification.body());
+    }
+
+    const progress_seq = "\x1b]9;4;1;73\x07";
+    for (0..progress_seq.len + 1) |split| {
+        pane.feedPodOutput(progress_seq[0..split]);
+        pane.feedPodOutput(progress_seq[split..]);
+        try std.testing.expect(pane.takeOscProgressChanged());
+        try std.testing.expectEqual(@as(?u8, 73), pane.osc_progress.percentage);
+    }
+}
+
+test "OSC 99 capability replies return to the pane across every split" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+
+    const query = "\x1b]99;i=probe:p=?;\x1b\\";
+    for (0..query.len + 1) |split| {
+        pane.feedPodOutput(query[0..split]);
+        pane.feedPodOutput(query[split..]);
+        const frame = try readTestFrame(fds[1], &frame_buf);
+        try std.testing.expectEqualStrings("\x1b]99;i=probe:p=?;p=title,body\x1b\\", frame.payload[16..]);
+    }
 }
 
 fn containsClearSeq(tail: []const u8, data: []const u8) bool {
