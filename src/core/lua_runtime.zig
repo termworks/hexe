@@ -1175,6 +1175,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.action.tab=hexe.action.tab or {}; hexe.action.tab.new=hexe.action.tab.new or function(o) return action('tab.new',o) end; hexe.action.tab.close=hexe.action.tab.close or function(o) return action('tab.close',o) end; hexe.action.tab.next=hexe.action.tab.next or function(o) return action('tab.next',o) end; hexe.action.tab.prev=hexe.action.tab.prev or function(o) return action('tab.prev',o) end; hexe.action.tab.rename=hexe.action.tab.rename or function(o) return action('tab.rename',o) end; " ++
         "hexe.action.float=hexe.action.float or {}; hexe.action.float.toggle=hexe.action.float.toggle or function(key) local o={}; if type(key)=='table' then o=key else o.float=key end; return action('float.toggle',o) end; hexe.action.float.nudge=hexe.action.float.nudge or function(dir) local o={}; if type(dir)=='table' then o=dir else o.dir=dir end; return action('float.nudge',o) end; " ++
         "hexe.action.pane=hexe.action.pane or {}; hexe.action.pane.disown=hexe.action.pane.disown or function(o) return action('pane.disown',o) end; hexe.action.pane.adopt=hexe.action.pane.adopt or function(o) return action('pane.adopt',o) end; hexe.action.pane.close=hexe.action.pane.close or function(o) return action('pane.close',o) end; hexe.action.pane.select=hexe.action.pane.select or function(o) return action('pane.select_mode',o) end; hexe.action.pane.sync_toggle=hexe.action.pane.sync_toggle or function(o) return action('pane.sync_toggle',o) end; hexe.action.pane.zoom=hexe.action.pane.zoom or function(o) return action('pane.zoom',o) end; hexe.action.config=hexe.action.config or {}; hexe.action.config.reload=hexe.action.config.reload or function(o) return action('config.reload',o) end; hexe.action.copy=hexe.action.copy or {}; hexe.action.copy.enter=hexe.action.copy.enter or function(o) return action('copy.enter',o) end; hexe.action.search=hexe.action.search or {}; hexe.action.search.enter=hexe.action.search.enter or function(o) return action('search.enter',o) end; " ++
+        "hexe.action.prompt=hexe.action.prompt or {}; hexe.action.prompt.previous=hexe.action.prompt.previous or function(o) return action('prompt.previous',o) end; hexe.action.prompt.next=hexe.action.prompt.next or function(o) return action('prompt.next',o) end; hexe.action.prompt.copy_output=hexe.action.prompt.copy_output or function(o) return action('prompt.copy_output',o) end; " ++
         "hexe.action.split=hexe.action.split or {}; hexe.action.split.horizontal=hexe.action.split.horizontal or function(o) return action('split.h',o) end; hexe.action.split.vertical=hexe.action.split.vertical or function(o) return action('split.v',o) end; hexe.action.split.resize=hexe.action.split.resize or function(dir) local o={}; if type(dir)=='table' then o=dir else o.dir=dir end; return action('split.resize',o) end; " ++
         "hexe.action.focus=hexe.action.focus or {}; hexe.action.focus.move=hexe.action.focus.move or function(dir) local o={}; if type(dir)=='table' then o=dir else o.dir=dir end; return action('focus.move',o) end; " ++
         "hexe.action.clipboard=hexe.action.clipboard or {}; hexe.action.clipboard.copy=hexe.action.clipboard.copy or function(o) return action('clipboard.copy',o) end; hexe.action.clipboard.request=hexe.action.clipboard.request or function(o) return action('clipboard.request',o) end; " ++
@@ -1740,6 +1741,27 @@ test "hexe module exposes callable exec and new config constructors" {
     try std.testing.expect(runtime.lua.toBoolean(-1));
 }
 
+test "hexe module exposes prompt action constructors" {
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const code =
+        "local hexe = require('hexe')\n" ++
+        "local previous = hexe.action.prompt.previous()\n" ++
+        "local next = hexe.action.prompt.next()\n" ++
+        "local copy = hexe.action.prompt.copy_output()\n" ++
+        "__hexe_prompt_actions_ok = previous.type == 'prompt.previous' and next.type == 'prompt.next' and copy.type == 'prompt.copy_output'\n";
+
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try runtime.lua.getGlobal("__hexe_prompt_actions_ok");
+    defer runtime.lua.pop(1);
+    try std.testing.expect(runtime.lua.toBoolean(-1));
+}
+
 test "hexe setup validates without mutating config builder" {
     var runtime = try LuaRuntime.init(std.testing.allocator);
     defer runtime.deinit();
@@ -1750,6 +1772,7 @@ test "hexe setup validates without mutating config builder" {
         "  keys = {\n" ++
         "    hexe.key({ hexe.key.ctrl, hexe.key.q }, hexe.action.quit()),\n" ++
         "    hexe.key({ hexe.key.ctrl, hexe.key.up }, nil, { mode = hexe.mode.passthrough_only, when = function(ctx) return ctx ~= nil end }),\n" ++
+        "    hexe.key({ hexe.key.alt, hexe.key.y }, hexe.action.prompt.copy_output()),\n" ++
         "  },\n" ++
         "  status = { left = { hexe.segment.time() } },\n" ++
         "})\n";

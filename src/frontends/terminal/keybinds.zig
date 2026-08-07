@@ -112,11 +112,6 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
 pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_codepoint: ?u21) void {
     var out: [64]u8 = undefined;
 
-    if (fast_path.fastPathBytes(&out, mods, key, text_codepoint)) |n| {
-        forwardInputToFocusedPaneWithEvent(state, out[0..n], null);
-        return;
-    }
-
     const target_pane = blk: {
         if (state.activeFloatingIndex()) |idx| {
             const fpane = state.view.float_views.items[idx];
@@ -134,6 +129,11 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
     };
 
     if (target_pane) |pane| {
+        const kitty_flags: u8 = @intCast(pane.vt.terminal.screens.active.kitty_keyboard.current().int());
+        if (fast_path.fastPathBytes(&out, mods, key, text_codepoint, kitty_flags)) |n| {
+            forwardInputToFocusedPaneWithEvent(state, out[0..n], null);
+            return;
+        }
         if (key_translate.encodeKey(&out, mods, key, text_codepoint, &pane.vt.terminal)) |bytes| {
             if (bytes.len > 0) {
                 forwardInputToFocusedPaneWithEvent(state, bytes, null);

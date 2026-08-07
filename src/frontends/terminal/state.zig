@@ -336,11 +336,10 @@ pub const State = struct {
     mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
     mux_vt_write_overflow_notified: bool,
 
-    // Stdin input can arrive split across reads. When using escape-sequence based
-    // encodings (CSI-u, mouse events, etc) we must not forward partial sequences
-    // into the focused pane. Keep a small tail buffer to stitch reads.
-    stdin_tail: [256]u8 = undefined,
-    stdin_tail_len: u16 = 0,
+    // Partial terminal input sequence retained across reads.
+    stdin_tail: std.ArrayList(u8) = .empty,
+    stdin_discard_osc: bool = false,
+    stdin_discard_prev_esc: bool = false,
 
     // Track bracketed paste mode to suppress keycast during paste
     in_bracketed_paste: bool = false,
@@ -1023,6 +1022,7 @@ pub const State = struct {
         self.csi_reply_targets.deinit(self.allocator);
         self.csi_reply_target_enqueued_ms.deinit(self.allocator);
         self.csi_reply_buf.deinit(self.allocator);
+        self.stdin_tail.deinit(self.allocator);
         self.mux_vt_write_queue.deinit(self.allocator);
         self.async_cmds.deinit();
         self.bracketed_paste_buf.deinit(self.allocator);

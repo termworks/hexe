@@ -1,0 +1,117 @@
+const std = @import("std");
+const core = @import("core");
+const ghostty = @import("ghostty-vt");
+
+pub const Direction = enum { previous, next };
+
+pub fn jump(vt: *core.VT, direction: Direction) bool {
+    const screen = vt.terminal.screens.active;
+    const start = screen.pages.getTopLeft(.viewport);
+    var iterator = start.rowIterator(switch (direction) {
+        .previous => .left_up,
+        .next => .right_down,
+    }, null);
+    _ = iterator.next();
+
+    while (iterator.next()) |pin| {
+        if (pin.rowAndCell().row.semantic_prompt != .prompt) continue;
+        screen.scroll(.{ .pin = pin });
+        vt.invalidateRenderState();
+        return true;
+    }
+    return false;
+}
+
+pub fn lastOutputAlloc(allocator: std.mem.Allocator, vt: *core.VT) !?[:0]const u8 {
+    const screen = vt.terminal.screens.active;
+    const bottom = screen.pages.getBottomRight(.screen) orelse return null;
+    var iterator = bottom.rowIterator(.left_up, null);
+    var output_pin: ?ghostty.PageList.Pin = null;
+    var found_boundary = false;
+
+    while (iterator.next()) |pin| {
+        switch (pin.rowAndCell().row.semantic_prompt) {
+            .unknown, .prompt_continuation => {},
+            .prompt => found_boundary = true,
+            .command => {
+                found_boundary = true;
+                if (output_pin == null) output_pin = pin;
+            },
+            .input => {
+                if (!found_boundary) continue;
+                const output = output_pin orelse return try allocator.dupeZ(u8, "");
+                const selection = screen.selectOutput(output) orelse return try allocator.dupeZ(u8, "");
+                return try screen.selectionString(allocator, .{ .sel = selection, .trim = true });
+            },
+        }
+    }
+    return null;
+}
+
+fn setSemantic(vt: *core.VT, y: u32, semantic: anytype) !void {
+    const pin = vt.terminal.screens.active.pages.pin(.{ .screen = .{ .x = 0, .y = y } }) orelse return error.UnknownPoint;
+    pin.rowAndCell().row.semantic_prompt = semantic;
+}
+
+fn viewportY(vt: *core.VT) u32 {
+    const screen = vt.terminal.screens.active;
+    const point = screen.pages.pointFromPin(.screen, screen.pages.getTopLeft(.viewport)).?;
+    return point.screen.y;
+}
+
+test "prompt jump is a no-op without marks" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 8, 3);
+    defer vt.deinit();
+    try vt.feed("one\r\ntwo\r\nthree\r\nfour\r\n");
+
+    const before = viewportY(&vt);
+    try std.testing.expect(!jump(&vt, .previous));
+    try std.testing.expectEqual(before, viewportY(&vt));
+    try std.testing.expect((try lastOutputAlloc(std.testing.allocator, &vt)) == null);
+}
+
+test "prompt jump crosses scrollback and skips continuation marks" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 8, 3);
+    defer vt.deinit();
+    try vt.feed("0\r\n1\r\n2\r\n3\r\n4\r\n5\r\n");
+    try setSemantic(&vt, 1, .prompt);
+    try setSemantic(&vt, 2, .prompt_continuation);
+    try setSemantic(&vt, 4, .prompt);
+
+    try std.testing.expect(jump(&vt, .previous));
+    try std.testing.expectEqual(@as(u32, 1), viewportY(&vt));
+    try std.testing.expect(!jump(&vt, .previous));
+    try std.testing.expectEqual(@as(u32, 1), viewportY(&vt));
+    try std.testing.expect(jump(&vt, .next));
+    try std.testing.expectEqual(@as(u32, 4), viewportY(&vt));
+}
+
+test "copy last output follows OSC 133 lifecycle and handles empty output" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 20, 6);
+    defer vt.deinit();
+
+    try vt.feed("\x1b]133;A\x07$ \x1b]133;B\x07echo one\r\n\x1b]133;C\x07one\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    const first = (try lastOutputAlloc(std.testing.allocator, &vt)).?;
+    defer std.testing.allocator.free(first);
+    try std.testing.expectEqualStrings("one", first);
+
+    try vt.feed("\x1b]133;B\x07true\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+    const empty = (try lastOutputAlloc(std.testing.allocator, &vt)).?;
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqualStrings("", empty);
+}
+
+test "OSC 133 marks and output survive resize reflow" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 16, 5);
+    defer vt.deinit();
+    try vt.feed("\x1b]133;A\x07$ \x1b]133;B\x07printf\r\n\x1b]133;C\x07abcdefghijklmno\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+
+    try vt.resize(7, 5);
+    const output = (try lastOutputAlloc(std.testing.allocator, &vt)).?;
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqualStrings("abcdefghijklmno", output);
+}

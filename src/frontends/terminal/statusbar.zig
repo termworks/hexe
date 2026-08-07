@@ -1792,6 +1792,40 @@ pub fn draw(
             }
         }
     }
+
+    const progress_pane = if (state.activeFloatingIndex()) |index|
+        if (index < state.view.float_views.items.len) state.view.float_views.items[index] else null
+    else
+        state.currentLayout().getFocusedPane();
+    if (progress_pane) |pane| {
+        if (pane.osc_progress.state != .inactive) {
+            var progress_buf: [32]u8 = undefined;
+            const label = switch (pane.osc_progress.state) {
+                .inactive => unreachable,
+                .in_progress => if (pane.osc_progress.percentage) |percentage|
+                    std.fmt.bufPrint(&progress_buf, " progress {d}% ", .{percentage}) catch return
+                else
+                    " progress ",
+                .error_state => if (pane.osc_progress.percentage) |percentage|
+                    std.fmt.bufPrint(&progress_buf, " error {d}% ", .{percentage}) catch return
+                else
+                    " error ",
+                .indeterminate => " progress ... ",
+                .paused => if (pane.osc_progress.percentage) |percentage|
+                    std.fmt.bufPrint(&progress_buf, " paused {d}% ", .{percentage}) catch return
+                else
+                    " paused ",
+            };
+            const style = switch (pane.osc_progress.state) {
+                .inactive => unreachable,
+                .in_progress, .indeterminate => shp.Style.parse("bold fg:0 bg:6"),
+                .error_state => shp.Style.parse("bold fg:15 bg:1"),
+                .paused => shp.Style.parse("bold fg:0 bg:3"),
+            };
+            const label_width = measureText(label);
+            _ = drawStyledText(renderer, width -| label_width, y, label, style);
+        }
+    }
 }
 
 /// If the mouse click at (x,y) hits a tab in the center tabs widget,

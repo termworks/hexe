@@ -6,6 +6,7 @@ const layout_mod = @import("layout.zig");
 const actions = @import("loop_actions.zig");
 const focus_move = @import("focus_move.zig");
 const mouse_selection = @import("mouse_selection.zig");
+const prompt_navigation = @import("prompt_navigation.zig");
 const statusbar = @import("statusbar.zig");
 
 const State = @import("state.zig").State;
@@ -20,6 +21,14 @@ fn layoutDirectionFromCore(direction: frontend_core.Direction) layout_mod.Layout
         .left => .left,
         .right => .right,
     };
+}
+
+fn focusedPane(state: *State) ?*Pane {
+    if (state.activeFloatingIndex()) |index| {
+        if (index < state.view.float_views.items.len) return state.view.float_views.items[index];
+        return null;
+    }
+    return state.currentLayout().getFocusedPane();
 }
 
 pub fn dispatchAction(state: *State, action: BindAction) bool {
@@ -449,6 +458,36 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
         },
         .search_enter => {
             state.enterSearchMode();
+            return true;
+        },
+        .prompt_previous, .prompt_next => {
+            const pane = focusedPane(state) orelse return true;
+            const direction: prompt_navigation.Direction = if (action == .prompt_previous) .previous else .next;
+            if (prompt_navigation.jump(&pane.vt, direction)) {
+                state.needs_render = true;
+                state.force_full_render = true;
+            }
+            return true;
+        },
+        .prompt_copy_output => {
+            const pane = focusedPane(state) orelse return true;
+            const output = prompt_navigation.lastOutputAlloc(state.allocator, &pane.vt) catch {
+                state.notifications.showFor("Copy command output failed", 1200);
+                state.needs_render = true;
+                return true;
+            } orelse return true;
+            defer state.allocator.free(output);
+
+            const stdout = std.fs.File.stdout();
+            var writer_buf: [256]u8 = undefined;
+            var writer = stdout.writer(&writer_buf);
+            state.renderer.vx.copyToSystemClipboard(&writer.interface, output, state.allocator) catch {
+                state.notifications.showFor("Clipboard copy failed", 1200);
+                state.needs_render = true;
+                return true;
+            };
+            state.notifications.showFor("Copied command output", 1200);
+            state.needs_render = true;
             return true;
         },
         .sprite_toggle => {

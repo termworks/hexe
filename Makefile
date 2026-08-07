@@ -1,4 +1,4 @@
-.PHONY: build build-gnu test smoke smoke-clean smoke-heavy install release
+.PHONY: build build-gnu test smoke smoke-protocol smoke-clean smoke-heavy install release
 
 # Static musl by default. Zig links its bundled musl STATICALLY for any
 # *-linux-musl target, so this needs no extra linkage flag — the result has no
@@ -44,6 +44,7 @@ smoke: smoke-clean
 	python3 -u scripts/smoke_fullscreen_reattach.py
 	python3 -u scripts/smoke_paste.py
 	python3 -u scripts/smoke_input_batch.py
+	python3 -u scripts/smoke_terminal_protocol.py
 	python3 -u scripts/smoke_kill.py
 	python3 -u scripts/smoke_cli_waiter_release.py
 	python3 -u scripts/smoke_stalled_peer.py
@@ -60,6 +61,10 @@ smoke: smoke-clean
 	python3 -u scripts/smoke_startup_chooser.py
 	python3 -u scripts/smoke_bad_config.py
 	python3 -u scripts/smoke_session_env.py
+
+smoke-protocol:
+	zig build
+	python3 -u scripts/smoke_terminal_protocol.py
 
 # Heavy-load scenario: splits + floats + fullscreen apps + huge buffers +
 # pastes, then chaos rounds. Needs a ReleaseFast build (Debug VT parsing is

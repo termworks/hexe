@@ -19,6 +19,7 @@ pub fn encodeKey(
     const event: ghostty.input.KeyEvent = .{
         .key = bindKeyToGhosttyKey(key),
         .utf8 = utf8,
+        .unshifted_codepoint = bindKeyCodepoint(key),
         .mods = .{
             .alt = (mods & 1) != 0,
             .ctrl = (mods & 2) != 0,
@@ -35,6 +36,14 @@ pub fn encodeKey(
         return null;
     };
     return writer.buffered();
+}
+
+fn bindKeyCodepoint(key: BindKey) u21 {
+    return switch (@as(BindKeyKind, key)) {
+        .space => ' ',
+        .char => key.char,
+        else => 0,
+    };
 }
 
 fn keyUtf8(key: BindKey, text_codepoint: ?u21, out: *[4]u8) []const u8 {

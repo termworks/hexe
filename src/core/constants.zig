@@ -95,6 +95,9 @@ pub const Sizes = struct {
     /// Used in: src/frontends/terminal/clipboard.zig
     pub const max_clipboard_bytes: usize = 128 * 1024;
 
+    /// Maximum encoded OSC 52 sequence size.
+    pub const max_clipboard_osc_bytes: usize = ((max_clipboard_bytes + 2) / 3) * 4 + 16;
+
     /// Maximum reasonable terminal rows (sanity check)
     /// Used in: src/core/vt.zig, src/frontends/terminal/render_state_blit.zig
     pub const max_reasonable_rows: usize = 10000;

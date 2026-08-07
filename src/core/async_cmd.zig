@@ -63,6 +63,12 @@ const Entry = struct {
     /// from user-controllable strings, so a config that composes a command
     /// dynamically mints a new one every frame.
     last_used_ms: i64 = 0,
+    /// Tiebreaker for eviction. Entries touched within the same millisecond
+    /// carry identical `last_used_ms`, and picking a victim by timestamp alone
+    /// then falls through to hash-map iteration order — which is not stable
+    /// across builds, so "least recently used" was whichever entry the map
+    /// happened to yield first.
+    use_seq: u64 = 0,
     /// How often to re-run.
     refresh_ms: i64 = DEFAULT_REFRESH_MS,
 
@@ -149,6 +155,7 @@ pub const AsyncCmdCache = struct {
     /// Nobody wants their output; they exist here only so poll() can reap them
     /// instead of the event loop blocking in wait().
     detached: std.ArrayList(std.process.Child) = .empty,
+    use_counter: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator) AsyncCmdCache {
         return .{
@@ -287,12 +294,16 @@ pub const AsyncCmdCache = struct {
         while (self.entries.count() >= MAX_ENTRIES) {
             var oldest_key: ?[]const u8 = null;
             var oldest_ms: i64 = std.math.maxInt(i64);
+            var oldest_seq: u64 = std.math.maxInt(u64);
             var scan = self.entries.iterator();
             while (scan.next()) |kv| {
                 const e = kv.value_ptr.*;
                 if (e.inFlight()) continue;
-                if (e.last_used_ms < oldest_ms) {
+                if (e.last_used_ms < oldest_ms or
+                    (e.last_used_ms == oldest_ms and e.use_seq < oldest_seq))
+                {
                     oldest_ms = e.last_used_ms;
+                    oldest_seq = e.use_seq;
                     oldest_key = kv.key_ptr.*;
                 }
             }
@@ -303,10 +314,16 @@ pub const AsyncCmdCache = struct {
         }
     }
 
+    fn nextUseSeq(self: *AsyncCmdCache) u64 {
+        self.use_counter +%= 1;
+        return self.use_counter;
+    }
+
     fn getOrCreate(self: *AsyncCmdCache, key: []const u8, refresh_ms: i64) ?*Entry {
         const now = std.time.milliTimestamp();
         if (self.entries.get(key)) |e| {
             e.last_used_ms = now;
+            e.use_seq = self.nextUseSeq();
             return e;
         }
         if (self.entries.count() >= MAX_ENTRIES) {
@@ -321,7 +338,12 @@ pub const AsyncCmdCache = struct {
             self.allocator.free(owned_key);
             return null;
         };
-        e.* = .{ .key = owned_key, .refresh_ms = refresh_ms, .last_used_ms = now };
+        e.* = .{
+            .key = owned_key,
+            .refresh_ms = refresh_ms,
+            .last_used_ms = now,
+            .use_seq = self.nextUseSeq(),
+        };
         self.entries.put(owned_key, e) catch {
             self.allocator.free(owned_key);
             self.allocator.destroy(e);

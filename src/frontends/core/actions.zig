@@ -29,6 +29,9 @@ pub const HostSurfaceAction = enum {
     config_reload,
     copy_enter,
     search_enter,
+    prompt_previous,
+    prompt_next,
+    prompt_copy_output,
 };
 
 /// Frontend-neutral action request distilled from a config keybinding.
@@ -165,6 +168,9 @@ pub fn actionRequestFromBindAction(action: BindAction) ActionRequest {
         .config_reload => .{ .host_surface = .config_reload },
         .copy_enter => .{ .host_surface = .copy_enter },
         .search_enter => .{ .host_surface = .search_enter },
+        .prompt_previous => .{ .host_surface = .prompt_previous },
+        .prompt_next => .{ .host_surface = .prompt_next },
+        .prompt_copy_output => .{ .host_surface = .prompt_copy_output },
         .split_h => .split_h,
         .split_v => .split_v,
         .split_resize => |dir| if (directionFromBindKeyKind(dir)) |value|
@@ -403,6 +409,14 @@ test "actionRequestFromBindAction categorizes host-surface actions" {
     try std.testing.expectEqual(
         HostSurfaceAction.search_enter,
         actionRequestFromBindAction(.search_enter).host_surface,
+    );
+    try std.testing.expectEqual(
+        HostSurfaceAction.prompt_previous,
+        actionRequestFromBindAction(.prompt_previous).host_surface,
+    );
+    try std.testing.expectEqual(
+        HostSurfaceAction.prompt_copy_output,
+        actionRequestFromBindAction(.prompt_copy_output).host_surface,
     );
 }
 

@@ -755,6 +755,9 @@ pub const Config = struct {
         config_reload,
         copy_enter,
         search_enter,
+        prompt_previous,
+        prompt_next,
+        prompt_copy_output,
     };
 
     pub const BindAction = union(BindActionTag) {
@@ -787,6 +790,9 @@ pub const Config = struct {
         config_reload, // re-read the Lua config and hot-swap it
         copy_enter, // enter keyboard copy-mode
         search_enter, // enter scrollback text search
+        prompt_previous,
+        prompt_next,
+        prompt_copy_output,
     };
 
     pub const Bind = struct {
@@ -1427,6 +1433,9 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "config.reload")) return .config_reload;
     if (std.mem.eql(u8, action_type, "copy.enter")) return .copy_enter;
     if (std.mem.eql(u8, action_type, "search.enter")) return .search_enter;
+    if (std.mem.eql(u8, action_type, "prompt.previous")) return .prompt_previous;
+    if (std.mem.eql(u8, action_type, "prompt.next")) return .prompt_next;
+    if (std.mem.eql(u8, action_type, "prompt.copy_output")) return .prompt_copy_output;
     if (std.mem.eql(u8, action_type, "pane.select_mode")) return .pane_select_mode;
     if (std.mem.eql(u8, action_type, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action_type, "clipboard.request")) return .clipboard_request;
@@ -1481,6 +1490,9 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "config.reload")) return .config_reload;
     if (std.mem.eql(u8, action, "copy.enter")) return .copy_enter;
     if (std.mem.eql(u8, action, "search.enter")) return .search_enter;
+    if (std.mem.eql(u8, action, "prompt.previous")) return .prompt_previous;
+    if (std.mem.eql(u8, action, "prompt.next")) return .prompt_next;
+    if (std.mem.eql(u8, action, "prompt.copy_output")) return .prompt_copy_output;
     if (std.mem.eql(u8, action, "pane.select_mode")) return .pane_select_mode;
     if (std.mem.eql(u8, action, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action, "clipboard.request")) return .clipboard_request;
@@ -1496,6 +1508,12 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "layout.save")) return .layout_save;
     if (std.mem.eql(u8, action, "layout.load")) return .layout_load;
     return null;
+}
+
+test "simple prompt actions parse" {
+    try std.testing.expectEqual(Config.BindAction.prompt_previous, parseSimpleAction("prompt.previous").?);
+    try std.testing.expectEqual(Config.BindAction.prompt_next, parseSimpleAction("prompt.next").?);
+    try std.testing.expectEqual(Config.BindAction.prompt_copy_output, parseSimpleAction("prompt.copy_output").?);
 }
 
 fn parseFloat(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {

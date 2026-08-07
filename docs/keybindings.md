@@ -74,6 +74,9 @@ Actions trigger terminal frontend operations. Session-structure mutations are ap
 | `hexe.action.overlay.sprite_toggle()` | Toggle sprite overlay |
 | `hexe.action.copy.enter()` | Enter keyboard copy-mode |
 | `hexe.action.search.enter()` | Search the focused pane's scrollback (type · `Enter` · `n`/`N` · `Esc`) |
+| `hexe.action.prompt.previous()` | Jump to the previous OSC 133 prompt mark |
+| `hexe.action.prompt.next()` | Jump to the next OSC 133 prompt mark |
+| `hexe.action.prompt.copy_output()` | Copy the last marked command output |
 
 **Actions that take parameters:**
 
@@ -82,6 +85,8 @@ hexe.key({ ... }, hexe.action.float.toggle("1"))
 hexe.key({ ... }, hexe.action.focus.move("left"))
 hexe.key({ ... }, hexe.action.split.resize("up"))
 hexe.key({ ... }, hexe.action.float.nudge("down"))
+hexe.key({ ... }, hexe.action.prompt.previous())
+hexe.key({ ... }, hexe.action.prompt.copy_output())
 ```
 
 ---
@@ -114,6 +119,16 @@ hexe.key({ ... }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_an
 ```
 
 Keys without any binding always pass through unchanged.
+
+## Mouse-aware panes
+
+Hexe forwards mouse events on both the primary and alternate screen when the pane enables mouse
+tracking and SGR mode 1006. Normal mode 1000 receives button events, button-event mode 1002 also
+receives drag motion, and any-event mode 1003 receives all motion.
+
+Legacy mouse encodings are not emitted. A pane that does not enable SGR mode 1006 keeps Hexe's
+normal selection and scrolling behavior. Hold the configured selection override modifiers
+(Ctrl+Alt by default) to select text inside a mouse-aware application.
 
 ---
 

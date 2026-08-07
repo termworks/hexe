@@ -26,6 +26,16 @@ return hexe.setup({
 
 Use `left`, `center`, and `right` arrays of `hexe.segment(...)` objects.
 
+## Pane Progress
+
+Hexe consumes OSC 9;4 progress reports from the focused pane and shows their state at the right
+edge of the status bar. States 1 through 4 show running, error, indeterminate, or paused progress;
+state 0 clears the indicator. Percentages are capped at 100.
+
+Pane notification sequences (OSC 9, 99, and 777) are consumed by Hexe rather than forwarded as
+unattributed host notifications. The in-app message includes the originating pane ID, and desktop
+delivery is used only when the frontend advertises `desktop_notify`.
+
 ## Segment Schema (Lua-first)
 
 ```lua

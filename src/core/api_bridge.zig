@@ -342,6 +342,9 @@ fn parseSimpleAction(action_str: []const u8) ?config.Config.BindAction {
     if (std.mem.eql(u8, action_str, "config.reload")) return .config_reload;
     if (std.mem.eql(u8, action_str, "copy.enter")) return .copy_enter;
     if (std.mem.eql(u8, action_str, "search.enter")) return .search_enter;
+    if (std.mem.eql(u8, action_str, "prompt.previous")) return .prompt_previous;
+    if (std.mem.eql(u8, action_str, "prompt.next")) return .prompt_next;
+    if (std.mem.eql(u8, action_str, "prompt.copy_output")) return .prompt_copy_output;
     if (std.mem.eql(u8, action_str, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action_str, "clipboard.request")) return .clipboard_request;
     if (std.mem.eql(u8, action_str, "system.notify")) return .system_notify;
@@ -356,6 +359,12 @@ fn parseSimpleAction(action_str: []const u8) ?config.Config.BindAction {
     if (std.mem.eql(u8, action_str, "layout.save")) return .layout_save;
     if (std.mem.eql(u8, action_str, "layout.load")) return .layout_load;
     return null;
+}
+
+test "prompt actions parse through the config builder bridge" {
+    try std.testing.expectEqual(config.Config.BindAction.prompt_previous, parseSimpleAction("prompt.previous").?);
+    try std.testing.expectEqual(config.Config.BindAction.prompt_next, parseSimpleAction("prompt.next").?);
+    try std.testing.expectEqual(config.Config.BindAction.prompt_copy_output, parseSimpleAction("prompt.copy_output").?);
 }
 
 /// Parse action from Lua (string or table with parameters)

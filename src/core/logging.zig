@@ -127,25 +127,14 @@ fn reconfigureBackend() void {
     }
 }
 
-fn fallbackLog(
-    level: Level,
-    comptime module: []const u8,
-    comptime fmt: []const u8,
-    args: anytype,
-    src: std.builtin.SourceLocation,
-) void {
-    if (include_source) {
-        std.debug.print(
-            "[{s}][{s}] {s}:{d} " ++ fmt ++ "\n",
-            .{ level.prefix(), module, src.file, src.line } ++ args,
-        );
-        return;
-    }
-
-    std.debug.print(
-        "[{s}][{s}] " ++ fmt ++ "\n",
-        .{ level.prefix(), module } ++ args,
-    );
+fn fallbackLog(level: Level, module: []const u8, msg: []const u8) void {
+    writeAllStderr("[");
+    writeAllStderr(level.prefix());
+    writeAllStderr("][");
+    writeAllStderr(module);
+    writeAllStderr("] ");
+    writeAllStderr(msg);
+    writeAllStderr("\n");
 }
 
 /// Enable all debug logging.
@@ -220,18 +209,29 @@ fn logAt(
     if (!enabled) return;
     if (@intFromEnum(level) < @intFromEnum(min_level)) return;
 
+    // Everything past this point is deliberately non-generic. Handing `fmt`
+    // and `args` to the backend specialized the whole formatting and writer
+    // stack once per call site — 1325 copies of the fallback and 100 of
+    // ghostty's stream warning alone, several MB in total. Formatting here
+    // and passing a plain slice collapses that to one instantiation.
+    var buf: [2048]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch fmt;
+    emit(level, module, msg, src);
+}
+
+fn emit(level: Level, module: []const u8, msg: []const u8, src: std.builtin.SourceLocation) void {
     const logger = ensureBackend() orelse {
-        fallbackLog(level, module, fmt, args, src);
+        fallbackLog(level, module, msg);
         return;
     };
 
     const scoped = logger.scoped(module);
     switch (level) {
-        .trace => scoped.tracef(fmt, args, src) catch fallbackLog(level, module, fmt, args, src),
-        .debug => scoped.debugf(fmt, args, src) catch fallbackLog(level, module, fmt, args, src),
-        .info => scoped.infof(fmt, args, src) catch fallbackLog(level, module, fmt, args, src),
-        .warn => scoped.warningf(fmt, args, src) catch fallbackLog(level, module, fmt, args, src),
-        .err => scoped.errf(fmt, args, src) catch fallbackLog(level, module, fmt, args, src),
+        .trace => scoped.tracef("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
+        .debug => scoped.debugf("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
+        .info => scoped.infof("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
+        .warn => scoped.warningf("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
+        .err => scoped.errf("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
     }
 }
 

@@ -81,19 +81,33 @@ fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8, parsed_event:
 }
 
 fn mergeStdinTail(state: *State, input_bytes: []const u8) struct { merged: []const u8, owned: ?[]u8 } {
-    if (state.stdin_tail_len == 0) return .{ .merged = input_bytes, .owned = null };
+    if (state.stdin_tail.items.len == 0) return .{ .merged = input_bytes, .owned = null };
 
-    const tl: usize = @intCast(state.stdin_tail_len);
+    const tl = state.stdin_tail.items.len;
     const total = tl + input_bytes.len;
     var tmp = state.allocator.alloc(u8, total) catch {
-        // Allocation failure: drop tail rather than corrupt memory.
-        state.stdin_tail_len = 0;
+        state.stdin_tail.clearRetainingCapacity();
         return .{ .merged = input_bytes, .owned = null };
     };
-    @memcpy(tmp[0..tl], state.stdin_tail[0..tl]);
+    @memcpy(tmp[0..tl], state.stdin_tail.items);
     @memcpy(tmp[tl..total], input_bytes);
-    state.stdin_tail_len = 0;
+    state.stdin_tail.clearRetainingCapacity();
     return .{ .merged = tmp, .owned = tmp };
+}
+
+fn discardOversizedOscPrefix(state: *State, input_bytes: []const u8) []const u8 {
+    if (!state.stdin_discard_osc) return input_bytes;
+
+    for (input_bytes, 0..) |b, i| {
+        const done = b == 0x07 or b == 0x9c or (state.stdin_discard_prev_esc and b == '\\');
+        state.stdin_discard_prev_esc = b == 0x1b;
+        if (done) {
+            state.stdin_discard_osc = false;
+            state.stdin_discard_prev_esc = false;
+            return input_bytes[i + 1 ..];
+        }
+    }
+    return &[_]u8{};
 }
 
 fn firstControlTrafficIndex(bytes: []const u8) ?usize {
@@ -119,6 +133,7 @@ fn stashIncompleteParserTail(state: *State, inp: []const u8) []const u8 {
         if (res.n == 0) {
             return stashFromIndex(state, inp, i);
         }
+        freeParsedEventPayload(state, res.event);
         i += res.n;
     }
 
@@ -128,12 +143,20 @@ fn stashIncompleteParserTail(state: *State, inp: []const u8) []const u8 {
 fn stashFromIndex(state: *State, inp: []const u8, start: usize) []const u8 {
     const tail = inp[start..];
     if (tail.len == 0) return inp;
-    if (tail.len > state.stdin_tail.len) {
-        // Too large to stash; don't block input.
-        return inp;
+    if (tail.len > core.constants.Sizes.max_clipboard_osc_bytes) {
+        const starts_osc = (tail.len >= 2 and tail[0] == 0x1b and tail[1] == ']') or tail[0] == 0x9d;
+        if (starts_osc) {
+            state.stdin_discard_osc = true;
+            state.stdin_discard_prev_esc = tail[tail.len - 1] == 0x1b;
+        }
+        state.stdin_tail.clearRetainingCapacity();
+        return inp[0..start];
     }
-    @memcpy(state.stdin_tail[0..tail.len], tail);
-    state.stdin_tail_len = @intCast(tail.len);
+    state.stdin_tail.clearRetainingCapacity();
+    state.stdin_tail.appendSlice(state.allocator, tail) catch |err| {
+        core.logging.logError("terminal", "failed to retain partial terminal input", err);
+        state.stdin_tail.clearRetainingCapacity();
+    };
     return inp[0..start];
 }
 
@@ -1266,7 +1289,9 @@ fn parseLikelyTerminalCsiReplyLen(inp: []const u8, start: usize) usize {
 pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
-    var effective_input = input_bytes;
+    const available_input = discardOversizedOscPrefix(state, input_bytes);
+    if (available_input.len == 0) return;
+    var effective_input = available_input;
 
     if (state.drop_input_until_ms != 0 and std.time.milliTimestamp() >= state.drop_input_until_ms) {
         // The float's trigger-key window closed without any input arriving, so
@@ -1277,20 +1302,19 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
     if (state.drop_input_until_ms != 0) {
         var keep_all = false;
-        if (state.stdin_tail_len > 0) {
-            const tl: usize = @intCast(state.stdin_tail_len);
-            keep_all = firstControlTrafficIndex(state.stdin_tail[0..tl]) != null;
+        if (state.stdin_tail.items.len > 0) {
+            keep_all = firstControlTrafficIndex(state.stdin_tail.items) != null;
         }
 
         if (!keep_all) {
-            if (firstControlTrafficIndex(input_bytes)) |idx| {
+            if (firstControlTrafficIndex(available_input)) |idx| {
                 if (idx > 0) {
-                    effective_input = input_bytes[idx..];
+                    effective_input = available_input[idx..];
                 }
             } else {
                 // Plain trigger-key batch: drop it entirely.
                 state.drop_input_until_ms = 0;
-                state.stdin_tail_len = 0;
+                state.stdin_tail.clearRetainingCapacity();
                 vaxis_parser = .{};
                 return;
             }
@@ -1299,7 +1323,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         // Control/reply traffic is preserved (with optional plain-key prefix trimmed).
         if (effective_input.len == 0) {
             state.drop_input_until_ms = 0;
-            state.stdin_tail_len = 0;
+            state.stdin_tail.clearRetainingCapacity();
             vaxis_parser = .{};
             return;
         }
@@ -1463,7 +1487,7 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
         }
         state.osc_reply_prev_esc = (b == ESC);
 
-        if (state.osc_reply_buf.items.len > 64 * 1024) {
+        if (state.osc_reply_buf.items.len > core.constants.Sizes.max_clipboard_osc_bytes) {
             clearOscReplyCapture(state);
             i += 1;
             continue;
