@@ -117,6 +117,34 @@ See [floats](floats.md) for the full float reference.
 
 ---
 
+## Session environment
+
+A session's environment is the environment of the shell that opened it. Every
+pane the session spawns — the first one, new tabs, splits, floats — inherits
+that, so a session opened from a project directory gets that project's `PATH`,
+its direnv/nix profile, and its variables.
+
+This is captured fresh each time a frontend registers, which includes reattach:
+reattaching a session from a shell whose environment has changed gives newly
+created panes the new environment. Panes already running keep the environment
+they were spawned with, since a running process's environment cannot be
+rewritten from outside.
+
+`hexe ses` is a long-lived daemon shared by every session, so its own
+environment belongs to no session in particular. It is used only as a fallback,
+when there is no registering frontend to take an environment from (a remote
+frontend, or a pane created by a CLI command with no session attached).
+
+Two things are always set per pane rather than inherited: `PWD`, which is
+restated from the directory the pane actually starts in, and `HEXE_SESSION`,
+which names the session the pane belongs to. `OLDPWD` is not set at all — a
+fresh shell has no previous directory.
+
+Floats can depart from the session environment with `inherit_env`, `add_env`
+and `add_path`. See [floats](floats.md).
+
+---
+
 ## Session persistence
 
 Ses writes session state to disk periodically and on clean shutdown:

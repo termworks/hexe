@@ -35,6 +35,7 @@ pub fn beginCreatePane(
     cwd: ?[]const u8,
     sticky_pwd: ?[]const u8,
     sticky_key: ?u8,
+    base_env: ?[]const []const u8,
     env: ?[]const []const u8,
     isolation_profile: ?[]const u8,
 ) !InFlightPane {
@@ -50,7 +51,7 @@ pub fn beginCreatePane(
     const owned_pwd: ?[]const u8 = if (sticky_pwd) |pwd| try self.allocator.dupe(u8, pwd) else null;
     errdefer if (owned_pwd) |pwd| self.allocator.free(pwd);
 
-    const spawn = try pane_spawn.startPodSpawn(self.allocator, uuid, name, pod_socket_path, shell, cwd, env, isolation_profile);
+    const spawn = try pane_spawn.startPodSpawn(self.allocator, uuid, name, pod_socket_path, shell, cwd, base_env, env, isolation_profile);
 
     return .{
         .client_id = client_id,
@@ -138,6 +139,7 @@ pub fn createPane(
     cwd: ?[]const u8,
     sticky_pwd: ?[]const u8,
     sticky_key: ?u8,
+    base_env: ?[]const []const u8,
     env: ?[]const []const u8,
     isolation_profile: ?[]const u8,
 ) !*store_mod.Pane {
@@ -152,7 +154,7 @@ pub fn createPane(
     const pod_socket_path = try ipc.getPodSocketPath(self.allocator, &uuid);
     errdefer if (!pane_inserted) self.allocator.free(pod_socket_path);
 
-    const spawn = try pane_spawn.spawnPod(self.allocator, uuid, name, pod_socket_path, shell, cwd, env, isolation_profile);
+    const spawn = try pane_spawn.spawnPod(self.allocator, uuid, name, pod_socket_path, shell, cwd, base_env, env, isolation_profile);
     // spawnPod forked a real `hexe pod daemon`. If anything below fails before
     // the pane is in the store, that process is orphaned: it keeps its pty, its
     // shell child and its socket forever, with no record for any sweep to find.

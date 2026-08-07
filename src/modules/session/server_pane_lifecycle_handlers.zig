@@ -7,6 +7,7 @@ const core = @import("core");
 const wire = core.wire;
 const ses = @import("main.zig");
 const server = @import("server.zig");
+const pane_spawn = @import("pane_spawn.zig");
 const Server = server.Server;
 
 const path_prepend_prefix = wire.path_prepend_env_key ++ "=";
@@ -129,7 +130,9 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
     ses.debugLog("create_pane: shell_len={d} cwd_len={d} sticky_key={d} isolation_profile_len={d} env_count={d}", .{ cp.shell_len, cp.cwd_len, cp.sticky_key, cp.isolation_profile_len, cp.env_count });
 
     var offset: usize = 0;
-    const shell = if (cp.shell_len > 0) blk: {
+    // Resolved once the session env is known — an unspecified shell must come
+    // from the session, not from whatever SHELL the daemon was started under.
+    const requested_shell: ?[]const u8 = if (cp.shell_len > 0) blk: {
         if (offset + cp.shell_len > trail_len) {
             self.sendBinaryError(fd, "create_pane: malformed shell trail");
             return;
@@ -137,9 +140,7 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
         const s = buf[offset .. offset + cp.shell_len];
         offset += cp.shell_len;
         break :blk s;
-    } else blk: {
-        break :blk @as([]const u8, std.posix.getenv("SHELL") orelse "/bin/sh");
-    };
+    } else null;
     const cwd: ?[]const u8 = if (cp.cwd_len > 0) blk: {
         if (offset + cp.cwd_len > trail_len) {
             self.sendBinaryError(fd, "create_pane: malformed cwd trail");
@@ -227,15 +228,45 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
         }
     }
 
+    const client_id = self.findClientForCtlFd(fd) orelse blk: {
+        const cid = self.ses_state.addClient(fd) catch |err| {
+            core.logging.logError("ses", "create_pane failed to add client", err);
+            self.sendBinaryError(fd, "client_add_failed");
+            return;
+        };
+        break :blk cid;
+    };
+
+    // The session's own environment, sent by its frontend at register. This is
+    // what a pane inherits when it is not an `inherit_env` float; SES's environ
+    // is only the last-resort fallback inside the spawn path.
+    var session_env: ?[]const []const u8 = null;
+    defer if (session_env) |entries| self.allocator.free(entries);
+    if (self.ses_state.getClient(client_id)) |client| {
+        if (client.session_env) |blob| {
+            session_env = pane_spawn.parseSessionEnv(self.allocator, blob) catch |err| brk: {
+                core.logging.logError("ses", "create_pane failed to parse session env", err);
+                break :brk null;
+            };
+        }
+    }
+
+    const base_env: ?[]const []const u8 = parent_env orelse session_env;
+
+    const shell = requested_shell orelse
+        pane_spawn.lookupSessionEnv(base_env, "SHELL") orelse
+        std.posix.getenv("SHELL") orelse
+        "/bin/sh";
+
     // Resolve `add_path`: the frontend cannot compose PATH itself because the
     // base it must extend lives here (the parent pane's environ for
-    // inherit_env, otherwise SES's own). Strip the markers either way — they
-    // are transport, not something a pane's shell should ever see.
+    // inherit_env, else the session's, else SES's own). Strip the markers
+    // either way — they are transport, not something a pane's shell should see.
     var path_entry: ?[]u8 = null;
     defer if (path_entry) |p| self.allocator.free(p);
     if (findPathPrepend(env_list.items)) |prepend| {
         stripPathPrependEntries(&env_list);
-        const base = basePathFor(env_list.items, parent_env);
+        const base = basePathFor(env_list.items, base_env);
         if (buildPrependedPath(self.allocator, prepend, base)) |composed| {
             path_entry = composed;
             env_list.append(self.allocator, composed) catch |err| {
@@ -248,33 +279,33 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
         }
     }
 
-    var merged_env_storage: ?[]const []const u8 = null;
-    defer if (merged_env_storage) |slice| self.allocator.free(slice);
-    const spawn_env: ?[]const []const u8 = blk: {
-        if (parent_env) |base| {
-            if (env_list.items.len == 0) break :blk base;
-            const merged = self.allocator.alloc([]const u8, base.len + env_list.items.len) catch |err| {
-                core.logging.logError("ses", "create_pane environment merge allocation failed", err);
-                self.sendBinaryError(fd, "create_pane: env merge alloc failed");
-                return;
-            };
-            @memcpy(merged[0..base.len], base);
-            @memcpy(merged[base.len..], env_list.items);
-            merged_env_storage = merged;
-            break :blk merged;
+    // Stamp the pane with the session it belongs to. Inherited, this named
+    // whichever session the shell that started the daemon was in.
+    var session_env_entry: ?[]u8 = null;
+    defer if (session_env_entry) |e| self.allocator.free(e);
+    if (self.ses_state.getClient(client_id)) |client| {
+        if (client.session_id) |sid| {
+            const hex: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+            if (std.fmt.allocPrint(self.allocator, "HEXE_SESSION={s}", .{hex})) |entry| {
+                session_env_entry = entry;
+                env_list.append(self.allocator, entry) catch |err| {
+                    core.logging.logError("ses", "create_pane HEXE_SESSION append failed", err);
+                };
+            } else |err| {
+                core.logging.logError("ses", "create_pane HEXE_SESSION build failed", err);
+            }
         }
-        if (env_list.items.len > 0) break :blk env_list.items;
-        break :blk null;
+    }
+
+    // The frontend sets this on itself after exec, so it is absent from the
+    // environ SES captured. Shell integration keys off it to decide whether it
+    // is talking to a mux at all, so state it here instead of relying on the
+    // daemon having inherited it.
+    env_list.append(self.allocator, "HEXE_MUX_SOCKET=1") catch |err| {
+        core.logging.logError("ses", "create_pane HEXE_MUX_SOCKET append failed", err);
     };
 
-    const client_id = self.findClientForCtlFd(fd) orelse blk: {
-        const cid = self.ses_state.addClient(fd) catch |err| {
-            core.logging.logError("ses", "create_pane failed to add client", err);
-            self.sendBinaryError(fd, "client_add_failed");
-            return;
-        };
-        break :blk cid;
-    };
+    const spawn_env: ?[]const []const u8 = if (env_list.items.len > 0) env_list.items else null;
 
     // Sticky/per-cwd pane reuse: if a matching sticky pane already exists,
     // attach/take over it instead of spawning a new pod.
@@ -346,7 +377,7 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
     // other session (PLAN.md 1.1). The reply is deferred to the tick that sees
     // the handshake land, which keeps spawn-FAILURE reporting intact — the
     // client still learns the outcome on this request, just a tick later.
-    const flight = self.ses_state.beginCreatePane(client_id, shell, cwd, sticky_pwd, sticky_key, spawn_env, isolation_profile) catch |err| {
+    const flight = self.ses_state.beginCreatePane(client_id, shell, cwd, sticky_pwd, sticky_key, base_env, spawn_env, isolation_profile) catch |err| {
         core.logging.logError("ses", "create_pane failed to spawn pane", err);
         self.sendBinaryError(fd, "create_failed");
         return;
