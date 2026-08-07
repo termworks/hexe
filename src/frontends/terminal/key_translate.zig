@@ -16,6 +16,8 @@ pub fn encodeKey(
     var utf8_buf: [4]u8 = undefined;
     const utf8 = keyUtf8(key, text_codepoint, &utf8_buf);
 
+    const shift = (mods & 4) != 0;
+
     const event: ghostty.input.KeyEvent = .{
         .key = bindKeyToGhosttyKey(key),
         .utf8 = utf8,
@@ -23,9 +25,16 @@ pub fn encodeKey(
         .mods = .{
             .alt = (mods & 1) != 0,
             .ctrl = (mods & 2) != 0,
-            .shift = (mods & 4) != 0,
+            .shift = shift,
             .super = (mods & 8) != 0,
         },
+        // Shift is spent producing the character itself: `2` gives `@`, `a`
+        // gives `A`. The encoder subtracts consumed mods before deciding
+        // whether a key still counts as unmodified text, and only unmodified
+        // text is sent as-is under the Kitty protocol. Leaving this empty made
+        // every shifted character encode as a CSI-u sequence instead — so with
+        // a pane in Kitty mode, no symbol or capital reached the application.
+        .consumed_mods = .{ .shift = shift and utf8.len > 0 },
     };
 
     var writer = std.Io.Writer.fixed(out);
