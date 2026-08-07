@@ -408,6 +408,55 @@ test "CSI scanner preserves query state across every split" {
     }
 }
 
+fn readTestFrame(fd: std.posix.fd_t, buffer: []u8) !struct { header: core.wire.MuxVtHeader, payload: []const u8 } {
+    var header_bytes: [@sizeOf(core.wire.MuxVtHeader)]u8 = undefined;
+    try readTestExact(fd, &header_bytes);
+    const header = std.mem.bytesToValue(core.wire.MuxVtHeader, &header_bytes);
+    if (header.len > buffer.len) return error.TestFrameTooLarge;
+    try readTestExact(fd, buffer[0..header.len]);
+    return .{ .header = header, .payload = buffer[0..header.len] };
+}
+
+fn readTestExact(fd: std.posix.fd_t, buffer: []u8) !void {
+    var offset: usize = 0;
+    while (offset < buffer.len) {
+        const count = try std.posix.read(fd, buffer[offset..]);
+        if (count == 0) return error.EndOfStream;
+        offset += count;
+    }
+}
+
+test "Kitty replies return to the pane across every query split" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    const resize = try readTestFrame(fds[1], &frame_buf);
+    try std.testing.expectEqual(@intFromEnum(core.pod_protocol.FrameType.resize), resize.header.frame_type);
+
+    const query = "\x1b[?u";
+    for (0..query.len + 1) |split| {
+        pane.feedPodOutput(query[0..split]);
+        pane.feedPodOutput(query[split..]);
+        const frame = try readTestFrame(fds[1], &frame_buf);
+        try std.testing.expectEqual(@as(u16, 7), frame.header.pane_id);
+        try std.testing.expectEqual(@intFromEnum(core.pod_protocol.FrameType.input), frame.header.frame_type);
+        try std.testing.expectEqualStrings("\x1b[?0u", frame.payload[16..]);
+    }
+
+    pane.feedPodOutput("\x1b[>1u");
+    pane.feedPodOutput(query);
+    const enabled = try readTestFrame(fds[1], &frame_buf);
+    try std.testing.expectEqualStrings("\x1b[?1u", enabled.payload[16..]);
+}
+
 fn containsClearSeq(tail: []const u8, data: []const u8) bool {
     const has_esc = std.mem.indexOfScalar(u8, data, 0x1b) != null;
     const has_ff = std.mem.indexOfScalar(u8, data, 0x0c) != null;
