@@ -377,6 +377,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     fast_path_test_module.addImport("core", core_module);
+    if (ghostty_vt_mod) |vt| {
+        fast_path_test_module.addImport("ghostty-vt", vt);
+    }
 
     const fast_path_tests = b.addTest(.{
         .root_module = fast_path_test_module,
