@@ -74,6 +74,9 @@ Actions trigger terminal frontend operations. Session-structure mutations are ap
 | `hexe.action.overlay.sprite_toggle()` | Toggle sprite overlay |
 | `hexe.action.copy.enter()` | Enter keyboard copy-mode |
 | `hexe.action.search.enter()` | Search the focused pane's scrollback (type · `Enter` · `n`/`N` · `Esc`) |
+| `hexe.action.prompt.previous()` | Jump to the previous OSC 133 prompt mark |
+| `hexe.action.prompt.next()` | Jump to the next OSC 133 prompt mark |
+| `hexe.action.prompt.copy_output()` | Copy the last marked command output |
 
 **Actions that take parameters:**
 
@@ -82,6 +85,8 @@ hexe.key({ ... }, hexe.action.float.toggle("1"))
 hexe.key({ ... }, hexe.action.focus.move("left"))
 hexe.key({ ... }, hexe.action.split.resize("up"))
 hexe.key({ ... }, hexe.action.float.nudge("down"))
+hexe.key({ ... }, hexe.action.prompt.previous())
+hexe.key({ ... }, hexe.action.prompt.copy_output())
 ```
 
 ---

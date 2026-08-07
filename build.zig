@@ -399,6 +399,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_pane_osc_tests = b.addRunArtifact(pane_osc_tests);
 
+    const prompt_navigation_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/frontends/terminal/prompt_navigation.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    prompt_navigation_tests.root_module.addImport("core", core_module);
+    if (ghostty_vt_mod) |vt| {
+        prompt_navigation_tests.root_module.addImport("ghostty-vt", vt);
+    }
+    const run_prompt_navigation_tests = b.addRunArtifact(prompt_navigation_tests);
+
     // Terminal OSC passthrough/query regression tests.
     const pane_output_test_module = b.createModule(.{
         .root_source_file = b.path("src/frontends/terminal/pane_output.zig"),
@@ -544,6 +557,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_fast_path_tests.step);
     test_step.dependOn(&run_mouse_protocol_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
+    test_step.dependOn(&run_prompt_navigation_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);
     test_step.dependOn(&run_pane_search_tests.step);
     test_step.dependOn(&run_reattach_reconcile_tests.step);
