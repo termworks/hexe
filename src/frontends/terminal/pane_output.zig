@@ -11,7 +11,7 @@ fn writeResponse(self: *Pane, data: []const u8, comptime context: []const u8) vo
     };
 }
 
-pub fn processOutput(self: *Pane, data: []const u8) void {
+fn processVtOutput(self: *Pane, data: []const u8) void {
     if (canSkipControlScanners(self, data)) {
         updateEscTail(self, data);
         return;
@@ -19,13 +19,80 @@ pub fn processOutput(self: *Pane, data: []const u8) void {
 
     handleCsiQueries(self, data);
     handleDcsQueries(self, data);
-    forwardOsc(self, data);
 
     if (containsClearSeq(self.esc_tail[0..self.esc_tail_len], data)) {
         self.did_clear = true;
     }
 
     updateEscTail(self, data);
+}
+
+fn feedVtOutput(self: *Pane, data: []const u8) void {
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const remaining = data[offset..];
+        const segment_len = nextResponseBoundary(self, remaining) orelse remaining.len;
+        const segment = remaining[0..segment_len];
+        self.vt.feed(segment) catch |err| {
+            core.logging.logError("terminal", "pane VT feed failed", err);
+            return;
+        };
+        processVtOutput(self, segment);
+        offset += segment_len;
+    }
+}
+
+/// Split `data` into OSC sequences and everything else, feeding the rest to the
+/// VT in order.
+///
+/// The C1 form of OSC (a bare 0x9d) is deliberately NOT recognised here. 0x9d is
+/// also a UTF-8 continuation byte: it is the second byte of U+276F `❯`, and of
+/// every codepoint in U+2740..U+277F. Treating it as an introducer swallows the
+/// rest of the stream into an OSC that never terminates — a shell prompt or TUI
+/// using `❯` loses everything printed after it. C1 controls are unreachable in a
+/// UTF-8 stream, which is why the VT parser does not honour them either.
+pub fn feedOutput(self: *Pane, data: []const u8) void {
+    const ESC: u8 = 0x1b;
+
+    var plain_start: usize = 0;
+    var i: usize = 0;
+    while (i < data.len) {
+        const b = data[i];
+
+        if (self.osc_in_progress) {
+            appendOscByte(self, b);
+            i += 1;
+            plain_start = i;
+            continue;
+        }
+
+        if (self.osc_pending_esc) {
+            self.osc_pending_esc = false;
+            if (b == ']') {
+                beginOsc(self, false);
+                i += 1;
+                plain_start = i;
+                continue;
+            }
+            feedVtOutput(self, "\x1b");
+            plain_start = i;
+            continue;
+        }
+
+        if (b == ESC) {
+            feedVtOutput(self, data[plain_start..i]);
+            self.osc_pending_esc = true;
+            i += 1;
+            plain_start = i;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    if (!self.osc_in_progress and !self.osc_pending_esc) {
+        feedVtOutput(self, data[plain_start..]);
+    }
 }
 
 pub fn nextResponseBoundary(self: *const Pane, data: []const u8) ?usize {
@@ -68,7 +135,7 @@ fn canSkipControlScanners(self: *const Pane, data: []const u8) bool {
     if (self.osc_in_progress or self.osc_pending_esc or self.osc_prev_esc) return false;
     if (std.mem.indexOfScalar(u8, self.esc_tail[0..self.esc_tail_len], 0x1b) != null) return false;
 
-    return std.mem.indexOfAny(u8, data, &.{ 0x1b, 0x0c, 0x9d }) == null;
+    return std.mem.indexOfAny(u8, data, &.{ 0x1b, 0x0c }) == null;
 }
 
 fn updateEscTail(self: *Pane, data: []const u8) void {
@@ -231,103 +298,75 @@ fn handleDcsQuery(self: *Pane, payload: []const u8) void {
     writeResponse(self, "\x1bP0$r\x1b\\", "DCS unavailable response write failed");
 }
 
-fn forwardOsc(self: *Pane, data: []const u8) void {
-    const ESC: u8 = 0x1b;
-    const BEL: u8 = 0x07;
-    const OSC_C1: u8 = 0x9d;
-    const ST_C1: u8 = 0x9c;
-
-    for (data) |b| {
-        if (!self.osc_in_progress) {
-            if (self.osc_pending_esc) {
-                self.osc_pending_esc = false;
-                if (b == ']') {
-                    self.osc_in_progress = true;
-                    self.osc_prev_esc = false;
-                    self.osc_buf.clearRetainingCapacity();
-                    self.osc_buf.append(self.allocator, ESC) catch {
-                        self.osc_in_progress = false;
-                        continue;
-                    };
-                    self.osc_buf.append(self.allocator, ']') catch {
-                        self.osc_in_progress = false;
-                        continue;
-                    };
-                    continue;
-                }
-            }
-
-            if (b == OSC_C1) {
-                self.osc_in_progress = true;
-                self.osc_prev_esc = false;
-                self.osc_buf.clearRetainingCapacity();
-                self.osc_buf.append(self.allocator, OSC_C1) catch {
-                    self.osc_in_progress = false;
-                    continue;
-                };
-                continue;
-            }
-
-            if (b == ESC) {
-                self.osc_pending_esc = true;
-            }
-            continue;
-        }
-
-        self.osc_buf.append(self.allocator, b) catch {
-            self.osc_in_progress = false;
-            self.osc_pending_esc = false;
-            self.osc_prev_esc = false;
+fn beginOsc(self: *Pane, c1: bool) void {
+    self.osc_in_progress = true;
+    self.osc_prev_esc = false;
+    self.osc_discarding = false;
+    self.osc_buf.clearRetainingCapacity();
+    self.osc_buf.append(self.allocator, if (c1) 0x9d else 0x1b) catch {
+        self.osc_discarding = true;
+        return;
+    };
+    if (!c1) {
+        self.osc_buf.append(self.allocator, ']') catch {
+            self.osc_discarding = true;
             self.osc_buf.clearRetainingCapacity();
-            continue;
         };
+    }
+}
 
-        var done = false;
-        if (b == BEL) {
-            done = true;
-        } else if (self.osc_prev_esc and b == '\\') {
-            done = true;
-        } else if (b == ST_C1) {
-            done = true;
-        }
-        self.osc_prev_esc = (b == ESC);
+fn appendOscByte(self: *Pane, b: u8) void {
+    // BEL or ESC \ only. 0x9c (C1 ST) is a UTF-8 continuation byte — accepting
+    // it truncates any OSC whose payload carries non-ASCII text, such as a
+    // title or a hyperlink URI containing U+2700..U+273F.
+    const done = b == 0x07 or (self.osc_prev_esc and b == '\\');
+    self.osc_prev_esc = b == 0x1b;
 
-        if (self.osc_buf.items.len > 64 * 1024) {
-            self.osc_in_progress = false;
-            self.osc_pending_esc = false;
-            self.osc_prev_esc = false;
+    if (!self.osc_discarding) {
+        self.osc_buf.append(self.allocator, b) catch {
+            self.osc_discarding = true;
             self.osc_buf.clearRetainingCapacity();
-            continue;
-        }
-
-        if (done) {
-            self.osc_in_progress = false;
-            self.osc_pending_esc = false;
-            self.osc_prev_esc = false;
-
-            const code = parseOscCode(self.osc_buf.items) orelse 0;
-            if (isConsumedOscCode(code)) {
-                consumeOsc(self, self.osc_buf.items);
-            } else if (shouldPassthroughOsc(self.osc_buf.items)) {
-                if (isOscQuery(self.osc_buf.items)) {
-                    if (!handleOscQuery(self, code)) {
-                        self.osc_expected_responses +|= 1;
-                        const stdout = std.fs.File.stdout();
-                        stdout.writeAll(self.osc_buf.items) catch |err| {
-                            core.logging.logError("terminal", "forward OSC query to terminal stdout", err);
-                        };
-                    }
-                } else {
-                    const stdout = std.fs.File.stdout();
-                    stdout.writeAll(self.osc_buf.items) catch |err| {
-                        core.logging.logError("terminal", "forward OSC sequence to terminal stdout", err);
-                    };
-                }
-            }
-
+        };
+        if (self.osc_buf.items.len > core.constants.Sizes.max_clipboard_osc_bytes) {
+            self.osc_discarding = true;
             self.osc_buf.clearRetainingCapacity();
         }
     }
+
+    if (done) finishOsc(self);
+}
+
+fn finishOsc(self: *Pane) void {
+    self.osc_in_progress = false;
+    self.osc_pending_esc = false;
+    self.osc_prev_esc = false;
+    defer {
+        self.osc_discarding = false;
+        self.osc_buf.clearRetainingCapacity();
+    }
+    if (self.osc_discarding) return;
+
+    const code = parseOscCode(self.osc_buf.items) orelse {
+        feedVtOutput(self, self.osc_buf.items);
+        return;
+    };
+    if (isConsumedOscCode(code)) {
+        consumeOsc(self, self.osc_buf.items);
+        return;
+    }
+    if (!shouldPassthroughOsc(self.osc_buf.items)) {
+        feedVtOutput(self, self.osc_buf.items);
+        return;
+    }
+
+    if (isOscQuery(self.osc_buf.items)) {
+        if (handleOscQuery(self, code)) return;
+        self.osc_expected_responses +|= 1;
+    }
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll(self.osc_buf.items) catch |err| {
+        core.logging.logError("terminal", "forward OSC sequence to terminal stdout", err);
+    };
 }
 
 fn consumeOsc(self: *Pane, seq: []const u8) void {

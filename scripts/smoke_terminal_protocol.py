@@ -4,6 +4,7 @@
 import atexit
 import base64
 import fcntl
+import hashlib
 import os
 import pty
 import re
@@ -35,6 +36,8 @@ with open(os.path.join(CONFIG_HOME, "hexe", "init.lua"), "w", encoding="utf-8") 
         "  hexe.key({ hexe.key.alt, hexe.key['y'] }, hexe.action.prompt.copy_output()),\n"
         "  hexe.key({ hexe.key.alt, hexe.key['v'] }, hexe.action.split.vertical()),\n"
         "  hexe.key({ hexe.key.alt, hexe.key['h'] }, hexe.action.focus.move('left')),\n"
+        "  hexe.key({ hexe.key.alt, hexe.key['c'] }, hexe.action.clipboard.copy()),\n"
+        "  hexe.key({ hexe.key.alt, hexe.key['p'] }, hexe.action.clipboard.request()),\n"
         "} })\n"
     )
 
@@ -275,6 +278,52 @@ selected, selection_data = read_until(master, selection_clipboard, 15)
 if not selected:
     fail(f"plain-pane mouse selection did not copy text; tail={selection_data[-240:]!r}")
 print("MOUSE: untracked pane retained mux text selection")
+
+copy_started = time.monotonic()
+os.write(master, b"\x1bc")
+copied_again, copy_data = read_until(master, selection_clipboard, 2)
+if not copied_again:
+    fail(f"OSC 52 selection copy blocked the frontend; tail={copy_data[-240:]!r}")
+print(f"OSC52 COPY: completed in {time.monotonic() - copy_started:.2f}s")
+
+app_copy_payload = b"Q" * (32 * 1024)
+app_copy_sequence = b"\x1b]52;c;" + base64.b64encode(app_copy_payload) + b"\x1b\\"
+app_copy_started = time.monotonic()
+os.write(
+    master,
+    b"printf '\\033]52;c;'; head -c 32768 /dev/zero | tr '\\000' Q | base64 | tr -d '\\n'; printf '\\033\\\\'\r",
+)
+app_copied, app_copy_data = read_until(master, app_copy_sequence, 2)
+if not app_copied:
+    fail(f"pane OSC 52 copy blocked the frontend; tail={app_copy_data[-240:]!r}")
+print(f"OSC52 APP COPY: 32 KiB completed in {time.monotonic() - app_copy_started:.2f}s")
+
+paste_payload = b"P" * (32 * 1024)
+paste_digest = hashlib.sha256(paste_payload).hexdigest().encode()
+paste_command = (
+    "stty raw -echo min 1 time 50; printf 'CLIPBOARD_PASTE_READY\\r\\n'; "
+    f"digest=$(dd bs=1 count={len(paste_payload)} 2>/dev/null | sha256sum | cut -d' ' -f1); "
+    "stty sane; stty -echo; printf '\\nPROTO_CLIPBOARD_PASTE_%s\\n' \"$digest\"\r"
+).encode()
+os.write(master, paste_command)
+paste_ready, _ = read_until(master, b"CLIPBOARD_PASTE_READY", 15)
+if not paste_ready:
+    fail("OSC 52 paste capture did not become ready")
+time.sleep(0.2)
+os.write(master, b"\x1bp")
+clipboard_request = b"\x1b]52;c;?\x1b\\"
+requested, request_data = read_until(master, clipboard_request, 2)
+if not requested:
+    fail(f"OSC 52 clipboard request blocked the frontend; tail={request_data[-240:]!r}")
+paste_reply = b"\x1b]52;c;" + base64.b64encode(paste_payload) + b"\x1b\\"
+paste_started = time.monotonic()
+for offset in range(0, len(paste_reply), 512):
+    os.write(master, paste_reply[offset : offset + 512])
+    pump(master, 0.002)
+paste_marker = b"PROTO_CLIPBOARD_PASTE_" + paste_digest
+if not wait_screen(master, paste_marker.decode(), 5):
+    fail("fragmented OSC 52 paste stalled or corrupted input")
+print(f"OSC52 PASTE: fragmented 32 KiB reply completed in {time.monotonic() - paste_started:.2f}s")
 
 os.write(master, b"printf '\\033]99;i=live:p=title;Live\\033\\\\033]99;i=live:p=body;Once\\033\\'\r")
 os.write(master, b"printf '\\033]777;notify;Live;Once\\033\\'\r")

@@ -107,6 +107,7 @@ pub const Pane = struct {
     osc_in_progress: bool = false,
     osc_pending_esc: bool = false,
     osc_prev_esc: bool = false,
+    osc_discarding: bool = false,
     osc_expected_responses: u16 = 0,
     osc_consumer: pane_osc.Consumer = .{},
     osc_notifications: std.ArrayList(pane_osc.Notification) = .empty,
@@ -212,6 +213,7 @@ pub const Pane = struct {
         self.osc_in_progress = false;
         self.osc_pending_esc = false;
         self.osc_prev_esc = false;
+        self.osc_discarding = false;
         self.osc_buf.clearRetainingCapacity();
         self.osc_consumer.reset();
         self.osc_notifications.clearRetainingCapacity();
@@ -229,18 +231,7 @@ pub const Pane = struct {
     /// Called by the event loop when a MuxVtHeader frame arrives for this pane.
     pub fn feedPodOutput(self: *Pane, data: []const u8) void {
         self.did_clear = false;
-        var offset: usize = 0;
-        while (offset < data.len) {
-            const remaining = data[offset..];
-            const segment_len = pane_output.nextResponseBoundary(self, remaining) orelse remaining.len;
-            const segment = remaining[0..segment_len];
-            self.vt.feed(segment) catch |err| {
-                core.logging.logError("terminal", "pane VT feed failed", err);
-                return;
-            };
-            pane_output.processOutput(self, segment);
-            offset += segment_len;
-        }
+        pane_output.feedOutput(self, data);
         const password_input = self.vt.terminal.flags.password_input;
         if (password_input != self.last_reported_password_input) {
             self.sendPasswordModeToPod(password_input);
