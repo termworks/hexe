@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.8] - 2026-08-07
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Give each session its own environment and PWD
+
 ## [0.2.2] - 2026-07-31
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
