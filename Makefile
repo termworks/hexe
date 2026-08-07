@@ -1,4 +1,4 @@
-.PHONY: build build-gnu test smoke smoke-clean smoke-heavy install release
+.PHONY: build build-gnu test speech-smoke smoke smoke-clean smoke-heavy install release
 
 # Static musl by default. Zig links its bundled musl STATICALLY for any
 # *-linux-musl target, so this needs no extra linkage flag — the result has no
@@ -18,6 +18,9 @@ build-gnu:
 
 test:
 	zig build test -Doptimize=ReleaseFast
+
+speech-smoke: build
+	scripts/smoke_speech.sh
 
 # Live end-to-end smokes: real frontend under a pty, isolated HEXE_INSTANCE.
 # Requires a debug build in zig-out (zig build) and python3.

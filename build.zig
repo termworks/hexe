@@ -70,6 +70,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("logly");
 
+    const whisper_dep = b.dependency("whisper_cpp", .{});
+    const whisper_lib = buildWhisper(b, whisper_dep, target, optimize);
+
     // Get libvaxis dependency (required TUI rendering library)
     const vaxis_mod = b.dependency("libvaxis", .{
         .target = target,
@@ -109,6 +112,18 @@ pub fn build(b: *std.Build) void {
     }
     core_module.addImport("logly", logly_mod);
     core_module.addImport("sprites_pack", sprites_pack_mod);
+
+    const speech_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/speech/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
+    });
+    speech_module.addIncludePath(whisper_dep.path("include"));
+    speech_module.addIncludePath(whisper_dep.path("ggml/include"));
+    speech_module.addImport("core", core_module);
+    speech_module.linkLibrary(whisper_lib);
 
     // Create frontend-core module (host-neutral frontend event/action boundary)
     const frontend_core_module = b.createModule(.{
@@ -210,6 +225,7 @@ pub fn build(b: *std.Build) void {
     cli_root.addImport("ses", ses_module);
     cli_root.addImport("pod", pod_module);
     cli_root.addImport("shp", shp_module);
+    cli_root.addImport("speech", speech_module);
     cli_root.addImport("xev", xev_mod);
     if (yazap_mod) |yazap| {
         cli_root.addImport("yazap", yazap);
@@ -511,10 +527,25 @@ pub fn build(b: *std.Build) void {
     });
     const run_pod_input_dedup_tests = b.addRunArtifact(pod_input_dedup_tests);
 
+    const speech_test_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/speech/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .link_libcpp = true,
+    });
+    speech_test_module.addIncludePath(whisper_dep.path("include"));
+    speech_test_module.addIncludePath(whisper_dep.path("ggml/include"));
+    speech_test_module.addImport("core", core_module);
+    speech_test_module.linkLibrary(whisper_lib);
+    const speech_tests = b.addTest(.{ .root_module = speech_test_module });
+    const run_speech_tests = b.addRunArtifact(speech_tests);
+
     const test_step = b.step("test", "Run hexe test suites");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_pod_buffering_tests.step);
     test_step.dependOn(&run_pod_input_dedup_tests.step);
+    test_step.dependOn(&run_speech_tests.step);
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);
@@ -544,6 +575,92 @@ fn computeRuntimeEpoch(b: *std.Build) []const u8 {
     hasher.final(&digest);
     const hex = std.fmt.bytesToHex(digest[0..16].*, .lower);
     return std.fmt.allocPrint(b.allocator, "{s}", .{&hex}) catch @panic("failed to allocate runtime epoch");
+}
+
+fn buildWhisper(
+    b: *std.Build,
+    dep: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const lib = b.addLibrary(.{
+        .name = "hexe-whisper",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+        }),
+    });
+
+    lib.addIncludePath(dep.path("include"));
+    lib.addIncludePath(dep.path("src"));
+    lib.addIncludePath(dep.path("ggml/include"));
+    lib.addIncludePath(dep.path("ggml/src"));
+    lib.addIncludePath(dep.path("ggml/src/ggml-cpu"));
+
+    const flags = &.{
+        "-D_GNU_SOURCE",
+        "-D_XOPEN_SOURCE=600",
+        "-DGGML_USE_CPU",
+        "-DGGML_SCHED_MAX_COPIES=4",
+        "-DGGML_VERSION=\"0.9.4\"",
+        "-DGGML_COMMIT=\"fc674574\"",
+        "-DWHISPER_VERSION=\"1.8.4\"",
+        "-Wno-unused-command-line-argument",
+    };
+    lib.addCSourceFiles(.{
+        .root = dep.path(""),
+        .flags = flags,
+        .files = &.{
+            "src/whisper.cpp",
+            "ggml/src/ggml.c",
+            "ggml/src/ggml.cpp",
+            "ggml/src/ggml-alloc.c",
+            "ggml/src/ggml-backend.cpp",
+            "ggml/src/ggml-backend-dl.cpp",
+            "ggml/src/ggml-backend-reg.cpp",
+            "ggml/src/ggml-opt.cpp",
+            "ggml/src/ggml-threading.cpp",
+            "ggml/src/ggml-quants.c",
+            "ggml/src/gguf.cpp",
+            "ggml/src/ggml-cpu/ggml-cpu.c",
+            "ggml/src/ggml-cpu/ggml-cpu.cpp",
+            "ggml/src/ggml-cpu/repack.cpp",
+            "ggml/src/ggml-cpu/hbm.cpp",
+            "ggml/src/ggml-cpu/quants.c",
+            "ggml/src/ggml-cpu/traits.cpp",
+            "ggml/src/ggml-cpu/amx/amx.cpp",
+            "ggml/src/ggml-cpu/amx/mmq.cpp",
+            "ggml/src/ggml-cpu/binary-ops.cpp",
+            "ggml/src/ggml-cpu/unary-ops.cpp",
+            "ggml/src/ggml-cpu/vec.cpp",
+            "ggml/src/ggml-cpu/ops.cpp",
+        },
+    });
+
+    if (target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .x86) {
+        lib.addCSourceFiles(.{
+            .root = dep.path(""),
+            .flags = flags,
+            .files = &.{
+                "ggml/src/ggml-cpu/arch/x86/quants.c",
+                "ggml/src/ggml-cpu/arch/x86/repack.cpp",
+            },
+        });
+    } else if (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .arm) {
+        lib.addCSourceFiles(.{
+            .root = dep.path(""),
+            .flags = flags,
+            .files = &.{
+                "ggml/src/ggml-cpu/arch/arm/quants.c",
+                "ggml/src/ggml-cpu/arch/arm/repack.cpp",
+            },
+        });
+    }
+
+    return lib;
 }
 
 fn hashFile(b: *std.Build, hasher: anytype, path: []const u8) void {

@@ -42,6 +42,10 @@
             .url = "git+https://github.com/muhammad-fiaz/logly.zig#5d356e63b5e79c1798a945cf21d89d53608ee15d",
             .hash = "logly-0.1.6-kZjLexxIEgCMOhBA3f1bx3lzP-JrTZDAfcYc7vVrtbzV",
         },
+        .whisper_cpp = .{
+            .url = "git+https://github.com/ggml-org/whisper.cpp#fc674574ca27cac59a15e5b22a09b9d9ad62aafe",
+            .hash = "N-V-__8AABwy8QFn_J9nf3N8oItfjBMhhB3si-QSuVr3AROO",
+        },
     },
     .fingerprint = 0x4c99ab0b473f252d,
 }

@@ -15,6 +15,7 @@ const config_validate = @import("commands/config_validate.zig");
 const ses_export = @import("commands/ses_export.zig");
 const ses_pipe = @import("commands/ses_pipe.zig");
 const ses_stats = @import("commands/ses_stats.zig");
+const speech_cmds = @import("commands/speech.zig");
 
 const c = @cImport({
     @cInclude("stdlib.h");
@@ -355,6 +356,9 @@ pub fn main() !void {
     var record_cmd = app.createCommand("record", "Recording lifecycle control");
     record_cmd.setProperty(.help_on_empty_args);
 
+    var speech_cmd = app.createCommand("speech", "Push-to-talk speech recognition");
+    speech_cmd.setProperty(.help_on_empty_args);
+
     // SES subcommands
     var ses_daemon = app.createCommand("daemon", "Start the session daemon");
     try ses_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
@@ -685,10 +689,20 @@ pub fn main() !void {
     try record_toggle.addArg(Arg.booleanOption("capture-input", null, null));
     try record_cmd.addSubcommands(&[_]yazap.Command{ record_start, record_stop, record_status, record_toggle });
 
+    var speech_start = app.createCommand("start", "Start recording for a pane");
+    try speech_start.addArg(Arg.singleValueOption("uuid", 'u', null));
+    const speech_stop = app.createCommand("stop", "Stop, transcribe, and insert text");
+    const speech_status = app.createCommand("status", "Show push-to-talk status");
+    const speech_cancel = app.createCommand("cancel", "Discard the active recording");
+    const speech_setup = app.createCommand("setup", "Download the tiny.en Whisper model");
+    var speech_transcribe = app.createCommand("transcribe", "Transcribe a 16 kHz mono PCM WAV file");
+    try speech_transcribe.addArg(Arg.positional("wav", null, null));
+    try speech_cmd.addSubcommands(&[_]yazap.Command{ speech_start, speech_stop, speech_status, speech_cancel, speech_setup, speech_transcribe });
+
     var allow_cmd = app.createCommand("allow", "Trust a project .hexe.lua so its on_start/on_stop hooks may run");
     try allow_cmd.addArg(Arg.positional("path", null, null));
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, speech_cmd, config_cmd, allow_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -1199,6 +1213,32 @@ pub fn main() !void {
                 m.getSingleValue("out") orelse "",
                 m.containsArg("capture-input"),
             );
+            return;
+        }
+    } else if (matches.subcommandMatches("speech")) |speech_matches| {
+        if (speech_matches.subcommandMatches("start")) |m| {
+            const uuid = m.getSingleValue("uuid") orelse std.posix.getenv("HEXE_PANE_UUID") orelse "";
+            try speech_cmds.runStart(allocator, uuid);
+            return;
+        }
+        if (speech_matches.subcommandMatches("stop")) |_| {
+            try speech_cmds.runStop(allocator);
+            return;
+        }
+        if (speech_matches.subcommandMatches("status")) |_| {
+            try speech_cmds.runStatus(allocator);
+            return;
+        }
+        if (speech_matches.subcommandMatches("cancel")) |_| {
+            try speech_cmds.runCancel(allocator);
+            return;
+        }
+        if (speech_matches.subcommandMatches("setup")) |_| {
+            try speech_cmds.runSetup(allocator);
+            return;
+        }
+        if (speech_matches.subcommandMatches("transcribe")) |m| {
+            try speech_cmds.runTranscribe(allocator, m.getSingleValue("wav") orelse "");
             return;
         }
     } else if (matches.subcommandMatches("config")) |config_matches| {

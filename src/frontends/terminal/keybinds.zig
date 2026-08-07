@@ -911,6 +911,15 @@ fn handlePressEvent(state: *State, cfg: *const core.Config, query: *const PaneQu
         if (!has_press and !has_hold and !has_release) return false;
 
         if (press_bind) |pb| {
+            const immediate_press = switch (pb.action) {
+                .speech_start => true,
+                else => false,
+            };
+            if (immediate_press and has_release) {
+                cancelTimer(state, .repeat_active, mods_eff, key);
+                scheduleTimer(state, .repeat_active, std.math.maxInt(i64), mods_eff, key, pb.action, focus_ctx);
+                return dispatchBindWithMode(state, pb, mods_eff, key);
+            }
             if (!has_hold and !has_release) {
                 return dispatchBindWithMode(state, pb, mods_eff, key);
             }

@@ -189,6 +189,21 @@ Record a terminal attach stream directly into asciicast output.
 
 ---
 
+## hexe speech
+
+```sh
+hexe speech setup
+hexe speech start --uuid <pane-uuid>
+hexe speech stop
+hexe speech status
+hexe speech cancel
+hexe speech transcribe <recording.wav>
+```
+
+Control embedded Whisper push-to-talk. See [speech](speech.md).
+
+---
+
 ## hexe config
 
 ```sh

@@ -48,13 +48,25 @@ pub fn runPodSend(
         return;
     }
 
+    try sendBytes(allocator, uuid, name, socket_path, data_buf[0..data_len]);
+}
+
+pub fn sendBytes(
+    allocator: std.mem.Allocator,
+    uuid: []const u8,
+    name: []const u8,
+    socket_path: []const u8,
+    data: []const u8,
+) !void {
+    if (data.len == 0) return error.EmptyInput;
+    if (data.len > pod_protocol.MAX_FRAME_LEN) return error.FrameTooLarge;
     const target_socket = try resolveTargetSocket(allocator, uuid, name, socket_path);
     defer allocator.free(target_socket);
 
     var client = ipc.Client.connect(target_socket) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("pod is not running\n", .{});
-            return;
+            return error.PodNotRunning;
         }
         return err;
     };
@@ -63,11 +75,11 @@ pub fn runPodSend(
     // Send versioned handshake for auxiliary input.
     wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_INPUT) catch |err| {
         print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
-        return;
+        return err;
     };
 
     var conn = client.toConnection();
-    try pod_protocol.writeFrame(&conn, .input, data_buf[0..data_len]);
+    try pod_protocol.writeFrame(&conn, .input, data);
 }
 
 fn resolveTargetSocket(allocator: std.mem.Allocator, uuid: []const u8, name: []const u8, socket_path: []const u8) ![]const u8 {

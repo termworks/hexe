@@ -20,6 +20,8 @@ pub const Direction = enum {
 pub const HostSurfaceAction = enum {
     clipboard_copy,
     clipboard_request,
+    speech_start,
+    speech_stop,
     system_notify,
     keycast_toggle,
     sprite_toggle,
@@ -156,6 +158,8 @@ pub fn actionRequestFromBindAction(action: BindAction) ActionRequest {
         .pane_select_mode => .pane_select_mode,
         .clipboard_copy => .{ .host_surface = .clipboard_copy },
         .clipboard_request => .{ .host_surface = .clipboard_request },
+        .speech_start => .{ .host_surface = .speech_start },
+        .speech_stop => .{ .host_surface = .speech_stop },
         .system_notify => .{ .host_surface = .system_notify },
         .keycast_toggle => .{ .host_surface = .keycast_toggle },
         .sprite_toggle => .{ .host_surface = .sprite_toggle },

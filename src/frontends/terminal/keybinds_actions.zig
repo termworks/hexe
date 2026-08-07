@@ -401,6 +401,24 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
             state.needs_render = true;
             return true;
         },
+        .speech_start => {
+            const pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
+                state.view.float_views.items[idx]
+            else
+                state.currentLayout().getFocusedPane();
+            const target = pane orelse {
+                state.notifications.showFor("No focused pane", 1200);
+                return true;
+            };
+            spawnSpeechCommand(state, "start", target.uuid[0..]);
+            state.notifications.showFor("Listening…", 900);
+            return true;
+        },
+        .speech_stop => {
+            spawnSpeechCommand(state, "stop", null);
+            state.notifications.showFor("Transcribing…", 1200);
+            return true;
+        },
         .system_notify => {
             const stdout = std.fs.File.stdout();
             var io_buf: [512]u8 = undefined;
@@ -492,6 +510,21 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
             }
             return true;
         },
+    }
+}
+
+fn spawnSpeechCommand(state: *State, command: []const u8, pane_uuid: ?[]const u8) void {
+    const self_exe = std.fs.selfExePathAlloc(state.allocator) catch {
+        state.notifications.showFor("Speech helper unavailable", 1200);
+        return;
+    };
+    defer state.allocator.free(self_exe);
+    if (pane_uuid) |uuid| {
+        const argv = [_][]const u8{ self_exe, "speech", command, "--uuid", uuid };
+        if (!state.async_cmds.spawnDetached(&argv, null)) state.notifications.showFor("Speech command failed", 1200);
+    } else {
+        const argv = [_][]const u8{ self_exe, "speech", command };
+        if (!state.async_cmds.spawnDetached(&argv, null)) state.notifications.showFor("Speech command failed", 1200);
     }
 }
 

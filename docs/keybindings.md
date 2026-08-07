@@ -70,6 +70,8 @@ Actions trigger terminal frontend operations. Session-structure mutations are ap
 | `hexe.action.focus.move(dir)` | Move focus |
 | `hexe.action.clipboard.copy()` | Copy selection to clipboard |
 | `hexe.action.clipboard.request()` | Paste from clipboard |
+| `hexe.action.speech.start()` | Start push-to-talk recording for the focused pane |
+| `hexe.action.speech.stop()` | Stop recording, transcribe, and insert text |
 | `hexe.action.system.notify()` | Send a system notification |
 | `hexe.action.overlay.sprite_toggle()` | Toggle sprite overlay |
 | `hexe.action.copy.enter()` | Enter keyboard copy-mode |

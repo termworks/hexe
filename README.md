@@ -35,6 +35,7 @@ See [architecture](docs/architecture.md) for the full picture.
 | [Instances](docs/instances.md) | Running multiple independent stacks side by side |
 | [Config](docs/config.md) | Full config reference |
 | [CLI](docs/cli.md) | All commands and flags |
+| [Speech](docs/speech.md) | Embedded Whisper push-to-talk |
 | [Sprites](docs/sprite.md) | Pokemon sprite overlays |
 
 ---
