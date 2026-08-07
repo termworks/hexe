@@ -1772,6 +1772,7 @@ test "hexe setup validates without mutating config builder" {
         "  keys = {\n" ++
         "    hexe.key({ hexe.key.ctrl, hexe.key.q }, hexe.action.quit()),\n" ++
         "    hexe.key({ hexe.key.ctrl, hexe.key.up }, nil, { mode = hexe.mode.passthrough_only, when = function(ctx) return ctx ~= nil end }),\n" ++
+        "    hexe.key({ hexe.key.alt, hexe.key.y }, hexe.action.prompt.copy_output()),\n" ++
         "  },\n" ++
         "  status = { left = { hexe.segment.time() } },\n" ++
         "})\n";

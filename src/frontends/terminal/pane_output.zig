@@ -28,6 +28,39 @@ pub fn processOutput(self: *Pane, data: []const u8) void {
     updateEscTail(self, data);
 }
 
+pub fn nextResponseBoundary(self: *const Pane, data: []const u8) ?usize {
+    var csi_state = self.csi_query_state;
+    var dcs_state = self.dcs_query_state;
+
+    for (data, 0..) |byte, index| {
+        switch (csi_state) {
+            .idle => if (byte == 0x1b) {
+                csi_state = .esc;
+            },
+            .esc => csi_state = if (byte == '[') .csi else .idle,
+            .csi => if (byte >= 0x40 and byte <= 0x7e) {
+                csi_state = .idle;
+                if (std.mem.indexOfScalar(u8, "cnpqu", byte) != null) return index + 1;
+            },
+        }
+
+        switch (dcs_state) {
+            .idle => if (byte == 0x1b) {
+                dcs_state = .esc;
+            },
+            .esc => dcs_state = if (byte == 'P') .dcs else .idle,
+            .dcs => if (byte == 0x1b) {
+                dcs_state = .dcs_esc;
+            },
+            .dcs_esc => {
+                if (byte == '\\') return index + 1;
+                dcs_state = .dcs;
+            },
+        }
+    }
+    return null;
+}
+
 fn canSkipControlScanners(self: *const Pane, data: []const u8) bool {
     if (data.len == 0) return true;
     if (self.csi_query_state != .idle) return false;
@@ -546,6 +579,37 @@ test "DSR replies use pane-local coordinates across every query split" {
     pane.feedPodOutput("\x1b[?6n");
     const decxcpr = try readTestFrame(fds[1], &frame_buf);
     try std.testing.expectEqualStrings("\x1b[?24;80R", decxcpr.payload[16..]);
+}
+
+test "local replies preserve byte ordering within one output frame" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+
+    pane.feedPodOutput("\x1b[10;20H\x1b[6n");
+    const after_move = try readTestFrame(fds[1], &frame_buf);
+    try std.testing.expectEqualStrings("\x1b[10;20R", after_move.payload[16..]);
+
+    pane.feedPodOutput("\x1b[1;1H\x1b[6n\x1b[10;20H");
+    const before_move = try readTestFrame(fds[1], &frame_buf);
+    try std.testing.expectEqualStrings("\x1b[1;1R", before_move.payload[16..]);
+
+    pane.feedPodOutput("\x1b[>1u\x1b[?u");
+    const after_flags = try readTestFrame(fds[1], &frame_buf);
+    try std.testing.expectEqualStrings("\x1b[?1u", after_flags.payload[16..]);
+
+    pane.feedPodOutput("\x1b[?u\x1b[>2u");
+    const before_flags = try readTestFrame(fds[1], &frame_buf);
+    try std.testing.expectEqualStrings("\x1b[?1u", before_flags.payload[16..]);
 }
 
 test "XTVERSION replies return to the pane across every query split" {

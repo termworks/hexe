@@ -229,11 +229,18 @@ pub const Pane = struct {
     /// Called by the event loop when a MuxVtHeader frame arrives for this pane.
     pub fn feedPodOutput(self: *Pane, data: []const u8) void {
         self.did_clear = false;
-        pane_output.processOutput(self, data);
-        self.vt.feed(data) catch |err| {
-            core.logging.logError("terminal", "pane VT feed failed", err);
-            return;
-        };
+        var offset: usize = 0;
+        while (offset < data.len) {
+            const remaining = data[offset..];
+            const segment_len = pane_output.nextResponseBoundary(self, remaining) orelse remaining.len;
+            const segment = remaining[0..segment_len];
+            self.vt.feed(segment) catch |err| {
+                core.logging.logError("terminal", "pane VT feed failed", err);
+                return;
+            };
+            pane_output.processOutput(self, segment);
+            offset += segment_len;
+        }
         const password_input = self.vt.terminal.flags.password_input;
         if (password_input != self.last_reported_password_input) {
             self.sendPasswordModeToPod(password_input);
