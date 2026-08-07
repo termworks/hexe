@@ -485,6 +485,36 @@ test "DECRQM replies return to the pane across every query split" {
     try std.testing.expectEqualStrings("\x1b[?2026;1$y", enabled.payload[16..]);
 }
 
+test "DSR replies use pane-local coordinates across every query split" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 31, 12, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+    pane.focused = false;
+    pane.feedPodOutput("\x1b[10;20H");
+
+    const query = "\x1b[6n";
+    for (0..query.len + 1) |split| {
+        pane.feedPodOutput(query[0..split]);
+        pane.feedPodOutput(query[split..]);
+        const frame = try readTestFrame(fds[1], &frame_buf);
+        try std.testing.expectEqualStrings("\x1b[10;20R", frame.payload[16..]);
+    }
+
+    pane.feedPodOutput("\x1b[24;80H");
+    pane.feedPodOutput("\x1b[?6n");
+    const decxcpr = try readTestFrame(fds[1], &frame_buf);
+    try std.testing.expectEqualStrings("\x1b[?24;80R", decxcpr.payload[16..]);
+}
+
 fn containsClearSeq(tail: []const u8, data: []const u8) bool {
     const has_esc = std.mem.indexOfScalar(u8, data, 0x1b) != null;
     const has_ff = std.mem.indexOfScalar(u8, data, 0x0c) != null;

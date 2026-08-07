@@ -38,9 +38,17 @@ pub fn csiDisposition(vt: *core.VT, final: u8, params: []const u8, reply_buf: []
     }
 
     if (final == 'n') {
-        var value = params;
-        if (value.len > 0 and value[0] == '?') value = value[1..];
-        if (std.mem.eql(u8, value, "5") or std.mem.eql(u8, value, "6")) return .forward_to_host;
+        if (std.mem.eql(u8, params, "5")) return .{ .reply = "\x1b[0n" };
+        if (std.mem.eql(u8, params, "6") or std.mem.eql(u8, params, "?6")) {
+            const cursor = vt.getCursor();
+            const row = @as(u32, cursor.y) + 1;
+            const column = @as(u32, cursor.x) + 1;
+            const reply = if (params[0] == '?')
+                std.fmt.bufPrint(reply_buf, "\x1b[?{d};{d}R", .{ row, column }) catch return .ignore
+            else
+                std.fmt.bufPrint(reply_buf, "\x1b[{d};{d}R", .{ row, column }) catch return .ignore;
+            return .{ .reply = reply };
+        }
     }
 
     if (final == 'c') {
@@ -87,8 +95,8 @@ test "CSI routing keeps emulation and appearance ownership explicit" {
     defer vt.deinit();
     var reply: [128]u8 = undefined;
 
-    try std.testing.expect(csiDisposition(&vt, 'n', "5", &reply) == .forward_to_host);
-    try std.testing.expect(csiDisposition(&vt, 'n', "?6", &reply) == .forward_to_host);
+    try expectReply(csiDisposition(&vt, 'n', "5", &reply), "\x1b[0n");
+    try expectReply(csiDisposition(&vt, 'n', "6", &reply), "\x1b[1;1R");
     try std.testing.expect(csiDisposition(&vt, 'c', "", &reply) == .forward_to_host);
     try std.testing.expect(csiDisposition(&vt, 'c', ">0", &reply) == .forward_to_host);
     try expectReply(csiDisposition(&vt, 'p', "?2026$", &reply), "\x1b[?2026;2$y");
@@ -132,4 +140,23 @@ test "DECRQM reports modeled pane modes and rejects unknown modes" {
 
     try expectReply(csiDisposition(&vt, 'p', "?9999$", &reply), "\x1b[?9999;0$y");
     try std.testing.expect(csiDisposition(&vt, 'p', "?bad$", &reply) == .ignore);
+}
+
+test "DSR reports pane-local one-based cursor coordinates" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 80, 24);
+    defer vt.deinit();
+    var reply: [128]u8 = undefined;
+
+    try expectReply(csiDisposition(&vt, 'n', "5", &reply), "\x1b[0n");
+    try expectReply(csiDisposition(&vt, 'n', "6", &reply), "\x1b[1;1R");
+    try expectReply(csiDisposition(&vt, 'n', "?6", &reply), "\x1b[?1;1R");
+
+    try vt.feed("\x1b[10;20H");
+    try expectReply(csiDisposition(&vt, 'n', "6", &reply), "\x1b[10;20R");
+    try expectReply(csiDisposition(&vt, 'n', "?6", &reply), "\x1b[?10;20R");
+
+    try vt.feed("\x1b[24;80H");
+    try expectReply(csiDisposition(&vt, 'n', "6", &reply), "\x1b[24;80R");
+    try std.testing.expect(csiDisposition(&vt, 'n', "?5", &reply) == .ignore);
 }
