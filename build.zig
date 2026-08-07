@@ -381,6 +381,15 @@ pub fn build(b: *std.Build) void {
     });
     const run_fast_path_tests = b.addRunArtifact(fast_path_tests);
 
+    const mouse_protocol_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/frontends/terminal/mouse_protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_mouse_protocol_tests = b.addRunArtifact(mouse_protocol_tests);
+
     // Terminal OSC passthrough/query regression tests.
     const pane_output_test_module = b.createModule(.{
         .root_source_file = b.path("src/frontends/terminal/pane_output.zig"),
@@ -524,6 +533,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_vtwq_tests.step);
     test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
+    test_step.dependOn(&run_mouse_protocol_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);
     test_step.dependOn(&run_pane_search_tests.step);
     test_step.dependOn(&run_reattach_reconcile_tests.step);

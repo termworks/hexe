@@ -8,6 +8,7 @@ const focus_nav = @import("focus_nav.zig");
 const float_title = @import("float_title.zig");
 const float_util = @import("float_util.zig");
 const mouse_selection = @import("mouse_selection.zig");
+const mouse_protocol = @import("mouse_protocol.zig");
 const statusbar = @import("statusbar.zig");
 const terminal_main = @import("main.zig");
 
@@ -131,20 +132,39 @@ fn encodeMouseEvent(mouse: vaxis.Mouse) MouseEvent {
 }
 
 fn forwardMouseToPane(pane: *Pane, ev: MouseEvent) void {
-    // Convert absolute coords to pane-local (1-based for SGR)
-    const local_x: u16 = if (ev.x >= pane.x) ev.x - pane.x + 1 else 1;
-    const local_y: u16 = if (ev.y >= pane.y) ev.y - pane.y + 1 else 1;
-
-    // Build SGR mouse sequence: ESC [ < btn ; x ; y M/m
     var buf: [32]u8 = undefined;
-    const terminator: u8 = if (ev.is_release) 'm' else 'M';
-    const len = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{ ev.btn, local_x, local_y, terminator }) catch |err| {
+    const encoded = mouse_protocol.encodeSgr(
+        &buf,
+        pane.x,
+        pane.y,
+        ev.x,
+        ev.y,
+        .{ .button_code = ev.btn, .is_release = ev.is_release },
+    ) catch |err| {
         terminal_main.debugLogUuid(&pane.uuid, "mouse SGR forwarding format failed: {s}", .{@errorName(err)});
         return;
     };
-    pane.write(len) catch |err| {
+    pane.write(encoded) catch |err| {
         terminal_main.debugLogUuid(&pane.uuid, "mouse SGR forwarding write failed: {s}", .{@errorName(err)});
     };
+}
+
+fn trackingForPane(pane: *const Pane) mouse_protocol.Tracking {
+    const modes = &pane.vt.terminal.modes;
+    return .{
+        .normal = modes.get(.mouse_event_normal),
+        .button = modes.get(.mouse_event_button),
+        .any = modes.get(.mouse_event_any),
+        .sgr = modes.get(.mouse_format_sgr),
+    };
+}
+
+fn shouldForwardToPane(pane: *const Pane, ev: MouseEvent, override_active: bool) bool {
+    return mouse_protocol.shouldForward(
+        trackingForPane(pane),
+        .{ .button_code = ev.btn, .is_release = ev.is_release },
+        override_active,
+    );
 }
 
 fn focusTarget(state: *State, target: FocusTarget) void {
@@ -477,21 +497,6 @@ fn copySelectionRange(state: *State, pane: *Pane, range: anytype) bool {
     return true;
 }
 
-fn forwardToFocusedAltPane(state: *State, ev: MouseEvent) bool {
-    if (state.activeFloatingIndex()) |afi| {
-        if (afi < state.view.float_views.items.len and state.view.float_views.items[afi].vt.inAltScreen()) {
-            forwardMouseToPane(state.view.float_views.items[afi], ev);
-            return true;
-        }
-    } else if (state.currentLayout().getFocusedPane()) |p| {
-        if (p.vt.inAltScreen()) {
-            forwardMouseToPane(p, ev);
-            return true;
-        }
-    }
-    return false;
-}
-
 fn copyTextToSystemClipboard(state: *State, bytes: []const u8) bool {
     const stdout = std.fs.File.stdout();
     var buf: [256]u8 = undefined;
@@ -561,7 +566,8 @@ fn desiredMouseShape(state: *State, ev: MouseEvent, override_active: bool) vaxis
     }
 
     const in_content = ev.x >= target.pane.x and ev.x < target.pane.x + target.pane.width and ev.y >= target.pane.y and ev.y < target.pane.y + target.pane.height;
-    if (in_content and (override_active or !target.pane.vt.inAltScreen())) return .text;
+    const tracking = trackingForPane(target.pane);
+    if (in_content and (override_active or !tracking.enabled() or !tracking.sgr)) return .text;
     return .default;
 }
 
@@ -765,7 +771,12 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
     }
 
     const target = findFocusableAt(state, ev.x, ev.y);
-    const forward_to_app = if (target) |t| t.pane.vt.inAltScreen() else false;
+    const forward_to_app = if (target) |t|
+        ev.x >= t.pane.x and ev.x < t.pane.x + t.pane.width and
+            ev.y >= t.pane.y and ev.y < t.pane.y + t.pane.height and
+            shouldForwardToPane(t.pane, ev, override_active)
+    else
+        false;
 
     // Wheel scroll.
     if (is_wheel) {
@@ -786,14 +797,6 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                     state.mouse_selection.update(t.pane, state.mouse_selection.last_local.x, state.mouse_selection.last_local.y);
                 }
                 state.needs_render = true;
-            }
-        } else {
-            if (state.activeFloatingIndex()) |afi| {
-                if (afi < state.view.float_views.items.len) {
-                    forwardMouseToPane(state.view.float_views.items[afi], ev);
-                }
-            } else if (state.currentLayout().getFocusedPane()) |p| {
-                forwardMouseToPane(p, ev);
             }
         }
         return true;
@@ -860,7 +863,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             }
 
             const in_content = ev.x >= t.pane.x and ev.x < t.pane.x + t.pane.width and ev.y >= t.pane.y and ev.y < t.pane.y + t.pane.height;
-            const use_mux_selection = in_content and (override_active or !t.pane.vt.inAltScreen());
+            const use_mux_selection = in_content and !forward_to_app;
 
             if (!use_mux_selection and (state.mouse_selection.has_range or state.mouse_selection.active)) {
                 state.mouse_selection.clear();
@@ -912,20 +915,17 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.mouse_selection.clear();
                 state.needs_render = true;
             }
-            _ = forwardToFocusedAltPane(state, ev);
         }
 
         return true;
     }
 
-    // Other mouse events (including release): forward only when target is in alt-screen.
+    // Other mouse events include release and tracking-mode motion.
     if (target) |t| {
         if (forward_to_app) {
             forwardMouseToPane(t.pane, ev);
             return true;
         }
-    } else if (forwardToFocusedAltPane(state, ev)) {
-        return true;
     }
 
     return true;

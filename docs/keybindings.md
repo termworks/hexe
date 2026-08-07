@@ -115,6 +115,16 @@ hexe.key({ ... }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_an
 
 Keys without any binding always pass through unchanged.
 
+## Mouse-aware panes
+
+Hexe forwards mouse events on both the primary and alternate screen when the pane enables mouse
+tracking and SGR mode 1006. Normal mode 1000 receives button events, button-event mode 1002 also
+receives drag motion, and any-event mode 1003 receives all motion.
+
+Legacy mouse encodings are not emitted. A pane that does not enable SGR mode 1006 keeps Hexe's
+normal selection and scrolling behavior. Hold the configured selection override modifiers
+(Ctrl+Alt by default) to select text inside a mouse-aware application.
+
 ---
 
 ## `when`
