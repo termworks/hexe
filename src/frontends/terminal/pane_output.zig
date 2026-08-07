@@ -3,6 +3,7 @@ const core = @import("core");
 
 const pane_mod = @import("pane.zig");
 const Pane = pane_mod.Pane;
+const pane_respond = @import("pane_respond.zig");
 
 fn writeResponse(self: *Pane, data: []const u8, comptime context: []const u8) void {
     self.write(data) catch |err| {
@@ -45,32 +46,36 @@ fn updateEscTail(self: *Pane, data: []const u8) void {
 }
 
 fn handleCsiQueries(self: *Pane, data: []const u8) void {
+    scanCsi(self, data, self, handleCsiQueryFinal);
+}
+
+fn scanCsi(scanner: anytype, data: []const u8, context: anytype, comptime on_final: anytype) void {
     const ESC: u8 = 0x1b;
 
     for (data) |b| {
-        switch (self.csi_query_state) {
+        switch (scanner.csi_query_state) {
             .idle => {
-                if (b == ESC) self.csi_query_state = .esc;
+                if (b == ESC) scanner.csi_query_state = .esc;
             },
             .esc => {
                 if (b == '[') {
-                    self.csi_query_state = .csi;
-                    self.csi_query_len = 0;
+                    scanner.csi_query_state = .csi;
+                    scanner.csi_query_len = 0;
                 } else {
-                    self.csi_query_state = .idle;
+                    scanner.csi_query_state = .idle;
                 }
             },
             .csi => {
                 if (b >= 0x40 and b <= 0x7e) {
-                    handleCsiQueryFinal(self, b, self.csi_query_buf[0..self.csi_query_len]);
-                    self.csi_query_state = .idle;
-                    self.csi_query_len = 0;
-                } else if (self.csi_query_len < self.csi_query_buf.len) {
-                    self.csi_query_buf[self.csi_query_len] = b;
-                    self.csi_query_len += 1;
+                    on_final(context, b, scanner.csi_query_buf[0..scanner.csi_query_len]);
+                    scanner.csi_query_state = .idle;
+                    scanner.csi_query_len = 0;
+                } else if (scanner.csi_query_len < scanner.csi_query_buf.len) {
+                    scanner.csi_query_buf[scanner.csi_query_len] = b;
+                    scanner.csi_query_len += 1;
                 } else {
-                    self.csi_query_state = .idle;
-                    self.csi_query_len = 0;
+                    scanner.csi_query_state = .idle;
+                    scanner.csi_query_len = 0;
                 }
             },
         }
@@ -78,7 +83,15 @@ fn handleCsiQueries(self: *Pane, data: []const u8) void {
 }
 
 fn handleCsiQueryFinal(self: *Pane, final: u8, params: []const u8) void {
-    if (!shouldForwardCsiQuery(final, params)) return;
+    var reply_buf: [128]u8 = undefined;
+    switch (pane_respond.csiDisposition(&self.vt, final, params, &reply_buf)) {
+        .ignore => return,
+        .reply => |reply| {
+            writeResponse(self, reply, "local CSI response write failed");
+            return;
+        },
+        .forward_to_host => {},
+    }
 
     var seq_buf: [80]u8 = undefined;
     var n: usize = 0;
@@ -98,21 +111,6 @@ fn handleCsiQueryFinal(self: *Pane, final: u8, params: []const u8) void {
     stdout.writeAll(seq_buf[0..n]) catch |err| {
         core.logging.logError("terminal", "forward CSI query to terminal stdout", err);
     };
-}
-
-fn shouldForwardCsiQuery(final: u8, params: []const u8) bool {
-    if (final == 'n') {
-        var p = params;
-        if (p.len > 0 and p[0] == '?') p = p[1..];
-        return std.mem.eql(u8, p, "5") or std.mem.eql(u8, p, "6");
-    }
-    if (final == 'c') {
-        if (params.len == 0) return true;
-        if (std.mem.eql(u8, params, "0")) return true;
-        if (params[0] == '>') return true;
-        return false;
-    }
-    return false;
 }
 
 fn handleDcsQueries(self: *Pane, data: []const u8) void {
@@ -368,6 +366,46 @@ test "OSC passthrough keeps color feedback families including OSC 51" {
     try std.testing.expect(isOscQuery("\x1b]51;?\x07"));
     try std.testing.expect(isOscQuery("\x1b]119;?\x07"));
     try std.testing.expect(!shouldPassthroughOsc("\x1b]99;?\x07"));
+}
+
+test "CSI scanner preserves query state across every split" {
+    const QueryState = enum { idle, esc, csi };
+    const Scanner = struct {
+        csi_query_state: QueryState = .idle,
+        csi_query_buf: [32]u8 = undefined,
+        csi_query_len: u8 = 0,
+    };
+    const Capture = struct {
+        count: usize = 0,
+        final: u8 = 0,
+        params: [32]u8 = undefined,
+        params_len: usize = 0,
+
+        fn receive(self: *@This(), final: u8, params: []const u8) void {
+            self.count += 1;
+            self.final = final;
+            self.params_len = params.len;
+            @memcpy(self.params[0..params.len], params);
+        }
+    };
+
+    const sequences = [_][]const u8{
+        "\x1b[?u",
+        "\x1b[?2026$p",
+        "\x1b[6n",
+        "\x1b[>0q",
+    };
+    for (sequences) |sequence| {
+        for (0..sequence.len + 1) |split| {
+            var scanner: Scanner = .{};
+            var capture: Capture = .{};
+            scanCsi(&scanner, sequence[0..split], &capture, Capture.receive);
+            scanCsi(&scanner, sequence[split..], &capture, Capture.receive);
+            try std.testing.expectEqual(@as(usize, 1), capture.count);
+            try std.testing.expectEqual(sequence[sequence.len - 1], capture.final);
+            try std.testing.expectEqualStrings(sequence[2 .. sequence.len - 1], capture.params[0..capture.params_len]);
+        }
+    }
 }
 
 fn containsClearSeq(tail: []const u8, data: []const u8) bool {
