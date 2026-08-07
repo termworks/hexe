@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.2.9] - 2026-08-07
+
+### <!-- 0 -->⛰️  Features
+
+- Stream oversized OSC 52 payloads
+- Answer XTVERSION queries
+- Navigate semantic prompts
+- Consume pane notifications
+- Deliver mouse by pane modes
+- Answer DECRQM from pane modes
+- Answer kitty keyboard query
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Preserve kitty key distinctions
+- Preserve protocol ordering
+- Answer DSR from pane cursor
+
+### <!-- 2 -->🚜 Refactor
+
+- Split pane query routing
+
+### <!-- 3 -->📚 Documentation
+
+- Preserve previous implementation plan
+
+### <!-- 4 -->⚡ Performance
+
+- Drop per-call-site log instantiation
+
+### <!-- 6 -->🧪 Testing
+
+- Cover live protocol surfaces
+- Add live protocol smoke
+
 ## [0.2.8] - 2026-08-07
 
 ### <!-- 1 -->🐛 Bug Fixes
