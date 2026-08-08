@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.10] - 2026-08-08
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Send shifted keys as text again
+
 ## [0.2.9] - 2026-08-07
 
 ### <!-- 0 -->⛰️  Features
