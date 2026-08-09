@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.11] - 2026-08-09
+
+### <!-- 4 -->⚡ Performance
+
+- Arena render and cache git probes
+
 ## [0.2.10] - 2026-08-08
 
 ### <!-- 1 -->🐛 Bug Fixes
