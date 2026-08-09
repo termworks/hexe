@@ -538,8 +538,13 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
 }
 
 pub fn renderModulesSimple(allocator: std.mem.Allocator, callback_runtime: ?*LuaRuntime, ctx: *segment.Context, modules: []const core.Segment, stdout: std.fs.File, is_zsh: bool) !void {
-    const alloc = std.heap.page_allocator;
-    _ = allocator;
+    // Rendering one prompt makes hundreds of small, short-lived allocations.
+    // Served straight from the page allocator that was one mmap and one munmap
+    // each — over 1600 syscalls per prompt, most of this function's cost. They
+    // all die when the prompt is written, which is exactly an arena.
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const alloc = arena_state.allocator();
 
     const ModuleResult = struct {
         when_passed: bool = true,

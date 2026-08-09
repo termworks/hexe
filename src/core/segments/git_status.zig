@@ -237,7 +237,10 @@ fn runGitStatus(cwd: []const u8, status: *GitStatus) void {
     const stdout: []const u8 = blk: {
         if (cmd_mod.cachedValueArgv(key, &argv, getCacheTTL())) |cached| break :blk cached;
         if (cmd_mod.hasAsyncCache()) return; // first run in flight; keep last status
-        const sync = cmd_mod.runArgvCaptured(alloc, &argv, 64 * 1024, cmd_mod.DEFAULT_TIMEOUT_MS) orelse return;
+        // No async cache: this is a prompt process, which exits before the
+        // in-memory cache above can ever be consulted again. Fall back to the
+        // cross-process one so a burst of prompts costs a single git walk.
+        const sync = cmd_mod.fileCachedOutputArgv(alloc, key, &argv, getCacheTTL()) orelse return;
         owned_stdout = sync;
         break :blk sync;
     };
@@ -330,7 +333,7 @@ fn checkStash(cwd: []const u8, status: *GitStatus) void {
     const stdout: []const u8 = blk: {
         if (cmd_mod.cachedValueArgv(key, &argv, getCacheTTL())) |cached| break :blk cached;
         if (cmd_mod.hasAsyncCache()) return;
-        const sync = cmd_mod.runArgvCaptured(alloc, &argv, 16 * 1024, cmd_mod.DEFAULT_TIMEOUT_MS) orelse return;
+        const sync = cmd_mod.fileCachedOutputArgv(alloc, key, &argv, getCacheTTL()) orelse return;
         owned_stdout = sync;
         break :blk sync;
     };

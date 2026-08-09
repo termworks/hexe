@@ -42,9 +42,7 @@ pub const PopArgs = struct {
 
 /// Entry point for shp - can be called directly from unified CLI
 pub fn run(args: PopArgs) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.c_allocator;
 
     if (args.init_shell) |shell| {
         try printInit(shell, args.no_comms);

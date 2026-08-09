@@ -5,13 +5,19 @@ const Context = @import("context.zig").Context;
 const Style = @import("../style.zig").Style;
 
 /// File-cache TTL for the `sudo -n true` probe in short-lived prompt processes.
-/// Default 2s; override with HEXE_SUDO_CACHE_TTL (ms, clamped 500..15000).
+/// Override with HEXE_SUDO_CACHE_TTL (ms, clamped 500..15000).
+///
+/// 2s meant the cache only ever served prompts issued in a burst; a person
+/// typing a command takes longer than that, so interactive use missed on
+/// essentially every prompt and paid the spawn — which costs a PAM round and a
+/// PATH walk. Sudo's own credential timeout is 15 minutes, so a few seconds of
+/// staleness on the indicator is not meaningful.
 fn sudoCacheTtlMs() i64 {
     if (std.posix.getenv("HEXE_SUDO_CACHE_TTL")) |s| {
-        const v = std.fmt.parseInt(i64, s, 10) catch 2000;
+        const v = std.fmt.parseInt(i64, s, 10) catch 10000;
         return @min(@max(v, 500), 15000);
     }
-    return 2000;
+    return 10000;
 }
 
 /// Sudo segment - displays indicator if:

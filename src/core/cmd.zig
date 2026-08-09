@@ -156,6 +156,79 @@ pub fn fileCachedSucceededArgv(key: []const u8, argv: []const []const u8, ttl_ms
     return ok;
 }
 
+/// Cap on a cached command's stdout. Beyond this the result is returned but
+/// not recorded, so one enormous repo cannot fill the runtime dir.
+const SEG_CACHE_MAX_OUTPUT: usize = 64 * 1024;
+
+/// Like `runArgvCaptured`, but reuses file-cached stdout recorded by a previous
+/// run within `ttl_ms`.
+///
+/// `fileCachedSucceededArgv` only records a boolean, which covers `sudo -n
+/// true` but not the git probes: those need their output. Without this a
+/// prompt process re-runs `git status` every time, and `git status` walks the
+/// whole worktree — thousands of stats and ~10ms in a mid-sized repo, on every
+/// prompt. The in-memory cache the segments consult first only exists in the
+/// long-lived terminal.
+///
+/// Caller owns the returned memory. Best-effort: any IO failure falls through
+/// to running the command.
+pub fn fileCachedOutputArgv(
+    allocator: std.mem.Allocator,
+    key: []const u8,
+    argv: []const []const u8,
+    ttl_ms: i64,
+) ?[]u8 {
+    const now = std.time.milliTimestamp();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = segCachePath(&path_buf, key) orelse
+        return runArgvCaptured(allocator, argv, SEG_CACHE_MAX_OUTPUT, DEFAULT_TIMEOUT_MS);
+
+    // Cache entry is "<timestamp_ms>\n<stdout>".
+    if (std.fs.cwd().readFileAlloc(allocator, path, SEG_CACHE_MAX_OUTPUT + 64)) |contents| {
+        var keep = false;
+        defer if (!keep) allocator.free(contents);
+        if (std.mem.indexOfScalar(u8, contents, '\n')) |nl| {
+            if (std.fmt.parseInt(i64, contents[0..nl], 10)) |ts| {
+                const age = now - ts;
+                if (age >= 0 and age < ttl_ms) {
+                    const payload = allocator.dupe(u8, contents[nl + 1 ..]) catch {
+                        return runArgvCaptured(allocator, argv, SEG_CACHE_MAX_OUTPUT, DEFAULT_TIMEOUT_MS);
+                    };
+                    keep = false;
+                    return payload;
+                }
+            } else |_| {}
+        }
+    } else |_| {}
+
+    const out = runArgvCaptured(allocator, argv, SEG_CACHE_MAX_OUTPUT, DEFAULT_TIMEOUT_MS) orelse return null;
+    if (out.len <= SEG_CACHE_MAX_OUTPUT) writeSegCacheOutput(path, now, out);
+    return out;
+}
+
+fn writeSegCacheOutput(path: []const u8, ts_ms: i64, payload: []const u8) void {
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.{d}", .{ path, std.os.linux.getpid() }) catch return;
+    var head_buf: [32]u8 = undefined;
+    const head = std.fmt.bufPrint(&head_buf, "{d}\n", .{ts_ms}) catch return;
+    const f = std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch return;
+    var failed = false;
+    f.writeAll(head) catch {
+        failed = true;
+    };
+    if (!failed) f.writeAll(payload) catch {
+        failed = true;
+    };
+    f.close();
+    if (failed) {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return;
+    }
+    std.fs.cwd().rename(tmp_path, path) catch {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+    };
+}
+
 fn writeSegCache(path: []const u8, ts_ms: i64, ok: bool) void {
     var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
     const tmp_path = std.fmt.bufPrint(&tmp_buf, "{s}.{d}", .{ path, std.os.linux.getpid() }) catch return;
