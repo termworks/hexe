@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.12] - 2026-08-11
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Remove pty_paused and simplify PTY draining
+- Decode ctrl chords above the alphabet
+
 ## [0.2.11] - 2026-08-09
 
 ### <!-- 4 -->⚡ Performance
