@@ -146,6 +146,15 @@ fn vaxisKeyToBindKey(vk: vaxis.Key, mods_inout: *u8) ?core.Config.BindKey {
                 mods_inout.* |= 2;
             }
 
+            // The control bytes above the alphabet, which a legacy terminal sends bare and with no
+            // modifier to say what they were. Without this they decode as unidentified keys with no
+            // text, and the encoder — correctly — writes nothing for them, so ^\ ^] ^^ ^_ reach no
+            // program in a pane at all.
+            if (cp >= 0x1c and cp <= 0x1f) {
+                cp = "\\]^_"[cp - 0x1c];
+                mods_inout.* |= 2;
+            }
+
             // Match config key style: use lowercase alpha key + shift mod.
             if (cp >= 'A' and cp <= 'Z') {
                 cp = std.ascii.toLower(@intCast(cp));

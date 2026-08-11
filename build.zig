@@ -386,6 +386,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_fast_path_tests = b.addRunArtifact(fast_path_tests);
 
+    // Terminal frontend key-decoding regression tests.
+    const input_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/input_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    input_test_module.addImport("core", core_module);
+    input_test_module.addImport("vaxis", vaxis_mod);
+    input_test_module.addImport("pop", pop_module);
+
+    const input_tests = b.addTest(.{
+        .root_module = input_test_module,
+    });
+    const run_input_tests = b.addRunArtifact(input_tests);
+
     const mouse_protocol_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/frontends/terminal/mouse_protocol.zig"),
@@ -560,6 +575,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_vtwq_tests.step);
     test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
+    test_step.dependOn(&run_input_tests.step);
     test_step.dependOn(&run_mouse_protocol_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
     test_step.dependOn(&run_prompt_navigation_tests.step);
