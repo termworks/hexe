@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.13] - 2026-08-11
+
+### <!-- 6 -->🧪 Testing
+
+- Pin the ^\ round trip through the encoder
+
 ## [0.2.12] - 2026-08-11
 
 ### <!-- 1 -->🐛 Bug Fixes
