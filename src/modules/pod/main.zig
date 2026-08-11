@@ -496,7 +496,6 @@ const Pod = struct {
     backlog_abs: u64 = 0,
     alt_tracker: buffering.AltScreenTracker = .{},
     reader: pod_protocol.Reader,
-    pty_paused: bool = false,
     password_mode: bool = false,
 
     // Exactly-once input dedup across a frontend VT reconnect. See applyInputFrame.
@@ -881,20 +880,7 @@ const Pod = struct {
             armClientWatcher(accept_ctx.client_ctx, client.fd);
         }
         debugLog("settleAfterAccept: after armClient, watched_fd={?d}", .{accept_ctx.client_ctx.watched_fd});
-        // Resume for ANY consumer. Back-pressure pauses the PTY when the ring
-        // fills with nothing attached; gating the resume on `client` alone
-        // meant an observer (`hexe pod record`) could attach, receive the
-        // backlog, and then sit there while the child shell stayed blocked on
-        // its PTY writes forever — the reader that was supposed to unblock it
-        // was attached and ignored. armPtyWatcher itself early-returns while
-        // pty_paused is set, so the flag must be cleared first.
-        if ((accept_ctx.pod.client != null or accept_ctx.pod.observers.items.len > 0) and
-            accept_ctx.pod.pty_paused)
-        {
-            debugLog("settleAfterAccept: re-arming pty watcher (was paused)", .{});
-            accept_ctx.pod.pty_paused = false;
-            armPtyWatcher(accept_ctx.pty_ctx);
-        }
+        armPtyWatcher(accept_ctx.pty_ctx);
     }
 
     fn acceptCallback(
@@ -925,18 +911,16 @@ const Pod = struct {
             debugLog("acceptCallback: tryAccept failed: {s}", .{@errorName(err)});
             break :blk null;
         }) |conn| {
-            debugLog("acceptCallback: new conn fd={d}, client_before={?d}, watched_fd={?d}, pty_paused={}, pty_armed={}", .{
+            debugLog("acceptCallback: new conn fd={d}, client_before={?d}, watched_fd={?d}, pty_armed={}", .{
                 conn.fd,
                 if (accept_ctx.pod.client) |cl| cl.fd else null,
                 accept_ctx.client_ctx.watched_fd,
-                accept_ctx.pod.pty_paused,
                 accept_ctx.pty_ctx.armed.*,
             });
             accept_ctx.pod.handleAcceptedConnection(conn, accept_ctx.backlog_tmp);
-            debugLog("acceptCallback: after handle, client={?d}, watched_fd={?d}, pty_paused={}, pty_armed={}", .{
+            debugLog("acceptCallback: after handle, client={?d}, watched_fd={?d}, pty_armed={}", .{
                 if (accept_ctx.pod.client) |cl| cl.fd else null,
                 accept_ctx.client_ctx.watched_fd,
-                accept_ctx.pod.pty_paused,
                 accept_ctx.pty_ctx.armed.*,
             });
             settleAfterAccept(accept_ctx);
@@ -1058,8 +1042,8 @@ const Pod = struct {
     }
 
     fn armPtyWatcher(ctx: *PtyContext) void {
-        if (ctx.armed.* or ctx.pod.pty_paused) {
-            debugLog("armPtyWatcher: SKIP (armed={}, pty_paused={})", .{ ctx.armed.*, ctx.pod.pty_paused });
+        if (ctx.armed.*) {
+            debugLog("armPtyWatcher: SKIP (already armed)", .{});
             return;
         }
         debugLog("armPtyWatcher: ARMED", .{});
@@ -1082,57 +1066,19 @@ const Pod = struct {
             return .disarm;
         };
 
-        if (pty_ctx.pod.client == null and pty_ctx.pod.observers.items.len == 0) {
-            const free = pty_ctx.pod.backlog.available();
-            if (free == 0) {
-                pty_ctx.pod.pty_paused = true;
-                pty_ctx.armed.* = false;
-                return .disarm;
-            }
-
-            const read_buf = pty_ctx.io_buf[0..@min(pty_ctx.io_buf.len, free)];
-            const n = pty_ctx.pod.pty.read(read_buf) catch |err| switch (err) {
-                // Spurious poll wakeup with nothing to read. This must never
-                // be conflated with child exit (n == 0): the PTY master is
-                // non-blocking, and treating EAGAIN as EOF kills a live shell.
-                error.WouldBlock => return .rearm,
-                // PTY masters commonly report EIO once the child side is gone.
-                // Treat that as clean end-of-stream so the pod can keep the
-                // socket alive briefly and SES can still attach/read backlog.
-                error.InputOutput => 0,
-                else => {
-                    pty_ctx.callback_error.* = err;
-                    pty_ctx.armed.* = false;
-                    return .disarm;
-                },
-            };
-
-            if (n == 0) {
-                pty_ctx.should_stop.* = true;
-                pty_ctx.armed.* = false;
-                return .disarm;
-            }
-
-            const data = read_buf[0..n];
-            pty_ctx.pod.scanOutputMetadata(data);
-            pty_ctx.pod.alt_tracker.feed(data, pty_ctx.pod.backlog_abs);
-            if (pty_ctx.pod.password_mode) return .rearm;
-            const appended = pty_ctx.pod.backlog.appendNoDrop(data);
-            // Every ring append MUST bump backlog_abs — the replay window
-            // derives the ring's absolute start from it.
-            if (appended) pty_ctx.pod.backlog_abs += data.len;
-            if (!appended or pty_ctx.pod.backlog.isFull()) {
-                pty_ctx.pod.pty_paused = true;
-                pty_ctx.armed.* = false;
-                return .disarm;
-            }
-
-            return .rearm;
-        }
-
+        // Drain the PTY unconditionally, attached or not. A detached pod that
+        // stops reading leaves its child blocked in write() once the kernel
+        // PTY buffer fills, which is indistinguishable from a suspended
+        // process — the exact opposite of "detached sessions keep running".
+        // Backlog is bounded scrollback: overflow drops the oldest bytes.
         const n = pty_ctx.pod.pty.read(pty_ctx.io_buf) catch |err| switch (err) {
-            // See above: EAGAIN is a spurious wakeup, never child exit.
+            // Spurious poll wakeup with nothing to read. This must never be
+            // conflated with child exit (n == 0): the PTY master is
+            // non-blocking, and treating EAGAIN as EOF kills a live shell.
             error.WouldBlock => return .rearm,
+            // PTY masters commonly report EIO once the child side is gone.
+            // Treat that as clean end-of-stream so the pod can keep the
+            // socket alive briefly and SES can still attach/read backlog.
             error.InputOutput => 0,
             else => {
                 pty_ctx.callback_error.* = err;
@@ -1275,7 +1221,7 @@ const Pod = struct {
             const client_after = if (timer_ctx.pod.client) |cl| cl.fd else null;
             // A deferred handshake can install a VT client from here, which
             // needs the same watcher settling the inline accept path does.
-            if (client_before != client_after or timer_ctx.pod.pty_paused) {
+            if (client_before != client_after) {
                 settleAfterAccept(timer_ctx.accept_ctx);
             }
         }
@@ -1667,10 +1613,6 @@ const Pod = struct {
         // Keep backlog after replay so repeated detach/reattach cycles can
         // still restore scrollback for panes that stayed idle between
         // attaches. Ring capacity naturally bounds history size.
-        // Note: do NOT reset pty_paused here. The acceptCallback caller
-        // checks pty_paused and calls armPtyWatcher. If we clear the flag
-        // here, the caller sees pty_paused=false and skips re-arming,
-        // leaving the PTY watcher permanently disarmed after reconnect.
     }
 
     /// Register a one-shot request connection, trying to complete it inline so
