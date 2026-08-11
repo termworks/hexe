@@ -395,6 +395,9 @@ pub fn build(b: *std.Build) void {
     input_test_module.addImport("core", core_module);
     input_test_module.addImport("vaxis", vaxis_mod);
     input_test_module.addImport("pop", pop_module);
+    if (ghostty_vt_mod) |vt| {
+        input_test_module.addImport("ghostty-vt", vt);
+    }
 
     const input_tests = b.addTest(.{
         .root_module = input_test_module,

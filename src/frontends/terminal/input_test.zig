@@ -15,6 +15,7 @@ const testing = std.testing;
 const core = @import("core");
 const vaxis = @import("vaxis");
 const input = @import("input.zig");
+const key_translate = @import("key_translate.zig");
 
 const CTRL: u8 = 2;
 
@@ -46,6 +47,27 @@ test "keyEventFromVaxisEvent: Ctrl+letter still normalizes to a-z" {
     const ev = try decodedChar(0x03);
     try testing.expectEqual(@as(u8, 'c'), ev.key.char);
     try testing.expectEqual(CTRL, ev.mods & CTRL);
+}
+
+// The whole round trip, which is what a pane actually sees: the byte a terminal sends is decoded
+// into a chord and then re-encoded, because the frontend never forwards the original bytes.
+// Legacy in, legacy out; and the Kitty spelling once a program in the pane has asked for it.
+test "a ^\\ typed at the terminal reaches the pane, in whichever spelling is current" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+
+    const ev = input.keyEventFromVaxisEvent(press(0x1c)) orelse return error.NotDecoded;
+
+    var buf: [64]u8 = undefined;
+    const legacy = key_translate.encodeKey(&buf, ev.mods, ev.key, ev.text_codepoint, &vt.terminal) orelse
+        return error.MissingEncoding;
+    try testing.expectEqualStrings("\x1c", legacy);
+
+    try vt.feed("\x1b[>1u");
+    const kitty = key_translate.encodeKey(&buf, ev.mods, ev.key, ev.text_codepoint, &vt.terminal) orelse
+        return error.MissingEncoding;
+    try testing.expectEqualStrings("\x1b[92;5u", kitty);
 }
 
 test "keyEventFromVaxisEvent: escape is not swept up by the new range" {
