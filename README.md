@@ -48,41 +48,39 @@ hexe itself — see [recording](docs/recording.md).
 | [The command line](docs/cli.md) | addressing sessions, panes and pods from a script |
 | [Recording](docs/recording.md) | hexe writes asciicasts of itself; every film in the docs was made that way |
 
----|---|
-| [Architecture](docs/architecture.md) | How terminal, runtime, ses, and pod fit together |
-| [Sessions](docs/sessions.md) | Detach, reattach, layouts, pane adoption |
-| [Floats](docs/floats.md) | Overlay panes — per-directory, persistent, isolated |
-| [Keybindings](docs/keybindings.md) | Binding system, actions, conditions, gestures |
-| [Status bar & prompt](docs/statusbar.md) | Segments, animations, conditions |
-| [Isolation](docs/isolation.md) | Linux namespace + cgroup sandboxing for panes |
-| [Instances](docs/instances.md) | Running multiple independent stacks side by side |
-| [Config](docs/config.md) | Full config reference |
-| [CLI](docs/cli.md) | All commands and flags |
-
 ---
 
 ## Quick start
 
-**Build** (requires Zig):
+**Build** (requires Zig). A static musl binary, which is what `make build` gives you:
 
 ```sh
-zig build -Doptimize=ReleaseFast
+make build       # zig build -Doptimize=ReleaseFast, static musl, stripped
+make install     # …and copy it to ~/.local/bin/hexe
 ```
 
 **Run:**
 
 ```sh
-hexe terminal new
+hexe terminal new             # a new session, named after a pokemon
+hexe terminal new --name work # or named by you
+hexe                          # bare: attach to a session rooted here, or load ./.hexe.lua
 ```
 
-**Detach** (default: `Alt+Shift+D` release), then reattach:
+**Detach and come back.** Detach is a keybinding, so it is whatever your config says — there is no
+built-in chord:
+
+```lua
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.d }, hexe.action.detach()),
+```
 
 ```sh
-hexe terminal attach <session-name-or-prefix>
-hexe session list   # to find sessions
+hexe session list                    # what is running, attached or not
+hexe terminal attach work            # by name, or by uuid prefix
 ```
 
-**Config** lives at `~/.config/hexe/init.lua`. See [config](docs/config.md).
+**Config** lives at `~/.config/hexe/init.lua` and is Lua. See [configuration](docs/config.md), and
+[keybindings](docs/keybindings.md) for the binding language.
 
 ---
 
