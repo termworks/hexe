@@ -116,6 +116,15 @@ pub const StdinWatcher = struct {
     completion: xev.Completion = .{},
     slot: StdinSlot = undefined,
     armed: bool = false,
+    /// The terminal this frontend was drawing to is gone for good: the pty
+    /// master was closed (EIO/ENXIO) or the fd was taken away (EBADF).
+    ///
+    /// Without this the frontend spins: the read fails, the callback disarms,
+    /// the loop's `ensureStdinWatcherArmed` re-arms it, and a dead fd polls
+    /// ready immediately — a re-arm loop at 100% of a core, for as long as the
+    /// process lives. One was found doing that for 33 minutes after its
+    /// recorder was killed, and everything else on the machine felt it.
+    dead: bool = false,
 };
 
 /// Host-owned watcher and reusable read-buffer storage.
@@ -233,8 +242,18 @@ pub fn pumpStdin(state: *State, buffer: []u8, hooks: *const HostHooks) void {
     }
 }
 
+/// Is this the terminal going away, rather than a hiccup to retry?
+///
+/// EIO is what a pty slave read returns once the master is closed; ENXIO and
+/// EBADF are the same story told differently. None of them can be waited out,
+/// so re-arming on any of them is a spin.
+fn terminalGone(err: anyerror) bool {
+    return err == error.InputOutput or err == error.NoDevice or
+        err == error.NotOpenForReading or err == error.FileDescriptorInvalid;
+}
+
 pub fn ensureStdinWatcherArmed(state: *State, watcher: *StdinWatcher, buffer: []u8, hooks: *const HostHooks) void {
-    if (watcher.armed) return;
+    if (watcher.armed or watcher.dead) return;
     watcher.slot = .{ .state = state, .fd = hooks.stdin_fd, .buffer = buffer, .hooks = hooks, .watcher = watcher };
     const file = xev.File.initFd(hooks.stdin_fd);
     watcher.completion = .{};
@@ -450,6 +469,10 @@ fn stdinCallback(
         // Re-arm and wait, rather than tearing the terminal's input down.
         if (err == error.WouldBlock) return .rearm;
         slot.watcher.armed = false;
+        // A gone terminal is never coming back, so stop the loop from
+        // re-arming this fd; otherwise the failure repeats as fast as the
+        // event loop can turn.
+        if (terminalGone(err)) slot.watcher.dead = true;
         slot.hooks.connectionLost(slot.state);
         return .disarm;
     };

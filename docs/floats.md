@@ -44,10 +44,16 @@ means "the one for here". It depends on the pane's cwd being known, which is OSC
 
 **Which tab.** A `global` float belongs to no tab; its visibility is tracked per tab with a
 bitmask, so the same instance can be shown on one tab and hidden on another. A tab-bound float
-(the default) dies with its tab. `per_cwd` implies global regardless of what you wrote.
+(the default) dies with its tab, and pressing its key on a *different* tab creates a second
+instance rather than moving the first — there is no way to move a tab-bound float between tabs.
+`per_cwd` implies global regardless of what you wrote.
 
-**What hiding means.** By default hiding is just hiding: the process keeps running, and toggling
-back is instant. `destroy` kills it instead, for one-shot dialogs. `sticky` goes the other way —
+That bitmask is a `u64` (`state.zig:2539`), so a global float's visibility can only be tracked for
+the first 64 tabs: on tab 65 and beyond it can never be shown.
+
+**What hiding means.** Hiding is just hiding: the process keeps running, and toggling back is
+instant. (`destroy` is *supposed* to kill it instead and does not — see below.) `sticky` goes the
+other way —
 ses keeps the pod alive in a half-attached state when the frontend detaches or exits, and a new
 frontend reclaims it on reattach, so a float survives the terminal that opened it. `exclusive`
 hides every other float on the tab when this one is shown, which is what you want for something
@@ -141,9 +147,9 @@ floats that *persist*, and persist with a scope you choose:
 | `sticky` | ses keeps the pod alive across frontend exits; reclaimed on reattach |
 | `global` | not owned by a tab; visibility tracked per tab |
 | `exclusive` | hides the other floats on the tab when shown (one-way: they are not restored) |
-| `destroy` | kill the process when hidden; ignored for `per_cwd` |
+| `destroy` | **accepted and inert.** Parsed and merged into the float's attributes, then never read: nothing kills a float's process on hide, in the frontend or in SES |
 | `isolated` | run the command in a sandboxed pod |
-| `navigatable` | directional focus moves into it like a split, instead of left/right switching tabs |
+| `navigatable` | **accepted and inert.** Stored on the float's view state and never consulted by focus movement; with a float focused, left/right still switch tabs and up/down still do nothing |
 | `inherit_env` | import the focused pane's environment at creation |
 
 The first float entry with no `key` supplies defaults for the rest. Defaults are additive: they can
@@ -181,8 +187,10 @@ mux = {
 
 - **`exclusive` is one-way.** The floats it hides stay hidden; nothing restores them when it is
   dismissed.
-- **`destroy` and `sticky` do not compose.** A float that kills itself on hide has nothing to
-  preserve, and `destroy` is ignored for `per_cwd` floats entirely.
+- **`destroy` does nothing at all.** It is accepted by the config, merged into the float's
+  attributes at `state.zig:443`, and then never read by any code path: hiding a `destroy` float
+  leaves its process running exactly like any other. The same is true of `navigatable`. Both are
+  config that parses and lies.
 - **A float whose command exits closes.** `git log` flashes and is gone unless the command keeps a
   process alive — `…; exec $SHELL` is the usual fix.
 - **`add_path` does not expand `~`.** Use an absolute path, or set the whole `PATH` via `add_env`.
@@ -190,8 +198,10 @@ mux = {
   changes nothing.
 - **`per_cwd` needs OSC 7.** With a shell that does not report its directory, every instance
   collapses into one.
-- **Floats do not tile.** They overlap, in the order they were shown; there is no arrangement to
-  configure beyond size, anchor and nudging.
+- **Floats do not tile.** They overlap in focus order — the focused one is drawn last — and there
+  is no arrangement to configure beyond size, anchor and nudging.
+- **A global float cannot be shown past tab 64.** Its per-tab visibility lives in a `u64`.
+- **A tab-bound float cannot move tabs.** Its key on another tab makes another instance.
 
 ## Where it lives
 

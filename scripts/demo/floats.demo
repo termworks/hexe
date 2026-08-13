@@ -1,50 +1,145 @@
-# Floats: overlay panes with their own lifetime rules.
+# Floats, attribute by attribute: what each flag does, said on screen and then shown.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name floats
 
-run echo "a plain pane, underneath"
-wait 1.8
-
-# Alt+1: a float with a command in it. The pane below is still there.
-key M-1
-wait 4
-
-# Toggling it away leaves the process running.
-key M-1
-wait 2.5
-
-# Alt+2 is a different float — same keys, different instance and title.
-key M-2
-wait 4
-
-# It moves.
-key M-S-Left
+run # a float is a pane that is not in the split tree. one key each.
 wait 1.5
-key M-S-Down
-wait 2.5
+key M-1
+wait 4
+
+run # this one is exclusive: opening another float hides it rather than stacking
+wait 1.5
+key M-2
+wait 4
+
+run # and it is per_cwd — one instance per directory, which is the point of it
+wait 2
 key M-2
 wait 2
-
-# The explorer float is anchored right and is `navigatable`.
-key C-M-9
-wait 3.5
-key C-M-9
-wait 2
-
-# per_cwd: the same key in another directory is another instance.
 run cd /tmp/hexe-demo-work/other
 wait 2
-key M-1
+key M-2
 wait 4
-key M-1
-wait 2
+run # different directory, different instance, different listing
+wait 2.5
+key M-2
+wait 1.5
 run cd /tmp/hexe-demo-work/proj
 wait 2
+key M-2
+wait 3.5
+run # back in the first directory: the same instance, with its own scrollback
+wait 2.5
+key M-2
+wait 2
 
-# Back where it was, with its own scrollback.
+# ── env ─────────────────────────────────────────────────────────────────────
+run # inherit_env, add_env and add_path: a float can carry its own environment
+wait 2
 key M-1
 wait 3.5
+run echo "HEXE_FLOAT=$HEXE_FLOAT HEXE_FLOAT_NAME=$HEXE_FLOAT_NAME"
+wait 3
+run echo "$PATH" | cut -c1-70
+wait 3
+run # those come from add_env and add_path in the float's own definition
+wait 2.5
 key M-1
 wait 2
+
+# ── destroy vs keep-alive ───────────────────────────────────────────────────
+run # this float declares destroy = true, which is supposed to kill it on hide
+wait 2
+key M-5
+wait 3
+run echo "something I typed in the scratch float"
+wait 2.5
+key M-5
+wait 2
+key M-5
+wait 3.5
+run # still here. destroy is parsed, stored, and never acted on — the attribute lies
+wait 3.5
+key M-5
+wait 2
+
+# ── tab scope ───────────────────────────────────────────────────────────────
+run # global = false makes a float belong to the tab it was opened on
+wait 2
+key M-6
+wait 3
+key C-M-t
+wait 3
+run # a new tab. the global float is reachable here too
+wait 2
+key M-6
+wait 3
+key M-6
+wait 1.5
+key C-M-x
+wait 2
+key Enter
+wait 2.5
+
+# ── position, and moving one ────────────────────────────────────────────────
+run # size and position are percentages, and a float can be nudged while open
+wait 2
+key M-6
+wait 3
+key M-S-Left
+wait 1.2
+key M-S-Up
+wait 1.2
+key M-S-Right
+wait 2
+key M-6
+wait 2
+
+# ── navigatable ─────────────────────────────────────────────────────────────
+run # this one sets navigatable = true, which should let focus walk into it
+wait 2
+key C-M-9
+wait 3.5
+key C-M-Left
+wait 2.5
+key C-M-Right
+wait 2.5
+run # left and right switched tabs instead. navigatable is inert too — floats are reached by their key
+wait 3.5
+key C-M-9
+wait 2
+
+# ── from outside ────────────────────────────────────────────────────────────
+run # a float is a pod, so anything can drive it from outside the session
+wait 2
+key M-2
+wait 3.5
+run f=$(hexe pod list 2>&1 | grep -o 'name=[a-z0-9-]*' | tail -1 | cut -d= -f2); echo "float pod: $f"
+wait 3
+run hexe pod send --name "$f" --enter "echo typed into the float from another process"
+wait 3.5
+key M-2
+wait 2.5
+
+run # and one-off floats come straight from the command line, result and all
+wait 2
+run count=$(hexe terminal float --title report --size 60,40 --result-file /tmp/hexe-demo-work/pick.txt --command /tmp/hexe-demo-work/bin/report)
+wait 9
+run echo "the float answered: $count"
+wait 3
+
+# ── sticky ──────────────────────────────────────────────────────────────────
+run # sticky floats outlive the terminal itself. watch: open one, then detach
+wait 2.5
+key M-1
+wait 3.5
+key C-M-d
+wait 2
+key Enter
+wait 4
+spawn terminal attach floats
+wait 6
+run # new frontend, same session — and the float came back with it
+wait 3

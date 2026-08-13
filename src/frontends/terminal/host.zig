@@ -179,6 +179,15 @@ fn outputHeld(state: *State) bool {
     return false;
 }
 
+/// Does this render error mean the terminal itself has gone away, rather than
+/// something transient? `WriteFailed` is what a write to a pty whose master is
+/// closed surfaces as; the rest are the same condition arriving by other names.
+fn terminalWriteGone(err: anyerror) bool {
+    return err == error.WriteFailed or err == error.BrokenPipe or
+        err == error.InputOutput or err == error.NotOpenForWriting or
+        err == error.FileDescriptorInvalid;
+}
+
 fn renderIfDue(state: *State, last_render_ms: *i64) void {
     if (!state.needs_render) return;
 
@@ -196,6 +205,20 @@ fn renderIfDue(state: *State, last_render_ms: *i64) void {
 
     render(state) catch |err| {
         core.logging.logError("terminal", "terminal render failed", err);
+        // **A terminal that cannot be written to is a terminal that is gone.**
+        // Every pane's output, the status bar's 75ms animation tick and the
+        // 100ms ticker all set `needs_render`, so a frontend whose terminal
+        // has been closed repaints, fails, and repaints again for as long as
+        // the process lives — measured at 63-96% of a core, indefinitely,
+        // which is felt by everything else on the machine. Stopping is also
+        // simply what the frontend means here: the session and its pods stay
+        // up, exactly as they do on detach.
+        if (terminalWriteGone(err)) {
+            core.logging.warn("terminal", "terminal is gone (write failed), stopping frontend", .{});
+            state.runtime.requestFrontendDisconnectStop();
+            state.running = false;
+            return;
+        }
     };
     state.needs_render = false;
     state.force_full_render = false;

@@ -1,5 +1,5 @@
 .PHONY: build build-gnu test smoke smoke-protocol smoke-clean smoke-heavy install release \
-        demos demo-fixture demo-record demo-publish demo-embed
+        demos demo-fixture demo-record demo-publish demo-embed demo-clean
 
 # Static musl by default. Zig links its bundled musl STATICALLY for any
 # *-linux-musl target, so this needs no extra linkage flag — the result has no
@@ -107,12 +107,24 @@ DEMO ?=
 demo-fixture:
 	scripts/demo/fixture.sh
 
-demo-record: build demo-fixture
+# `nice`, because a recording is seventeen hexe stacks in a row and the author
+# is using the machine while it runs -- their shell prompt has a 10ms budget
+# and falls back to its own the moment it is missed.
+demo-record: build demo-fixture demo-clean
 	@if [ -n "$(DEMO)" ]; then \
-		python3 -u scripts/demo/record.py scripts/demo/$(DEMO).demo; \
+		nice -n 10 python3 -u scripts/demo/record.py scripts/demo/$(DEMO).demo; \
 	else \
-		for d in scripts/demo/*.demo; do python3 -u scripts/demo/record.py "$$d" || exit 1; done; \
+		for d in scripts/demo/*.demo; do nice -n 10 python3 -u scripts/demo/record.py "$$d" || exit 1; done; \
 	fi
+	@$(MAKE) --no-print-directory demo-clean
+
+# Kill anything a demo left behind. A frontend whose recorder died does NOT
+# exit when its pty closes -- it spins at 100% of a core -- so this is not
+# tidiness, it is the difference between a usable machine and a hot one.
+demo-clean:
+	@# Bracketed so the pattern cannot match this shell itself.
+	-@pkill -9 -f '[i]nstance dem' 2>/dev/null || true
+	-@pkill -9 -f '[h]exe-demo-work' 2>/dev/null || true
 
 demo-publish:
 	scripts/demo/publish.sh $(DEMO)

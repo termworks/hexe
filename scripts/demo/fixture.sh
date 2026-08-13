@@ -72,6 +72,28 @@ for old_name, new_name, command in swaps:
     block = re.sub(r'command\s*=\s*"[^"]*"', 'command = "%s"' % command, block, count=1)
     src = src[:start] + block + src[end:]
 
+# Two floats the author's config has no equivalent of, added so the films can
+# show the attributes nothing else uses: a tab-bound float that is destroyed
+# the moment it is hidden, and a plain one that is neither exclusive nor
+# sticky, to contrast against.
+extra = '''    hexe.float("scratch", {
+      key   = "5",
+      title = "scratch",
+      attrs = { global = false, destroy = true },
+      size  = { width = 50, height = 40 },
+      position = { x = 0, y = 0 },
+    }),
+    hexe.float("notes", {
+      key   = "6",
+      title = "notes",
+      attrs = { global = true },
+      size  = { width = 45, height = 45 },
+      position = { x = 100, y = 100 },
+    }),
+'''
+anchor = '    hexe.float("explorer", {'
+src = src.replace(anchor, extra + anchor, 1)
+
 open(path, 'w').write(src)
 PATCH
 
@@ -83,6 +105,10 @@ cat > "$WORK/home/.config/hexe/demo-keys.lua" <<'EOF'
 local hexe = require("hexe")
 
 return {
+  -- the two demo-only floats added to the layout above
+  hexe.key({ hexe.key.alt, hexe.key["5"] }, hexe.action.float.toggle("5")),
+  hexe.key({ hexe.key.alt, hexe.key["6"] }, hexe.action.float.toggle("6")),
+
   hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.f }, hexe.action.search.enter()),
   hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.y }, hexe.action.copy.enter()),
   hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.g }, hexe.action.prompt.previous()),

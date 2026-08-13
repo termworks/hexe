@@ -30,6 +30,9 @@ The demo script is a line-per-action file:
     run <text>         type it, then Enter
     type <text>        type it, leave the line alone
     key <spec> …       one or more keys: C-M-h, M-1, Up, Enter, Escape, C-c
+    mouse <x> <y> <what>   down | up | click | dblclick | move | wheelup | wheeldown
+                       SGR 1006, which is the encoding hexe asks panes for and
+                       the only one it emits; 1-based columns and rows
     wait <seconds>     pause, so a viewer can read what just happened
     clear              clear the pane without showing the command
     sh <command>       run a host command with the demo's environment, filmed
@@ -158,6 +161,29 @@ def keyspec(spec):
     return ("\x1b[%d;%du" % (codepoint, mods)).encode()
 
 
+def mousespec(x, y, what):
+    """SGR 1006 mouse reports, as a terminal sends them.
+
+    `CSI < button ; col ; row M` for a press or motion and `m` for a release;
+    button 32 is "moved with the left button held", 64 and 65 are the wheel.
+    Drag, resize-by-border and rename-by-double-click are all mouse-only, so
+    without this they could not be filmed at all.
+    """
+    x, y = int(x), int(y)
+    seqs = {
+        "down": ["\x1b[<0;%d;%dM" % (x, y)],
+        "up": ["\x1b[<0;%d;%dm" % (x, y)],
+        "click": ["\x1b[<0;%d;%dM" % (x, y), "\x1b[<0;%d;%dm" % (x, y)],
+        "dblclick": ["\x1b[<0;%d;%dM" % (x, y), "\x1b[<0;%d;%dm" % (x, y)] * 2,
+        "move": ["\x1b[<32;%d;%dM" % (x, y)],
+        "wheelup": ["\x1b[<64;%d;%dM" % (x, y)],
+        "wheeldown": ["\x1b[<65;%d;%dM" % (x, y)],
+    }
+    if what not in seqs:
+        raise SystemExit("unknown mouse action %r" % what)
+    return "".join(seqs[what]).encode()
+
+
 class Recorder:
     def __init__(self, demo_path, out_path):
         self.slug = os.path.basename(demo_path)[: -len(".demo")]
@@ -197,6 +223,14 @@ class Recorder:
 
         if self.launch is None:
             self.launch = "terminal new --name " + self.name
+        # `-I` even though HEXE_INSTANCE is already exported, because argv is
+        # what `pkill -f` can see. A frontend takes its instance from the
+        # environment, so a leftover one is invisible to the pattern that finds
+        # its ses and pods -- and a frontend whose recorder was killed does not
+        # exit when its pty closes, it spins at 100% of a core. One was found
+        # doing exactly that for 33 minutes.
+        if " -I " not in self.launch and "--instance" not in self.launch:
+            self.launch += " -I " + self.instance
 
     # ── environment ─────────────────────────────────────────────────────────
     def environ(self):
@@ -369,6 +403,10 @@ class Recorder:
                 for spec in rest.split():
                     self.send(keyspec(spec))
                     time.sleep(0.45)
+            elif verb == "mouse":
+                parts = rest.split()
+                self.send(mousespec(parts[0], parts[1], parts[2]))
+                time.sleep(0.35)
             elif verb == "wait":
                 time.sleep(float(rest))
             elif verb == "clear":
@@ -417,6 +455,12 @@ class Recorder:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 except OSError:
                     pass
+        # Belt and braces: the process groups above cover what this run
+        # started, and the pattern covers anything they started in turn. Both
+        # matter -- a frontend that outlives its recorder busy-loops on a dead
+        # pty and burns a whole core until something kills it, which is felt by
+        # every other program on the machine (the author's shell prompt has a
+        # 10ms budget and starts falling back to its own).
         subprocess.run(["pkill", "-9", "-f", "instance " + self.instance],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for fd in ("master", "slave"):
