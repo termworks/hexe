@@ -1,25 +1,27 @@
-# The shell prompt: hexe renders it, in any of four shells.
-cols 120
-rows 28
+# The shell prompt: hexe renders it, and this shell asks for it directly.
+cols 240
+rows 60
 speed 0.05
 name prompt
-env HEXE_DEMO_SHP=1
 
-run hexe shell init bash | head -12
-wait 3.5
+# The prompt on screen is hexe's, drawn by the segments in the same config the
+# status bar reads. oslo calls it from its own hooks rather than from a
+# generated shell snippet.
+run grep -n 'shp prompt' -A3 $HOME/.config/oslo/prompt.lua | head -12
+wait 5
 
-# Left segments, and a right prompt that is drawn on the same row.
+# Left segments, and a right prompt drawn on the same row.
 run cd src
-wait 2
+wait 2.5
 run cd ..
-wait 2
+wait 2.5
 
 # The status segment shows what the last command did.
 run false
-wait 2.5
+wait 3
 run true
-wait 2
+wait 2.5
 
-# It is the same config the status bar reads, under `prompt`.
-run grep -A6 'prompt = {' $XDG_CONFIG_HOME/hexe/init.lua | head -12
+# The same renderer, called by hand.
+run hexe shell prompt --status 1 --duration 1200 --jobs 2
 wait 4

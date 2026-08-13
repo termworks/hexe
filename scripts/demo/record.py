@@ -11,13 +11,16 @@ CI exactly as it is made here.
 Why not tmux, the way a shell's demos are usually driven: hexe *is* the thing
 under the recorder. Running it inside another multiplexer would put a second
 key parser and a second renderer between the demo and the film, and the keys
-these demos press -- Ctrl+Alt+letter, Alt+digit -- are exactly the ones the
-outer multiplexer would want for itself.
+these demos press are exactly the ones the outer multiplexer would want for
+itself.
+
+The films are shot at 240x60 with the author's own configuration and oslo as
+the shell -- see fixture.sh, which copies both in.
 
 The demo script is a line-per-action file:
 
-    cols 120           terminal width  (default 120)
-    rows 30            terminal height (default 30)
+    cols 240           terminal width  (default 240)
+    rows 60            terminal height (default 60)
     speed 0.06         seconds between keystrokes while typing
     name work          session name (default: the demo's own slug)
     launch <argv>      the frontend to record (default: `terminal new --name <name>`)
@@ -62,14 +65,20 @@ REPO = os.environ.get("HEXE_REPO",
                       os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 HEXE = os.environ.get("HEXE_BIN", os.path.join(REPO, "zig-out/bin/hexe"))
 WORK = os.environ.get("DEMO_WORK", "/tmp/hexe-demo-work")
+SHELL = os.environ.get("DEMO_SHELL", "/usr/bin/oslo")
 CAST_DIR = os.environ.get("CAST_DIR", "/tmp/hexe-demos")
 
 # A terminal that answers the questions a TUI asks on startup. Without the
 # primary-device reply libvaxis waits out its capability timeout on every
 # recording, which is three seconds of nothing at the head of every film.
-# Nothing here claims the kitty keyboard protocol: the demos press keys a
-# plain xterm can carry, and a film should show what that terminal sees.
+#
+# The kitty keyboard reply matters more than it looks: the author's config
+# binds `Ctrl+Alt+.` and `Ctrl+Alt+,` to the tabs, and legacy encodings cannot
+# express a modified full stop at all. Claiming the protocol — as every
+# terminal these demos are meant to represent does — lets the recorder send
+# those chords the way a real keyboard does.
 QUERY_REPLIES = [
+    (b"\x1b[?u", b"\x1b[?1u"),           # kitty keyboard: supported, flags=1
     (b"\x1b[c", b"\x1b[?62;22c"),        # primary device attributes
     (b"\x1b[>c", b"\x1b[>0;10;1c"),      # secondary device attributes
     (b"\x1b[>0q", b"\x1bP>|demo(1)\x1b\\"),  # XTVERSION
@@ -88,13 +97,31 @@ KEYS = {
 ARROWS = {"up": "A", "down": "B", "right": "C", "left": "D"}
 
 
-def keyspec(spec):
-    """One key as the bytes a terminal without the kitty protocol would send.
+KITTY_NAMED = {
+    "enter": 13, "return": 13, "tab": 9, "escape": 27, "esc": 27,
+    "space": 32, "bspace": 127, "backspace": 127,
+    # Spelled out because that is how a config spells them, and because a
+    # modified one has no legacy sequence to fall back to.
+    "comma": 44, "dot": 46, "period": 46, "slash": 47, "semicolon": 59,
+    "minus": 45, "equal": 61, "backslash": 92, "quote": 39, "grave": 96,
+}
+PUNCTUATION = {
+    "comma": ",", "dot": ".", "period": ".", "slash": "/", "semicolon": ";",
+    "minus": "-", "equal": "=", "backslash": "\\", "quote": "'", "grave": "`",
+}
 
-    `C-` is control, `M-` is meta/alt, `S-` is shift. Modified arrows go out as
-    CSI 1 ; <mod> <letter>, modified letters as the control character with an
-    ESC in front -- which is what hexe sees from a terminal that never answered
-    the kitty query, and therefore what these demos have to press.
+
+def keyspec(spec):
+    """One key, as the bytes a keyboard would put on the wire.
+
+    `C-` is control, `M-` is meta/alt, `S-` is shift. Unmodified keys go out in
+    the plain encodings every terminal has always used. Modified keys go out in
+    the kitty keyboard protocol -- `CSI <codepoint> ; <mods> u` -- because the
+    legacy encodings cannot express half of them: `Ctrl+Alt+.`, which the
+    author's config binds to the next tab, has no legacy sequence at all, and
+    `Ctrl+Alt+1` has none either. Modified arrows keep the older
+    `CSI 1 ; <mods> <letter>` form, which kitty-aware terminals still send and
+    every parser understands.
     """
     ctrl = alt = shift = False
     while len(spec) > 2 and spec[1] == "-" and spec[0] in "CMSAcmsa":
@@ -105,39 +132,37 @@ def keyspec(spec):
         spec = spec[2:]
 
     low = spec.lower()
-    if low in ARROWS and (ctrl or alt or shift):
-        mod = 1 + (1 if shift else 0) + (2 if alt else 0) + (4 if ctrl else 0)
-        return ("\x1b[1;%d%s" % (mod, ARROWS[low])).encode()
-    if low in KEYS and not (ctrl or alt or shift):
-        return KEYS[low]
-    if low in KEYS:
-        base = KEYS[low]
-        return (b"\x1b" + base) if alt else base
+    mods = 1 + (1 if shift else 0) + (2 if alt else 0) + (4 if ctrl else 0)
 
-    if len(spec) != 1:
+    if low in ARROWS and mods > 1:
+        return ("\x1b[1;%d%s" % (mods, ARROWS[low])).encode()
+    if mods == 1:
+        if low in KEYS:
+            return KEYS[low]
+        if low in PUNCTUATION:
+            return PUNCTUATION[low].encode()
+        if len(spec) == 1:
+            return spec.encode()
         raise SystemExit("unknown key %r" % spec)
-    ch = spec
-    if ctrl:
-        if ch.lower() == "\\":
-            ch = "\x1c"
-        elif ch.lower() == "]":
-            ch = "\x1d"
-        elif ch.lower() == "_" or ch == "/":
-            ch = "\x1f"
-        elif ch.lower() == " ":
-            ch = "\x00"
-        else:
-            ch = chr(ord(ch.lower()) - 96)
-    elif shift:
-        ch = ch.upper()
-    return (b"\x1b" + ch.encode()) if alt else ch.encode()
+
+    codepoint = KITTY_NAMED.get(low)
+    if codepoint is None:
+        if low in KEYS:
+            # A named key with no kitty codepoint (function keys, page up):
+            # fall back to the legacy sequence, ESC-prefixed for alt.
+            base = KEYS[low]
+            return (b"\x1b" + base) if alt else base
+        if len(spec) != 1:
+            raise SystemExit("unknown key %r" % spec)
+        codepoint = ord(spec.lower())
+    return ("\x1b[%d;%du" % (codepoint, mods)).encode()
 
 
 class Recorder:
     def __init__(self, demo_path, out_path):
         self.slug = os.path.basename(demo_path)[: -len(".demo")]
         self.out = out_path
-        self.cols, self.rows, self.speed = 120, 30, 0.06
+        self.cols, self.rows, self.speed = 240, 60, 0.06
         self.name = self.slug.replace("-", "_")[:24]
         self.launch = None
         self.extra_env = {}
@@ -178,14 +203,21 @@ class Recorder:
         env = {
             "PATH": os.path.dirname(os.path.abspath(HEXE)) + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": WORK + "/home",
-            "XDG_CONFIG_HOME": WORK + "/config",
+            # Both spellings point at the same copied configuration: the hexe
+            # config reaches its layout through `$HOME/.config/hexe`, and oslo
+            # and hexe both look under `$XDG_CONFIG_HOME`.
+            "XDG_CONFIG_HOME": WORK + "/home/.config",
             "XDG_STATE_HOME": WORK + "/state",
             "XDG_DATA_HOME": WORK + "/data",
             "XDG_RUNTIME_DIR": WORK + "/run",
             "HEXE_DEMO_BIN": os.path.dirname(os.path.abspath(HEXE)),
             "HEXE_INSTANCE": self.instance,
             "TERM": "xterm-256color",
-            "SHELL": "/bin/bash",
+            # The author's shell, which is also the one hexe integrates with
+            # most closely: oslo emits OSC 7 and OSC 133 on its own, so
+            # per-directory floats and prompt marks work with no shim.
+            "SHELL": SHELL,
+            "OSLO_PROFILE": "demo",
             "LANG": "C.UTF-8",
             "COLORTERM": "truecolor",
             "USER": os.environ.get("USER", "demo"),
@@ -234,6 +266,13 @@ class Recorder:
                 return
             if self.recording:
                 self.events.append((time.time() - self.t0, data))
+                # **Only answer queries before filming starts.** A reply is
+                # written to the pty as input, and anything the frontend is not
+                # actively waiting for is forwarded to the focused pane -- so a
+                # late answer to a startup question arrives as `4 q` typed into
+                # your shell, on camera. Every capability query happens while
+                # the frontend is starting, which is before the first frame.
+                continue
             for query, reply in QUERY_REPLIES:
                 if query in data:
                     try:
@@ -275,8 +314,10 @@ class Recorder:
     def run(self):
         if not os.access(HEXE, os.X_OK):
             raise SystemExit("no hexe binary at %s -- run: make build" % HEXE)
-        if not os.path.isdir(WORK + "/config/hexe"):
+        if not os.path.isdir(WORK + "/home/.config/hexe"):
             raise SystemExit("no fixture at %s -- run: scripts/demo/fixture.sh" % WORK)
+        if not os.access(SHELL, os.X_OK):
+            raise SystemExit("no shell at %s -- set DEMO_SHELL" % SHELL)
 
         atexit.register(self.cleanup)
         self.open_pty()
@@ -361,7 +402,7 @@ class Recorder:
         header = {
             "version": 2, "width": self.cols, "height": self.rows,
             "timestamp": int(time.time()), "title": "hexe: " + self.slug,
-            "env": {"SHELL": "/bin/bash", "TERM": "xterm-256color"},
+            "env": {"SHELL": SHELL, "TERM": "xterm-256color"},
         }
         with open(self.out, "w") as fh:
             fh.write(json.dumps(header) + "\n")

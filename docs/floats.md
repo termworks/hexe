@@ -1,291 +1,206 @@
 # Floats
 
-Floats are overlay panes that appear on top of your splits. They are toggled with a keybinding and can be configured with rich behavior around persistence, scope, and lifecycle.
-
-Layouts own float structure and behavior: key, command, title, size, position, and attrs.
-Mux config owns float visuals: default borders, ad-hoc float visuals, and title-based visual matches.
-
----
-
-## Defining floats
-
-Floats are defined under `floats` in your session layout:
+A float is a pane that is not in the split tree. It has a border, a title, a size in percent, an
+anchor, and — this is the part that matters — a set of attributes describing what it is *for*: one
+per project directory, kept alive when the terminal restarts, killed the moment it is hidden,
+sandboxed, or carrying an environment of its own.
 
 ```lua
-return hexe.layout("default", {
-  floats = {
-    hexe.float("git", {
-      key     = "g",
-      command = "lazygit",
-      title   = "git",
-      attrs = { per_cwd = true, sticky = true, global = true },
-      size = { width = 90, height = 90 },
-    }),
-    hexe.float("files", {
-      key     = "f",
-      command = "fzf",
-      attrs = { per_cwd = true, sticky = true, global = true },
-    }),
-    hexe.float("scratch", {
-      key        = "t",
-      attrs = { global = false, destroy = true },
-      size = { width = 40, height = 30 },
-      position = { x = 100, y = 0 },
-    }),
-  },
-})
+hexe.float("git", {
+  key     = "1",
+  title   = "git",
+  command = "lazygit",
+  attrs   = { per_cwd = true, sticky = true, global = true, exclusive = true },
+  size    = { width = 80, height = 60 },
+}),
 ```
-
-And toggled via keybindings:
 
 ```lua
-{ on = "press", mods = { hexe.mod.alt }, key = "g",
-  when = "focus:any",
-  action = hexe.action.float.toggle("g") },
+hexe.key({ hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1")),
 ```
 
----
+<!-- demo:begin -->
+[![floats demo](https://asciinema.org/a/1263003.svg)](https://asciinema.org/a/1263003)
+<!-- demo:end -->
 
-## Environment (`add_env`, `add_path`)
+## How it works
 
-A float can carry its own environment, independent of the rest of the session:
+A float is toggled by the `key` string it declares — the binding names it, so one key per float and
+the two halves stay together. What toggling does depends on the attributes, and there are three
+questions being answered:
+
+```
+                     ┌ which instance is this?          per_cwd
+toggle key ────────> ├ is it allowed on this tab?       global
+                     └ what happens when it hides?      destroy · sticky · exclusive
+```
+
+**Which instance.** A plain float has one process. A `per_cwd` float has one process *per working
+directory*: toggling the key in `~/work/a` opens that directory's instance, toggling it in
+`~/work/b` opens another, and coming back to `a` finds the first exactly as you left it, scrollback
+and all. This is the attribute that makes a `lazygit` or a REPL key useful — it is bound once and
+means "the one for here". It depends on the pane's cwd being known, which is OSC 7, which is what
+`hexe shell init <shell>` emits.
+
+**Which tab.** A `global` float belongs to no tab; its visibility is tracked per tab with a
+bitmask, so the same instance can be shown on one tab and hidden on another. A tab-bound float
+(the default) dies with its tab. `per_cwd` implies global regardless of what you wrote.
+
+**What hiding means.** By default hiding is just hiding: the process keeps running, and toggling
+back is instant. `destroy` kills it instead, for one-shot dialogs. `sticky` goes the other way —
+ses keeps the pod alive in a half-attached state when the frontend detaches or exits, and a new
+frontend reclaims it on reattach, so a float survives the terminal that opened it. `exclusive`
+hides every other float on the tab when this one is shown, which is what you want for something
+you look *at* rather than beside.
+
+### Environment
+
+A float can depart from the session's environment in three ways, and they compose:
 
 ```lua
 hexe.float("claude", {
-  key     = "2",
-  command = "claude",
-  attrs   = { per_cwd = true, inherit_env = true },
+  key      = "2",
+  command  = "claude",
+  attrs    = { per_cwd = true, inherit_env = true },
   add_env  = { ANTHROPIC_MODEL = "opus", NO_COLOR = "1" },
-  add_path = { "~/.local/bin", "/opt/toolchain/bin" },
+  add_path = { "/opt/toolchain/bin" },
 })
 ```
 
-`add_env` sets variables for this float's process only. A variable set here
-wins over whatever the process would otherwise inherit — from `inherit_env`,
-or from the session — so it can override as well as add.
-Values may be strings, numbers, or booleans. The array form works too, if you
-prefer it: `add_env = { "NO_COLOR=1" }`.
+`inherit_env` imports the *currently focused pane's* environment at creation, which is how a float
+picks up a direnv or nix profile you activated in the pane you launched it from. `add_env` sets
+variables for this float only, and wins over anything inherited. `add_path` prepends directories:
+an entry already on `PATH` is *moved* to the front rather than duplicated, because asking for a
+path you already have is a request to raise its priority.
 
-`add_path` prepends directories to this float's `PATH`, so a binary that is
-not on your normal `PATH` becomes runnable inside the float — or one that is
-shadowed by another copy earlier on `PATH` wins instead. Pass a single string
-or a list. The entries are searched first, in the order you declare them; a
-directory that is already on the inherited `PATH` is *moved* to the front
-rather than duplicated (every stale copy of it is dropped), because adding a
-path you already have is a request to raise its priority. Everything else
-keeps its original order. `~` is not expanded — use an absolute path, or set
-the full `PATH` via `add_env`.
+All three apply when the process is **spawned**. Toggling an existing float back reuses its
+process, so a change takes effect on the next creation — a new `per_cwd` directory, a fresh
+session, or after a `destroy`.
 
-Both apply when the float's process is **spawned**. Toggling an existing float
-back into view reuses its process, so changes take effect the next time the
-float is created (a new `per_cwd` directory, a fresh session, or after a
-`destroy`). Note that an interactive shell started as the float's command may
-re-order `PATH` itself from your rc files.
+### Visuals
 
----
+Structure and behaviour come from the layout; appearance comes from `mux.floats`, in three layers:
 
-## Sizing and position
-
-| Field | Default | Description |
-|---|---|---|
-| `size.width` | float default | Width as % of terminal (10–100) |
-| `size.height` | float default | Height as % of terminal (10–100) |
-| `position.x` | `50` | Horizontal anchor (0=left, 50=center, 100=right) |
-| `position.y` | `50` | Vertical anchor (0=top, 50=center, 100=bottom) |
-
----
-
-## Attributes
-
-Attributes control behavior. They are set under `attrs = { ... }`:
-
-### `per_cwd`
-
-One float instance per working directory.
-
-- Toggle `Alt+g` in `/repo/a` → opens the `/repo/a` lazygit
-- Toggle `Alt+g` in `/repo/b` → opens the `/repo/b` lazygit (separate instance)
-- Go back to `/repo/a` → shows the `/repo/a` instance again
-
-Useful for project-scoped tools: `lazygit`, `nvim`, REPLs, file browsers.
-
-### `sticky`
-
-The float survives terminal-frontend restarts.
-
-- Pod is kept alive in a half-attached state when the frontend detaches or exits
-- A new frontend automatically reclaims it on reattach
-- Combine with `per_cwd` for directory-specific persistent floats
-
-### `global`
-
-Controls tab scope.
-
-- `global = true` (recommended with `per_cwd`): Float is visible across all tabs. Visibility is tracked per-tab via a bitmask.
-- `global = false` (default): Float is bound to the tab it was created on. Closing that tab destroys it.
-
-### `exclusive`
-
-When shown, this float hides all other floats on the current tab.
-
-Useful for modal-style overlays where you want a single focused tool.
-
-### `destroy`
-
-The float process is killed when the float is hidden.
-
-- Meaningful only for tab-bound, non-`per_cwd` floats
-- Useful for fire-and-forget tools or one-shot dialogs
-
-### `isolated`
-
-The float runs inside a sandboxed pod (Linux namespaces + cgroups).
-
-See [isolation](isolation.md) for profiles and resource limits.
-
-## Visual policy
-
-Float visuals are configured in the `mux.floats` section.
-
-Named floats use `defaults` as their base. Ad-hoc CLI floats use `adhoc`.
-Then every `match[pattern]` rule whose regex pattern matches the float title is applied in declaration order. Later matches win.
-
-```lua
-return {
-  floats = {
-    defaults = {
-      size = { width = 65, height = 65 },
-      color = { active = 2, passive = 237 },
-      attrs = { global = true },
-    },
-    adhoc = {
-      size = { width = 80, height = 70 },
-      color = { active = 4, passive = 237 },
-    },
-    match = {
-      ["^explorer$"] = {
-        padding = { x = 2, y = 1 },
-        color = { active = 6, passive = 238 },
-      },
-    },
-  },
-}
+```
+defaults ──> (named floats)          size, colours, border, title, padding, shadow
+adhoc    ──> (CLI floats)
+match["^git$"] ──> applied on top, in declaration order, by TITLE
 ```
 
-`match[...]` uses the float title, not the pane name.
+Later matches win. The border can carry a title module built from the same segment machinery the
+status bar uses, so a float's border can show anything a status segment can.
 
-### Border style
+### Ad-hoc floats
 
-Border characters and colors live in `defaults`, `adhoc`, or `match`:
-
-```lua
-return {
-  floats = {
-    match = {
-      ["^git$"] = {
-        style = {
-          border = {
-            chars = {
-              top_left = "╭",
-              top_right = "╮",
-              bottom_left = "╰",
-              bottom_right = "╯",
-              horizontal = "─",
-              vertical = "│",
-            },
-          },
-        },
-      },
-    },
-  },
-}
-```
-
-```lua
-return {
-  floats = {
-    match = {
-      ["^git$"] = {
-        color = { active = 2, passive = 8 },
-      },
-    },
-  },
-}
-```
-
-### Border title
-
-Embed a title or status module in the border:
-
-```lua
-return {
-  floats = {
-    match = {
-      ["^git$"] = {
-        style = {
-          title = {
-            name = "title",
-            position = "topcenter",
-            segments = {
-              {
-                name = "title",
-                render = function(ctx)
-                  local t = hexe.segment.title(ctx)
-                  return {
-                    { text = "[", style = "bg:0 fg:1" },
-                    { text = " " .. t .. " ", style = "bg:237 fg:250" },
-                    { text = "]", style = "bg:0 fg:1" },
-                  }
-                end,
-              },
-            },
-          },
-        },
-      },
-    },
-  },
-}
-```
-
----
-
-## Ad-hoc floats (CLI)
-
-Spawn a one-off float from the command line:
+A float does not have to be declared. This is a one-off, and it is how hexe is used as a picker
+from inside a script:
 
 ```sh
-hexe terminal float --command "btop" --title "monitor" --size "80,70,0,0"
-hexe terminal float --command "zsh" --isolation sandbox
-hexe terminal float --command "bash /tmp/script.sh" --result-file /tmp/result
+dir=$(hexe terminal float --title picker --size 60,40 \
+        --result-file /tmp/pick --command 'bash -c "ls | fzf > /tmp/pick"')
 ```
 
-Options:
-
-| Flag | Description |
+| | |
 |---|---|
-| `--command` | Command to run |
-| `--title` | Border title |
-| `--cwd` | Working directory |
-| `--size WxH,X,Y` | Size and position |
-| `--isolation <profile>` | Isolation profile |
-| `--key <key>` | Exit key (sent on dismiss) |
-| `--result-file <path>` | Write float output here on close |
-| `--pass-env` | Pass current env to float |
-| `--extra-env K=V` | Add extra env vars |
+| `--command` | what to run (required) |
+| `--title` | border title, and the key `match[…]` rules are tested against |
+| `--cwd` | working directory |
+| `--size w,h,x,y` | percentages: width, height, and an optional shift on each axis |
+| `--isolation <profile>` \| `--isolated` | run it sandboxed ([isolation](isolation.md)) |
+| `--key <key>` | key sent to the pane when the float is dismissed |
+| `--result-file <path>` | where the float's result is written |
+| `--pass-env` \| `--extra-env K=V` | environment for this float |
 
----
+The command blocks until the float closes, then prints what the float wrote to `--result-file` on
+stdout and exits with the float's exit code — which is what makes the command substitution above
+work. The wait is deliberately unbounded: it was once capped at the ten-second wire default, so any
+interactive float open longer than that returned nothing.
 
-## Moving floats
+## What makes it different
 
-You can nudge a float's position with a keybinding:
+tmux popups (`display-popup`) are the nearest thing, and they are transient by design: a popup is a
+window that exists while its command runs. Everything in this document is about the opposite —
+floats that *persist*, and persist with a scope you choose:
+
+- **Per-directory instances** have no tmux equivalent; you would keep separate sessions or windows
+  per project and switch between them.
+- **`sticky` outlives the frontend**, which a popup cannot: a popup dies with the client that
+  opened it.
+- **Floats have a lifecycle of their own** — shown, hidden, destroyed — rather than being tied to a
+  command's exit.
+- What tmux popups do better: they are one command with no declaration, which is why hexe also has
+  `hexe terminal float`.
+
+## Configuration
+
+### Attributes
+
+| | |
+|---|---|
+| `per_cwd` | one instance per working directory; implies `global` |
+| `sticky` | ses keeps the pod alive across frontend exits; reclaimed on reattach |
+| `global` | not owned by a tab; visibility tracked per tab |
+| `exclusive` | hides the other floats on the tab when shown (one-way: they are not restored) |
+| `destroy` | kill the process when hidden; ignored for `per_cwd` |
+| `isolated` | run the command in a sandboxed pod |
+| `navigatable` | directional focus moves into it like a split, instead of left/right switching tabs |
+| `inherit_env` | import the focused pane's environment at creation |
+
+The first float entry with no `key` supplies defaults for the rest. Defaults are additive: they can
+turn an attribute on, not force it off for a float that asked for it.
+
+### Size, position, movement
 
 ```lua
-{ on = "press", mods = { hexe.mod.alt, hexe.mod.shift }, key = "up",
-  action = hexe.action.float.nudge("up") },
+size     = { width = 80, height = 60 },   -- percent of the terminal, 10–100
+position = { x = 100, y = 50 },           -- 0 = left/top, 50 = centre, 100 = right/bottom
 ```
 
----
+```lua
+hexe.key({ hexe.key.alt, hexe.key.shift, hexe.key.left }, hexe.action.float.nudge("left")),
+```
 
-## Full attribute reference
+### Visual rules
 
-See [float_attributes.md](float_attributes.md) for detailed notes on each attribute and edge cases.
+```lua
+mux = {
+  floats = {
+    defaults = { size = { width = 80, height = 65 }, color = { active = 5, passive = 237 } },
+    adhoc    = { size = { width = 70, height = 55 }, color = { active = 4, passive = 237 } },
+    match = {
+      ["^git$"] = {
+        padding = { x = 2, y = 1 },
+        style = { border = { chars = { top_left = "╭", top_right = "╮" } } },
+      },
+    },
+  },
+},
+```
+
+## What it cannot do
+
+- **`exclusive` is one-way.** The floats it hides stay hidden; nothing restores them when it is
+  dismissed.
+- **`destroy` and `sticky` do not compose.** A float that kills itself on hide has nothing to
+  preserve, and `destroy` is ignored for `per_cwd` floats entirely.
+- **A float whose command exits closes.** `git log` flashes and is gone unless the command keeps a
+  process alive — `…; exec $SHELL` is the usual fix.
+- **`add_path` does not expand `~`.** Use an absolute path, or set the whole `PATH` via `add_env`.
+- **Environment changes need a new process.** Editing `add_env` and toggling an existing float
+  changes nothing.
+- **`per_cwd` needs OSC 7.** With a shell that does not report its directory, every instance
+  collapses into one.
+- **Floats do not tile.** They overlap, in the order they were shown; there is no arrangement to
+  configure beyond size, anchor and nudging.
+
+## Where it lives
+
+| | |
+|---|---|
+| `src/core/config.zig` | `FloatAttributes`, `FloatDef` — the authoritative attribute list |
+| `src/frontends/terminal/loop_actions.zig` | toggle, create, per-cwd resolution, exclusivity |
+| `src/frontends/terminal/float_util.zig`, `float_title.zig`, `float_completion.zig` | geometry, border titles, result files |
+| `src/frontends/terminal/overlay_render.zig`, `borders.zig` | drawing floats and their borders |
+| `src/core/api_bridge_float.zig` | the Lua side of a float definition |
+| `src/modules/session/sticky_panes.zig` | keeping sticky floats alive between frontends |
+| `src/cli/commands/mux_float.zig` | `hexe terminal float` |

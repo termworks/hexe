@@ -10,13 +10,15 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.h }, hexe.action.split.horizont
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.v }, hexe.action.split.vertical()),
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left }, hexe.action.focus.move("left")),
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.m }, hexe.action.pane.zoom()),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.s }, hexe.action.pane.sync_toggle()),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.b }, hexe.action.pane.sync_toggle()),
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.t }, hexe.action.tab.new()),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.dot }, hexe.action.tab.next()),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.comma }, hexe.action.tab.prev()),
 hexe.key({ hexe.key.alt, hexe.key.r }, hexe.action.tab.rename()),
 ```
 
 <!-- demo:begin -->
-[![panes-and-tabs demo](https://asciinema.org/a/1262985.svg)](https://asciinema.org/a/1262985)
+[![panes-and-tabs demo](https://asciinema.org/a/1263008.svg)](https://asciinema.org/a/1263008)
 <!-- demo:end -->
 
 ## How it works

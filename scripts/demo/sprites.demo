@@ -1,24 +1,24 @@
 # Sprites: 1152 pokemon, drawn over a pane, for no reason at all.
-cols 120
-rows 30
+cols 240
+rows 60
 speed 0.04
 name sprite
 
 run echo "a pane like any other"
-wait 1.5
+wait 2
 
 key C-M-p
-wait 3.5
+wait 4
 
 key C-M-h
+wait 2.5
+key C-M-p
+wait 4
+
+# Each pane keeps its own, and the sprite is the pane's own name.
+key C-M-Left
 wait 2
+key C-M-p
+wait 2.5
 key C-M-p
 wait 3.5
-
-# Each pane keeps its own; the sprite is the pane's name.
-key C-M-Left
-wait 1.5
-key C-M-p
-wait 2
-key C-M-p
-wait 3

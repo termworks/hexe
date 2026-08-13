@@ -1,25 +1,24 @@
 # Instances: two stacks on one machine that cannot see each other.
-cols 120
-rows 30
+cols 240
+rows 60
 speed 0.04
 name inst
 
 run echo "$HEXE_INSTANCE"
-wait 2
+wait 2.5
 run hexe ses list
-wait 3
+wait 3.5
 
 # The flag belongs to the subcommand, not to `hexe` itself.
 run hexe -I spare ses status
-wait 2.5
+wait 3
 run hexe ses status -I spare
-wait 2.5
+wait 3
 
 # Another instance is another set of sockets, and another daemon.
 run hexe ses list -I spare
-wait 3
-
+wait 3.5
 run ls $XDG_RUNTIME_DIR/hexe/
-wait 3
+wait 3.5
 run HEXE_INSTANCE=spare hexe ses status
-wait 3
+wait 3.5

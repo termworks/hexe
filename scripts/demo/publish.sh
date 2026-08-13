@@ -16,7 +16,17 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 MAP="scripts/demo/casts.tsv"
 CASTS="${CAST_DIR:-/tmp/hexe-demos}"
-touch "$MAP"
+# Created if absent, never *touched*: the freshness check below compares each
+# cast against this file's mtime, so bumping it here would make every cast look
+# older than the map and skip the whole upload -- silently, leaving the
+# documents pointing at yesterday's films.
+[ -f "$MAP" ] || : > "$MAP"
+
+# The map's age is read ONCE, here. Comparing each cast against the live file
+# is wrong twice over: `touch`ing it would make every cast look old, and the
+# map is rewritten after every upload -- so the first cast published makes the
+# second one look stale, and a re-record of seventeen films uploads one.
+map_mtime=$(stat -c %Y "$MAP" 2>/dev/null || echo 0)
 
 targets=()
 if [ $# -gt 0 ]; then
@@ -34,7 +44,8 @@ for cast in "${targets[@]}"; do
     # re-recorded demo can never be uploaded again and the document keeps
     # pointing at the old film, silently.
     existing=$(awk -v s="$slug" '$1 == s {print $2}' "$MAP")
-    if [ -n "$existing" ] && [ ! "$cast" -nt "$MAP" ]; then
+    cast_mtime=$(stat -c %Y "$cast")
+    if [ -n "$existing" ] && [ "$cast_mtime" -le "$map_mtime" ]; then
         echo "$slug already at https://asciinema.org/a/$existing"
         continue
     fi

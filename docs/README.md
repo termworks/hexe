@@ -1,11 +1,10 @@
-# Features
+# Documentation
 
 One document per feature: what it is, how it works, what it cannot do, and where it lives in the
-tree. These go deeper than the reference pages in [`docs/`](..) — those say what a setting is
-called, these say how the thing is built and why it is built that way.
+tree. Each says how the thing is built and why it is built that way, and carries the settings that
+belong to it, so there is one page per subject rather than a shallow one and a deep one.
 
-Every claim in here was checked against the source or against a running build, and where the two
-disagreed with the older documentation, this is the one that matches the code. Where a design was
+Every claim in here was checked against the source or against a running build. Where a design was
 forced by a measurement or by a bug, the document says so, because those are the sentences worth
 reading twice.
 
@@ -33,7 +32,7 @@ reading twice.
 | | |
 |---|---|
 | [The status bar](statusbar.md) | three zones, priority budgets, buttons, progress from panes |
-| [The shell prompt](prompt.md) | the same segments, rendered into bash, zsh, fish or oslo |
+| [The shell prompt](prompt.md) | the same segments, rendered into oslo, bash, zsh or fish |
 | [Sprites](sprites.md) | 2304 pokemon in 1.6 MB, and why the pane is named after one |
 
 ## Configuring it
@@ -54,8 +53,8 @@ reading twice.
 ## The recordings
 
 Each document opens with a recording of the feature actually running. They are not screencasts
-somebody performed: every one is a script in [`scripts/demo`](../../scripts/demo/), driven into a
-real frontend by [`record.py`](../../scripts/demo/record.py), so any of them can be made again
+somebody performed: every one is a script in [`scripts/demo`](../scripts/demo/), driven into a
+real frontend by [`record.py`](../scripts/demo/record.py), so any of them can be made again
 after the code changes — and a film that stops matching hexe is a bug in one or the other.
 
 ```sh
@@ -66,16 +65,24 @@ make demo-publish                      # upload, remember the ids in casts.tsv
 make demo-embed                        # put the players back in the documents
 ```
 
-The recorder is not tmux driving hexe, the way a shell's demos are usually made: hexe *is* the
-thing under the recorder, and the chords these demos press — `Ctrl+Alt+letter`, `Alt+digit` — are
-exactly the ones an outer multiplexer would want for itself. Instead `record.py` opens a pty,
-starts a real frontend on it, answers the terminal queries a TUI asks at startup, types, and writes
-what comes back as an asciicast. Nothing in a film is synthesised: if a feature fails on the
-machine doing the recording, the film shows it failing — which is what [isolation](isolation.md) is
-a recording of.
+They are filmed **with the author's own configuration and the author's own shell**: `fixture.sh`
+copies `~/.config/hexe` and `~/.config/oslo` in as they are, so the prompt, the status bar, the
+float borders and every key a film presses are the ones in daily use. Two things are changed on the
+way in and both are marked in the fixture: the four agent floats get local, offline commands — a
+recording must not open a paid agent or touch a network — and a small block of extra bindings is
+appended for the actions the config does not bind but the documents describe.
 
-Every demo runs under its own instance, its own config, its own `HOME` and its own state
-directories, so a recording can neither see nor disturb a real session.
+The recorder is not tmux driving hexe, the way a shell's demos are usually made: hexe *is* the
+thing under the recorder, and the chords these demos press are exactly the ones an outer
+multiplexer would want for itself. Instead `record.py` opens a pty, starts a real frontend on it,
+answers the terminal queries a TUI asks at startup — including the kitty keyboard one, without
+which `Ctrl+Alt+.` cannot be sent at all — types, and writes what comes back as an asciicast.
+Nothing in a film is synthesised: if a feature fails on the machine doing the recording, the film
+shows it failing, which is what [isolation](isolation.md) is a recording of.
+
+Every demo runs at 240×60 under its own instance, its own copy of the configuration, its own `HOME`
+and its own state directories, so a recording can neither see nor disturb a real session or a real
+history.
 
 ## Reading these
 
@@ -89,6 +96,8 @@ Configuration         spellings verified against the code that reads them
 Measurements          real numbers only; the section is absent when there are none
 What it cannot do     required, and never empty
 Where it lives        paths, and the types or functions that matter
+Reference             the older reference material for that subject, where it still
+                        holds — profiles, schemas, tables; absent from most pages
 ```
 
 The **What it cannot do** section is the one to read first if you are deciding whether to rely on

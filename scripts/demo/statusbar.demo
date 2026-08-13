@@ -1,34 +1,34 @@
 # The status bar: three zones, budgeted by priority, redrawn on a timer.
-cols 120
-rows 28
+cols 240
+rows 60
 speed 0.04
 name status
 
-# The right zone follows the focused pane: directory and git branch.
+# The right zone follows the focused pane: directory, branch, dirty marks.
 run cd src
-wait 2
-run cd ..
-wait 2
-run git checkout -q -b release && git branch --show-current
 wait 2.5
+run cd ..
+wait 2.5
+run git checkout -q -b release && git branch --show-current
+wait 3
 
 # The centre zone is the tab list.
 key C-M-t
-wait 2.5
+wait 3
 key M-r
-wait 1.5
+wait 2
 type build
 key Enter
+wait 3
+key C-M-comma
 wait 2.5
-key C-M-b
-wait 2
 
 # Notifications are not segments: they are drawn over the bar and time out.
 run hexe terminal notify "build finished"
-wait 3
+wait 3.5
 
 # Progress comes from the pane itself, over OSC 9;4.
-run $WORK/bin/progress
-wait 5
+run /tmp/hexe-demo-work/bin/progress
+wait 6
 run git checkout -q main
-wait 2
+wait 2.5

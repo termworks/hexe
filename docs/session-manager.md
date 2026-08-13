@@ -14,7 +14,7 @@ hexe allow .                    # trust this file's hooks
 ```
 
 <!-- demo:begin -->
-[![session-manager demo](https://asciinema.org/a/1262989.svg)](https://asciinema.org/a/1262989)
+[![session-manager demo](https://asciinema.org/a/1263012.svg)](https://asciinema.org/a/1263012)
 <!-- demo:end -->
 
 ## How it works
@@ -172,4 +172,121 @@ Registered layouts live in `~/.local/share/hexe/sessions.json` (or `$XDG_DATA_HO
 | `src/cli/app.zig` | `hexe allow`, and the `layout` subcommands |
 | `src/frontends/terminal/startup_chooser.zig` | what bare `hexe` asks |
 | `src/modules/session/layout_apply.zig`, `layout_template.zig` | building the session from a layout |
-| `docs/session_manager.md` | the reference page |
+
+## Reference: the config schema
+
+
+Local project configs use the same canonical entrypoint as the global config:
+
+```lua
+local hexe = require("hexe")
+
+return hexe.setup({
+  ses = {
+    layouts = {
+      hexe.layout("name", {
+        root = ".",
+        tabs = {},
+        floats = {},
+      }),
+    },
+  },
+})
+```
+
+### Layout
+
+| Field | Default | Description |
+|---|---|---|
+| `name` | required | Layout/session name |
+| `root` | config directory | Working directory for all panes |
+| `tabs` | `{}` | Tab definitions |
+| `floats` | `{}` | Layout-level float definitions |
+
+### Tab
+
+| Field | Default | Description |
+|---|---|---|
+| `name` | required | Tab label |
+| `root` | required | Pane or split tree |
+| `floats` | `{}` | Per-tab float definitions |
+
+### Pane
+
+```lua
+hexe.pane({ command = "nvim", cwd = "src" })
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `command` | default shell | Command to run |
+| `cwd` | layout root | Working directory, relative to `root` |
+| `keybindings` | `{}` | Pane-local keybindings |
+
+### Split
+
+```lua
+hexe.split("horizontal", {
+  hexe.pane({ command = "nvim" }),
+  hexe.pane(),
+}, { ratio = 0.70 })
+```
+
+| Field | Default | Description |
+|---|---|---|
+| direction | required | `"horizontal"` or `"vertical"` |
+| children | required | Array of panes or nested splits |
+| `ratio` | equal split | First-child ratio, `0.0` to `1.0` |
+
+### Float
+
+```lua
+hexe.float("git", {
+  key = "g",
+  title = "git",
+  command = "lazygit",
+  size = { width = 90, height = 90 },
+  attrs = { global = true, per_cwd = false },
+})
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `key` | required | Toggle key character |
+| `title` | float name | Border title |
+| `command` | default shell | Command to run |
+| `cwd` | layout root | Working directory |
+| `size.width` | `80` | Width as percentage of terminal |
+| `size.height` | `80` | Height as percentage of terminal |
+| `position.x` | `50` | Horizontal position, center percent |
+| `position.y` | `50` | Vertical position, center percent |
+| `attrs.global` | `false` | Available across all tabs |
+| `attrs.sticky` | `false` | Reuse by key and directory policy |
+| `attrs.per_cwd` | `false` | Separate instance per directory |
+| `attrs.inherit_env` | `false` | Inherit environment from parent pane |
+| `add_env` | `{}` | Extra env vars for this float, overriding inherited ones |
+| `add_path` | `{}` | Directories prepended to this float's `PATH` |
+
+### Nested Splits
+
+Splits can nest arbitrarily:
+
+```lua
+hexe.split("horizontal", {
+  hexe.pane({ command = "nvim" }),
+  hexe.split("vertical", {
+    hexe.pane({ command = "npm run dev" }),
+    hexe.pane({ command = "npm test" }),
+  }, { ratio = 0.50 }),
+}, { ratio = 0.50 })
+```
+
+Three-way equal split:
+
+```lua
+hexe.split("horizontal", {
+  hexe.pane({ command = "nvim" }),
+  hexe.pane(),
+  hexe.pane(),
+})
+```

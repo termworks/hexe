@@ -17,7 +17,7 @@ END='<!-- demo:end -->'
 
 while IFS=$'\t' read -r slug id; do
     [ -n "$slug" ] || continue
-    doc="docs/features/$slug.md"
+    doc="docs/$slug.md"
     [ -f "$doc" ] || { echo "no document for $slug" >&2; continue; }
 
     block=$(printf '%s\n[![%s](https://asciinema.org/a/%s.svg)](https://asciinema.org/a/%s)\n%s' \

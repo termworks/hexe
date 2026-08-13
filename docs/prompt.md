@@ -1,302 +1,179 @@
-# Shell Prompt (`shp`) Infrastructure
+# The shell prompt
 
-This document covers how Hexe prompt rendering works end-to-end, including Lua execution, conditions, config layering, and module behavior.
-
-## Quick Start
-
-Enable prompt hooks in your shell:
+The same segment machinery that draws the status bar also draws your shell's prompt, in bash, zsh,
+fish or oslo. The shell asks hexe for a string once per prompt; hexe evaluates your segments and
+answers. Nothing is injected into your shell's own prompt logic beyond one hook.
 
 ```sh
-# bash
-eval "$(hexe shp init bash)"
-
-# zsh
-eval "$(hexe shp init zsh)"
-
-# fish
-hexe shp init fish | source
+eval "$(hexe shell init bash)"     # or zsh
+hexe shell init fish | source
 ```
 
-Define segments in `~/.config/hexe/init.lua`:
+oslo needs no generated snippet: it calls the renderer from its own hooks, which is what the
+recording above is running.
 
 ```lua
-local hexe = require("hexe")
+-- ~/.config/oslo/prompt.lua
+oslo.prompt.left = {
+  command = "hexe",
+  args = { "shp", "prompt", "--shell=bash",
+           "--status=$status", "--duration=$duration_ms", "--jobs=$jobs",
+           "--language=$language", "--vimode=$vimode" },
+  timeout_ms = 10,
+  async = true,
+}
+```
 
-return hexe.setup({
-  prompt = {
-    left = {
-      hexe.segment({
-        name = "ssh",
-        priority = 50,
-        render = function(ctx)
-          if not ctx.env.SSH_CONNECTION then
-            return nil
-          end
-          return { { text = " //", style = "bg:237 fg:15" } }
-        end,
-      }),
-    },
+`--shell=bash` even from oslo, deliberately: zsh mode wraps every escape in `%{ %}`, and a shell
+that measures visible width itself would print those markers. `--language` and `--vimode` are what
+a shell with more to say than bash can supply — both optional, and omitted by shells that have no
+answer.
+
+```lua
+prompt = {
+  left  = { hexe.segment.username({ style = "bg:5 fg:0" }),
+            hexe.segment.status({ style = "bg:0 fg:9" }) },
+  right = { hexe.segment.directory({ style = "bg:237 fg:15" }),
+            hexe.segment.git_branch({ style = "bg:5 fg:0" }) },
+},
+```
+
+<!-- demo:begin -->
+[![prompt demo](https://asciinema.org/a/1263010.svg)](https://asciinema.org/a/1263010)
+<!-- demo:end -->
+
+## How it works
+
+```
+shell about to draw a prompt
+   │  PROMPT_COMMAND / precmd / fish_prompt
+   ▼
+hexe shp prompt --status=$? --duration=<ms> --jobs=<n> [--right]
+   │
+   ├─ read config: ~/.config/hexe/init.lua, then ./.hexe.lua if present
+   ├─ evaluate the `prompt.left` (or `prompt.right`) segments against ctx
+   └─ print the assembled, styled string
+   ▼
+shell sets PS1 to it
+```
+
+The hook the shell installs does three things: it times commands (a `DEBUG` trap or `preexec`
+equivalent), it reports what happened to the pane's session (`hexe shp shell-event`), and it emits
+**OSC 7** so the pod learns the working directory. That last one is not cosmetic — it is what makes
+`per_cwd` floats, directory-aware status segments and `hexe ses list --details` know where a pane
+is.
+
+Every prompt is a separate process, which is the design's real constraint: it must be fast, and it
+must not need a running session. `hexe shp prompt` works in a plain terminal with no hexe session
+at all, which is the point of having one prompt configuration rather than two.
+
+### What a segment gets
+
+`ctx` is smaller than the status bar's, because a prompt knows about one shell at one moment:
+`cwd`, `home`, `exit_status`, `cmd_duration_ms`, `jobs`, `terminal_width`, `now_ms`, `env`, and
+`ctx.cache` for memoising. `ctx.pane(0)` returns that same context; there is no cross-pane lookup
+in prompt mode, because there is no session to look across.
+
+### What a prompt may use
+
+Prompt deliberately supports a subset:
+
+| | |
+|---|---|
+| allowed kinds | `render`, `builtin` |
+| refused kinds | `button`, `progress` — a prompt is not interactive and does not repaint |
+| builtin allowlist | `directory`, `git_branch`, `git_status`, `status`, `sudo`, `jobs`, `duration`, `pod_name`, `hostname`, `username`, `character` |
+
+`spinner`, `randomdo` and `running_anim` are refused for the same reason: they only make sense on a
+surface that redraws itself, and a prompt is printed once.
+
+### Width
+
+Each side gets half the terminal. Over budget, the **highest** priority number is dropped first, so
+low numbers survive longest — the same rule as the status bar, applied per side.
+
+## What makes it different
+
+Compared with starship, powerlevel10k and their relatives:
+
+- **One configuration, two surfaces.** The segments in your prompt and the segments in your status
+  bar are the same objects with the same styling language, so a git segment looks the same in both
+  places without being written twice.
+- **The prompt knows about the multiplexer.** `pod_name` names the pane you are in; the shell hooks
+  report command, status, duration and jobs back to the session, which is what feeds
+  `command_finished` events and the status bar's own `last_command` and `duration` segments.
+- **Segments are Lua, not TOML.** A conditional is `return nil`, not a template language.
+- What the alternatives do better: they are one binary with a large library of ready-made,
+  carefully tuned segments; hexe ships the ones it needs and expects you to write the rest.
+
+## Configuration
+
+```lua
+prompt = {
+  left = {
+    hexe.segment({
+      name = "ssh", priority = 60,
+      render = function(ctx)
+        if not ctx.env.SSH_CONNECTION then return nil end
+        return { { text = " //", style = "bg:237 fg:15" } }
+      end,
+    }),
+    hexe.segment.status({ style = "bg:0 fg:9", prefix = " ", suffix = " " }),
   },
-})
+  right = { hexe.segment.git_branch({ style = "bg:5 fg:0", suffix = " " }) },
+},
 ```
 
-## Config Sources and Precedence
+Config is read from `~/.config/hexe/init.lua`, then `./.hexe.lua` if the directory has one, which
+may override the prompt arrays for that project.
 
-Prompt loading order:
+The renderer can be called by hand, which is how it is debugged:
 
-1. Global config: `~/.config/hexe/init.lua`
-2. Optional local override: `./.hexe.lua`
-
-For SHP, local `./.hexe.lua` can override prompt arrays with the same canonical setup form:
-
-```lua
-local hexe = require("hexe")
-
-return hexe.setup({
-  prompt = {
-    left = { ... },
-    right = { ... },
-  },
-})
+```sh
+hexe shp prompt --status 1 --duration 1200 --jobs 2
+hexe shp prompt --right --shell zsh
+hexe shp spinner            # the animation frames, for a shell that wants one
 ```
 
-## Segment Model (Lua-first)
+### The Lua sandbox
 
-Each prompt side is an array of segment definitions.
+The config runtime is **unrestricted by default**: `io`, `os`, `package` and `hexe.exec` are all
+available, which is why a real config can read `/etc/os-release` or shell out. Setting
+`HEXE_UNRESTRICTED_CONFIG` to anything other than `1` revokes all of it — `io`, `package`,
+`dofile`, `loadfile`, `load`, `debug`, `hexe.exec`, and everything on `os` except `time`, `date`,
+`clock` and `difftime`. The same revocation is applied unconditionally before an untrusted
+project-local `.hexe.lua` runs; see [project sessions](session-manager.md).
 
-```lua
-{
-  name     = "directory",       -- built-in segment name
-  priority = 50,                 -- lower = kept longer when width is tight
+## Measurements
 
-  -- render segment
-  render = function(ctx)
-    return { { text = " hello ", style = "bg:1 fg:0" } }
-  end,
+- **One process per prompt.** Everything expensive in a prompt is therefore paid on every command:
+  the shipped config replaces a `distrologo` shell-out (~15 ms, itself spawning `lsb_release`,
+  `cut` and `xargs`) with a memoised read of `/etc/os-release`, and `systemd-detect-virt` (~3 ms)
+  with a per-boot cache file.
+- **Width budget: half the terminal per side.**
+- **`hexe.exec` takes `timeout_ms` and `cache_ms`**, and reports `cached` and `elapsed_ms` back, so
+  a slow command in a prompt is measurable rather than mysterious.
 
-  -- or builtin segment descriptor
-  builtin = function(ctx)
-    return {
-      name = "directory",
-      style = "bg:237 fg:15",
-      prefix = { output = " ", style = "bg:0 fg:8" },
-      suffix = { output = " ", style = "bg:0 fg:8" },
-    }
-  end,
-}
-```
+## What it cannot do
 
-Notes:
+- **No OSC 133 from bash, zsh or fish.** The shipped integrations emit OSC 7 but not semantic
+  prompt marks, so `hexe.action.prompt.previous/next/copy_output` do nothing in those shells unless
+  the shell marks its own prompts. oslo emits both on its own.
+- **No buttons, no progress, no animation.** A printed prompt cannot repaint itself.
+- **No cross-pane context.** A prompt segment cannot ask about another pane.
+- **Right prompt is a second invocation.** The shell asks for it separately, and shells that have
+  no notion of a right prompt cannot show one.
+- **A broken config breaks the prompt, not the shell.** The renderer reports the error and prints
+  what it can; the shell keeps working.
+- **`hexe shp` is `hexe shell`.** `shp` is an alias, and the underlying command is `shell prompt`.
 
-- Kind is inferred from fields (`render`, `builtin`, `button`, `progress`); no `kind` field is required.
-- `outputs` is not used in the Lua-first prompt model.
-- Affix object form is supported: `prefix = { output = "...", style = "..." }`, `suffix = { output = "...", style = "..." }`.
+## Where it lives
 
-## Prompt Restrictions
-
-Prompt intentionally supports a limited segment subset:
-
-- Allowed kinds: `render`, `builtin`
-- Not allowed in prompt: `button`, `progress`
-
-Builtin allowlist for prompt:
-
-- `directory`
-- `git_branch`
-- `git_status`
-- `status`
-- `sudo`
-- `jobs`
-- `duration`
-- `pod_name`
-- `hostname`
-- `username`
-- `character`
-
-Examples of builtins not allowed in prompt: `spinner`, `randomdo`, `running_anim`.
-
-## Output Execution Paths
-
-### `render = ...` (in-process)
-
-`render` runs inside Hexe and must return a value.
-
-Return behavior:
-
-- `string` -> used as output
-- `number` -> converted to text
-- `boolean true` -> rendered as `"true"`
-- `nil` / `false` / other types -> treated as empty (segment hidden)
-
-### `builtin = ...` (descriptor)
-
-`builtin` returns a descriptor table:
-
-- `name` (required): builtin segment name (for example `git_branch`, `git_status`, `directory`)
-- `style`: descriptor style override
-- `prefix` / `suffix`: wrapper text around builtin output
-  - string form: `prefix = " "`
-  - object form: `prefix = { output = " ", style = "bg:0 fg:8" }`
-  - same schema for `suffix`
-
-You can build descriptors with helpers:
-
-```lua
-builtin = function(_)
-  return hexe.segment.builtin.directory({
-    style = "bg:237 fg:15",
-    suffix = " ",
-  })
-end
-```
-
-Style behavior:
-
-- If descriptor `style` is provided, it is authoritative for rendered builtin text.
-- This is useful when you want fixed colors (for example black-on-red git segments).
-
-## Conditions (`when`)
-
-The Lua-first prompt model usually encodes visibility directly in `render`/`builtin` callbacks (return `nil` to hide). `when` is callback-only.
-
-Prompt condition form:
-
-```lua
-when = function(ctx)
-  return (ctx.exit_status or 0) ~= 0
-end
-```
-
-Legacy forms like `when = { lua = ... }`, token tables, and bash/env conditions are no longer supported in prompt.
-
-## Lua Context (`ctx`)
-
-Prompt Lua callbacks (`render`, `builtin`, and `when`) receive `ctx`:
-
-- `ctx.cwd`
-- `ctx.home`
-- `ctx.exit_status`
-- `ctx.cmd_duration_ms`
-- `ctx.jobs`
-- `ctx.terminal_width`
-- `ctx.now_ms`
-- `ctx.env` (environment map: `ctx.env.NAME`)
-- `ctx.pane(0)` / `ctx.pane(nil)` (returns current prompt context table)
-- `ctx.pane(1)` and `ctx.pane("focused")` / `ctx.pane("current")` also return current prompt context table
-- prompt mode has no cross-pane lookup (`ctx.pane(<other>)` returns `nil`)
-- `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback-local caching
-
-Example:
-
-```lua
-render = function(ctx)
-  if (ctx.exit_status or 0) ~= 0 then
-    return "ERR"
-  end
-  return nil
-end
-```
-
-## Lua Safety Modes
-
-Hexe Lua runtime has two modes:
-
-- Safe mode (default): no `io`, no `os`, restricted `require`
-- Unsafe mode: enable with `HEXE_UNRESTRICTED_CONFIG=1`
-
-Unsafe mode enables `io`, `os`, and package loading from config paths.
-
-### `require()` behavior
-
-Safe mode:
-
-- only `require("hexe")` is allowed
-
-Unsafe mode package search paths:
-
-- `${XDG_CONFIG_HOME}/hexe/lua/?.lua`
-- `${XDG_CONFIG_HOME}/hexe/lua/?/init.lua`
-- `./.hexe/lua/?.lua`
-- `./.hexe/lua/?/init.lua`
-
-If `XDG_CONFIG_HOME` is unset, `~/.config/hexe` is used.
-
-Native C modules are disabled (`package.cpath = ""`).
-
-### Lua Trace
-
-- Set `HEXE_LUA_TRACE=1` to trace all callback evaluations.
-- Set `HEXE_LUA_TRACE=slow` to trace only slow evaluations.
-- Optional threshold: `HEXE_LUA_TRACE_SLOW_MS` (default `8`).
-
-## Width and Priority Behavior
-
-Prompt rendering uses width budgeting per side:
-
-- left prompt budget: half terminal width
-- right prompt budget: half terminal width
-
-If segments exceed budget, higher priority numbers are hidden first. Lower numbers stay visible longer.
-
-## Built-in Prompt Segments
-
-Prompt builtin allowlist:
-
-- `directory`
-- `git_branch`
-- `git_status`
-- `status`
-- `sudo`
-- `jobs`
-- `duration`
-- `pod_name`
-- `hostname`
-- `username`
-- `character`
-
-## Practical Patterns
-
-Pure Lua segment:
-
-```lua
-{
-  name = "virt",
-  priority = 40,
-  render = function(_)
-    local p = io.popen("systemd-detect-virt 2>/dev/null")
-    if not p then return nil end
-    local v = (p:read("*a") or ""):match("^%s*(.-)%s*$")
-    p:close()
-    if v == "" or v == "none" then return nil end
-    if v == "lxc" then
-      return { { text = " >> ", style = "bg:5 fg:0" } }
-    end
-    return { { text = " :: ", style = "bg:5 fg:0" } }
-  end,
-}
-```
-
-Builtin descriptor segment:
-
-```lua
-{
-  name = "git_status",
-  priority = 5,
-  builtin = function(_)
-    return { name = "git_status", style = "bg:1 fg:0", suffix = " " }
-  end,
-}
-```
-
-## Troubleshooting
-
-- Lua segment not rendering:
-  - check return value (must resolve to supported output type)
-  - check for runtime errors in config
-- if using `io`/`os`, ensure `HEXE_UNRESTRICTED_CONFIG=1`
-- `require("my_module")` fails:
-  - verify module exists under `~/.config/hexe/lua/...`
-  - verify unsafe mode is enabled
-- Segment disappears unexpectedly:
-  - check `priority` and terminal width budget
-  - check `when` conditions
+| | |
+|---|---|
+| `src/modules/shell/main.zig` | the `shp prompt` entry point |
+| `src/modules/shell/shell/bash.zig`, `zsh.zig`, `fish.zig`, `oslo.zig` | the init scripts, one per shell |
+| `src/modules/shell/render_modules.zig`, `format.zig` | assembling and styling the line |
+| `src/core/segments/` | the built-ins the allowlist names |
+| `src/core/lua_runtime.zig` | the config runtime, the sandbox, `require("hexe")` |
+| `src/cli/app.zig` | `shell init`, `shell prompt`, `shell spinner`, `shell shell-event`, `shell exit-intent` |

@@ -11,7 +11,7 @@ hexe record stop  --scope pod
 ```
 
 <!-- demo:begin -->
-[![recording demo](https://asciinema.org/a/1262988.svg)](https://asciinema.org/a/1262988)
+[![recording demo](https://asciinema.org/a/1263011.svg)](https://asciinema.org/a/1263011)
 <!-- demo:end -->
 
 ## How it works
@@ -97,7 +97,7 @@ Hexe records from where the bytes already are:
 | `--out <file.cast>` | defaults: `/tmp/hexe-pod.cast`, `/tmp/hexe-mux.cast` |
 | `--capture-input` | also record keystrokes as `"i"` events |
 
-The documentation's own recordings are made by a harness in [`scripts/demo`](../../scripts/demo/):
+The documentation's own recordings are made by a harness in [`scripts/demo`](../scripts/demo/):
 a fixture builds a deterministic world, `record.py` starts a real frontend on a pty and types into
 it, `publish.sh` uploads, `embed.sh` puts the player in the document.
 

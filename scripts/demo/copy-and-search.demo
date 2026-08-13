@@ -1,52 +1,51 @@
 # Reading what already happened: search, copy-mode, and prompt marks.
-cols 120
-rows 30
+cols 240
+rows 60
 speed 0.04
 name read
-env HEXE_DEMO_SHP=1
 
-run seq 1 120 | paste - - - - -
-wait 2.5
+run seq 1 400 | paste - - - - - - - - - -
+wait 3
 
 # Ctrl+Alt+F searches the pane's whole scrollback, not just the screen.
 key C-M-f
-wait 1.5
-type 42
-wait 1.5
+wait 2
+type 242
+wait 2
 key Enter
-wait 2.5
+wait 3
 key n
-wait 1.5
+wait 1.8
 key n
-wait 1.5
+wait 1.8
 key N
-wait 1.5
+wait 1.8
 key Escape
-wait 1.5
+wait 2
 
 # Copy-mode: a cursor on the pane, hjkl or arrows, v to select, y to yank.
 key C-M-y
-wait 1.5
-key Down Down Right Right
-wait 1
-key v
-wait 1
-key Right Right Right Right Right
-wait 1.5
-key y
 wait 2
-
-# Prompt marks: the shell integration marks every prompt, so hexe can jump
-# between commands and copy the output of one.
-run echo first; echo second
+key Down Down Right Right
 wait 1.5
-run ls src
+key v
 wait 1.5
-key C-M-g
-wait 1.5
-key C-M-g
-wait 1.5
-key C-M-j
-wait 1.5
-key C-M-u
+key Right Right Right Right Right Right
+wait 2
+key y
 wait 2.5
+
+# Prompt marks: oslo marks every prompt with OSC 133 on its own, so hexe can
+# jump between commands and copy the output of one.
+run echo first; echo second
+wait 2
+run ls src
+wait 2
+key C-M-g
+wait 2
+key C-M-g
+wait 2
+key C-M-j
+wait 2
+key C-M-u
+wait 3

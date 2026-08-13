@@ -1,21 +1,21 @@
 # Project sessions: a .hexe.lua in the repo, opened as tabs and splits.
-cols 120
-rows 32
+cols 240
+rows 60
 speed 0.04
 name proj
 
-run head -28 .hexe.lua
-wait 4
+run head -30 .hexe.lua
+wait 5
 
 # Freeze the session that is running into a config of its own.
 run hexe layout save --scope local
-wait 1.5
+wait 2
 type frozen
 key Enter
-wait 2.5
-run hexe layout list
 wait 3
+run hexe layout list
+wait 3.5
 
 # Hooks in a project config only run once the file's hash is on the ledger.
 run hexe allow .
-wait 3
+wait 3.5

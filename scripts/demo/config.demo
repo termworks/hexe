@@ -1,27 +1,27 @@
-# Configuration: one Lua file, checked and reloadable without losing the session.
-cols 120
-rows 30
+# Configuration: one Lua file, checked, and reloadable without losing a pane.
+cols 240
+rows 60
 speed 0.04
 name config
 
 run hexe config paths
-wait 3
+wait 3.5
 
 run hexe config check
-wait 2.5
+wait 3
 
 # Break it on purpose: a config error is reported, not obeyed.
-run cp $XDG_CONFIG_HOME/hexe/init.lua /tmp/init.bak
-wait 1
-run echo 'return hexe.setup({ nonsense = true })' > $XDG_CONFIG_HOME/hexe/init.lua
-wait 1.2
+run cp $HOME/.config/hexe/init.lua /tmp/init.bak
+wait 1.5
+run echo 'return hexe.setup({ nonsense = true })' > $HOME/.config/hexe/init.lua
+wait 1.5
 run hexe config check
-wait 3
+wait 4
 
 # Put it back, change one visible thing, and reload in place.
-run cp /tmp/init.bak $XDG_CONFIG_HOME/hexe/init.lua
-wait 1.2
-run sed -i 's/\["git.branch"\] = "bg:5 fg:0"/["git.branch"] = "bg:2 fg:0"/' $XDG_CONFIG_HOME/hexe/init.lua
+run cp /tmp/init.bak $HOME/.config/hexe/init.lua
 wait 1.5
+run sed -i 's/\["git.branch"\] = "bg:1 fg:0"/["git.branch"] = "bg:2 fg:0"/' $HOME/.config/hexe/init.lua
+wait 2
 key C-M-r
-wait 3
+wait 4

@@ -1,34 +1,42 @@
 # Keybindings: what a key does, and what decides.
-cols 120
-rows 30
+cols 240
+rows 60
 speed 0.04
 name keys
 
 # The keycast overlay, so the film shows the keys and not just their effect.
 key C-M-k
-wait 2
+wait 2.5
 
 key C-M-h
-wait 2.5
-key C-M-Left
-wait 1.5
-key C-M-Right
-wait 1.5
-
-# `when` gating: split is bound only while a split pane is focused. Inside a
-# float the same key does nothing at all.
-key M-3
 wait 3
-key C-M-h
-wait 2.5
-key M-3
-wait 2
+key C-M-Left
+wait 1.8
+key C-M-Right
+wait 1.8
 
-# Still bound out here.
-key C-M-v
+# `when` gating: the split keys are bound only while a split pane is focused.
+# Inside a float the same key does nothing at all.
+key M-2
+wait 3.5
+key C-M-h
+wait 3
+key M-2
 wait 2.5
-key C-M-w
+
+# Passthrough: Ctrl+Alt+arrows move focus here — unless the focused pane is
+# running an editor, which the config hands them to instead.
+run nvim README.md
+wait 6
+key C-M-Down
 wait 2
+key C-M-Down
+wait 2
+key C-M-Up
+wait 2.5
+type :q
+key Enter
+wait 3.5
 
 key C-M-k
-wait 1.5
+wait 2
