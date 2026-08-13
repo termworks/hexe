@@ -1,0 +1,45 @@
+# Floats: overlay panes with their own lifetime rules.
+cols 120
+rows 32
+speed 0.04
+name floats
+
+run echo "a plain pane, underneath"
+wait 1.5
+
+# Alt+1: a float with a command in it. The pane below is still there.
+key M-1
+wait 3.5
+
+# Toggling it away leaves the process running.
+key M-1
+wait 2
+
+# Alt+2 is a different float, anchored right.
+key M-2
+wait 3.5
+
+# It moves.
+key M-S-Left
+wait 1.2
+key M-S-Down
+wait 2
+
+key M-2
+wait 1.5
+
+# per_cwd: the same key in another directory is another instance.
+run cd /tmp/hexe-demo-work/other
+wait 1.5
+key M-1
+wait 3.5
+key M-1
+wait 1.5
+run cd /tmp/hexe-demo-work/proj
+wait 1.5
+
+# Back where it was, with its own scrollback.
+key M-1
+wait 3
+key M-1
+wait 1.5

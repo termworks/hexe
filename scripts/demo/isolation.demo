@@ -1,0 +1,27 @@
+# Isolation: a pane in namespaces — and what it looks like when the kernel says no.
+cols 120
+rows 30
+speed 0.04
+name sandbox
+launch terminal new --name sandbox --log debug --logfile $WORK/iso.log
+
+# The float is declared with an isolation profile and cgroup limits.
+run grep -A6 'hexe.float("sandbox"' $XDG_CONFIG_HOME/hexe/layout.lua
+wait 4
+
+# Alt+0 toggles it. On this machine nothing appears — and that is the honest
+# result, not a missing recording.
+key M-0
+wait 4
+
+# Every profile begins with an unprivileged user namespace.
+run unshare -Ur true; echo "exit=$?"
+wait 3
+
+# Ubuntu's AppArmor refuses them to unconfined programs by default.
+run cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+wait 3
+
+# The cgroup half needs a delegated subtree, and says so in the log.
+run grep -o 'voidbox cgroup path.*' $WORK/iso.log | head -1
+wait 3.5

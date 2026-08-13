@@ -1,0 +1,34 @@
+# Keybindings: what a key does, and what decides.
+cols 120
+rows 30
+speed 0.04
+name keys
+
+# The keycast overlay, so the film shows the keys and not just their effect.
+key C-M-k
+wait 2
+
+key C-M-h
+wait 2.5
+key C-M-Left
+wait 1.5
+key C-M-Right
+wait 1.5
+
+# `when` gating: split is bound only while a split pane is focused. Inside a
+# float the same key does nothing at all.
+key M-3
+wait 3
+key C-M-h
+wait 2.5
+key M-3
+wait 2
+
+# Still bound out here.
+key C-M-v
+wait 2.5
+key C-M-w
+wait 2
+
+key C-M-k
+wait 1.5

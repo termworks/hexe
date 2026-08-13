@@ -23,6 +23,11 @@ See [architecture](docs/architecture.md) for the full picture.
 
 ## Docs
 
+**[Features](docs/features/)** — one document per feature, each opening with a recording of it
+running: how it works, how it differs from tmux, what it cannot do, and where it lives in the tree.
+Start there if you want to know how hexe is built. The pages below are the reference: what each
+setting is called and what it accepts.
+
 | Topic | Description |
 |---|---|
 | [Architecture](docs/architecture.md) | How terminal, runtime, ses, and pod fit together |

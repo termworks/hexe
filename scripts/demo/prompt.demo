@@ -1,0 +1,25 @@
+# The shell prompt: hexe renders it, in any of four shells.
+cols 120
+rows 28
+speed 0.05
+name prompt
+env HEXE_DEMO_SHP=1
+
+run hexe shell init bash | head -12
+wait 3.5
+
+# Left segments, and a right prompt that is drawn on the same row.
+run cd src
+wait 2
+run cd ..
+wait 2
+
+# The status segment shows what the last command did.
+run false
+wait 2.5
+run true
+wait 2
+
+# It is the same config the status bar reads, under `prompt`.
+run grep -A6 'prompt = {' $XDG_CONFIG_HOME/hexe/init.lua | head -12
+wait 4

@@ -1,0 +1,28 @@
+# Four processes: frontend, runtime, ses, pod — and only one of them is disposable.
+cols 120
+rows 32
+speed 0.04
+name layers
+
+run hexe ses list --details
+wait 3
+
+# One pod per pane, each holding its own PTY and its own shell.
+run hexe pod list | head -5
+wait 3
+
+run pgrep -a hexe | cut -c1-96
+wait 3.5
+
+run echo "the frontend is about to be killed outright"
+wait 1.5
+
+# Not a detach: SIGKILL, the way a crashed terminal goes.
+crash
+wait 2.5
+
+# A new frontend, attaching to a session that never noticed.
+spawn terminal attach layers
+wait 4
+run echo "same session, same shells, same scrollback"
+wait 3

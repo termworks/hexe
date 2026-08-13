@@ -1,4 +1,5 @@
-.PHONY: build build-gnu test smoke smoke-protocol smoke-clean smoke-heavy install release
+.PHONY: build build-gnu test smoke smoke-protocol smoke-clean smoke-heavy install release \
+        demos demo-fixture demo-record demo-publish demo-embed
 
 # Static musl by default. Zig links its bundled musl STATICALLY for any
 # *-linux-musl target, so this needs no extra linkage flag — the result has no
@@ -86,6 +87,34 @@ smoke-heavy: smoke-clean
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"
+
+# ==================================================================================================
+# Feature demos
+# ==================================================================================================
+# One recording per document in docs/features. Each is a script in
+# scripts/demo, driven into a real frontend by record.py, so any of them can be
+# made again after the code changes -- and a film that stops matching hexe is a
+# bug in one or the other. Needs a ReleaseFast build: Debug VT parsing cannot
+# keep up with a session being typed at.
+DEMO ?=
+
+demo-fixture:
+	scripts/demo/fixture.sh
+
+demo-record: build demo-fixture
+	@if [ -n "$(DEMO)" ]; then \
+		python3 -u scripts/demo/record.py scripts/demo/$(DEMO).demo; \
+	else \
+		for d in scripts/demo/*.demo; do python3 -u scripts/demo/record.py "$$d" || exit 1; done; \
+	fi
+
+demo-publish:
+	scripts/demo/publish.sh $(DEMO)
+
+demo-embed:
+	scripts/demo/embed.sh
+
+demos: demo-record demo-publish demo-embed
 
 # ==================================================================================================
 # Release

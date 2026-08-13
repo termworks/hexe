@@ -1,0 +1,52 @@
+# Reading what already happened: search, copy-mode, and prompt marks.
+cols 120
+rows 30
+speed 0.04
+name read
+env HEXE_DEMO_SHP=1
+
+run seq 1 120 | paste - - - - -
+wait 2.5
+
+# Ctrl+Alt+F searches the pane's whole scrollback, not just the screen.
+key C-M-f
+wait 1.5
+type 42
+wait 1.5
+key Enter
+wait 2.5
+key n
+wait 1.5
+key n
+wait 1.5
+key N
+wait 1.5
+key Escape
+wait 1.5
+
+# Copy-mode: a cursor on the pane, hjkl or arrows, v to select, y to yank.
+key C-M-y
+wait 1.5
+key Down Down Right Right
+wait 1
+key v
+wait 1
+key Right Right Right Right Right
+wait 1.5
+key y
+wait 2
+
+# Prompt marks: the shell integration marks every prompt, so hexe can jump
+# between commands and copy the output of one.
+run echo first; echo second
+wait 1.5
+run ls src
+wait 1.5
+key C-M-g
+wait 1.5
+key C-M-g
+wait 1.5
+key C-M-j
+wait 1.5
+key C-M-u
+wait 2.5
