@@ -14,7 +14,7 @@ hexe pod gc --dry-run                          # sockets and metadata left by po
 ```
 
 <!-- demo:begin -->
-[![pods demo](https://asciinema.org/a/1263009.svg)](https://asciinema.org/a/1263009)
+[![pods demo](https://asciinema.org/a/1263034.svg)](https://asciinema.org/a/1263034)
 <!-- demo:end -->
 
 ## How it works

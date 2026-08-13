@@ -20,7 +20,7 @@ hexe.key({ hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1")),
 ```
 
 <!-- demo:begin -->
-[![floats demo](https://asciinema.org/a/1263019.svg)](https://asciinema.org/a/1263019)
+[![floats demo](https://asciinema.org/a/1263028.svg)](https://asciinema.org/a/1263028)
 <!-- demo:end -->
 
 ## How it works

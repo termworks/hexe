@@ -16,7 +16,7 @@ status = {
 ```
 
 <!-- demo:begin -->
-[![statusbar demo](https://asciinema.org/a/1263015.svg)](https://asciinema.org/a/1263015)
+[![statusbar demo](https://asciinema.org/a/1263040.svg)](https://asciinema.org/a/1263040)
 <!-- demo:end -->
 
 ## How it works

@@ -18,7 +18,7 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, hexe.action.focus.move("u
 ```
 
 <!-- demo:begin -->
-[![keybindings demo](https://asciinema.org/a/1263006.svg)](https://asciinema.org/a/1263006)
+[![keybindings demo](https://asciinema.org/a/1263031.svg)](https://asciinema.org/a/1263031)
 <!-- demo:end -->
 
 ## How it works

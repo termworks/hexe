@@ -11,7 +11,7 @@ hexe record stop  --scope pod
 ```
 
 <!-- demo:begin -->
-[![recording demo](https://asciinema.org/a/1263011.svg)](https://asciinema.org/a/1263011)
+[![recording demo](https://asciinema.org/a/1263036.svg)](https://asciinema.org/a/1263036)
 <!-- demo:end -->
 
 ## How it works

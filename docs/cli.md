@@ -12,7 +12,7 @@ hexe terminal send --last --enter "make test"
 ```
 
 <!-- demo:begin -->
-[![cli demo](https://asciinema.org/a/1263000.svg)](https://asciinema.org/a/1263000)
+[![cli demo](https://asciinema.org/a/1263025.svg)](https://asciinema.org/a/1263025)
 <!-- demo:end -->
 
 ## How it works

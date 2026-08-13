@@ -12,7 +12,7 @@ hexe popup choose --items "staging,production,abort" "Where to?"
 ```
 
 <!-- demo:begin -->
-[![overlays demo](https://asciinema.org/a/1263007.svg)](https://asciinema.org/a/1263007)
+[![overlays demo](https://asciinema.org/a/1263032.svg)](https://asciinema.org/a/1263032)
 <!-- demo:end -->
 
 ## How it works

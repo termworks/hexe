@@ -12,7 +12,7 @@ hexe pod list           # the daemons holding the actual shells
 ```
 
 <!-- demo:begin -->
-[![architecture demo](https://asciinema.org/a/1262999.svg)](https://asciinema.org/a/1262999)
+[![architecture demo](https://asciinema.org/a/1263024.svg)](https://asciinema.org/a/1263024)
 <!-- demo:end -->
 
 ## How it works

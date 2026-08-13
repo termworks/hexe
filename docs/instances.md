@@ -11,7 +11,7 @@ hexe terminal new -T            # a throwaway stack with a generated name
 ```
 
 <!-- demo:begin -->
-[![instances demo](https://asciinema.org/a/1263004.svg)](https://asciinema.org/a/1263004)
+[![instances demo](https://asciinema.org/a/1263029.svg)](https://asciinema.org/a/1263029)
 <!-- demo:end -->
 
 ## How it works

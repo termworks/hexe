@@ -39,7 +39,7 @@ prompt = {
 ```
 
 <!-- demo:begin -->
-[![prompt demo](https://asciinema.org/a/1263010.svg)](https://asciinema.org/a/1263010)
+[![prompt demo](https://asciinema.org/a/1263035.svg)](https://asciinema.org/a/1263035)
 <!-- demo:end -->
 
 ## How it works

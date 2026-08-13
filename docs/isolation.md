@@ -18,7 +18,7 @@ hexe terminal float --command "bash /tmp/untrusted.sh" --isolation full
 ```
 
 <!-- demo:begin -->
-[![isolation demo](https://asciinema.org/a/1263005.svg)](https://asciinema.org/a/1263005)
+[![isolation demo](https://asciinema.org/a/1263030.svg)](https://asciinema.org/a/1263030)
 <!-- demo:end -->
 
 ## How it works

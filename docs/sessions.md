@@ -14,7 +14,7 @@ hexe ses list                     # what is running, attached or not
 ```
 
 <!-- demo:begin -->
-[![sessions demo](https://asciinema.org/a/1263013.svg)](https://asciinema.org/a/1263013)
+[![sessions demo](https://asciinema.org/a/1263038.svg)](https://asciinema.org/a/1263038)
 <!-- demo:end -->
 
 ## How it works

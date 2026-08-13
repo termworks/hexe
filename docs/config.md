@@ -25,7 +25,7 @@ hexe config dump      # the normalised result
 ```
 
 <!-- demo:begin -->
-[![config demo](https://asciinema.org/a/1263001.svg)](https://asciinema.org/a/1263001)
+[![config demo](https://asciinema.org/a/1263026.svg)](https://asciinema.org/a/1263026)
 <!-- demo:end -->
 
 ## How it works

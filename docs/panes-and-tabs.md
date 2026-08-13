@@ -18,7 +18,7 @@ hexe.key({ hexe.key.alt, hexe.key.r }, hexe.action.tab.rename()),
 ```
 
 <!-- demo:begin -->
-[![panes-and-tabs demo](https://asciinema.org/a/1263008.svg)](https://asciinema.org/a/1263008)
+[![panes-and-tabs demo](https://asciinema.org/a/1263033.svg)](https://asciinema.org/a/1263033)
 <!-- demo:end -->
 
 ## How it works
