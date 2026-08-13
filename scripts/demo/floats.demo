@@ -44,10 +44,10 @@ run echo "HEXE_FLOAT=$HEXE_FLOAT HEXE_FLOAT_NAME=$HEXE_FLOAT_NAME"
 wait 3
 run echo "$PATH" | cut -c1-70
 wait 3
-run # those come from add_env and add_path in the float's own definition
-wait 2.5
 key M-1
 wait 2
+run # those two came from add_env and add_path in the float's own definition
+wait 3
 
 # ── destroy vs keep-alive ───────────────────────────────────────────────────
 run # this float declares destroy = true, which is supposed to kill it on hide
@@ -60,10 +60,10 @@ key M-5
 wait 2
 key M-5
 wait 3.5
-run # still here. destroy is parsed, stored, and never acted on — the attribute lies
-wait 3.5
 key M-5
 wait 2
+run # it was still there. destroy is parsed, stored, and then never read
+wait 3.5
 
 # ── tab scope ───────────────────────────────────────────────────────────────
 run # global = false makes a float belong to the tab it was opened on
@@ -106,10 +106,10 @@ key C-M-Left
 wait 2.5
 key C-M-Right
 wait 2.5
-run # left and right switched tabs instead. navigatable is inert too — floats are reached by their key
-wait 3.5
 key C-M-9
 wait 2
+run # left and right switched tabs instead: navigatable is inert too
+wait 3.5
 
 # ── from outside ────────────────────────────────────────────────────────────
 run # a float is a pod, so anything can drive it from outside the session
