@@ -1,50 +1,119 @@
-# Panes and tabs: the split tree, and what the frontend does to it.
+# Panes and tabs: every way the split tree can be changed, and by what.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name panes
 
-run echo "one pane"
-wait 1.5
-
+run # one pane. ctrl+alt+h splits it, and the new pane starts in the same directory
+wait 2
 key C-M-h
-wait 2.5
-run echo "two"
-wait 1.8
+wait 3
+run echo "second pane"
+wait 2
 
+run # ctrl+alt+e splits the other way, so a tab is a tree, not a row
+wait 2
 key C-M-e
-wait 2.5
-run echo "three"
-wait 1.8
+wait 3
+run echo "third pane"
+wait 2
 
-# Focus moves by direction, not by cycling.
+run # focus moves by direction, the way your eyes do — not by cycling
+wait 2
 key C-M-Left
 wait 1.8
-key C-M-Right
-wait 1.2
 key C-M-Down
 wait 1.8
+key C-M-Up
+wait 1.8
+key C-M-Right
+wait 2
 
-# Zoom: the focused pane takes the tab, and gives it back.
+run # the divider moves with ctrl+alt+shift+arrows
+wait 2
+key C-M-S-Left
+wait 1.2
+key C-M-S-Left
+wait 1.2
+key C-M-S-Right
+wait 2
+
+run # zoom takes the whole tab and gives it back, and the pane is really resized
+wait 2
 key C-M-m
 wait 3
+run tput cols; tput lines
+wait 2.5
 key C-M-m
 wait 2.5
 
-# Broadcast: one keyboard, every pane in the tab.
+run # broadcast: one keyboard, every pane in the tab
+wait 2
 key C-M-b
 wait 2
-run echo "typed once"
-wait 2.5
+run echo "typed once, landed everywhere"
+wait 3
 key C-M-b
 wait 2
 
-# Tabs: new, and the two keys that move between them.
+run # pane select puts a letter on each pane and jumps to the one you press
+wait 2
+key C-M-o
+wait 3
+key a
+wait 2.5
+
+run # a pane can also be picked with the mouse
+wait 2
+mouse 180 10 click
+wait 2
+mouse 40 10 click
+wait 2
+
+# ── tabs ────────────────────────────────────────────────────────────────────
+run # tabs are a list. ctrl+alt+t makes one, ctrl+alt+. and ctrl+alt+, move
+wait 2.5
 key C-M-t
 wait 3
-run echo "a second tab"
+run echo "a second tab, with its own tree"
 wait 2
 key C-M-comma
 wait 2.5
 key C-M-dot
 wait 2.5
+
+run # alt+r renames the tab in place
+wait 2
+key M-r
+wait 2
+type builds
+key Enter
+wait 3
+
+run # and the whole arrangement can be saved and brought back later
+wait 2
+run hexe terminal layout save demo-layout 2>&1 | tail -2
+wait 3
+run hexe terminal layout list 2>&1 | tail -3
+wait 3
+
+run # closing the tab asks first, because the config says so
+wait 2
+key C-M-x
+wait 2.5
+key Enter
+wait 3
+
+# ── adoption ────────────────────────────────────────────────────────────────
+run # a pane can leave the session without dying: disown it, then adopt it back
+wait 2.5
+key C-M-z
+wait 2.5
+key Enter
+wait 3
+run hexe ses list --details 2>&1 | tail -6
+wait 3.5
+key C-M-a
+wait 3.5
+key Enter
+wait 3

@@ -1,21 +1,82 @@
-# The CLI: the same session, from outside the session.
+# The CLI: driving a live session from outside it.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name cli
 
-run hexe ses list --details
+run # everything hexe knows about itself is a command away
+wait 2
+run hexe ses list --details 2>&1
 wait 4
 
-# Panes are addressable, so a script can type into one.
-run hexe terminal send --broadcast --enter "echo sent from the command line"
+run # a session listing can be filtered to one directory
+wait 2
+run hexe session list . 2>&1 | head -6
 wait 3.5
 
-# The float's result comes back on stdout, so a shell can capture it.
+run # panes are addressable: by uuid, by name, by --last, by --creator, or all of them
+wait 2.5
+run hexe terminal info --creator 2>&1 | head -8
+wait 4
+
+run # sending keystrokes into a pane from another process
+wait 2
+key C-M-h
+wait 3
+run hexe terminal send --broadcast --enter "echo sent from outside" 2>&1
+wait 3.5
+
+run # and a control character, when what you need is ctrl+c
+wait 2
+run hexe terminal send --broadcast --ctrl c 2>&1
+wait 3
+
+run # focus can be moved from a script too — editors use this to step into a pane
+wait 2.5
+run hexe terminal focus left 2>&1
+wait 2.5
+run hexe terminal focus right 2>&1
+wait 2.5
+
+run # notifications, to one pane or to every pane at once
+wait 2
+run hexe terminal notify --broadcast "deploy finished" 2>&1
+wait 3.5
+
+# ── pods from the command line ───────────────────────────────────────────────
+run # a pod is a shell with a socket. one can be made with no session at all
+wait 2.5
+run hexe pod new --name notes --labels demo,docs 2>&1
+wait 3
+run hexe pod list 2>&1 | tail -2
+wait 3
+
+run # the listing takes a lua predicate, not a glob
+wait 2
+run hexe pod list --where 'return pod.name == "notes"' 2>&1 | tail -2
+wait 3.5
+
+run # --probe asks each pod whether it is actually answering
+wait 2
+run hexe pod list --probe 2>&1 | tail -2
+wait 3.5
+
+run hexe pod send --name notes --enter "echo written by the CLI > /tmp/hexe-demo-work/notes.txt"
+wait 2.5
+run cat /tmp/hexe-demo-work/notes.txt
+wait 2.5
+run hexe pod kill --name notes 2>&1; hexe pod gc --dry-run 2>&1
+wait 3
+
+# ── one-off floats, and the layout registry ─────────────────────────────────
+run # a float from a script, with its answer captured on stdout
+wait 2
 run count=$(hexe terminal float --title report --size 60,40 --result-file /tmp/hexe-demo-work/pick.txt --command /tmp/hexe-demo-work/bin/report)
 wait 9
 run echo "the float answered: $count"
-wait 3.5
+wait 3
 
-run hexe pod list | head -3
-wait 3.5
+run # every command has --help, and every daemon takes --log and --logfile
+wait 2.5
+run hexe pod attach --help 2>&1 | head -8
+wait 4
