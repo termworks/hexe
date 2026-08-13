@@ -132,6 +132,20 @@ stack a command talks to:
 | `HEXE_INSTANCE` | which stack: sockets live under `$XDG_RUNTIME_DIR/hexe/<instance>/`. See [instances](instances.md) |
 | `HEXE_SESSION` | set inside every pane, naming the session it belongs to |
 
+SES reads five caps from the environment, and two of them are a trap:
+
+| | |
+|---|---|
+| `HEXE_MAX_CONNECTIONS` | the connection ceiling (default 512) |
+| `HEXE_MAX_PANES_PER_SESSION` | refuses to create more panes in one session |
+| `HEXE_MAX_CONNECTIONS_PER_MINUTE` | an interactive connection rate limit, clamped to the limiter's capacity |
+| `HEXE_MAX_SESSIONS` | **parsed and never enforced** |
+| `HEXE_MAX_MEMORY_PER_SESSION_MB` | **parsed and never enforced** |
+
+Every socket is checked at both ends for a same-uid peer, and the runtime and log directories are
+created with an ownership check (`ensurePrivateDir`) — the runtime directory prefers
+`/run/user/<uid>` and only falls back to `/tmp` when there is no better home.
+
 And the layers can be started by hand when something has gone wrong:
 
 ```sh
