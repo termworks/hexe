@@ -115,6 +115,17 @@ scripts/demo/frame.py /tmp/hexe-demos/floats.cast 12.5   # what the screen looke
 - **A `pod record` observer costs one more socket connection** and a copy of the byte stream; it
   does not touch the pane's own VT client.
 
+## Reference: the flags in full
+
+| | |
+|---|---|
+| `record start\|stop\|status\|toggle --scope pod\|mux` | `toggle` is what a status-bar button calls; `status` prints `0` or `1`, or JSON with `--json` |
+| target flags | `--uuid`, `--name`, `--socket` — **ignored by `--scope mux`**, which records the frontend attach and has no per-pane target |
+| no target at all | `--scope pod` resolves the active pod from `HEXE_PANE_UUID`, then `hexe terminal info --last` |
+| `pod attach --record <f> [--capture-input]` | attach and record in the same command |
+| `pod record --out <f>` | observe without displacing the attached client |
+| `terminal record --out <f>` | spawn `hexe terminal attach` inside a pty and record what it draws |
+
 ## What it cannot do
 
 - **Nothing is recorded retroactively.** The pod's backlog ring is not written into a cast; a
