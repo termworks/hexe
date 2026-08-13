@@ -1,27 +1,44 @@
-# Four processes: frontend, runtime, ses, pod — and only one is disposable.
+# Four processes: who owns what, and what happens when each one dies.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name layers
 
-run hexe ses list --details
-wait 3.5
-
-run hexe pod list | head -3
+run # a session is three kinds of process. this is all of them
 wait 3
+run pgrep -a hexe 2>&1 | cut -c1-130
+wait 4.5
 
-run pgrep -a hexe | cut -c1-140
+run # the frontend renders. ses owns the session graph. one pod holds each pane's pty
+wait 3.5
+run hexe ses list --details 2>&1
+wait 4
+run hexe pod list 2>&1 | head -3
 wait 4
 
-run echo "the frontend is about to be killed outright"
-wait 2
+run # ses never parses VT — it routes opaque frames, which is why it cannot tell you what a pane shows
+wait 4
 
-# Not a detach: SIGKILL, the way a crashed terminal goes.
-crash
-wait 3
+run # the pod writes every byte to its backlog ring BEFORE it forwards it, which is the whole detach story
+wait 4
 
-# A new frontend, attaching to a session that never noticed.
-spawn terminal attach layers
-wait 5
-run echo "same session, same shells, same scrollback"
+run # so: kill the frontend outright. not a detach — SIGKILL, the way a crashed terminal goes
 wait 3.5
+crash
+wait 4
+
+spawn terminal attach layers
+wait 6
+run # same session, same shells, same scrollback. only the view was lost
+wait 3.5
+run hexe ses list --details 2>&1
+wait 4
+
+run # and the frontend is a projection: it never sends the session, it sends what it wants done
+wait 3.5
+key C-M-h
+wait 3
+run # that split was a request to ses, which mutated the graph and published a new snapshot
+wait 4
+run hexe ses list --details 2>&1 | tail -5
+wait 4

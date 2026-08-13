@@ -1,27 +1,47 @@
-# Configuration: one Lua file, checked, and reloadable without losing a pane.
+# Configuration: one Lua file, checked, sandboxed where it matters, reloadable in place.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name config
 
-run hexe config paths
-wait 3.5
-
-run hexe config check
-wait 3
-
-# Break it on purpose: a config error is reported, not obeyed.
-run cp $HOME/.config/hexe/init.lua /tmp/init.bak
-wait 1.5
-run echo 'return hexe.setup({ nonsense = true })' > $HOME/.config/hexe/init.lua
-wait 1.5
-run hexe config check
+run # where hexe looks, and what it will load from there
+wait 2.5
+run hexe config paths 2>&1
 wait 4
 
-# Put it back, change one visible thing, and reload in place.
-run cp /tmp/init.bak $HOME/.config/hexe/init.lua
+run hexe config check 2>&1
+wait 4
+
+run # the schema refuses what it does not know rather than ignoring it
+wait 2.5
+run cp $XDG_CONFIG_HOME/hexe/init.lua /tmp/init.bak
 wait 1.5
-run sed -i 's/\["git.branch"\] = "bg:1 fg:0"/["git.branch"] = "bg:2 fg:0"/' $HOME/.config/hexe/init.lua
+run echo 'return hexe.setup({ nonsense = true })' > $XDG_CONFIG_HOME/hexe/init.lua
+wait 1.5
+run hexe config check 2>&1
+wait 4.5
+
+run # note what did NOT happen: the frontend kept running, with the config it already had
+wait 3.5
+run cp /tmp/init.bak $XDG_CONFIG_HOME/hexe/init.lua
+wait 2
+
+run # change one visible thing and reload in place — no pane is lost
+wait 3
+run sed -i 's/\["git.branch"\] = "bg:1 fg:0"/["git.branch"] = "bg:2 fg:0"/' $XDG_CONFIG_HOME/hexe/init.lua
 wait 2
 key C-M-r
+wait 4
+
+run # the config is real Lua: it can read files, shell out with a cache, and compute anything
+wait 3
+run grep -n "hexe.exec\|io.open\|os.getenv" $XDG_CONFIG_HOME/hexe/init.lua 2>&1 | head -4
+wait 4
+
+run # a project's own .hexe.lua runs with io, os, package, dofile and hexe.exec all revoked
+wait 3.5
+run head -12 .hexe.lua 2>&1
+wait 4
+
+run hexe config dump 2>&1 | head -12
 wait 4

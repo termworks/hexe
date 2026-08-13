@@ -1,27 +1,43 @@
-# Isolation: a pane in namespaces — and what it looks like when the kernel says no.
+# Isolation: namespaces and cgroups per pane, and what the kernel has to allow first.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name sandbox
-launch terminal new --name sandbox --log debug --logfile $WORK/iso.log
+launch terminal new --name sandbox -I demsandbox --log debug --logfile $WORK/iso.log
 
-# The float is declared with an isolation profile and cgroup limits.
-run grep -A9 'hexe.float("sandbox"' $HOME/.config/hexe/layout.lua
+run # a float can declare an isolation profile and cgroup limits, right in the layout
+wait 3
+run grep -A9 'hexe.float("sandbox"' $XDG_CONFIG_HOME/hexe/layout.lua 2>&1
 wait 5
 
-# Ctrl+Alt+0 toggles it. On this machine nothing appears — and that is the
-# honest result, not a missing recording.
+run # five profiles: none, minimal, default, sandbox, full — each adds namespaces and takes away mounts
+wait 4
+
+run # this is the machine as the pane sees it now, unsandboxed
+wait 2.5
+run ps -e --no-headers | wc -l; hostname; ls / | tr '\n' ' '
+wait 4
+
+run # ctrl+alt+0 toggles the sandboxed float. on this machine nothing appears
+wait 3
 key C-M-0
 wait 4.5
 
-# Every profile begins with an unprivileged user namespace.
+run # that is the honest result, not a missing recording. every profile starts with a user namespace
+wait 4
 run unshare -Ur true; echo "exit=$?"
 wait 3.5
-
-# Ubuntu's AppArmor refuses them to unconfined programs by default.
-run cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+run # ubuntu's apparmor refuses those to unconfined programs by default
+wait 3
+run cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>&1
 wait 3.5
 
-# The cgroup half needs a delegated subtree, and says so in the log.
-run grep -o 'voidbox cgroup path.*' $WORK/iso.log | head -1
+run # the cgroup half needs a delegated subtree, and says so in the log
+wait 3
+run grep -o 'voidbox cgroup path.*' $WORK/iso.log 2>&1 | head -1
+wait 4.5
+
+run # a float that cannot be isolated is rolled back silently — the reason is only in the log
+wait 4
+run grep -o 'directory not accessible for voidbox bind.*' $WORK/iso.log 2>&1 | head -2
 wait 4

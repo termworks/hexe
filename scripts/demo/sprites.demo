@@ -1,24 +1,42 @@
-# Sprites: 1152 pokemon, drawn over a pane, for no reason at all.
+# Sprites: 2304 pokemon in 1.6 MB, and the naming underneath them.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name sprite
 
-run echo "a pane like any other"
-wait 2
+run # every pane and every session is named after a pokemon, which is what makes them typeable
+wait 3
+run hexe ses list --details 2>&1
+wait 4
 
+run # ctrl+alt+p draws the one this pane is named after, over the pane
+wait 3
 key C-M-p
 wait 4
 
+run # each pane keeps its own, so a split shows two
+wait 2.5
 key C-M-h
-wait 2.5
+wait 3
 key C-M-p
 wait 4
-
-# Each pane keeps its own, and the sprite is the pane's own name.
 key C-M-Left
-wait 2
-key C-M-p
 wait 2.5
 key C-M-p
+wait 2
+key C-M-p
+wait 3
+
+run # the art is ANSI over half-block glyphs, one file per pokemon, packed at build time
 wait 3.5
+run # each sprite is its own gzip stream behind an index, so showing one inflates one
+wait 3.5
+run # 9 MB of art becomes 1.6 MB in the binary, and nothing is read from disk at runtime
+wait 3.5
+
+run # there is a 1-in-100 chance of a shiny, and no way to ask for a particular pokemon
+wait 3.5
+key C-M-p
+wait 3
+key C-M-p
+wait 2.5

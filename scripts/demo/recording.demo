@@ -1,22 +1,47 @@
-# Recording: hexe writes asciicasts of itself.
+# Recording: hexe writes asciicasts of itself, from three different doors.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name rec
 
-run hexe record status --scope pod
-wait 2.5
+run # nothing is recorded until something asks. this is the state file it keeps
+wait 3
+run hexe record status --scope pod 2>&1
+wait 3
 
-run hexe record start --scope pod --out /tmp/hexe-demo-work/pane.cast
+run # scope pod records one pane's pty stream
 wait 2.5
+run hexe record start --scope pod --out /tmp/hexe-demo-work/pane.cast 2>&1
+wait 3
 run echo "everything from here is in the cast"; ls src
 wait 3
-run hexe record status --scope pod
-wait 2.5
-run hexe record stop --scope pod
-wait 2.5
+run hexe record status --scope pod 2>&1
+wait 3
+run hexe record stop --scope pod 2>&1
+wait 3
 
-run head -c 220 /tmp/hexe-demo-work/pane.cast; echo
+run # asciicast v2: a json header, then one line per chunk of output with its timestamp
+wait 3
+run head -c 240 /tmp/hexe-demo-work/pane.cast 2>&1; echo
+wait 4.5
+run wc -lc /tmp/hexe-demo-work/pane.cast 2>&1
+wait 3
+
+run # the state file is per instance and per scope, which is what stops a second start
+wait 3
+run cat /tmp/hexe/$HEXE_INSTANCE/record-pod.state 2>&1; echo
 wait 4
-run wc -lc /tmp/hexe-demo-work/pane.cast
+
+run # toggle is start-or-stop, which is what the rec button in the status bar calls
+wait 3
+run hexe record toggle --scope pod --out /tmp/hexe-demo-work/toggle.cast 2>&1
+wait 3
+run hexe record status --scope pod 2>&1
+wait 2.5
+run hexe record toggle --scope pod 2>&1
+wait 3
+
+run # pod record is the other door: it observes without displacing the attached client
+wait 3
+run # and every film in this documentation was made by driving a real frontend on a pty
 wait 3.5

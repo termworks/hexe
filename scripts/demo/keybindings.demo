@@ -1,10 +1,11 @@
-# Keybindings: what a key does, and what decides.
+# Keybindings: what decides where a key goes.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name keys
 
-# The keycast overlay, so the film shows the keys and not just their effect.
+run # the keycast overlay, so this film shows the keys and not only their effect
+wait 2.5
 key C-M-k
 wait 2.5
 
@@ -15,17 +16,25 @@ wait 1.8
 key C-M-Right
 wait 1.8
 
-# `when` gating: the split keys are bound only while a split pane is focused.
-# Inside a float the same key does nothing at all.
+run # a chord that no bind matches is not swallowed — it goes straight to the shell
+wait 2.5
+key C-M-Right
+wait 1.5
+
+run # `when` gates a bind: split is bound only while a split pane is focused
+wait 2.5
 key M-2
 wait 3.5
 key C-M-h
 wait 3
 key M-2
 wait 2.5
+run # inside the float that same chord did nothing at all
+wait 3
 
-# Passthrough: Ctrl+Alt+arrows move focus here — unless the focused pane is
-# running an editor, which the config hands them to instead.
+# ── passthrough ─────────────────────────────────────────────────────────────
+run # and a bind can hand its chord to the pane instead of acting on it
+wait 2.5
 run nvim README.md
 wait 6
 key C-M-Down
@@ -36,7 +45,34 @@ key C-M-Up
 wait 2.5
 type :q
 key Enter
+wait 4
+run # ctrl+alt+arrows moved the cursor, not the focus: the config passes them to an editor
 wait 3.5
+
+# ── how the chord arrives at all ────────────────────────────────────────────
+run # ctrl+alt+. and ctrl+alt+, switch tabs — chords a legacy encoding cannot even express
+wait 3
+key C-M-t
+wait 3
+key C-M-comma
+wait 2.5
+key C-M-dot
+wait 2.5
+key C-M-x
+wait 2
+key Enter
+wait 2.5
+
+run # the scrollback keys are the frontend's own, not the pane's
+wait 2.5
+run seq 1 200 | paste - - - - -
+wait 2.5
+key PageUp
+wait 2
+key PageUp
+wait 2
+key End
+wait 2.5
 
 key C-M-k
 wait 2

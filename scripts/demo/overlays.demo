@@ -1,39 +1,65 @@
 # Overlays: everything hexe draws on top of the panes.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name pop
 
-# A notification: drawn over the bar, timed out, blocking nothing.
+run # a notification: drawn over the bar, timed out, blocking nothing
+wait 2.5
 run hexe terminal notify "deploy finished"
 wait 4
 
-# The same thing from a key, as a desktop notification through the terminal.
+run # to one pane, or to every pane at once
+wait 2
+run hexe terminal notify --broadcast "deploying to production"
+wait 4
+
+run # and from a key, which asks the host terminal for a desktop notification instead
+wait 2.5
 key C-M-n
 wait 3
 
-# Pane select: every pane gets a letter, and the letter picks it.
+# ── pane select ─────────────────────────────────────────────────────────────
+run # pane select puts a letter over every pane, drawn in block digits so it reads at a glance
+wait 3
 key C-M-h
+wait 3
+key C-M-e
 wait 3
 key C-M-o
 wait 3.5
 key a
 wait 3
 
-# Keycast: the keys, on screen, for teaching and for films like this one.
+# ── keycast ─────────────────────────────────────────────────────────────────
+run # keycast shows the last few chords, grouped by time — for teaching and for films like this
+wait 3
 key C-M-k
 wait 2
 key C-M-Left
 wait 1.2
 key C-M-Right
 wait 1.2
-key C-M-h
-wait 2.5
-key C-M-k
+key C-M-Down
+wait 1.2
+key C-M-m
 wait 2
+key C-M-m
+wait 2
+key C-M-k
+wait 2.5
 
-# A question. The confirmations for quitting, detaching, disowning and closing
-# are the same popup, turned on per action in `mux.confirm`.
+# ── sprites ─────────────────────────────────────────────────────────────────
+run # and the pokemon overlay, which is the same machinery drawing something useless
+wait 3
+key C-M-p
+wait 3.5
+key C-M-p
+wait 2.5
+
+# ── questions ───────────────────────────────────────────────────────────────
+run # a confirm is a question with the tab's keys held until it is answered
+wait 3
 key C-M-q
 wait 4
 key Enter

@@ -1,24 +1,38 @@
-# Instances: two stacks on one machine that cannot see each other.
+# Instances: two whole stacks on one machine that cannot see each other.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name inst
 
-run echo "$HEXE_INSTANCE"
+run # every socket, state file and log this session uses is namespaced by one name
+wait 3
+run echo "HEXE_INSTANCE=$HEXE_INSTANCE"
 wait 2.5
-run hexe ses list
+run ls $XDG_RUNTIME_DIR/hexe/ 2>&1
+wait 3.5
+run ls $XDG_RUNTIME_DIR/hexe/$HEXE_INSTANCE/ 2>&1 | head -4
 wait 3.5
 
-# The flag belongs to the subcommand, not to `hexe` itself.
-run hexe -I spare ses status
+run # the flag belongs to the subcommand, not to hexe itself — this is the common mistake
 wait 3
-run hexe ses status -I spare
+run hexe -I spare ses status 2>&1
+wait 3
+run hexe ses status -I spare 2>&1
 wait 3
 
-# Another instance is another set of sockets, and another daemon.
-run hexe ses list -I spare
+run # a different instance is a different daemon, and it knows nothing of this one
+wait 3
+run hexe ses list -I spare 2>&1
 wait 3.5
-run ls $XDG_RUNTIME_DIR/hexe/
+run HEXE_INSTANCE=spare hexe ses status 2>&1
 wait 3.5
-run HEXE_INSTANCE=spare hexe ses status
+
+run # every daemon carries its instance in argv, so one stack can be killed on its own
+wait 3
+run pgrep -a hexe 2>&1 | cut -c1-120 | head -4
+wait 4.5
+run # pkill -TERM -f "instance $HEXE_INSTANCE" would end exactly this stack and no other
+wait 3.5
+
+run # and -T gives a throwaway stack with a generated name, which is what the smoke tests use
 wait 3.5

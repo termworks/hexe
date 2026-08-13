@@ -75,6 +75,17 @@ corrupt it: there is no frontend-authored copy to lose.
 A session with no `--name` gets a pokemon; so does every pane. They exist to be typed: `attach
 work`, `attach a3f2` and `attach nido` all resolve by prefix, over both names and uuids.
 
+Three behaviours follow from that, and none of them were written down before:
+
+- **Names are made unique automatically.** Ask for a name that is taken and you get a suffixed one
+  rather than a collision.
+- **An ambiguous prefix lists the candidates** instead of picking one for you.
+- **Attaching to a session that is already attached steals it.** The other frontend is detached;
+  the session is single, and the newcomer wins.
+
+A frontend that simply vanishes — the terminal closed, the ssh link dropped — is noticed and the
+session auto-detaches rather than being held open by a client that is gone.
+
 ### The environment a session runs in
 
 A session's environment is the environment of the shell that opened it, captured from that

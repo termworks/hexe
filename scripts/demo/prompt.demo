@@ -1,27 +1,47 @@
-# The shell prompt: hexe renders it, and this shell asks for it directly.
+# The shell prompt: the same segments the status bar uses, printed by the shell.
 cols 240
 rows 60
-speed 0.05
+speed 0.035
 name prompt
 
-# The prompt on screen is hexe's, drawn by the segments in the same config the
-# status bar reads. oslo calls it from its own hooks rather than from a
-# generated shell snippet.
-run grep -n 'shp prompt' -A3 $HOME/.config/oslo/prompt.lua | head -12
+run # the prompt on this screen is hexe's, drawn from the prompt section of the same config
+wait 3.5
+run grep -n "prompt = {" -A8 $XDG_CONFIG_HOME/hexe/init.lua 2>&1 | head -12
 wait 5
 
-# Left segments, and a right prompt drawn on the same row.
+run # oslo asks for it directly rather than through a generated shell snippet
+wait 3
+run grep -n "oslo.prompt" -A6 $HOME/.config/oslo/prompt.lua 2>&1 | head -14
+wait 5
+
+run # the same renderer, called by hand, with the context a shell would pass
+wait 3
+run hexe shell prompt --shell=bash --status 0 --duration 12 --jobs 0 2>&1
+wait 4
+run hexe shell prompt --shell=bash --status 1 --duration 1200 --jobs 2 2>&1
+wait 4
+run # a failed command and a long one look different, because segments read that context
+wait 3
+
+run # the right prompt is a second call, on the same row
+wait 2.5
+run hexe shell prompt --shell=bash --right --status 0 2>&1
+wait 4
+
+run # segments react to the directory too
+wait 2.5
 run cd src
 wait 2.5
 run cd ..
 wait 2.5
-
-# The status segment shows what the last command did.
 run false
-wait 3
+wait 2.5
 run true
 wait 2.5
 
-# The same renderer, called by hand.
-run hexe shell prompt --status 1 --duration 1200 --jobs 2
+run # for bash, zsh and fish the same thing is set up by an init snippet
+wait 3
+run hexe shell init bash 2>&1 | head -10
+wait 5
+run # those emit OSC 7 so hexe knows the pane's directory — but not OSC 133, so prompt marks need oslo
 wait 4

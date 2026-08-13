@@ -79,6 +79,21 @@ applied one: drop it, because the frontend is replaying frames it could not conf
 newer: apply and advance. Without this, a reconnect could type the tail of your last command line
 into your shell a second time.
 
+### Reaching one
+
+A pod is addressed by `--socket`, `--uuid` or `--name`, in that order of precedence. `pod new
+--alias` (and `pod daemon --write-alias`) adds a second socket path beside the uuid one —
+`pod@<name>.sock` — so a script can reach a pod by a name it chose rather than by a uuid it has to
+remember. `--labels a,b,c` tags a pod, and `pod list --where '<lua>'` filters on the result:
+
+```sh
+hexe pod list --where 'return pod.name == "notes"'
+hexe pod list --probe          # ask each pod whether it answers, rather than trusting its file
+```
+
+The metadata file is refreshed as the pod's cwd changes and re-stamped every five minutes as a
+keepalive, which is what lets `pod gc` tell a crashed pod's leftovers from a live one's.
+
 ### What a pod knows about itself
 
 Each pod writes a metadata line — uuid, name, its own pid, the child's pid, cwd, shell, isolation,

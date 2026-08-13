@@ -62,12 +62,31 @@ is a key that "does not work" while its binding is plainly there in the file.
 | `hexe.mode.act_and_passthrough` | run the action *and* send the key to the pane |
 | `hexe.mode.passthrough_only` | send the key to the pane, run nothing |
 
+### Keys the frontend keeps for itself
+
+Two sets of keys never reach the bind list at all:
+
+| | |
+|---|---|
+| `Ctrl+Q` | quits, always, and cannot be rebound or shadowed (`loop_input.zig:948`) |
+| `PageUp`, `PageDown`, `Home`, `End`, `Shift+Up`, `Shift+Down` | scroll the frontend's own scrollback, with acceleration; the pane never sees them |
+
+Anything the decoder understands but no bind claims is forwarded to the pane **as its original
+bytes**, not as a re-encoding — and any forwarded input snaps the pane back to the bottom of its
+scrollback, which is what you want after reading history.
+
 ### When a chord fires
 
 `on` distinguishes four moments — `press`, `release`, `repeat`, `hold` — with two thresholds
 turning a held key into three outcomes: under `tap_ms` it is a repeat and fires nothing, between
 `tap_ms` and `hold_ms` it is a tap, and beyond `hold_ms` it is a hold. This is what makes
-"hold Alt+Shift+D to detach" possible without that chord being unusable for anything else.
+"hold Alt+Shift+D to detach" possible without that chord being unusable for anything else. A single
+bind can override the threshold with its own `hold_ms`.
+
+Three details of that machine are worth knowing, because they are what stop it misfiring: a tap is
+decided on key *release*, auto-repeat is suppressed by a repeat lock rather than fired repeatedly,
+and an **unmodified** chord skips the tap/hold machinery altogether — a bare letter cannot be
+delayed waiting to see whether you are holding it.
 
 ### Conditions
 

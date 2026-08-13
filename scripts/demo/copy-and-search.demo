@@ -1,19 +1,32 @@
-# Reading what already happened: search, copy-mode, and prompt marks.
+# Reading what already happened: scrollback, search, copy-mode, prompt marks.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name read
 
-run seq 1 400 | paste - - - - - - - - - -
+run seq 1 600 | paste - - - - - - - - - -
 wait 3
 
-# Ctrl+Alt+F searches the pane's whole scrollback, not just the screen.
+run # the frontend owns the scrollback: page keys scroll it, the pane never sees them
+wait 3
+key PageUp
+wait 1.8
+key PageUp
+wait 1.8
+key End
+wait 2.5
+
+# ── search ──────────────────────────────────────────────────────────────────
+run # ctrl+alt+f searches the whole scrollback, not the visible screen
+wait 3
 key C-M-f
 wait 2
 type 242
 wait 2
 key Enter
 wait 3
+run # n and N walk the matches, and each jump scrolls the viewport to it
+wait 1
 key n
 wait 1.8
 key n
@@ -21,9 +34,11 @@ wait 1.8
 key N
 wait 1.8
 key Escape
-wait 2
+wait 2.5
 
-# Copy-mode: a cursor on the pane, hjkl or arrows, v to select, y to yank.
+# ── copy-mode ───────────────────────────────────────────────────────────────
+run # ctrl+alt+y is a cursor on the pane: hjkl or arrows, v selects, y yanks, q leaves
+wait 3.5
 key C-M-y
 wait 2
 key Down Down Right Right
@@ -33,12 +48,31 @@ wait 1.5
 key Right Right Right Right Right Right
 wait 2
 key y
+wait 3
+run # the yank went out over OSC 52, so it lands in the clipboard of whatever terminal is watching
+wait 3.5
+
+# ── the mouse ───────────────────────────────────────────────────────────────
+run # dragging selects too, and the wheel scrolls
+wait 2.5
+mouse 20 6 down
+wait 0.8
+mouse 60 6 move
+wait 0.8
+mouse 60 6 up
+wait 2
+mouse 100 20 wheelup
+wait 1.2
+mouse 100 20 wheeldown
 wait 2.5
 
-# Prompt marks: oslo marks every prompt with OSC 133 on its own, so hexe can
-# jump between commands and copy the output of one.
-run echo first; echo second
-wait 2
+# ── prompt marks ────────────────────────────────────────────────────────────
+run # oslo marks every prompt with OSC 133, so hexe can move by command instead of by line
+wait 3
+run echo first
+wait 1.5
+run echo second
+wait 1.5
 run ls src
 wait 2
 key C-M-g
@@ -47,5 +81,7 @@ key C-M-g
 wait 2
 key C-M-j
 wait 2
+run # and this copies the output of the last marked command, without the prompt line
+wait 2.5
 key C-M-u
 wait 3

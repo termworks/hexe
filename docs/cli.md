@@ -51,10 +51,12 @@ hexe session export <uuid>                  hexe session daemon [--foreground]
 hexe layout open <target>[:<tab>]           hexe layout save --scope local|global|both
 hexe layout list [--json]
 
-hexe pod list [--where <path>] [--alive] [--json]     hexe pod new [-n <name>] [--shell …] [--cwd …]
-hexe pod send <text> [--uuid|--name] [--enter]        hexe pod attach [--uuid|--name] [--detach <key>]
-hexe pod record --out <file.cast>                     hexe pod kill --uuid <u>|--name <n> [--signal …]
-hexe pod gc [--dry-run]
+hexe pod list [--where <lua>] [--probe] [--alive] [--json]
+hexe pod new [-n <name>] [--shell …] [--cwd …] [--labels a,b] [--alias]
+hexe pod send <text> [--uuid|--name] [--enter] [--ctrl <letter>]
+hexe pod attach [--uuid|--name] [--detach <key>] [--record <f.cast>] [--capture-input]
+hexe pod record --out <file.cast>                     hexe pod kill --uuid <u>|--name <n> [--signal <n|NAME>] [--force]
+hexe pod gc [--dry-run]                               hexe pod daemon --uuid <32hex> --socket <path> […]
 
 hexe shell init bash|zsh|fish               hexe shell prompt [--status …] [--right]
 hexe popup notify|confirm|choose            hexe config check|validate|dump|paths
@@ -78,6 +80,24 @@ Sessions additionally resolve by **prefix**, over both names and uuids, which is
 
 Inside a pane, `HEXE_PANE_UUID` and `HEXE_SESSION` are already set, so a script usually needs no
 target at all.
+
+### Flags the reference page never mentioned
+
+| | |
+|---|---|
+| `pod list --where '<lua>'` | a Lua predicate *body*, not a path or a glob: `--where 'return pod.name == "notes"'`. `pod` is the row |
+| `pod list --probe` | ask each pod whether it actually answers, rather than trusting its metadata file |
+| `pod new --labels a,b,c` / `--alias` | tag a pod, and give it a `pod@<name>.sock` symlink beside its uuid socket |
+| `pod send --ctrl <letter>` | send a control character; combines with `--enter`, which appends the newline after it |
+| `pod kill --signal <n\|NAME>` / `--force` | a specific signal, or signal-then-`SIGKILL` after 50 ms |
+| `pod attach --record <f> [--capture-input]` | attach and record in one go |
+| `session list <dir>` | positional directory filter: `hexe ses list .` |
+| `terminal new/attach --remote host[:port] [-u user] [-i identity]` | attach across a link; identity defaults to `~/.ssh/id_ed25519` |
+| `terminal new/attach --ses-socket <path>` / `--no-autostart-ses` | point at a specific daemon, or refuse to start one |
+| `terminal float --key <k>` | the key that dismisses the float; a dismissed float exits 130 and its output is discarded |
+| `shell init <shell> --no-comms` | the prompt hooks without the shell→mux reporting |
+| `--log trace\|debug\|info` and `--logfile` / `-L` | on every daemon; the level name is the only accepted spelling |
+| `--help` / `-h` | on every command and subcommand, generated from the flag list |
 
 ### Two gotchas worth knowing
 

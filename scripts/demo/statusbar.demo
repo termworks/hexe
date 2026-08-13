@@ -1,34 +1,67 @@
-# The status bar: three zones, budgeted by priority, redrawn on a timer.
+# The status bar: what each zone shows and what makes it change.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name status
 
-# The right zone follows the focused pane: directory, branch, dirty marks.
+run # three zones. left is the session and the pane, centre is the tabs, right follows the pane
+wait 3.5
+
+run # the right zone tracks the focused pane's directory and its git state
+wait 2.5
 run cd src
 wait 2.5
 run cd ..
 wait 2.5
 run git checkout -q -b release && git branch --show-current
 wait 3
+run touch newfile.txt
+wait 3
+run rm newfile.txt; git checkout -q main
+wait 3
 
-# The centre zone is the tab list.
+# ── the tab row ─────────────────────────────────────────────────────────────
+run # the centre zone is the tab list, and it is truly centred rather than laid out with the sides
+wait 3
 key C-M-t
 wait 3
 key M-r
 wait 2
-type build
+type builds
 key Enter
 wait 3
 key C-M-comma
 wait 2.5
-
-# Notifications are not segments: they are drawn over the bar and time out.
-run hexe terminal notify "build finished"
-wait 3.5
-
-# Progress comes from the pane itself, over OSC 9;4.
-run /tmp/hexe-demo-work/bin/progress
-wait 6
-run git checkout -q main
+key C-M-dot
 wait 2.5
+key C-M-x
+wait 2
+key Enter
+wait 2.5
+
+# ── things the panes push at it ─────────────────────────────────────────────
+run # a notification is not a segment: it is drawn over the bar and times out
+wait 3
+run hexe terminal notify "build finished"
+wait 4
+
+run # progress comes from the pane itself, over OSC 9;4
+wait 2.5
+run /tmp/hexe-demo-work/bin/progress
+wait 7
+
+# ── buttons ─────────────────────────────────────────────────────────────────
+run # the rec segment on the right is a button: it renders its own state and takes clicks
+wait 3
+run hexe record start --scope pod --out /tmp/hexe-demo-work/bar.cast 2>&1
+wait 3.5
+run hexe record status --scope pod 2>&1
+wait 3
+run hexe record stop --scope pod 2>&1
+wait 3
+
+# ── width ───────────────────────────────────────────────────────────────────
+run # when the bar runs out of room, segments drop by priority — highest number first
+wait 3.5
+run # nothing here is stored: the bar is frontend state, rebuilt by whatever attaches next
+wait 3.5
