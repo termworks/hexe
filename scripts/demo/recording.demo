@@ -1,0 +1,22 @@
+# Recording: hexe writes asciicasts of itself.
+cols 120
+rows 28
+speed 0.04
+name rec
+
+run hexe record status --scope pod
+wait 2
+
+run hexe record start --scope pod --out /tmp/hexe-demo-work/pane.cast
+wait 2
+run echo "everything from here is in the cast"; ls src
+wait 2.5
+run hexe record status --scope pod
+wait 2
+run hexe record stop --scope pod
+wait 2
+
+run head -c 180 /tmp/hexe-demo-work/pane.cast; echo
+wait 3.5
+run wc -lc /tmp/hexe-demo-work/pane.cast
+wait 3

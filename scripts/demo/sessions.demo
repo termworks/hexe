@@ -1,0 +1,29 @@
+# Sessions: the frontend is disposable, the shells are not.
+cols 120
+rows 30
+speed 0.05
+name work
+
+run echo "this shell belongs to the session, not to the terminal"
+wait 1.4
+
+# Something that keeps counting while nobody is watching.
+run for i in $(seq 1 200); do echo "tick $i"; sleep 1; done
+wait 4
+
+# Detach. The frontend exits; ses and every pod keep running.
+key C-M-d
+wait 3
+
+# Gone from the screen; ses and the pods are still on the machine.
+wait 4
+
+# A new frontend, attaching to the same session by name.
+spawn terminal attach work
+wait 4
+
+# The counter never stopped, and the scrollback came back with it.
+key C-c
+wait 1.2
+run hexe ses list --details
+wait 3.5
