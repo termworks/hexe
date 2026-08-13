@@ -129,6 +129,19 @@ CLI:
 - **Digits: 3×5, 5×7 or 7×9 cells**, drawn with quadrant blocks — two sub-pixels per cell in each
   direction.
 
+## Measured behaviour worth knowing
+
+- **One blocking popup per scope.** A second request while a question is up does not queue behind
+  it or replace it.
+- **Notifications are single-slot with an unbounded queue.** They are shown one at a time in
+  arrival order, and the message is always copied rather than borrowed, so a caller can free it.
+- **A popup auto-cancels on a timeout** rather than waiting forever, which is what stops a script
+  that died mid-question from wedging the tab.
+- **The `Style` carried on a popup object is ignored by the renderer** — styling comes from the
+  `pop` config, not from the popup that was raised.
+- **Confirm's button labels are configurable** (`yes_label` / `no_label`) and it has a default
+  selection; the chooser scrolls its viewport when the list is longer than `visible_count`.
+
 ## What it cannot do
 
 - **A blocking popup blocks its scope.** A tab-scope question takes that tab's keys until it is

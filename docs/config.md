@@ -134,6 +134,23 @@ theme = hexe.theme({
 }),
 ```
 
+### The rest of the `hexe` table
+
+Beyond `setup`, `key`, `segment`, `layout`, `tab`, `split`, `pane`, `float`, `theme`, `style` and
+`exec`, the runtime exposes a handful of helpers nothing documented:
+
+| | |
+|---|---|
+| `hexe.validate(cfg)` | check a config table without applying it |
+| `hexe.keymap` / `hexe.keymap.set{…}` | an alternative spelling for a bind list; callable as well as a table |
+| `hexe.when.press \| release \| repeat \| hold` | the names for a bind's `on` field |
+| `hexe.command("lazygit")` | asserts its argument is a string and returns it — a typo guard for `command =` fields |
+| `hexe.segment.builtin.<name>(opts)` | descriptor helpers for every built-in |
+| `hexe.status.recording(scope)`, `hexe.record.*` | the recording state a status segment reads |
+
+A split's children can carry their own `size`, so `hexe.split("h", { hexe.pane({ size = 70 }),
+hexe.pane() })` is a 70/30 split without a `ratio`.
+
 Tooling:
 
 | | |
