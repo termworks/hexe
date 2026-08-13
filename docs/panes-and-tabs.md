@@ -107,7 +107,7 @@ Every action above is bound the same way, and each takes its parameter as a stri
 | `hexe.action.pane.select()` | label panes and pick one |
 | `hexe.action.pane.sync_toggle()` | broadcast input to every pane in the tab |
 | `hexe.action.pane.disown()` / `.adopt()` | move a pane between sessions ([sessions](sessions.md)) |
-| `hexe.action.tab.new()` / `.next()` / `.prev()` / `.close()` / `.rename()` | tabs |
+| `hexe.action.tab.new()` / `.next()` / `.prev()` / `.close()` / `.rename()` | tabs. `rename` edits the tab's *name*, which the status bar only shows when its tabs segment sets `tab_title = "name"` — under the default `"basename"` a rename is invisible there and shows up in `hexe ses list --details` |
 | `hexe.action.layout.save()` / `.load()` | store and restore the current arrangement |
 
 The initial arrangement is a layout, and layouts nest:

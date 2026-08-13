@@ -151,7 +151,9 @@ up in three places:
   -- tabs-only
   active_style = "bg:5 fg:0 bold", inactive_style = "bg:237 fg:250",
   separator = " │ ", separator_style = "fg:7",
-  tab_title = "basename",           -- or "name"
+  tab_title = "basename",           -- or "name"; with "basename" a renamed tab keeps
+                                    -- showing its directory, because the name is not
+                                    -- what is drawn
   left_arrow = "", right_arrow = "",
   -- any segment
   when = function(ctx) local p = ctx.pane(0); return p and p.process_running end,

@@ -30,6 +30,10 @@ wait 2
 type builds
 key Enter
 wait 3
+run # the bar still says proj: this config sets tab_title = "basename", so it shows the directory
+wait 3.5
+run hexe ses list --details 2>&1 | grep -i tab
+wait 3.5
 key C-M-comma
 wait 2.5
 key C-M-dot
