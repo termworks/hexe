@@ -1,31 +1,70 @@
-# Sessions: the frontend is disposable, the shells are not.
+# Sessions: everything that outlives the terminal, and how it is addressed.
 cols 240
 rows 60
-speed 0.05
+speed 0.035
 name work
 
-run echo "this shell belongs to the session, not to the terminal"
-wait 1.6
+run # the session is a set of processes on the machine. the terminal is only a view of it
+wait 2.5
+run hexe ses list --details 2>&1
+wait 4
 
-# Something that keeps counting while nobody is watching.
-run for i in $(seq 1 300); do echo "tick $i"; sleep 1; done
+run # every pane is stamped with the session it belongs to
+wait 2
+run echo "HEXE_SESSION=$HEXE_SESSION"
+wait 3
+
+run # something that keeps counting while nobody is watching
+wait 2
+run for i in $(seq 1 400); do echo "tick $i"; sleep 1; done
 wait 5
 
-# Ctrl+Alt+D detaches. The config asks first — confirm is on for detach.
+# ── detach ──────────────────────────────────────────────────────────────────
 key C-M-d
 wait 2.5
 key Enter
-wait 3.5
-
-# Gone from the screen; ses and the pods are still on the machine.
-wait 4
-
-# A new frontend, attaching to the same session by name.
-spawn terminal attach work
 wait 5
 
-# The counter never stopped, and the scrollback came back with it.
+# the frontend is gone now; ses and every pod keep running
+wait 5
+
+spawn terminal attach work
+wait 6
 key C-c
 wait 1.5
-run hexe ses list --details
+run # the counter never stopped, and the scrollback came back with it
+wait 3
+
+# ── addressing ──────────────────────────────────────────────────────────────
+run # a session answers to its name, or to any prefix of its name or uuid
+wait 2.5
+run hexe ses list 2>&1 | head -5
+wait 3.5
+
+# ── what is written down ────────────────────────────────────────────────────
+run # ses writes the session graph to disk, so a restarted daemon still knows it
+wait 2.5
+run ls $XDG_STATE_HOME/hexe/*/ 2>&1 | head -4
+wait 3.5
+run head -c 200 $XDG_STATE_HOME/hexe/*/ses_state.json 2>&1; echo
 wait 4
+
+# ── adoption ────────────────────────────────────────────────────────────────
+run # a pane can leave the session without dying, and be picked up again
+wait 2.5
+key C-M-h
+wait 3
+run echo "this pane is about to be disowned"
+wait 2.5
+key C-M-z
+wait 2.5
+key Enter
+wait 3.5
+run hexe ses list --details 2>&1 | tail -5
+wait 3.5
+key C-M-a
+wait 3.5
+key Enter
+wait 3.5
+run # adopted back, still running, same scrollback
+wait 3

@@ -1,23 +1,53 @@
-# Pods: one daemon per pane, holding the PTY and the backlog.
+# Pods: the process that actually holds your shell.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name pods
 
-run hexe pod list
-wait 3.5
-
-# A pod with no session at all — a shell with a socket in front of it.
-run hexe pod new --name notes
-wait 3
-run hexe pod list | tail -2
-wait 3.5
-
-# Talking to it from outside, with nobody attached.
-run hexe pod send --name notes --enter "echo written from the CLI > /tmp/hexe-demo-work/notes.txt"
+run # every pane is a pod: one process, one pty, one socket, one metadata file
 wait 2.5
+run hexe pod list 2>&1
+wait 4
+
+run # the socket and the metadata live under the instance's runtime directory
+wait 2.5
+run ls $XDG_RUNTIME_DIR/hexe/$HEXE_INSTANCE/ 2>&1 | head -5
+wait 4
+
+run # a pod does not need a session at all — this one has none
+wait 2.5
+run hexe pod new --name notes 2>&1
+wait 3.5
+run hexe pod list 2>&1 | tail -2
+wait 3.5
+
+run # and it can be driven from anywhere, with nobody attached to it
+wait 2.5
+run hexe pod send --name notes --enter "echo written by another process > /tmp/hexe-demo-work/notes.txt"
+wait 3
 run cat /tmp/hexe-demo-work/notes.txt
 wait 3
 
-run hexe pod kill --name notes; hexe pod gc --dry-run
+run # a control character goes the same way
+wait 2
+run hexe pod send --name notes --ctrl c 2>&1
+wait 3
+
+run # recording a pod does not displace whoever is attached to it
+wait 2.5
+run hexe pod record --name notes --out /tmp/hexe-demo-work/notes.cast 2>&1 & sleep 3; hexe pod send --name notes --enter "echo this line is being recorded"; sleep 2; kill %1 2>/dev/null
+wait 6
+run head -c 150 /tmp/hexe-demo-work/notes.cast 2>&1; echo
+wait 4
+
+run # killing it leaves metadata behind, which is what gc is for
+wait 2.5
+run hexe pod kill --name notes 2>&1
+wait 2.5
+run hexe pod gc --dry-run 2>&1
+wait 3.5
+
+run # the backlog is why detaching is cheap: 4 MiB of raw pty output per pane
+wait 3
+run # replay takes the last megabyte of it, aligned to a line, skipping dead scrollback
 wait 3.5

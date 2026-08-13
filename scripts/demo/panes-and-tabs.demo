@@ -82,13 +82,15 @@ wait 2.5
 key C-M-dot
 wait 2.5
 
-run # alt+r renames the tab in place
-wait 2
+run # alt+r renames the tab in place — though this config shows basenames, not names
+wait 2.5
 key M-r
 wait 2
 type builds
 key Enter
 wait 3
+run hexe ses list --details 2>&1 | grep -i tab
+wait 3.5
 
 run # and the whole arrangement can be saved and brought back later
 wait 2

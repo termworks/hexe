@@ -18,7 +18,7 @@ hexe terminal float --command "bash /tmp/untrusted.sh" --isolation full
 ```
 
 <!-- demo:begin -->
-[![isolation demo](https://asciinema.org/a/1263005.svg)](https://asciinema.org/a/1263005)
+[![isolation demo](https://asciinema.org/a/1263030.svg)](https://asciinema.org/a/1263030)
 <!-- demo:end -->
 
 ## How it works
@@ -106,6 +106,18 @@ Ad-hoc, from a shell:
 |---|---|
 | `--isolation <profile>` | `none`, `minimal`, `default`, `balanced`, `sandbox`, `full` |
 | `--isolated` | the boolean form |
+
+## Dead ends in the code
+
+Three things look like features and are not, which is worth knowing before you configure against
+them:
+
+- **A global `ses.isolation` config table is parsed and never used.** Isolation is per float.
+- **A Landlock filesystem allowlist and an older cgroup path (with a 512-pid default) are dead
+  code**, left from an earlier design.
+- **The profile name is validated at the SES boundary**, so an unknown string is rejected there
+  rather than silently weakening the sandbox — but `HEXE_VOIDBOX_PROFILE` is how the profile
+  actually reaches the pod's child.
 
 ## What it cannot do
 

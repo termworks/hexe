@@ -1,21 +1,44 @@
-# Project sessions: a .hexe.lua in the repo, opened as tabs and splits.
+# Project sessions: a .hexe.lua in the repo, and the ledger that gates its hooks.
 cols 240
 rows 60
-speed 0.04
+speed 0.035
 name proj
 
-run head -30 .hexe.lua
+run # a project describes the session it wants, in the same Lua as the global config
+wait 3
+run head -30 .hexe.lua 2>&1
 wait 5
 
-# Freeze the session that is running into a config of its own.
-run hexe layout save --scope local
+run # the target resolves four ways: a directory, a .lua file, a registered name, or here
+wait 3
+run hexe layout list 2>&1
+wait 3.5
+
+run # freezing the running session writes one of these out
+wait 2.5
+run hexe layout save --scope local 2>&1
 wait 2
 type frozen
 key Enter
+wait 3.5
+run head -20 .hexe.lua 2>&1
+wait 5
+
+run # --scope global registers the name instead, pointing at this directory
 wait 3
-run hexe layout list
+run hexe layout list 2>&1
 wait 3.5
 
-# Hooks in a project config only run once the file's hash is on the ledger.
-run hexe allow .
+# ── trust ───────────────────────────────────────────────────────────────────
+run # a project config can carry on_start and on_stop hooks, which are shell commands
+wait 3
+run # so they are gated: nothing runs until the file's hash is on the ledger
+wait 3
+run hexe allow . 2>&1
+wait 3.5
+run cat $XDG_STATE_HOME/hexe/trust 2>&1
+wait 4
+run # the hash is bound to the path, so allowing one repo does not bless an identical file elsewhere
+wait 3.5
+run # and editing the file changes the hash, which withdraws the trust until you look again
 wait 3.5

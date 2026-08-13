@@ -14,7 +14,7 @@ hexe allow .                    # trust this file's hooks
 ```
 
 <!-- demo:begin -->
-[![session-manager demo](https://asciinema.org/a/1263012.svg)](https://asciinema.org/a/1263012)
+[![session-manager demo](https://asciinema.org/a/1263037.svg)](https://asciinema.org/a/1263037)
 <!-- demo:end -->
 
 ## How it works

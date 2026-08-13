@@ -16,7 +16,7 @@ status = {
 ```
 
 <!-- demo:begin -->
-[![statusbar demo](https://asciinema.org/a/1263015.svg)](https://asciinema.org/a/1263015)
+[![statusbar demo](https://asciinema.org/a/1263040.svg)](https://asciinema.org/a/1263040)
 <!-- demo:end -->
 
 ## How it works
@@ -94,9 +94,29 @@ hexe terminal notify --broadcast "deploying"
 
 ### Built-ins
 
-`tabs`, `session`, `directory`, `git_branch`, `git_status`, `jobs`, `duration`, `status`, `sudo`,
-`pod_name`, `hostname`, `username`, `time`, `cpu`, `memory`, `netspeed`, `battery`, `uptime`,
-`last_command`, `running_anim`, `randomdo`, `spinner`, `character`.
+The registry, verified against `src/core/segments/mod.zig` — several names have a short alias, and
+the aliases are undocumented everywhere else:
+
+| | |
+|---|---|
+| system | `time`, `netspeed`, `uptime`, `cpu`, `memory` (`mem`), `battery`, `last_command` (`cmd`), `running_anim`, `randomdo` |
+| shell context | `directory` (`dir`), `hostname` (`host`), `username` (`user`) |
+| git | `git_branch` (`git`), `git_status` |
+| shell state | `status`, `sudo`, `character` (`char`), `duration`, `jobs`, `pod_name`, `title` |
+| frontend | `tabs`, `session`, `spinner` |
+
+Three spellings reach the same built-in, and it is worth knowing which you are writing:
+
+```lua
+builtin = function() return "dir" end                          -- a bare name, alias allowed
+builtin = function() return { name = "cpu", fg = 15, bg = 1 } end   -- a descriptor
+render  = function(ctx) return hexe.segment.git_branch(ctx) end     -- a marker the renderer expands
+```
+
+A descriptor takes `style`, numeric `fg`/`bg`, `prefix`/`suffix` (string or `{ output, style }`,
+with their own `prefix_style`/`suffix_style`), and — for `spinner` — the spinner's own options. A
+malformed field degrades to nothing rather than aborting the bar, and `sufix` is accepted as a typo
+alias of `suffix`.
 
 Anything expensive should not be a shell-out on every redraw. `hexe.exec` exists for when it must
 be, with a timeout and a cache:
@@ -131,13 +151,20 @@ up in three places:
   -- tabs-only
   active_style = "bg:5 fg:0 bold", inactive_style = "bg:237 fg:250",
   separator = " │ ", separator_style = "fg:7",
-  tab_title = "basename",           -- or "name"
+  tab_title = "basename",           -- or "name"; with "basename" a renamed tab keeps
+                                    -- showing its directory, because the name is not
+                                    -- what is drawn
   left_arrow = "", right_arrow = "",
   -- any segment
   when = function(ctx) local p = ctx.pane(0); return p and p.process_running end,
   spinner = { kind = "knight_rider", width = 8, step_ms = 75, colors = { 1, 3, 5 } },
 }
 ```
+
+A `spinner` can be attached to **any** segment, not just the spinner built-in. Its `width` is
+clamped to 1–64 and `step` / `step_ms` to sane bounds; an unknown `kind` falls back to a generic
+animation rather than erroring. `trail_len` is a struct field the Lua parser never reads — it is
+always 6.
 
 `ctx` carries `shell_running`, `alt_screen`, `jobs`, `last_status`, `exit_status`, `last_command`,
 `cwd`, `home`, `cmd_duration_ms`, `terminal_width`, `now_ms`, `env`, plus `ctx.pane(...)` lookups

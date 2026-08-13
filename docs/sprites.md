@@ -11,7 +11,7 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.p }, hexe.action.overlay.sprite
 It is the least serious thing in the codebase and the one with the most interesting build step.
 
 <!-- demo:begin -->
-[![sprites demo](https://asciinema.org/a/1263014.svg)](https://asciinema.org/a/1263014)
+[![sprites demo](https://asciinema.org/a/1263039.svg)](https://asciinema.org/a/1263039)
 <!-- demo:end -->
 
 ## How it works

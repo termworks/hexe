@@ -13,7 +13,7 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.u }, hexe.action.prompt.copy_ou
 ```
 
 <!-- demo:begin -->
-[![copy-and-search demo](https://asciinema.org/a/1263002.svg)](https://asciinema.org/a/1263002)
+[![copy-and-search demo](https://asciinema.org/a/1263027.svg)](https://asciinema.org/a/1263027)
 <!-- demo:end -->
 
 ## How it works
