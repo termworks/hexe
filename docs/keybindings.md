@@ -1,138 +1,209 @@
 # Keybindings
 
-Keybindings are defined in the top-level `keys` array passed to `hexe.setup`.
-
----
-
-## Basic structure
+There is no prefix key. A binding is a chord, an action, a condition and a disposal rule, and a key
+that matches nothing at all reaches the pane unchanged — which is the default state of every key on
+your keyboard.
 
 ```lua
-local hexe = require("hexe")
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.t }, hexe.action.tab.new()),
 
-return hexe.setup({
-  keys = {
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.t }, hexe.action.tab.new()),
-  },
-})
-```
-
----
-
-## `key`
-
-The `key` field is a single array containing modifiers and the key, all using `hexe.key.*`:
-
-```lua
-key = { hexe.key.ctrl, hexe.key.alt, hexe.key.q }
-key = { hexe.key.ctrl, hexe.key.alt, hexe.key.shift, hexe.key.p }
-key = { hexe.key.ctrl, hexe.key.alt, hexe.key.up }
-key = { hexe.key.ctrl, hexe.key.alt, hexe.key["1"] }   -- number keys
-key = { hexe.key.ctrl, hexe.key.alt, hexe.key.dot }
-key = { hexe.key.ctrl, hexe.key.alt, hexe.key.comma }
-```
-
-**Modifiers:**
-- `hexe.key.ctrl`
-- `hexe.key.alt`
-- `hexe.key.shift`
-- `hexe.key.super`
-
-**Named keys:**
-- Letters: `hexe.key.a` … `hexe.key.z`
-- Numbers: `hexe.key["0"]` … `hexe.key["9"]`
-- Arrows: `hexe.key.up`, `hexe.key.down`, `hexe.key.left`, `hexe.key.right`
-- Punctuation: `hexe.key.dot`, `hexe.key.comma`, `hexe.key.space`, etc.
-
----
-
-## `action`
-
-Actions trigger terminal frontend operations. Session-structure mutations are applied by SES after command handling. Available action constructors:
-
-| Action | Description |
-|---|---|
-| `hexe.action.quit()` | Exit the terminal frontend |
-| `hexe.action.detach()` | Detach from session |
-| `hexe.action.pane.disown()` | Orphan current pane |
-| `hexe.action.pane.adopt()` | Adopt an orphaned pane |
-| `hexe.action.pane.close()` | Close current float or split pane |
-| `hexe.action.pane.select()` | Enter pane select/swap mode |
-| `hexe.action.split.horizontal()` | Split horizontally |
-| `hexe.action.split.vertical()` | Split vertically |
-| `hexe.action.split.resize(dir)` | Resize split |
-| `hexe.action.tab.new()` | New tab |
-| `hexe.action.tab.next()` | Next tab |
-| `hexe.action.tab.prev()` | Previous tab |
-| `hexe.action.tab.close()` | Close current tab |
-| `hexe.action.float.toggle(key)` | Toggle named float |
-| `hexe.action.float.nudge(dir)` | Move float |
-| `hexe.action.focus.move(dir)` | Move focus |
-| `hexe.action.clipboard.copy()` | Copy selection to clipboard |
-| `hexe.action.clipboard.request()` | Paste from clipboard |
-| `hexe.action.system.notify()` | Send a system notification |
-| `hexe.action.overlay.sprite_toggle()` | Toggle sprite overlay |
-| `hexe.action.copy.enter()` | Enter keyboard copy-mode |
-| `hexe.action.search.enter()` | Search the focused pane's scrollback (type · `Enter` · `n`/`N` · `Esc`) |
-| `hexe.action.prompt.previous()` | Jump to the previous OSC 133 prompt mark |
-| `hexe.action.prompt.next()` | Jump to the next OSC 133 prompt mark |
-| `hexe.action.prompt.copy_output()` | Copy the last marked command output |
-
-**Actions that take parameters:**
-
-```lua
-hexe.key({ ... }, hexe.action.float.toggle("1"))
-hexe.key({ ... }, hexe.action.focus.move("left"))
-hexe.key({ ... }, hexe.action.split.resize("up"))
-hexe.key({ ... }, hexe.action.float.nudge("down"))
-hexe.key({ ... }, hexe.action.prompt.previous())
-hexe.key({ ... }, hexe.action.prompt.copy_output())
-```
-
----
-
-## `mode`
-
-Controls what happens to the key after the bind fires:
-
-| Mode | Description |
-|---|---|
-| `hexe.mode.act_and_consume` | Run action, swallow the key (default) |
-| `hexe.mode.act_and_passthrough` | Run action AND forward key to pane |
-| `hexe.mode.passthrough_only` | Forward key to pane, no action |
-
-```lua
--- default: key is consumed
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.t }, hexe.action.tab.new())
-
--- passthrough: forward to pane, no action
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, nil, {
   mode = hexe.mode.passthrough_only,
   when = function(ctx)
     local p = ctx.pane(0)
     return p and (p.process_name == "nvim" or p.process_name == "vim")
   end,
-})
-
--- both: run action and also send key into pane
-hexe.key({ ... }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_and_passthrough })
+}),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, hexe.action.focus.move("up")),
 ```
 
-Keys without any binding always pass through unchanged.
+<!-- demo:begin -->
+[![keybindings demo](https://asciinema.org/a/1263006.svg)](https://asciinema.org/a/1263006)
+<!-- demo:end -->
 
-## Mouse-aware panes
+## How it works
 
-Hexe forwards mouse events on both the primary and alternate screen when the pane enables mouse
-tracking and SGR mode 1006. Normal mode 1000 receives button events, button-event mode 1002 also
-receives drag motion, and any-event mode 1003 receives all motion.
+```
+key event
+   │
+   ├─ a modal surface is up? (search · copy-mode · rename · popup)  ─> it takes the key
+   │
+   ├─ walk the bind list in order
+   │     ├─ chord matches?          mods bitmask + key
+   │     ├─ `on` matches?           press · release · repeat · hold
+   │     └─ `when` returns true?    a Lua callback over the focused pane
+   │        └─ first match wins
+   │
+   └─ no match ─> the key is translated and written to the focused pane's pod
+```
 
-Legacy mouse encodings are not emitted. A pane that does not enable SGR mode 1006 keeps Hexe's
-normal selection and scrolling behavior. Hold the configured selection override modifiers
-(Ctrl+Alt by default) to select text inside a mouse-aware application.
+**Order is the resolution rule.** The two bindings in the example above are the same chord: the
+first one, conditional on `nvim` being in the foreground, passes the key through and stops there;
+the second is reached only when the first did not match. This is how a chord can belong to the
+editor in one pane and to the multiplexer in the next, with no modes and no prefix.
 
----
+It cuts the other way too, and quietly. A chord bound earlier with **no** `when` matches
+everything, so a later binding of the same chord is dead code:
 
-## `when`
+```lua
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.v }, hexe.action.clipboard.request()),
+-- …
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.v }, hexe.action.split.vertical(), { when = focused_split }),
+```
+
+The second line never fires: the first has already matched. Nothing warns about it, and the symptom
+is a key that "does not work" while its binding is plainly there in the file.
+
+### What happens to the key afterwards
+
+| | |
+|---|---|
+| `hexe.mode.act_and_consume` | run the action, swallow the key (default) |
+| `hexe.mode.act_and_passthrough` | run the action *and* send the key to the pane |
+| `hexe.mode.passthrough_only` | send the key to the pane, run nothing |
+
+### When a chord fires
+
+`on` distinguishes four moments — `press`, `release`, `repeat`, `hold` — with two thresholds
+turning a held key into three outcomes: under `tap_ms` it is a repeat and fires nothing, between
+`tap_ms` and `hold_ms` it is a tap, and beyond `hold_ms` it is a hold. This is what makes
+"hold Alt+Shift+D to detach" possible without that chord being unusable for anything else.
+
+### Conditions
+
+`when` is a callback, and it receives a context that can look at any pane, not just the focused
+one:
+
+```lua
+when = function(ctx)
+  local p = ctx.pane(0)                 -- 0 or nil: the focused pane
+  return p and p.focus_split and not p.alt_screen
+end
+```
+
+| | |
+|---|---|
+| `ctx.pane(0)` / `ctx.pane("focused")` | the focused pane |
+| `ctx.pane(n)` | by index into `ctx.panes`, 1-based |
+| `ctx.pane("<uuid>")` | by uuid |
+| `ctx.pane("last")` | the previously focused pane |
+| `ctx.pane("tab:2/focus")` | the focused pane of tab 2 |
+| `ctx.cache.get/set/del` | memoise anything expensive, with a TTL |
+
+Useful pane fields: `focus_split`, `focus_float`, `float_key`, `process_name`, `process_running`,
+`alt_screen`, `tab_count`, `active_tab`. Callbacks are evaluated on the input path, so they are
+cached briefly, and `HEXE_LUA_TRACE=slow` with `HEXE_LUA_TRACE_SLOW_MS` will tell you which one is
+costing you.
+
+### Events
+
+Bindings react to keys; `hexe.events` reacts to the session:
+
+```lua
+hexe.events.on("command_finished", function(ev)
+  -- ev.command, ev.cwd, ev.status, ev.duration_ms, ev.jobs, ev.pane_uuid
+end)
+
+hexe.events.on("statusbar_redraw", hexe.events.debounce(250, function(ev) … end))
+hexe.events.once("pane_focus_changed", function(ev) … end)
+```
+
+Available: `pane_focus_changed`, `tab_changed`, `command_finished`,
+`pane_shell_running_changed`, `statusbar_redraw` (throttled, 120 ms by default).
+
+### Getting the chord to hexe at all
+
+Hexe asks for the kitty keyboard protocol on startup. Where the terminal supports it, modifiers
+arrive intact on every key, including the ones legacy encodings cannot express. Where it does not,
+hexe falls back to the traditional encodings, and the fallback is lossy in the ways it has always
+been: `Ctrl+Alt+letter` becomes `ESC` plus a control character, `Alt+digit` becomes `ESC` plus the
+digit, and chords like `Ctrl+.` cannot be represented at all.
+
+Passthrough runs the same translation in reverse when writing to a pane: arrows with modifiers
+become `ESC [ 1 ; <mod> A`, `Ctrl+letter` becomes a control character, `Alt+key` gains an `ESC`
+prefix, `Shift+Tab` becomes `ESC [ Z`.
+
+## What makes it different
+
+- **No prefix.** tmux routes every binding through `C-b`; hexe routes through the bind list and a
+  condition. The cost is that hexe occupies real chords, so a binding can collide with an
+  application's — and `when` plus ordering is the answer to that.
+- **Conditions are code, not a mode.** `when` is a Lua function with access to the pane's
+  foreground process, alt-screen state, tab and float identity. There is no equivalent to consult
+  in tmux's key tables.
+- **A key can do both things.** `act_and_passthrough` has no analogue in a prefix design, where the
+  prefix has already swallowed the key by the time the binding runs.
+- **Mouse-aware panes keep their mouse.** Applications that enable SGR mouse tracking (1006) get
+  their events; hold the selection-override chord (Ctrl+Alt by default) to select text over the top
+  of one anyway.
+
+## Configuration
+
+Keys and modifiers are spelled with `hexe.key.*`:
+
+```lua
+key = { hexe.key.ctrl, hexe.key.alt, hexe.key.q }
+key = { hexe.key.alt, hexe.key["1"] }        -- digits are string keys
+key = { hexe.key.ctrl, hexe.key.alt, hexe.key.left }
+key = { hexe.key.alt, hexe.key.shift, hexe.key.up }
+```
+
+Modifiers: `ctrl`, `alt`, `shift`, `super`. Keys: `a`–`z`, `["0"]`–`["9"]`, `up`/`down`/`left`/
+`right`, `dot`, `comma`, `space`, and the rest of the punctuation names.
+
+The full action set, as of this build:
+
+| | |
+|---|---|
+| session | `quit`, `detach` |
+| panes | `pane.close`, `pane.select`, `pane.zoom`, `pane.sync_toggle`, `pane.disown`, `pane.adopt` |
+| splits | `split.horizontal`, `split.vertical`, `split.resize(dir)` |
+| tabs | `tab.new`, `tab.next`, `tab.prev`, `tab.close`, `tab.rename` |
+| floats | `float.toggle(key)`, `float.nudge(dir)` |
+| focus | `focus.move(dir)` |
+| layout | `layout.save`, `layout.load` |
+| config | `config.reload` |
+| reading | `copy.enter`, `search.enter`, `prompt.previous`, `prompt.next`, `prompt.copy_output` |
+| clipboard | `clipboard.copy`, `clipboard.request` |
+| overlays | `overlay.sprite_toggle`, `overlay.keycast_toggle` |
+| system | `system.notify` |
+
+Two thresholds and one mouse setting round it out:
+
+```lua
+mux = {
+  mouse = { selection_override = { "ctrl", "alt" } },
+  confirm = { exit = true, detach = true, disown = true, close = true },
+},
+```
+
+## What it cannot do
+
+- **A chord hexe takes is a chord the pane never sees**, unless the bind says otherwise. There is
+  no prefix to hide behind, so collisions are real and are resolved by you.
+- **Legacy terminals cannot deliver every chord.** Without the kitty protocol, `Ctrl+Alt+1`,
+  `Ctrl+.` and friends do not arrive; that is the terminal, not hexe.
+- **`when` runs on the input path.** An expensive callback is felt as input latency — cache it.
+- **Bindings are global to the frontend.** There are no per-pane key tables, and no modes beyond
+  the modal surfaces (search, copy-mode, rename, popups) that take keys while they are up.
+- **`hexe.key(...)` is the only accepted spelling.** Raw bind tables from older configs are
+  rejected rather than migrated.
+
+## Where it lives
+
+| | |
+|---|---|
+| `src/core/config.zig` | `Bind`, `BindAction`, `BindWhen`, `BindMode`, and the action-name parser |
+| `src/frontends/terminal/keybinds.zig` | matching: chord, timing, condition, order |
+| `src/frontends/terminal/keybinds_actions.zig` | what each action does |
+| `src/frontends/terminal/key_translate.zig` | writing keys back out to a pane |
+| `src/frontends/terminal/input.zig`, `loop_input*.zig` | the input path and the modal surfaces |
+| `src/frontends/terminal/lua_events.zig` | `hexe.events` |
+| `src/core/lua_runtime.zig` | the `hexe.action.*` constructors |
+
+## Reference: conditions and events
+
+### The `when` callback
 
 Optional condition that must be true for the bind to fire.
 
@@ -184,7 +255,7 @@ Common pane fields:
 - Set `HEXE_LUA_TRACE=slow` to trace only slow evaluations.
 - Optional threshold: `HEXE_LUA_TRACE_SLOW_MS` (default `8`).
 
-## Lua Events
+### Lua Events
 
 You can register runtime event callbacks through `hexe.events`.
 
@@ -222,61 +293,3 @@ end)
 ```
 
 ---
-
-## Common patterns
-
-### Nvim passthrough
-
-Pass `Ctrl+Alt+Arrow` through to nvim/vim, otherwise move focus:
-
-```lua
--- passthrough first (evaluated before the fallback)
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up },    nil, { when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hexe.mode.passthrough_only }),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down },  nil, { when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hexe.mode.passthrough_only }),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left },  nil, { when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hexe.mode.passthrough_only }),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, nil, { when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hexe.mode.passthrough_only }),
-
--- fallback: move frontend focus
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up },    hexe.action.focus.move("up")),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down },  hexe.action.focus.move("down")),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left },  hexe.action.focus.move("left")),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, hexe.action.focus.move("right")),
-```
-
-Binds are evaluated in order — first match wins.
-
-### Context-sensitive split/float
-
-```lua
--- split only when a split is focused
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.h }, hexe.action.split.horizontal(), { when = function(ctx) return ctx.focus_split end }),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.v }, hexe.action.split.vertical(), { when = function(ctx) return ctx.focus_split end }),
-```
-
-### Float toggles
-
-```lua
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1")),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["2"] }, hexe.action.float.toggle("2")),
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["0"] }, hexe.action.float.toggle("p")),
-```
-
-The `float` value must match the `key` field of a float defined in your layout.
-
----
-
-## Terminal support
-
-Hexa enables the kitty keyboard protocol on startup. Terminals that support it send structured key events (including modifiers on arrows, etc.). Terminals that don't fall back to legacy escape sequences — most binds still work.
-
-**Key forwarding for passthrough modes** translates to legacy sequences:
-- Arrow keys with mods → `ESC [ 1 ; <mod> A/B/C/D`
-- Ctrl+letter → control character (0x01–0x1A)
-- Alt+key → ESC prefix
-- Shift+Tab → `ESC [ Z`
-
----
-
-## Conditions in status bar and prompt
-
-`when` is also used in status bar segments and shell prompt segments. See [statusbar](statusbar.md) for the full token list available in those contexts.

@@ -1,49 +1,50 @@
 # Panes and tabs: the split tree, and what the frontend does to it.
-cols 120
-rows 30
+cols 240
+rows 60
 speed 0.04
 name panes
 
 run echo "one pane"
-wait 1.2
+wait 1.5
 
 key C-M-h
-wait 2
+wait 2.5
 run echo "two"
-wait 1.5
+wait 1.8
 
-key C-M-v
-wait 2
+key C-M-e
+wait 2.5
 run echo "three"
-wait 1.5
+wait 1.8
 
 # Focus moves by direction, not by cycling.
 key C-M-Left
-wait 1.5
+wait 1.8
 key C-M-Right
+wait 1.2
 key C-M-Down
-wait 1.5
+wait 1.8
 
 # Zoom: the focused pane takes the tab, and gives it back.
 key C-M-m
-wait 2.5
+wait 3
 key C-M-m
-wait 2
+wait 2.5
 
 # Broadcast: one keyboard, every pane in the tab.
-key C-M-s
-wait 1.5
-run echo "typed once"
-wait 2
-key C-M-s
-wait 1.5
-
-# Tabs.
-key C-M-t
-wait 2.5
-run echo "a second tab"
-wait 1.5
 key C-M-b
 wait 2
-key C-M-n
+run echo "typed once"
+wait 2.5
+key C-M-b
 wait 2
+
+# Tabs: new, and the two keys that move between them.
+key C-M-t
+wait 3
+run echo "a second tab"
+wait 2
+key C-M-comma
+wait 2.5
+key C-M-dot
+wait 2.5

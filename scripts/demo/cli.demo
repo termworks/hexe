@@ -1,22 +1,21 @@
 # The CLI: the same session, from outside the session.
-cols 120
-rows 32
+cols 240
+rows 60
 speed 0.04
 name cli
 
 run hexe ses list --details
-wait 3.5
+wait 4
 
 # Panes are addressable, so a script can type into one.
 run hexe terminal send --broadcast --enter "echo sent from the command line"
-wait 3
+wait 3.5
 
-# A float with a command in it, run from a script, with its result captured.
 # The float's result comes back on stdout, so a shell can capture it.
-run count=$(hexe terminal float --title report --size 60,40 --result-file /tmp/hexe-demo-work/pick.txt --command $WORK/bin/report)
-wait 8
+run count=$(hexe terminal float --title report --size 60,40 --result-file /tmp/hexe-demo-work/pick.txt --command /tmp/hexe-demo-work/bin/report)
+wait 9
 run echo "the float answered: $count"
-wait 3
+wait 3.5
 
 run hexe pod list | head -3
-wait 3
+wait 3.5

@@ -11,7 +11,7 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.p }, hexe.action.overlay.sprite
 It is the least serious thing in the codebase and the one with the most interesting build step.
 
 <!-- demo:begin -->
-[![sprites demo](https://asciinema.org/a/1262991.svg)](https://asciinema.org/a/1262991)
+[![sprites demo](https://asciinema.org/a/1263014.svg)](https://asciinema.org/a/1263014)
 <!-- demo:end -->
 
 ## How it works
@@ -109,7 +109,6 @@ Sprite coverage is generations 1 through 9 with the variants: mega evolutions
 | `src/frontends/terminal/render_sprite.zig` | parsing the ANSI art into cells and centring it |
 | `src/frontends/terminal/keybinds_actions.zig` | `sprite_toggle`, for tiled panes and floats |
 | `src/core/ipc.zig` | `generatePaneName` — where the names come from in the first place |
-| `docs/sprite.md` | the original feature note |
 
 Sprites from [krabby](https://github.com/yannjor/krabby), originally
 [PokéSprite](https://msikma.github.io/pokesprite/), converted to Unicode by

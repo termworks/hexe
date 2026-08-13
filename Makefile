@@ -91,11 +91,17 @@ install: build
 # ==================================================================================================
 # Feature demos
 # ==================================================================================================
-# One recording per document in docs/features. Each is a script in
-# scripts/demo, driven into a real frontend by record.py, so any of them can be
-# made again after the code changes -- and a film that stops matching hexe is a
-# bug in one or the other. Needs a ReleaseFast build: Debug VT parsing cannot
-# keep up with a session being typed at.
+# One recording per document in docs/. Each is a script in scripts/demo,
+# driven into a real frontend by record.py, so any of them can be made again
+# after the code changes -- and a film that stops matching hexe is a bug in one
+# or the other.
+#
+# The films are shot with the author's own ~/.config/hexe and ~/.config/oslo,
+# copied into /tmp by fixture.sh (see the header there for the two things it
+# changes on the way in), at 240x60, with oslo as the shell.
+#
+# Needs a ReleaseFast build: Debug VT parsing cannot keep up with a session
+# being typed at.
 DEMO ?=
 
 demo-fixture:

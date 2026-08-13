@@ -1,127 +1,113 @@
-# Instances (Dev/Test Isolation)
+# Instances
 
-Hexe supports running multiple independent terminal-frontend/ses/pod stacks on the same machine.
-This is intended for development and feature testing without touching your "working" Hexe.
-
-The feature is implemented by **namespacing all IPC sockets** under an instance name.
-
-## Concepts
-
-Hexe has three cooperating process roles:
-
-- `terminal frontend` (`hexe terminal`; `hexe mux` is a compatibility alias) for UI + input
-- `ses` (session registry + spawns pods)
-- `pod` (one per pane; owns the PTY)
-
-Normally these talk over Unix sockets under:
-
-- `$XDG_RUNTIME_DIR/hexe/` (or `/tmp/hexe/`)
-
-With instances enabled, sockets are placed under:
-
-- `$XDG_RUNTIME_DIR/hexe/<instance>/`
-
-So different instances do not see each other.
-
-## Selecting an Instance
-
-There are two ways to pick an instance:
-
-1) Environment (default)
-
-If `HEXE_INSTANCE` is set, all `hexe ...` commands use it.
-
-2) CLI flags (override)
-
-Most commands accept:
-
-- `-I <NAME>` / `--instance <NAME>`
-
-This overrides `HEXE_INSTANCE` for that invocation (and any processes it spawns).
-
-Examples:
+An instance is a whole stack — its own SES daemon, its own pods, its own sessions — living under
+its own socket directory. Two instances on one machine cannot see each other, which is what makes
+it safe to run a development build of hexe next to the hexe you are working in.
 
 ```sh
-hexe terminal new -I dev
-hexe ses list -I dev
-hexe terminal attach -I dev nidoking
+hexe terminal new -I dev        # a stack called dev
+hexe ses list -I dev            # its sessions
+hexe terminal new -T            # a throwaway stack with a generated name
 ```
 
-## Test-Only Sessions
+<!-- demo:begin -->
+[![instances demo](https://asciinema.org/a/1263004.svg)](https://asciinema.org/a/1263004)
+<!-- demo:end -->
 
-`hexe terminal new` supports:
+## How it works
 
-- `-T` / `--test-only`
+The whole mechanism is a path:
 
-This starts an isolated stack by generating a unique instance name like:
+```
+$XDG_RUNTIME_DIR/hexe/                     the default instance
+$XDG_RUNTIME_DIR/hexe/<instance>/          everything for a named one
+        ├── ses.sock
+        └── pod-<uuid>.sock …
 
-- `test-<8chars>`
-
-The command prints the chosen instance so you can target it later:
-
-```sh
-hexe terminal new -T
-# prints: test instance: test-acde1234
+$XDG_STATE_HOME/hexe/<instance>/ses_state.json
+$XDG_STATE_HOME/hexe/<instance>/…log
 ```
 
-Internally this sets:
+A command resolves its instance from `HEXE_INSTANCE`, or from `--instance` / `-I` on the
+subcommand, and then every socket it opens or creates is namespaced by it. There is nothing else to
+it: no registry, no coordination, no shared lock. Two stacks are two directories.
 
-- `HEXE_INSTANCE=test-acde1234`
-- `HEXE_TEST_ONLY=1`
-
-## Listing Sessions
-
-`hexe ses list` always talks to the ses daemon of the current instance.
-It prints which instance it is using.
-
-Examples:
-
-```sh
-hexe ses list -I dev
-hexe ses list -I prod
-```
-
-If you never start a "default" instance, then:
-
-```sh
-env -u HEXE_INSTANCE -u HEXE_TEST_ONLY hexe ses list
-```
-
-may correctly report `ses daemon is not running`.
-
-## Killing Only One Instance
-
-Because Hexe now spawns `ses` and `pod` with explicit `--instance <name>` argv,
-you can kill a single instance with a single short command.
-
-Kill only dev:
+Because SES and every pod are spawned with `--instance <name>` in their argv, an instance is also
+visible in `ps` — and killable as a unit:
 
 ```sh
 pkill -TERM -f "hexe .*instance dev"
 ```
 
-If it does not exit (last resort):
+### Test-only stacks
 
 ```sh
-pkill -KILL -f "hexe .*instance dev"
-```
-
-Notes:
-
-- This matches both `-I dev` and `--instance dev` because the regex looks for the substring `instance dev`.
-- Killing pods will make the terminal frontend show a "Shell exited" popup for panes; kill the frontend process for a hard stop of the UI.
-
-## Recommended Workflow
-
-To make "working" vs "dev" unambiguous, use explicit instances:
-
-```sh
-# your daily session
-hexe terminal new -I prod
-
-# your development stack
-hexe terminal new -I dev
-
-# quick experiments
 hexe terminal new -T
+# test instance: test-acde1234
 ```
+
+`-T` generates a unique instance name, prints it, and sets `HEXE_INSTANCE` and `HEXE_TEST_ONLY=1`
+for everything it spawns. This is what the smoke tests use: each one gets a stack nothing else can
+reach, and cleaning up means killing one name.
+
+### Where the flag goes
+
+`-I` / `--instance` is an option **of the subcommand**, not of `hexe`:
+
+```sh
+hexe ses list -I dev        # correct
+hexe -I dev ses list        # error: unrecognized option 'I'
+```
+
+`HEXE_INSTANCE=dev hexe ses list` works too, and is what you want in a shell you intend to keep.
+
+## What makes it different
+
+tmux gets here with `-L <socket-name>` (and `-S <path>`), and the mechanism is the same idea: a
+different socket is a different server. The differences are in the reach:
+
+- **One name covers the whole stack.** Hexe has three process roles, and the instance name follows
+  all of them — SES, every pod, and every CLI call — including the state file and the log.
+- **It is in the process list.** Every daemon carries `--instance <name>` in its argv, so both
+  `pgrep` and a targeted `pkill` work without knowing socket paths.
+- **`-T` is a first-class throwaway.** tmux has no "give me a private server with a fresh name and
+  tell me what it was".
+
+## Configuration
+
+| | |
+|---|---|
+| `HEXE_INSTANCE=<name>` | environment; applies to every `hexe` command in that shell |
+| `-I <name>` / `--instance <name>` | per subcommand; overrides the environment for that call and everything it spawns |
+| `-T` / `--test-only` | `terminal new` only: generate `test-<8 hex>`, print it, use it |
+| `HEXE_TEST_ONLY=1` | set by `-T` |
+
+A useful habit, if you develop hexe:
+
+```sh
+hexe terminal new -I prod      # the one you live in
+hexe terminal new -I dev       # the one you are breaking
+hexe terminal new -T           # the one you are about to throw away
+```
+
+## What it cannot do
+
+- **Nothing is shared between instances.** Not sessions, not pods, not layouts in flight — that is
+  the point, but it also means you cannot move a pane across.
+- **`hexe ses list` with no instance talks to the default stack**, and correctly reports that no
+  daemon is running if you have never started one. `env -u HEXE_INSTANCE hexe ses list` is how you
+  ask about the default from inside a named stack.
+- **Instance names are sanitised and truncated** to fit a socket path; a long name is not an error,
+  but it is not the name you typed either.
+- **Killing an instance kills its panes.** The frontend will show a "shell exited" popup per pane
+  before you kill the frontend itself.
+- **Nothing garbage-collects a dead instance's directory.** `hexe pod gc` cleans stale pod
+  metadata; the empty runtime directory stays until the next reboot clears `$XDG_RUNTIME_DIR`.
+
+## Where it lives
+
+| | |
+|---|---|
+| `src/core/ipc.zig` | `getSocketDir`, `getSesStatePath`, `getLogPath`, and the name sanitiser |
+| `src/cli/app.zig` | the `--instance` option on every subcommand, and `-T` |
+| `scripts/smoke_*.py` | every smoke test sets `HEXE_INSTANCE`; this is the feature that lets them run at all |

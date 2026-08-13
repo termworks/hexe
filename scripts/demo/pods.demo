@@ -1,23 +1,23 @@
 # Pods: one daemon per pane, holding the PTY and the backlog.
-cols 120
-rows 30
+cols 240
+rows 60
 speed 0.04
 name pods
 
 run hexe pod list
-wait 3
+wait 3.5
 
 # A pod with no session at all — a shell with a socket in front of it.
 run hexe pod new --name notes
-wait 2.5
-run hexe pod list | tail -2
 wait 3
+run hexe pod list | tail -2
+wait 3.5
 
 # Talking to it from outside, with nobody attached.
 run hexe pod send --name notes --enter "echo written from the CLI > /tmp/hexe-demo-work/notes.txt"
-wait 2
-run cat /tmp/hexe-demo-work/notes.txt
 wait 2.5
+run cat /tmp/hexe-demo-work/notes.txt
+wait 3
 
 run hexe pod kill --name notes; hexe pod gc --dry-run
-wait 3
+wait 3.5

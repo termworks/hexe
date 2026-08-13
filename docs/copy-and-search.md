@@ -13,7 +13,7 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.u }, hexe.action.prompt.copy_ou
 ```
 
 <!-- demo:begin -->
-[![copy-and-search demo](https://asciinema.org/a/1262979.svg)](https://asciinema.org/a/1262979)
+[![copy-and-search demo](https://asciinema.org/a/1263002.svg)](https://asciinema.org/a/1263002)
 <!-- demo:end -->
 
 ## How it works
@@ -102,7 +102,9 @@ around the edges:
 | `mux.selection_color` | the selection highlight |
 | `mux.mouse.selection_override` | the chord that takes the mouse back from an application |
 
-To get prompt marks in bash, the shell has to emit them — hexe's own integration does not:
+oslo emits OSC 133 on every prompt on its own, which is why the recording above can jump between
+commands with nothing configured. To get the same in bash, the shell has to emit the marks itself —
+hexe's bash integration does not:
 
 ```sh
 PS1='\[\033]133;A\007\]…your prompt…\[\033]133;B\007\]'
