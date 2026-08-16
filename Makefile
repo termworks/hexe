@@ -70,6 +70,7 @@ smoke: smoke-clean
 	python3 -u scripts/smoke_float_concurrent.py
 	python3 -u scripts/smoke_pod_record_input.py
 	python3 -u scripts/smoke_exit_intent_concurrent.py
+	python3 -u scripts/smoke_float_destroy.py
 
 smoke-protocol:
 	zig build
