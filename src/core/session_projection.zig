@@ -130,20 +130,6 @@ pub const SessionProjection = struct {
         return self.base_root_owned;
     }
 
-    pub fn setBaseRoot(self: *SessionProjection, base_root: []const u8) !void {
-        const owned = try self.allocator.dupe(u8, base_root);
-        const snapshot_owned: ?[]u8 = if (self.attached_snapshot != null)
-            try self.allocator.dupe(u8, base_root)
-        else
-            null;
-        self.allocator.free(self.base_root_owned);
-        self.base_root_owned = owned;
-        if (self.attached_snapshot) |*snapshot| {
-            if (snapshot.base_root) |old| self.allocator.free(old);
-            snapshot.base_root = snapshot_owned.?;
-        }
-    }
-
     pub fn setSessionIdentity(
         self: *SessionProjection,
         session_uuid: [32]u8,
@@ -256,11 +242,6 @@ pub const SessionProjection = struct {
         // Normalize a corrupt tab_counter in-place while keeping projection
         // convenience field in sync.
         self.setTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
-    }
-
-    pub fn clearAttachedSnapshot(self: *SessionProjection) void {
-        if (self.attached_snapshot) |*snapshot| snapshot.deinit();
-        self.attached_snapshot = null;
     }
 
     pub fn attachedSnapshot(self: *const SessionProjection) ?*const session_model.SessionSnapshot {
@@ -582,16 +563,6 @@ pub const SessionProjection = struct {
         }
 
         return next;
-    }
-
-    pub fn replaceTabMetaFromSnapshot(
-        self: *SessionProjection,
-        tabs: []const session_model.SessionTab,
-    ) !void {
-        const next = try self.buildTabMetaFromSnapshot(tabs);
-        self.clearTabMeta();
-        self.tabs.deinit(self.allocator);
-        self.tabs = next;
     }
 
     pub fn appendTab(

@@ -6,6 +6,7 @@ const logging = @import("logging.zig");
 const config_mod = @import("config.zig");
 const session_model = @import("session_model.zig");
 const trust = @import("trust.zig");
+const strings = @import("strings.zig");
 
 /// Direction of a split in session config.
 pub const SplitDir = enum {
@@ -236,9 +237,9 @@ pub fn saveLayoutRegistry(allocator: std.mem.Allocator, registry: LayoutRegistry
     for (registry.entries, 0..) |entry, i| {
         if (i > 0) try writer.writeAll(",");
         try writer.writeAll("\n    {\"name\":\"");
-        try writeJsonEscaped(writer, entry.name);
+        try strings.writeJsonEscaped(writer, entry.name);
         try writer.writeAll("\",\"path\":\"");
-        try writeJsonEscaped(writer, entry.path);
+        try strings.writeJsonEscaped(writer, entry.path);
         try writer.writeAll("\"}");
     }
     try writer.writeAll("\n  ]\n}\n");
@@ -276,19 +277,6 @@ pub fn upsertLayoutRegistryEntry(allocator: std.mem.Allocator, name: []const u8,
     var next = LayoutRegistry{ .entries = try list.toOwnedSlice(allocator) };
     defer deinitLayoutRegistry(allocator, &next);
     try saveLayoutRegistry(allocator, next);
-}
-
-fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => try writer.writeByte(c),
-        }
-    }
 }
 
 /// Resolve a CLI argument to a .hexe.lua config path.
@@ -852,6 +840,34 @@ test "loadProjectConfig sandboxes an UNTRUSTED project file" {
 
     // ...and must not have touched the filesystem on the way.
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("pwned", .{}));
+}
+
+test "loadProjectConfig refuses a precompiled bytecode chunk" {
+    // The sandbox above is enforced at the SOURCE level: it nils io/os/package
+    // and friends in the Lua state. Lua 5.4 ships no bytecode verifier, so a
+    // crafted binary chunk gets arbitrary VM memory access and walks straight
+    // back out of it. Loading with mode `.text` is what keeps that sandbox
+    // meaningful, and a repo checkout is enough to reach this path.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Lua's binary signature. `lua_load` dispatches on this first byte alone,
+    // so the chunk does not need to be a valid one to prove the mode.
+    const bytecode = "\x1bLua\x54\x00\x19\x93\r\n\x1a\n";
+    try tmp.dir.writeFile(.{ .sub_path = "bytecode.lua", .data = bytecode });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "bytecode.lua");
+    defer std.testing.allocator.free(path);
+
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    try std.testing.expectError(error.LuaError, runtime.loadProjectConfig(path));
+
+    // Assert on the REASON, not just that it failed: a truncated binary chunk
+    // is rejected under `.binary_text` too, so "it errored" proves nothing.
+    // Only `.text` refuses it for being binary at all.
+    const msg = runtime.last_error orelse return error.NoLuaError;
+    try std.testing.expect(std.mem.indexOf(u8, msg, "attempt to load a binary chunk") != null);
 }
 
 test "loadProjectConfig keeps full capabilities for a TRUSTED project file" {

@@ -234,6 +234,9 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         // conditions): drain their output, reap finished ones, kill overruns.
         // Never blocks — that is the whole point.
         state.async_cmds.poll();
+        // Same contract for externally painted regions: advance in-flight
+        // fetches with non-blocking syscalls only.
+        state.regions.poll();
         maybeReconnectSes(state, &reconnect_state);
         runtime_events.applyDeferredPaneExits(state);
         runtime_events.applyDeferredCwdResponse(state);

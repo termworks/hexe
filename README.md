@@ -39,9 +39,8 @@ hexe itself — see [recording](docs/recording.md).
 | [Keybindings](docs/keybindings.md) | no prefix: chords, conditions, and what happens to the key afterwards |
 | [Reading what happened](docs/copy-and-search.md) | scrollback search, copy-mode, OSC 133 prompt marks |
 | [Overlays and popups](docs/overlays.md) | notifications, questions, pickers, keycast, pane labels |
-| [The status bar](docs/statusbar.md) | three zones, priority budgets, buttons, progress from panes |
-| [The shell prompt](docs/prompt.md) | the same segments, rendered into oslo, bash, zsh or fish |
-| [Sprites](docs/sprites.md) | 2304 pokemon in 1.6 MB, and why a pane is named after one |
+| [Painting](docs/regions.md) | the bar, titles, sprites and popups are drawn by an external painter |
+| [Shell integration](docs/prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
 | [Configuration](docs/config.md) | one Lua file, a schema that refuses typos, reload without losing panes |
 | [Project sessions](docs/session-manager.md) | `.hexe.lua`, freezing a session, and the trust ledger |
 | [Isolation](docs/isolation.md) | namespaces and cgroups per pane — and what it needs from the kernel |

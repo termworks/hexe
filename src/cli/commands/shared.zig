@@ -167,3 +167,47 @@ test "parseFieldDecodedAlloc decodes percent escapes" {
     try std.testing.expectEqualSlices(u8, "hello world", name);
     try std.testing.expectEqualSlices(u8, "/tmp/a b", cwd);
 }
+
+const wire = core.wire;
+
+/// Read a one-shot CLI reply and report it. SES answers every CLI request with
+/// `.ok` or `.error` + message; a caller that writes and prints success without
+/// reading this cannot tell "applied" from "pane not attached".
+/// Returns true on `.ok`; prints the reason and returns false otherwise.
+pub fn readOkOrError(allocator: std.mem.Allocator, fd: std.posix.fd_t) bool {
+    const print = std.debug.print;
+    const hdr = wire.readControlHeader(fd) catch |err| {
+        print("Error: no reply from ses daemon: {s}\n", .{@errorName(err)});
+        return false;
+    };
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    if (msg_type == .ok) return true;
+    if (msg_type != .@"error") {
+        print("Error: unexpected reply from ses daemon\n", .{});
+        return false;
+    }
+    if (hdr.payload_len == 0 or hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Error: ses daemon reported failure\n", .{});
+        return false;
+    }
+    const buf = allocator.alloc(u8, hdr.payload_len) catch {
+        print("Error: ses daemon reported failure\n", .{});
+        return false;
+    };
+    defer allocator.free(buf);
+    wire.readExact(fd, buf) catch {
+        print("Error: ses daemon reported failure\n", .{});
+        return false;
+    };
+    if (buf.len > @sizeOf(wire.Error)) {
+        const e = std.mem.bytesToValue(wire.Error, buf[0..@sizeOf(wire.Error)]);
+        const start = @sizeOf(wire.Error);
+        const end = @min(buf.len, start + e.msg_len);
+        if (end > start) {
+            print("Error: {s}\n", .{buf[start..end]});
+            return false;
+        }
+    }
+    print("Error: ses daemon reported failure\n", .{});
+    return false;
+}

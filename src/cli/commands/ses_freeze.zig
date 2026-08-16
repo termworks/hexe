@@ -20,60 +20,60 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
     // Get current pane UUID from environment
     const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
         print("Error: not inside a hexe terminal session (HEXE_PANE_UUID not set)\n", .{});
-        return;
+        std.process.exit(1);
     };
     if (uuid_str.len < 32) {
         print("Error: invalid HEXE_PANE_UUID\n", .{});
-        return;
+        std.process.exit(1);
     }
     var uuid_arr: [32]u8 = undefined;
     @memcpy(&uuid_arr, uuid_str[0..32]);
 
     // Connect to SES and request the current layout export.
-    const fd = com.connectSesCliChannel(allocator) orelse return;
+    const fd = com.connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
     var pu: wire.PaneUuid = .{ .uuid = undefined };
     pu.uuid = uuid_arr;
     wire.writeControl(fd, .get_layout, std.mem.asBytes(&pu)) catch {
         print("Error: failed to send request\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     // Read response
     const hdr = wire.readControlHeader(fd) catch {
         print("Error: failed to read response\n", .{});
-        return;
+        std.process.exit(1);
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type == .@"error") {
         print("Error: server returned error\n", .{});
-        return;
+        std.process.exit(1);
     }
     if (msg_type != .get_layout or hdr.payload_len == 0) {
         print("Error: unexpected response\n", .{});
-        return;
+        std.process.exit(1);
     }
     if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
         print("Error: layout response too large\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     // Read raw layout export JSON.
     const layout_export = allocator.alloc(u8, hdr.payload_len) catch {
         print("Error: allocation failed\n", .{});
-        return;
+        std.process.exit(1);
     };
     defer allocator.free(layout_export);
     wire.readExact(fd, layout_export) catch {
         print("Error: failed to read layout export\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     // Parse the layout export JSON.
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, layout_export, .{}) catch {
         print("Error: failed to parse layout export\n", .{});
-        return;
+        std.process.exit(1);
     };
     defer parsed.deinit();
 
@@ -81,7 +81,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         .object => |o| o,
         else => {
             print("Error: invalid layout export format\n", .{});
-            return;
+            std.process.exit(1);
         },
     };
 
@@ -103,34 +103,34 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
     const file = if (write_local)
         (std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch {
             print("Error: cannot create {s}\n", .{tmp_path});
-            return;
+            std.process.exit(1);
         })
     else
         (std.fs.cwd().createFile("/dev/null", .{ .truncate = true }) catch {
             print("Error: cannot open /dev/null\n", .{});
-            return;
+            std.process.exit(1);
         });
     defer file.close();
 
     file.writeAll("local hexe = require(\"hexe\")\n\n") catch |err| {
         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
     file.writeAll("return hexe.setup({\n") catch |err| {
         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
     file.writeAll("  ses = {\n    layouts = {\n") catch |err| {
         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
     writeLuaString(file, "      hexe.layout(\"", layout_name, "\", {\n") catch |err| {
         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
     writeLuaString(file, "        root = \"", cwd, "\",\n") catch |err| {
         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     // Tabs
@@ -196,7 +196,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
 
         writeLuaString(file, "          hexe.tab(\"", tab_name, "\", {\n") catch |err| {
             print("Error: failed to write layout: {s}\n", .{@errorName(err)});
-            return;
+            std.process.exit(1);
         };
         var wrote_root = false;
 
@@ -235,7 +235,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
                                 if (!std.mem.eql(u8, pane_cwd, cwd)) {
                                     writeLuaString(file, "            root = hexe.pane({ cwd = \"", pane_cwd, "\" }),\n") catch |err| {
                                         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
-                                        return;
+                                        std.process.exit(1);
                                     };
                                     wrote_root = true;
                                 }

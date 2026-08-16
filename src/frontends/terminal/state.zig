@@ -8,6 +8,7 @@ const core = @import("core");
 const frontend_core = @import("frontend_core");
 const wire = core.wire;
 const pop = @import("pop");
+const lua_api = @import("lua_api.zig");
 
 const state_types = @import("state_types.zig");
 pub const PendingAction = state_types.PendingAction;
@@ -98,20 +99,9 @@ const ReplacementNewPaneRollback = enum {
     orphan_new_pane,
 };
 
-const adhoc_title_outputs = [_]core.OutputDef{
-    .{ .style = "bg:1 fg:0", .format = " $output " },
-};
-
-const adhoc_title_segment = core.Segment{
-    .name = "title",
-    .kind = .builtin,
-    .builtin = "title",
-    .outputs = adhoc_title_outputs[0..],
-};
-
+/// Adhoc floats get a title slot; the painter fills it (`float.title`).
 const adhoc_title_style = core.FloatStyle{
     .position = .bottomright,
-    .module = adhoc_title_segment,
 };
 
 /// Keyboard copy-mode cursor state. Coordinates are local to the focused pane
@@ -132,10 +122,11 @@ fn clampAdd(cur: u16, delta: i16, max: u16) u16 {
 }
 
 pub const State = struct {
+    /// A float shows a title when it has somewhere to put one. What goes in it
+    /// is the painter's business.
     fn floatStyleShowsTitle(style: ?*const core.FloatStyle) bool {
         const value = style orelse return false;
-        if (value.position == null) return false;
-        return value.module != null or value.title_segments.len > 0;
+        return value.position != null;
     }
 
     fn titleMatchesPattern(self: *const State, pattern: []const u8, title: ?[]const u8) bool {
@@ -268,6 +259,8 @@ pub const State = struct {
     /// (tmux `resize-pane -Z`). Local view state — resets on reattach. Toggled
     /// by pane.zoom; auto-cleared by any layout-mutating operation.
     zoomed_pane_uuid: ?[32]u8 = null,
+    /// Pane focused before the current one. Feeds `hexe.pane("last")`.
+    prev_focused_pane_uuid: ?[32]u8 = null,
     /// Keyboard copy-mode (tmux copy-mode): a cursor over the focused pane that
     /// drives the shared mouse_selection machinery. When active, input is
     /// captured for navigation/selection instead of forwarded to the pane.
@@ -331,6 +324,12 @@ pub const State = struct {
     /// Driven once per event-loop iteration; the render path only ever reads
     /// its last completed values, so a slow command can never stall a frame.
     async_cmds: core.async_cmd.AsyncCmdCache,
+    /// Content for regions painted by an external program. Same contract as
+    /// `async_cmds`: the render path reads only completed responses, so a slow
+    /// or dead painter costs a stale region rather than a frame.
+    regions: core.regions.Registry,
+    /// Headless terminals backing surface-mode regions, one per region.
+    region_surfaces: @import("region_render.zig").SurfaceCache,
     /// Resumable non-blocking reader for the SES VT stream. Reset whenever
     /// the VT connection is replaced (loop_watchers arms a new node).
     mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
@@ -415,6 +414,10 @@ pub const State = struct {
         connect_options: core.FrontendConnectOptions,
     ) !State {
         const cfg = core.Config.load(allocator);
+        // Bind the live query API onto the `hexe` table the config already
+        // built. Done after load so callbacks registered during load can call
+        // it, and once per runtime rather than per evaluation.
+        if (cfg._lua_runtime) |rt| lua_api.install(rt);
         const pop_cfg = pop.PopConfig.load(allocator);
         const ses_cfg = core.SesConfig.load(allocator);
 
@@ -514,6 +517,8 @@ pub const State = struct {
 
             .mux_vt_write_queue = .{},
             .async_cmds = core.async_cmd.AsyncCmdCache.init(allocator),
+            .regions = core.regions.Registry.init(allocator),
+            .region_surfaces = @import("region_render.zig").SurfaceCache.init(allocator),
             .mux_vt_write_overflow_notified = false,
 
             .terminal_query_in_flight = false,
@@ -683,8 +688,23 @@ pub const State = struct {
         self.zoomed_pane_uuid = null;
     }
 
-    pub fn isZoomed(self: *const State) bool {
-        return self.zoomed_pane_uuid != null;
+    /// Reconcile zoom with the current layout. The uuid is a bare key with no
+    /// owner: nothing dropped it when the zoomed pane exited (the renderer then
+    /// matches no pane and draws an empty tab), and `Layout.resize` hands the
+    /// zoomed pane its small tiled rect back while zoom stays on.
+    pub fn revalidateZoom(self: *State) void {
+        const zu = self.zoomed_pane_uuid orelse return;
+        const layout = self.currentLayout();
+        const pane = layout.splits.get(zu) orelse {
+            self.zoomed_pane_uuid = null;
+            layout.resize(self.layout_width, self.layout_height);
+            return;
+        };
+        pane.resize(0, 0, self.layout_width, self.layout_height) catch |err| {
+            core.logging.logError("terminal", "zoom re-apply resize failed", err);
+            self.zoomed_pane_uuid = null;
+            layout.resize(self.layout_width, self.layout_height);
+        };
     }
 
     /// Enter keyboard copy-mode over the focused tiled pane.
@@ -1014,6 +1034,9 @@ pub const State = struct {
             self.float_ui.deinit();
         }
         self.config.deinit();
+        // After view/empty_layout: setPanePopConfig hands layouts a pointer
+        // into this struct, so it has to outlive them.
+        self.pop_config.deinit();
         var ses_cfg = self.ses_config;
         ses_cfg.deinit(self.allocator);
         self.osc_reply_targets.deinit(self.allocator);
@@ -1025,6 +1048,8 @@ pub const State = struct {
         self.stdin_tail.deinit(self.allocator);
         self.mux_vt_write_queue.deinit(self.allocator);
         self.async_cmds.deinit();
+        self.regions.deinit();
+        self.region_surfaces.deinit();
         self.bracketed_paste_buf.deinit(self.allocator);
         self.renderer.deinit();
         self.notifications.deinit();
@@ -1159,6 +1184,8 @@ pub const State = struct {
         // command in the render path is served from cache and executed in the
         // background instead of blocking the loop.
         core.cmd.setAsyncCache(&self.async_cmds);
+        core.regions.setActive(&self.regions);
+        @import("region_render.zig").setActive(&self.region_surfaces, self.config.tabs.status.socket);
     }
 
     pub fn writePaneInput(self: *State, pane: *Pane, data: []const u8) void {
@@ -1195,19 +1222,6 @@ pub const State = struct {
         press_start_ms: i64 = 0, // When the key was first pressed (for tap vs repeat detection)
         is_repeat: bool = false, // True if this press was part of a repeat sequence (don't fire tap)
     };
-
-    pub fn nextKeyTimerDeadlineMs(self: *const State, now_ms: i64) ?i64 {
-        var next: ?i64 = null;
-        for (self.key_timers.items) |t| {
-            if (t.kind == .hold_fired) continue;
-            if (t.kind == .repeat_wait or t.kind == .repeat_active) continue;
-            // tap_pending needs to fire to trigger deferred tap action
-            if (t.deadline_ms <= now_ms) return now_ms;
-            const d = t.deadline_ms;
-            if (next == null or d < next.?) next = d;
-        }
-        return next;
-    }
 
     pub fn currentLayout(self: *State) *Layout {
         // No tab yet (startup chooser): hand back the empty stand-in rather
@@ -1491,28 +1505,6 @@ pub const State = struct {
             }) catch |err| {
                 core.logging.logError("terminal", "failed to mirror synced float into shared frontend view", err);
                 return;
-            };
-        }
-    }
-
-    pub fn applyFrontendFloatGeometry(self: *State, pane: *Pane) void {
-        if (self.frontend_view) |*view| {
-            _ = frontend_core.applyViewActionWithContext(
-                view,
-                .{ .float_nudge = .right },
-                .{
-                    .float_geometry = .{
-                        .pane_uuid = pane.uuid,
-                        .width_pct = self.paneFloatWidthPct(pane),
-                        .height_pct = self.paneFloatHeightPct(pane),
-                        .pos_x_pct = self.paneFloatPosXPct(pane),
-                        .pos_y_pct = self.paneFloatPosYPct(pane),
-                        .pad_x = self.paneFloatPadX(pane),
-                        .pad_y = self.paneFloatPadY(pane),
-                    },
-                },
-            ) catch |err| {
-                core.logging.logError("terminal", "failed to mirror float geometry into shared frontend view", err);
             };
         }
     }
@@ -2047,6 +2039,7 @@ pub const State = struct {
         for (self.view.tab_views.items) |*tab| {
             tab.layout.resize(self.layout_width, self.layout_height);
         }
+        self.revalidateZoom();
 
         self.resizeFloatingPanes();
         self.renderer.resize(cols, rows) catch |err| {
@@ -2098,14 +2091,6 @@ pub const State = struct {
             }
         }
         return null;
-    }
-
-    pub fn paneSessionMeta(self: *const State, pane: *const Pane) core.session_model.SessionPane {
-        if (self.runtime.paneMeta(pane.uuid)) |meta| return meta;
-        return .{
-            .uuid = pane.uuid,
-            .kind = .split,
-        };
     }
 
     pub fn paneFloatState(self: *const State, pane: *const Pane) ?core.session_model.SessionFloat {
@@ -2458,22 +2443,6 @@ pub const State = struct {
         return true;
     }
 
-    pub fn paneNavigatable(self: *const State, pane: *const Pane) bool {
-        if (self.floatUiConst(pane)) |ui| return ui.navigatable;
-        return false;
-    }
-
-    pub fn paneRetainedAfterExit(self: *const State, pane: *const Pane) bool {
-        if (self.floatUiConst(pane)) |ui| return ui.retained_after_exit;
-        return false;
-    }
-
-    pub fn setPaneRetainedAfterExit(self: *State, pane_uuid: [32]u8, retained: bool) void {
-        if (self.ensureFloatUi(pane_uuid)) |ui| {
-            ui.retained_after_exit = retained;
-        }
-    }
-
     pub fn paneCaptureOutput(self: *const State, pane: *const Pane) bool {
         if (self.floatUiConst(pane)) |ui| return ui.capture_output;
         return false;
@@ -2596,10 +2565,6 @@ pub const State = struct {
             pad_x,
             pad_y,
         );
-    }
-
-    pub fn swapPaneFloatGeometry(self: *State, a: *const Pane, b: *const Pane) void {
-        self.runtime.swapFloatGeometry(a.uuid, b.uuid);
     }
 
     pub fn reindexFloatParentTabsAfterRemovedTab(self: *State, removed_idx: usize) void {

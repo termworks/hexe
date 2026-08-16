@@ -1,7 +1,6 @@
 const std = @import("std");
 const pop = @import("pop");
 const core = @import("core");
-const shp = @import("shp");
 const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
@@ -30,7 +29,7 @@ fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: Color, bg: Color, b
     });
 }
 
-fn textStyle(fg: Color, bg: Color, bold: bool) shp.Style {
+fn textStyle(fg: Color, bg: Color, bold: bool) core.style.Style {
     return .{
         .fg = switch (fg) {
             .none => .none,

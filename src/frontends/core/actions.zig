@@ -65,6 +65,9 @@ pub const ActionRequest = union(enum) {
     layout_load,
     host_surface: HostSurfaceAction,
     invalid_direction,
+    /// Runs Lua in the frontend's own runtime; no shared-view equivalent. The
+    /// terminal dispatcher handles it before this mapping is consulted.
+    frontend_local,
 };
 
 pub const ActionApplyResult = enum {
@@ -192,6 +195,10 @@ pub fn actionRequestFromBindAction(action: BindAction) ActionRequest {
             .invalid_direction,
         .layout_save => .layout_save,
         .layout_load => .layout_load,
+        // A Lua action runs in the terminal frontend's own runtime and has no
+        // shared-view equivalent; the terminal dispatcher handles it before
+        // reaching here.
+        .lua => .frontend_local,
     };
 }
 

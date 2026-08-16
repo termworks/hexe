@@ -1,179 +1,71 @@
-# The shell prompt
+# Shell integration
 
-The same segment machinery that draws the status bar also draws your shell's prompt, in bash, zsh,
-fish or oslo. The shell asks hexe for a string once per prompt; hexe evaluates your segments and
-answers. Nothing is injected into your shell's own prompt logic beyond one hook.
+hexe does not draw your prompt. It installs hooks so your shell *reports* what
+it is doing — cwd, exit status, command duration, job count, the running
+command — and that state is what the [painter](regions.md) draws with, both in
+your prompt and in hexe's own status bar.
 
 ```sh
 eval "$(hexe shell init bash)"     # or zsh
 hexe shell init fish | source
 ```
 
-oslo needs no generated snippet: it calls the renderer from its own hooks, which is what the
-recording above is running.
+## What the hooks do
+
+```
+shell runs a command
+   |  preexec / DEBUG trap
+   v
+hexe shell shell-event --phase=start --running --cmd=... --cwd=... --jobs=N
+   |
+   +--> pod socket --> SES --> frontend --> pane state
+                                             |
+                                             v
+                                   the painter's next request
+
+shell finishes
+   |  precmd / PROMPT_COMMAND
+   v
+hexe shell shell-event --phase=end --status=$? --cwd=... --jobs=N
+```
+
+`hexe shell exit-intent` is the third hook: it asks the mux for permission
+before the shell exits, so closing the last pane can be confirmed.
+
+`--no-comms` installs command timing without the mux reporting.
+
+## Drawing the prompt
+
+The prompt itself is drawn by whatever you point your shell at, from the same
+state hexe collects. Any program that can print a styled line works — it is your
+shell's `PS1`, not hexe's business.
+
+A shell that supports an async prompt command can call one directly:
 
 ```lua
--- ~/.config/oslo/prompt.lua
+-- e.g. oslo's ~/.config/oslo/prompt.lua
 oslo.prompt.left = {
-  command = "hexe",
-  args = { "shp", "prompt", "--shell=bash",
-           "--status=$status", "--duration=$duration_ms", "--jobs=$jobs",
-           "--language=$language", "--vimode=$vimode" },
+  command = "my-painter",
+  args = { "prompt.left", "--status=$status", "--duration=$duration_ms" },
   timeout_ms = 10,
   async = true,
 }
 ```
 
-`--shell=bash` even from oslo, deliberately: zsh mode wraps every escape in `%{ %}`, and a shell
-that measures visible width itself would print those markers. `--language` and `--vimode` are what
-a shell with more to say than bash can supply — both optional, and omitted by shells that have no
-answer.
-
-```lua
-prompt = {
-  left  = { hexe.segment.username({ style = "bg:5 fg:0" }),
-            hexe.segment.status({ style = "bg:0 fg:9" }) },
-  right = { hexe.segment.directory({ style = "bg:237 fg:15" }),
-            hexe.segment.git_branch({ style = "bg:5 fg:0" }) },
-},
-```
-
-<!-- demo:begin -->
-[![prompt demo](https://asciinema.org/a/1263035.svg)](https://asciinema.org/a/1263035)
-<!-- demo:end -->
-
-## How it works
-
-```
-shell about to draw a prompt
-   │  PROMPT_COMMAND / precmd / fish_prompt
-   ▼
-hexe shp prompt --status=$? --duration=<ms> --jobs=<n> [--right]
-   │
-   ├─ read config: ~/.config/hexe/init.lua, then ./.hexe.lua if present
-   ├─ evaluate the `prompt.left` (or `prompt.right`) segments against ctx
-   └─ print the assembled, styled string
-   ▼
-shell sets PS1 to it
-```
-
-The hook the shell installs does three things: it times commands (a `DEBUG` trap or `preexec`
-equivalent), it reports what happened to the pane's session (`hexe shp shell-event`), and it emits
-**OSC 7** so the pod learns the working directory. That last one is not cosmetic — it is what makes
-`per_cwd` floats, directory-aware status segments and `hexe ses list --details` know where a pane
-is.
-
-Every prompt is a separate process, which is the design's real constraint: it must be fast, and it
-must not need a running session. `hexe shp prompt` works in a plain terminal with no hexe session
-at all, which is the point of having one prompt configuration rather than two.
-
-### What a segment gets
-
-`ctx` is smaller than the status bar's, because a prompt knows about one shell at one moment:
-`cwd`, `home`, `exit_status`, `cmd_duration_ms`, `jobs`, `terminal_width`, `now_ms`, `env`, and
-`ctx.cache` for memoising. `ctx.pane(0)` returns that same context; there is no cross-pane lookup
-in prompt mode, because there is no session to look across.
-
-### What a prompt may use
-
-Prompt deliberately supports a subset:
-
-| | |
-|---|---|
-| allowed kinds | `render`, `builtin` |
-| refused kinds | `button`, `progress` — a prompt is not interactive and does not repaint |
-| builtin allowlist | `directory`, `git_branch`, `git_status`, `status`, `sudo`, `jobs`, `duration`, `pod_name`, `hostname`, `username`, `character` |
-
-`spinner`, `randomdo` and `running_anim` are refused for the same reason: they only make sense on a
-surface that redraws itself, and a prompt is printed once.
-
-### Width
-
-Each side gets half the terminal. Over budget, the **highest** priority number is dropped first, so
-low numbers survive longest — the same rule as the status bar, applied per side.
-
-## What makes it different
-
-Compared with starship, powerlevel10k and their relatives:
-
-- **One configuration, two surfaces.** The segments in your prompt and the segments in your status
-  bar are the same objects with the same styling language, so a git segment looks the same in both
-  places without being written twice.
-- **The prompt knows about the multiplexer.** `pod_name` names the pane you are in; the shell hooks
-  report command, status, duration and jobs back to the session, which is what feeds
-  `command_finished` events and the status bar's own `last_command` and `duration` segments.
-- **Segments are Lua, not TOML.** A conditional is `return nil`, not a template language.
-- What the alternatives do better: they are one binary with a large library of ready-made,
-  carefully tuned segments; hexe ships the ones it needs and expects you to write the rest.
-
-## Configuration
-
-```lua
-prompt = {
-  left = {
-    hexe.segment({
-      name = "ssh", priority = 60,
-      render = function(ctx)
-        if not ctx.env.SSH_CONNECTION then return nil end
-        return { { text = " //", style = "bg:237 fg:15" } }
-      end,
-    }),
-    hexe.segment.status({ style = "bg:0 fg:9", prefix = " ", suffix = " " }),
-  },
-  right = { hexe.segment.git_branch({ style = "bg:5 fg:0", suffix = " " }) },
-},
-```
-
-Config is read from `~/.config/hexe/init.lua`, then `./.hexe.lua` if the directory has one, which
-may override the prompt arrays for that project.
-
-The renderer can be called by hand, which is how it is debugged:
-
-```sh
-hexe shp prompt --status 1 --duration 1200 --jobs 2
-hexe shp prompt --right --shell zsh
-hexe shp spinner            # the animation frames, for a shell that wants one
-```
-
-### The Lua sandbox
-
-The config runtime is **unrestricted by default**: `io`, `os`, `package` and `hexe.exec` are all
-available, which is why a real config can read `/etc/os-release` or shell out. Setting
-`HEXE_UNRESTRICTED_CONFIG` to anything other than `1` revokes all of it — `io`, `package`,
-`dofile`, `loadfile`, `load`, `debug`, `hexe.exec`, and everything on `os` except `time`, `date`,
-`clock` and `difftime`. The same revocation is applied unconditionally before an untrusted
-project-local `.hexe.lua` runs; see [project sessions](session-manager.md).
-
-## Measurements
-
-- **One process per prompt.** Everything expensive in a prompt is therefore paid on every command:
-  the shipped config replaces a `distrologo` shell-out (~15 ms, itself spawning `lsb_release`,
-  `cut` and `xargs`) with a memoised read of `/etc/os-release`, and `systemd-detect-virt` (~3 ms)
-  with a per-boot cache file.
-- **Width budget: half the terminal per side.**
-- **`hexe.exec` takes `timeout_ms` and `cache_ms`**, and reports `cached` and `elapsed_ms` back, so
-  a slow command in a prompt is measurable rather than mysterious.
+See [painting](regions.md) for the protocol hexe itself uses, if you want one
+program to serve both.
 
 ## What it cannot do
 
-- **No OSC 133 from bash, zsh or fish.** The shipped integrations emit OSC 7 but not semantic
-  prompt marks, so `hexe.action.prompt.previous/next/copy_output` do nothing in those shells unless
-  the shell marks its own prompts. oslo emits both on its own.
-- **No buttons, no progress, no animation.** A printed prompt cannot repaint itself.
-- **No cross-pane context.** A prompt segment cannot ask about another pane.
-- **Right prompt is a second invocation.** The shell asks for it separately, and shells that have
-  no notion of a right prompt cannot show one.
-- **A broken config breaks the prompt, not the shell.** The renderer reports the error and prints
-  what it can; the shell keeps working.
-- **`hexe shp` is `hexe shell`.** `shp` is an alias, and the underlying command is `shell prompt`.
+The hooks report; they do not render. A shell with no painter running gets no
+styled prompt from hexe — that is the painter's job, and hexe has no fallback
+prompt to fall back to.
+
+Shells other than bash, zsh, fish and oslo are not covered. The reporting is
+three CLI calls, so a shell that can run a command in `preexec` and `precmd`
+can be wired by hand.
 
 ## Where it lives
 
-| | |
-|---|---|
-| `src/modules/shell/main.zig` | the `shp prompt` entry point |
-| `src/modules/shell/shell/bash.zig`, `zsh.zig`, `fish.zig`, `oslo.zig` | the init scripts, one per shell |
-| `src/modules/shell/render_modules.zig`, `format.zig` | assembling and styling the line |
-| `src/core/segments/` | the built-ins the allowlist names |
-| `src/core/lua_runtime.zig` | the config runtime, the sandbox, `require("hexe")` |
-| `src/cli/app.zig` | `shell init`, `shell prompt`, `shell spinner`, `shell shell-event`, `shell exit-intent` |
+`src/modules/shell/` — the hook emitters, one per shell.
+`src/cli/commands/com.zig` — `runShellEvent`, `runExitIntent`.

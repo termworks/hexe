@@ -357,8 +357,9 @@ pub fn run(terminal_args: TerminalArgs) !void {
         break :blk default_log_path;
     } else null;
     redirectStderr(effective_log);
-    debug_enabled = core.logging.levelEnablesDebug(terminal_args.log_level);
-    core.logging.setLogLevel(terminal_args.log_level);
+    const effective_level = core.logging.effectiveLevel(terminal_args.log_level, terminal_args.log_file);
+    debug_enabled = core.logging.levelEnablesDebug(effective_level);
+    core.logging.setLogLevel(effective_level);
     debugLog("started", .{});
     debugLog("level={s} logfile={s}", .{
         if (terminal_args.log_level) |level| @tagName(level) else "off",
@@ -635,18 +636,14 @@ pub fn main() !void {
             terminal_args.name = args[i];
         } else if (std.mem.eql(u8, arg, "--log")) {
             if (i + 1 >= args.len) {
-                std.debug.print("Error: --log requires a level (trace|debug|info)\n", .{});
+                std.debug.print("Error: --log requires a level (trace|debug|info|warn|err)\n", .{});
                 return;
             }
             i += 1;
             const parsed = core.logging.parseLevel(args[i]) orelse {
-                std.debug.print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{args[i]});
+                std.debug.print("Error: invalid --log level '{s}' (use trace|debug|info|warn|err)\n", .{args[i]});
                 return;
             };
-            if (parsed != .trace and parsed != .debug and parsed != .info) {
-                std.debug.print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{args[i]});
-                return;
-            }
             terminal_args.log_level = parsed;
         } else if ((std.mem.eql(u8, arg, "--logfile") or std.mem.eql(u8, arg, "-L")) and i + 1 < args.len) {
             i += 1;

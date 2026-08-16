@@ -452,7 +452,7 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
                 rt.lua.setField(-2, "started_at_ms");
                 rt.lua.pushInteger(@intCast(now_ms));
                 rt.lua.setField(-2, "now_ms");
-                lua_events.emitAutocmdWithPayloadOnStack(rt, "pane_shell_running_changed");
+                lua_events.emitWithState(state, rt, "pane_shell_running_changed");
             }
         }
     } else {
@@ -495,7 +495,7 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
             }
             rt.lua.pushInteger(@intCast(now_ms));
             rt.lua.setField(-2, "now_ms");
-            lua_events.emitAutocmdWithPayloadOnStack(rt, "command_finished");
+            lua_events.emitWithState(state, rt, "command_finished");
         }
 
         if (old_running != running) {
@@ -525,7 +525,7 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
                 }
                 rt.lua.pushInteger(@intCast(now_ms));
                 rt.lua.setField(-2, "now_ms");
-                lua_events.emitAutocmdWithPayloadOnStack(rt, "pane_shell_running_changed");
+                lua_events.emitWithState(state, rt, "pane_shell_running_changed");
             }
         }
     }
@@ -1009,7 +1009,7 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
     for (state.view.float_views.items) |pane| {
         const uuid_match = std.mem.eql(u8, pane.uuid[0..], uuid[0..]);
         if (uuid_match and pane.pokemon_initialized and
-            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_content == null)
+            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_name == null)
         {
             pane.pokemon_state.loadSprite(name, false) catch |err| {
                 core.logging.logError("terminal", "failed to load float sprite after pane-name update", err);
@@ -1020,7 +1020,7 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
     var split_iter = state.currentLayout().splits.valueIterator();
     while (split_iter.next()) |pane| {
         if (std.mem.eql(u8, pane.*.uuid[0..], uuid[0..]) and pane.*.pokemon_initialized and
-            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_content == null)
+            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_name == null)
         {
             pane.*.pokemon_state.loadSprite(name, false) catch |err| {
                 core.logging.logError("terminal", "failed to load split sprite after pane-name update", err);

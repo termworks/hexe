@@ -329,6 +329,28 @@ pub const SessionFloat = struct {
     pad_y: u8 = 0,
 };
 
+/// Shift a per-tab-index visibility bitmask when a tab is inserted at `index`.
+/// Bits at or above `index` move up one; the new tab starts hidden.
+pub fn shiftTabVisibleForInsert(mask: u64, index: usize) u64 {
+    if (index >= 64) return mask;
+    const shift: u6 = @intCast(index);
+    const low_mask: u64 = (@as(u64, 1) << shift) - 1;
+    const low = mask & low_mask;
+    const high = (mask & ~low_mask) << 1;
+    return low | high;
+}
+
+/// Shift a per-tab-index visibility bitmask when the tab at `index` is removed.
+/// Its bit is dropped and everything above it moves down one.
+pub fn shiftTabVisibleForRemove(mask: u64, index: usize) u64 {
+    if (index >= 64) return mask;
+    const shift: u6 = @intCast(index);
+    const low_mask: u64 = (@as(u64, 1) << shift) - 1;
+    const low = mask & low_mask;
+    const high = (mask >> shift) >> 1 << shift;
+    return low | high;
+}
+
 pub const SessionSnapshot = struct {
     allocator: std.mem.Allocator,
     uuid: [32]u8,

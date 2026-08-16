@@ -47,6 +47,8 @@ smoke: smoke-clean
 	python3 -u scripts/smoke_input_batch.py
 	python3 -u scripts/smoke_terminal_protocol.py
 	python3 -u scripts/smoke_kill.py
+	python3 -u scripts/smoke_pane_info.py
+	python3 -u scripts/smoke_lua_api.py
 	python3 -u scripts/smoke_cli_waiter_release.py
 	python3 -u scripts/smoke_stalled_peer.py
 	python3 -u scripts/smoke_stalled_pod_peer.py
@@ -58,7 +60,8 @@ smoke: smoke-clean
 	python3 -u scripts/smoke_dot_attach.py
 	python3 -u scripts/smoke_attach_stress.py
 	python3 -u scripts/smoke_attach_chaos.py
-	python3 -u scripts/smoke_slow_segments.py
+	python3 -u scripts/smoke_slow_exec.py
+	python3 -u scripts/smoke_region_painter.py
 	python3 -u scripts/smoke_startup_chooser.py
 	python3 -u scripts/smoke_bad_config.py
 	python3 -u scripts/smoke_session_env.py

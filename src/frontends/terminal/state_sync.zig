@@ -265,6 +265,8 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
         core.logging.logError("terminal", "failed IPC operation in state_sync", err);
     };
 
+    if (focused_from) |prev| self.prev_focused_pane_uuid = prev;
+
     if (self.config._lua_runtime) |rt| {
         rt.lua.createTable(0, 8);
         _ = rt.lua.pushString("pane_focus_changed");
@@ -281,7 +283,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
         rt.lua.setField(-2, "active_tab");
         rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
         rt.lua.setField(-2, "now_ms");
-        lua_events.emitAutocmdWithPayloadOnStack(rt, "pane_focus_changed");
+        lua_events.emitWithState(self, rt, "pane_focus_changed");
     }
 }
 

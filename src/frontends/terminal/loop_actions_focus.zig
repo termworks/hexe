@@ -280,6 +280,19 @@ fn swapFloatPositions(state: *State, a: *Pane, b: *Pane) void {
 
     a.syncBackendSize();
     b.syncBackendSize();
+
+    // Push both rects to SES, the way float_nudge does. Without this the swap
+    // was frontend-only and a detach/reattach restored the pre-swap positions.
+    const active_pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
+        if (idx < state.view.float_views.items.len) state.view.float_views.items[idx] else null
+    else
+        null;
+    for ([_]*Pane{ a, b }) |p| {
+        const is_active = active_pane == p;
+        if (!state.syncSessionFloatChecked(p, is_active)) {
+            core.logging.warn("terminal", "float swap: session sync rejected update", .{});
+        }
+    }
 }
 
 fn restoreFocusInTab(state: *State, old_uuid: ?[32]u8) void {

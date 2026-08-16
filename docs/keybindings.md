@@ -9,9 +9,9 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.t }, hexe.action.tab.new()),
 
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, nil, {
   mode = hexe.mode.passthrough_only,
-  when = function(ctx)
-    local p = ctx.pane(0)
-    return p and (p.process_name == "nvim" or p.process_name == "vim")
+  when = function()
+    local p = ctx.pane()
+    return p and (p.process == "nvim" or p.process == "vim")
   end,
 }),
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, hexe.action.focus.move("up")),
@@ -90,28 +90,33 @@ delayed waiting to see whether you are holding it.
 
 ### Conditions
 
-`when` is a callback, and it receives a context that can look at any pane, not just the focused
-one:
+`when` is a Lua function, evaluated when the key is pressed. It can look at any
+pane, not just the focused one:
 
 ```lua
-when = function(ctx)
-  local p = ctx.pane(0)                 -- 0 or nil: the focused pane
-  return p and p.focus_split and not p.alt_screen
+when = function()
+  local p = ctx.pane()                 -- omitted / 0 / "focused": focused pane
+  return p and p.is_split and not p.alt_screen
 end
 ```
 
 | | |
 |---|---|
-| `ctx.pane(0)` / `ctx.pane("focused")` | the focused pane |
-| `ctx.pane(n)` | by index into `ctx.panes`, 1-based |
-| `ctx.pane("<uuid>")` | by uuid |
+| `ctx.pane()` / `ctx.pane(0)` / `ctx.pane("focused")` | the focused pane |
+| `ctx.pane(n)` | by index into `ctx.panes()`, 1-based |
+| `ctx.pane("<uuid>")` | by uuid, or a prefix of one |
 | `ctx.pane("last")` | the previously focused pane |
 | `ctx.pane("tab:2/focus")` | the focused pane of tab 2 |
-| `ctx.cache.get/set/del` | memoise anything expensive, with a TTL |
+| `ctx.count("visible_floats")` | how many floats are on screen |
+| `ctx.floats{ visible = true }` | those floats, as a list |
 
-Useful pane fields: `focus_split`, `focus_float`, `float_key`, `process_name`, `process_running`,
-`alt_screen`, `tab_count`, `active_tab`. Callbacks are evaluated on the input path, so they are
-cached briefly, and `HEXE_LUA_TRACE=slow` with `HEXE_LUA_TRACE_SLOW_MS` will tell you which one is
+There is no fixed vocabulary of conditions to learn or extend — a condition is
+whatever Lua you can write over the query API. The full surface is in
+[Reference: conditions and events](#the-query-api).
+
+Conditions run on the input path, so keep them cheap: prefer `ctx.count(...)`
+to materialising `ctx.panes()`, and memoise with an upvalue if you need to.
+`HEXE_LUA_TRACE=slow` with `HEXE_LUA_TRACE_SLOW_MS` reports which callback is
 costing you.
 
 ### Events
@@ -224,49 +229,200 @@ mux = {
 
 ### The `when` callback
 
-Optional condition that must be true for the bind to fire.
-
-`when` is callback-only:
+Optional condition that must be true for the bind to fire. It is a Lua function,
+and it runs at the moment the key is pressed:
 
 ```lua
-when = function(ctx)
-  return ctx.focus_split and ctx.process_name == "nvim"
+when = function()
+  local p = ctx.pane()
+  return p and p.is_split and p.process == "nvim"
 end
 ```
 
-`ctx` exposes the current focused pane state.
-
-Pane lookup:
-- `ctx.pane(0)` (or `ctx.pane(nil)`) → current focused pane
-- `ctx.pane(<number>)` → pane by runtime index in `ctx.panes` (1-based)
-- `ctx.pane(<uuid_string>)` → pane by UUID
-- `ctx.pane("focused")` / `ctx.pane("current")` → current focused pane
-- `ctx.pane("last")` → previously focused pane (if available)
-- `ctx.pane("tab:<n>/focus")` → focused split pane for tab `n` (1-based)
-- `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback caching
+There is no condition language. Anything the query API can answer is a
+condition, and the answer is computed against live state on every press:
 
 ```lua
-local p = ctx.pane(0)
-if p and p.focus_float then
-  return true
+-- what is running here
+when = function() return ctx.pane().process == "nvim" end
+
+-- how many floats are on screen right now
+when = function() return ctx.count("visible_floats") == 0 end
+when = function() return #ctx.floats{ visible = true } > 2 end
+
+-- anything you can write in Lua
+when = function()
+  local p = ctx.pane()
+  return p and (p.exit_status or 0) ~= 0 and not p.alt_screen
 end
-return false
 ```
 
-Prefer `ctx.pane(0)` (or `hexe.ctx.pane(0)` when outside callback-local `ctx`).
+The callback also receives the API as its argument, so `function(ctx)
+... ctx.pane() ... end` is the same thing — `ctx` and `hexe` are one table.
 
-Common pane fields:
+A condition is truthy in the Lua sense: anything but `nil`/`false` fires the
+bind. An error inside the callback is caught and treated as false.
 
-| Field | Meaning |
+### Lua actions
+
+The action can be a function too, so a binding is not limited to the built-in
+action list:
+
+```lua
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.b }, function(ctx)
+  local p = ctx.pane()
+  hexe.exec("notify-send " .. ("%q"):format(p.cwd or "?"))
+end),
+```
+
+It receives the same query API as a condition, and runs on the input path with
+the same rules — keep it quick, and use `hexe.exec` (asynchronous) rather than
+blocking work. An error inside the callback is caught and logged; the key still
+counts as handled.
+
+### The query API
+
+Available as the callback's argument (`ctx`) and, outside a callback, as
+`hexe.live` — in keybinding conditions, keybinding actions, and event handlers
+alike. It is a namespace of its own because the config API already owns
+`hexe.pane`, `hexe.float`, `hexe.split` and `hexe.tab` as *constructors* —
+`hexe.pane{...}` builds a layout pane, `ctx.pane()` reads a running one.
+
+Every accessor reads live state; nothing is computed until you ask for it.
+
+| Call | Returns |
 |---|---|
-| `focus_split` | Focused pane is a split |
-| `focus_float` | Focused pane is a float |
-| `process_name` | Foreground process name (for example `nvim`) |
-| `process_running` | Whether a foreground process is present |
-| `alt_screen` | Terminal is in alt-screen mode |
-| `tab_count` | Number of open tabs |
-| `active_tab` | Active tab index |
-| `float_key` | Float key for focused float pane |
+| `ctx.pane([sel])` | one pane, or nil |
+| `ctx.panes([filter])` | array of panes |
+| `ctx.floats([filter])` | array of float panes |
+| `ctx.splits([filter])` | array of tiled panes |
+| `ctx.tabs()` | array of `{index, name, active, pane_count, focused_uuid}` |
+| `ctx.session()` | `{name, uuid, root, connected, tab_count, active_tab}` |
+| `ctx.ui()` | `{width, height, status_height, zoomed, copy_mode, search_mode, tab_rename, pane_select, float_focused}` |
+| `ctx.count(what)` | `"tabs"`, `"panes"`, `"splits"`, `"floats"`, `"visible_floats"` |
+| `ctx.env(name)` | one environment variable, or nil |
+
+`sel` selects a pane: omitted / `0` / `"focused"` / `"current"` for the focused
+one, a number for its index in `ctx.panes()`, or a uuid (a prefix is enough).
+
+`filter` is `{ visible = true }` and/or `{ tab = n }` (1-based).
+
+**Pane fields**
+
+| Group | Fields |
+|---|---|
+| identity | `uuid` `id` `pane_id` `index` `name` `tab` `focused` |
+| kind | `is_float` `is_split` `adhoc` `title` |
+| geometry | `x` `y` `width` `height` `zoomed` |
+| terminal | `alt_screen` `scrolled` `cursor_x` `cursor_y` `sync_input` |
+| process | `process` `process_pid` `process_running` |
+| shell | `cwd` `last_command` `exit_status` `duration_ms` `jobs` `shell_running` `started_at_ms` |
+| progress | `progress_state` `progress_pct` |
+| float | `float_key` `visible` `sticky` `per_cwd` `global` `exclusive` `isolated` `destroyable` |
+
+**Cost.** Each accessor builds only what it is asked for, so a predicate reading
+one field is one small table. Materialising every pane (`ctx.panes()`) in a
+condition that runs on every keystroke is the expensive shape — prefer
+`ctx.count(...)` when you only need a number. To memoise, close over an
+upvalue; conditions are ordinary closures.
+
+```lua
+local memo = {}
+local function expensive()
+  local key = ctx.session().active_tab
+  if memo[key] == nil then memo[key] = compute() end
+  return memo[key]
+end
+```
+
+### Doing things
+
+The query API is symmetric: everything you can look at, you can also act on.
+
+| Call | Effect |
+|---|---|
+| `ctx.act(spec)` | perform any bind action now — `spec` is what `hexe.action.*` returns, or the string form |
+| `ctx.exec(cmd [, opts])` | run a shell command asynchronously |
+| `ctx.notify(msg [, ms])` | show a mux notification |
+| `ctx.send([sel,] text)` | write to a pane's pty as if typed |
+| `ctx.focus(sel)` | focus any pane, switching tab if needed |
+| `ctx.close(sel)` | close any pane |
+| `ctx.scroll([sel,] lines)` | scroll back (positive), forward (negative), or to bottom (`0`) |
+| `ctx.tab_select(n)` | switch to tab n (1-based) |
+| `ctx.rename_tab([n,] name)` | set a tab's name directly |
+
+`ctx.act` is the general one: it takes the same value the `hexe.action.*`
+constructors already produce, so the whole action set — and anything added to it
+later — is reachable without a second list of names.
+
+```lua
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.n }, function(ctx)
+  -- close every float that is on screen, then report
+  local closed = 0
+  for _, f in ipairs(ctx.floats{ visible = true }) do
+    ctx.close(f.uuid)
+    closed = closed + 1
+  end
+  if closed == 0 then
+    ctx.act(hexe.action.float.toggle(1))
+  else
+    ctx.notify(("closed %d floats"):format(closed))
+  end
+end),
+```
+
+Mutations are visible to the next call in the same callback — `ctx.act(...)`
+followed by `ctx.count("tabs")` sees the new tab.
+
+`ctx.act` refuses to nest more than 8 deep, so an action that dispatches itself
+fails rather than taking the stack with it.
+
+### Breaking changes
+
+This release replaces the keybinding condition surface outright. Nothing from
+the old context is aliased — a config written against it will fail loudly at
+load, or read `nil`, rather than half-working.
+
+Pane fields were renamed to drop redundant prefixes:
+
+| Gone | Now |
+|---|---|
+| `process_name` | `process` |
+| `focus_split` / `focus_float` / `floating` | `is_split` / `is_float` |
+| `float_sticky` / `float_per_cwd` / `float_global` | `sticky` / `per_cwd` / `global` |
+| `float_exclusive` / `float_isolated` / `float_destroyable` | `exclusive` / `isolated` / `destroyable` |
+| `tab_index` (0-based) | `tab` (1-based) |
+| `pane_index` | `index` |
+
+Context-level things moved to where they belong:
+
+| Gone | Now |
+|---|---|
+| `ctx.focus_split`, `ctx.process_name`, `ctx.alt_screen`, … | `ctx.pane().is_split`, `.process`, `.alt_screen` |
+| `ctx.tab_count`, `ctx.active_tab` | `ctx.count("tabs")`, `ctx.session().active_tab` (1-based) |
+| `ctx.now_ms` | `os.time() * 1000` |
+| `ctx.env.FOO` | `ctx.env("FOO")` |
+| `ctx.panes` (array) | `ctx.panes()` |
+| `ctx.cache.get/set/del` | a `local memo = {}` upvalue — conditions are closures |
+
+The token forms are gone and are now rejected at load with `InvalidKeyBinding`
+rather than silently ignored:
+
+```lua
+when = "focus_split"                                  -- gone
+when = function(ctx) return ctx.pane().is_split end
+
+when = { all = { "focus_float", "float_sticky" } }    -- gone
+when = function(ctx) local p = ctx.pane() return p.is_float and p.sticky end
+
+when = { env = "SSH_TTY" }                            -- gone
+when = function(ctx) return ctx.env("SSH_TTY") ~= nil end
+
+when = { bash = "..." }                               -- gone, no replacement
+```
+
+`ctx.pane(0)`, `ctx.pane("focused")`, `ctx.pane("last")` and
+`ctx.pane("tab:2/focus")` still select the way they always did.
 
 ### Lua Trace
 
@@ -280,10 +436,24 @@ You can register runtime event callbacks through `hexe.events`.
 
 Supported events:
 - `pane_focus_changed`
+- `pane_exited` — `ev.pane_uuid`, `ev.exit_status`, `ev.was_focused`
 - `tab_changed`
+- `tab_created` — `ev.tab`, `ev.tab_count`, `ev.pane_uuid`
+- `tab_closed` — `ev.tab`, `ev.tab_count`
 - `command_finished`
 - `pane_shell_running_changed`
 - `statusbar_redraw` (throttled, default 120ms)
+
+Every payload carries `event` and `now_ms`. Handlers get the live API too, so a
+handler can query and act:
+
+```lua
+hexe.events.on("pane_exited", function(ev)
+  if ev.exit_status ~= 0 then
+    hexe.live.notify(("pane died: %d"):format(ev.exit_status))
+  end
+end)
+```
 
 Use the canonical helper API (`hexe.events.*`):
 

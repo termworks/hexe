@@ -35,7 +35,7 @@ pub fn runRecordStart(
 ) !void {
     const scope = parseScope(scope_raw) orelse {
         print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
-        return;
+        std.process.exit(1);
     };
 
     const state_path = try getStatePath(allocator, scope);
@@ -45,7 +45,7 @@ pub fn runRecordStart(
         defer freeState(allocator, st);
         if (isPidAlive(st.pid)) {
             print("already recording (pid={d})\n", .{st.pid});
-            return;
+            std.process.exit(1);
         }
         deleteStateFile(state_path, "start");
     }
@@ -66,7 +66,7 @@ pub fn runRecordStart(
         owned_target_uuid = try resolveActivePodUuid(allocator);
         if (owned_target_uuid == null) {
             print("Error: no active pod target found (use --uuid/--name/--socket)\n", .{});
-            return;
+            std.process.exit(1);
         }
         target_uuid = owned_target_uuid.?;
     }
@@ -116,14 +116,14 @@ pub fn runRecordStart(
 pub fn runRecordStop(allocator: std.mem.Allocator, scope_raw: []const u8) !void {
     const scope = parseScope(scope_raw) orelse {
         print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
-        return;
+        std.process.exit(1);
     };
     const state_path = try getStatePath(allocator, scope);
     defer allocator.free(state_path);
 
     const st = (try loadState(allocator, state_path)) orelse {
         print("not recording\n", .{});
-        return;
+        std.process.exit(1);
     };
     defer freeState(allocator, st);
 
@@ -186,7 +186,7 @@ pub fn runRecordToggle(
 ) !void {
     const scope = parseScope(scope_raw) orelse {
         print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
-        return;
+        std.process.exit(1);
     };
     const state_path = try getStatePath(allocator, scope);
     defer allocator.free(state_path);

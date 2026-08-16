@@ -1,8 +1,9 @@
 # Configuration
 
 One Lua file, one entry point, and a validator that will tell you before you start anything. The
-config describes six things — theme, keys, frontend behaviour, status bar, prompt, popups — plus
-the layouts a session starts with, and every one of them is a table passed to `hexe.setup`.
+config describes five things — theme, keys, frontend behaviour, where the status bar comes from,
+popups — plus the layouts a session starts with, and every one of them is a table passed to
+`hexe.setup`.
 
 ```lua
 local hexe = require("hexe")
@@ -11,8 +12,7 @@ return hexe.setup({
   theme  = hexe.theme({ styles = { ["git.branch"] = "bg:5 fg:0" } }),
   keys   = { hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit()) },
   mux    = { confirm = { exit = true, detach = true } },
-  status = { left = {}, center = {}, right = {} },
-  prompt = { left = {}, right = {} },
+  status = { enabled = true, view = "status" },
   pop    = { notify = {} },
   ses    = { layouts = { dofile(os.getenv("HOME") .. "/.config/hexe/layout.lua") } },
 })
@@ -28,6 +28,20 @@ hexe config dump      # the normalised result
 [![config demo](https://asciinema.org/a/1263026.svg)](https://asciinema.org/a/1263026)
 <!-- demo:end -->
 
+## Which files hexe reads
+
+Exactly one, by name:
+
+| path | who opens it |
+|---|---|
+| `~/.config/hexe/init.lua` | **hexe**. The config. The only file it looks for. |
+| `~/.config/hexe/layout.lua` | **your init.lua**, if it chooses to `dofile()` it. hexe never looks for this name — split your layouts out or inline them, as you like. |
+| `~/.config/hexe/lua/…` | **you**, via `require()`. A search path for modules you write; empty by default and needed by nobody. |
+| `./.hexe.lua` | **hexe**, per directory, sandboxed unless trusted. |
+
+So there is one config file. `layout.lua` is a convention this repo's example follows, not a
+second config format, and `lua/` is optional.
+
 ## How it works
 
 ```
@@ -37,13 +51,13 @@ hexe config dump      # the normalised result
    config builder             each section validated as it is set;
         │                     an unknown top-level section is an ERROR
         ▼
-   normalised config ──> frontend · status bar · prompt · SES layouts
+   normalised config ──> frontend · status bar · SES layouts
         ▲
 ./.hexe.lua ────────────┘     project overlay, run with capabilities revoked
 ```
 
 `hexe.setup` is not a convention, it is the schema. Sections are validated as they are read, raw
-segment tables are refused in favour of `hexe.segment(...)`, legacy layout spellings are refused
+legacy layout spellings are refused
 rather than migrated, and an unknown top-level key is an error rather than a silently ignored
 typo — which is the difference between a config that does not do what you meant and one that says
 so.
@@ -51,13 +65,13 @@ so.
 ### Reloading
 
 `hexe.action.config.reload()` re-reads the file and hot-swaps it into the running frontend: new
-keys, new segments, new theme, without losing a single pane. A config that fails to parse is
+keys, new theme, without losing a single pane. A config that fails to parse is
 reported and the running one is kept.
 
 The blast radius of a broken config is worth knowing, and the recording above shows it: the
 frontend keeps its running configuration and every pane stays exactly where it was, while the
-*prompt* — a separate process, reading the same file on every command — prints the parse error and
-falls back to the shell's own prompt until the file is fixed.
+painter is a separate process and is unaffected by a bad hexe config: the bar keeps drawing
+whatever it drew last.
 
 ### The Lua runtime
 
@@ -82,8 +96,8 @@ local r = hexe.exec("git branch --show-current", { timeout_ms = 80, cache_ms = 1
 -- r.ok, r.code, r.stdout, r.stderr, r.timeout, r.cached, r.elapsed_ms
 ```
 
-The timeout and the cache are the interesting fields: a prompt runs this on every command, and a
-status segment several times a second.
+The timeout and the cache are the interesting fields: a keybind condition can run this on every
+matching keypress, so it is asynchronous and cached rather than blocking the loop.
 
 ### Where it looks
 
@@ -101,11 +115,10 @@ modules:     $XDG_CONFIG_HOME/hexe/lua/?.lua
 tmux configures with `set-option` commands in its own language; zellij with KDL; wezterm — the
 closest relative — with Lua.
 
-- **One language for everything.** Keys, prompt, status bar, layouts and popup styling are the same
+- **One language for everything.** Keys, layouts and popup styling are the same
   Lua, so a helper you write for one is usable in the others. The shipped config defines
-  `git_branch(opts)` once and uses it in both the prompt and the bar.
-- **The prompt is in it.** No separate starship configuration to keep in sync.
-- **Errors are refusals.** Unknown sections, raw segment tables and old spellings are rejected with
+  helper once and uses it in several places.
+- **Errors are refusals.** Wrong types, out-of-range values and old spellings are rejected with
   a message rather than ignored.
 - **Reload is in-place**, not a restart, and not a re-source of a command language that has already
   half-applied itself.
@@ -119,8 +132,7 @@ The sections `hexe.setup` accepts:
 | `theme` | `hexe.theme({ colors = …, styles = …, chars = … })`; `hexe.style("name")` resolves one |
 | `keys` | a list of `hexe.key(...)` — see [keybindings](keybindings.md) |
 | `mux` | frontend behaviour: `confirm`, `mouse`, `floats`, `splits`, `selection_color` |
-| `status` | `left` / `center` / `right` lists — see [the status bar](statusbar.md) |
-| `prompt` | `left` / `right` lists — see [the shell prompt](prompt.md) |
+| `status` | `view` / `socket` / `refresh_ms` — see [painting](regions.md) |
 | `pop` | notification, confirm and chooser styling, and the overlay widgets |
 | `ses` | `layouts`, the shape a session starts with — see [sessions](sessions.md) |
 
@@ -136,7 +148,7 @@ theme = hexe.theme({
 
 ### The rest of the `hexe` table
 
-Beyond `setup`, `key`, `segment`, `layout`, `tab`, `split`, `pane`, `float`, `theme`, `style` and
+Beyond `setup`, `key`, `layout`, `tab`, `split`, `pane`, `float`, `theme`, `style` and
 `exec`, the runtime exposes a handful of helpers nothing documented:
 
 | | |
@@ -145,8 +157,8 @@ Beyond `setup`, `key`, `segment`, `layout`, `tab`, `split`, `pane`, `float`, `th
 | `hexe.keymap` / `hexe.keymap.set{…}` | an alternative spelling for a bind list; callable as well as a table |
 | `hexe.when.press \| release \| repeat \| hold` | the names for a bind's `on` field |
 | `hexe.command("lazygit")` | asserts its argument is a string and returns it — a typo guard for `command =` fields |
-| `hexe.segment.builtin.<name>(opts)` | descriptor helpers for every built-in |
-| `hexe.status.recording(scope)`, `hexe.record.*` | the recording state a status segment reads |
+| `hexe.status.recording(scope)`, `hexe.record.*` | recording state, for scripts and keybinds |
+| `hexe.live.*` | the live API, handed to every callback as its argument (`ctx`). Read: `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `env`. Act: `act`, `exec`, `notify`, `send`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`. See [keybindings](keybindings.md#the-query-api) |
 
 A split's children can carry their own `size`, so `hexe.split("h", { hexe.pane({ size = 70 }),
 hexe.pane() })` is a 70/30 split without a `ratio`.
@@ -182,7 +194,7 @@ Tooling:
 |---|---|
 | `src/core/lua_runtime.zig` | the interpreter, the sandbox, `require("hexe")`, the `hexe.*` bootstrap |
 | `src/core/config.zig`, `config_v2.zig`, `config_builder.zig` | the schema, the builder, the validators |
-| `src/core/api_bridge*.zig` | Lua ↔ Zig for floats, layouts, recording, segments |
+| `src/core/api_bridge*.zig` | Lua ↔ Zig for floats, layouts, recording |
 | `src/core/lua_api_exec.zig`, `cmd.zig`, `async_cmd.zig` | `hexe.exec` and its cache |
 | `src/core/style.zig` | the style string language |
 | `src/cli/commands/config_validate.zig` | `config check` / `validate` |

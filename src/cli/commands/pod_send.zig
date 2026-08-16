@@ -27,12 +27,12 @@ pub fn runPodSend(
             data_len = 1;
         } else {
             print("Error: --ctrl requires a single letter (a-z)\n", .{});
-            return;
+            std.process.exit(1);
         }
     } else if (text.len > 0) {
         if (text.len > data_buf.len - 1) {
             print("Error: text too long\n", .{});
-            return;
+            std.process.exit(1);
         }
         @memcpy(data_buf[0..text.len], text);
         data_len = text.len;
@@ -45,7 +45,7 @@ pub fn runPodSend(
 
     if (data_len == 0) {
         print("Error: no data to send (use text argument, --ctrl, or --enter)\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const target_socket = try resolveTargetSocket(allocator, uuid, name, socket_path);
@@ -54,7 +54,7 @@ pub fn runPodSend(
     var client = ipc.Client.connect(target_socket) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("pod is not running\n", .{});
-            return;
+            std.process.exit(1);
         }
         return err;
     };
@@ -63,7 +63,7 @@ pub fn runPodSend(
     // Send versioned handshake for auxiliary input.
     wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_INPUT) catch |err| {
         print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     var conn = client.toConnection();

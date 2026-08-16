@@ -579,7 +579,14 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
 
     applyMouseShape(state, desiredMouseShape(state, ev, override_active));
 
-    if (statusbar.updateHover(state.term_height, ev.x, ev.y)) {
+    // Resolve which painter region the pointer is over, and drop the pressed
+    // region on release: without this the painter is told a button is held
+    // down forever and keeps drawing it pressed.
+    if (statusbar.noteHover(state, &state.config, state.term_width, state.term_height, state.view.tab_views, state.activeTabIndex(), state.runtime.sessionName(), ev.x, ev.y)) {
+        state.needs_render = true;
+    }
+    if (ev.is_release) {
+        statusbar.clearPress();
         state.needs_render = true;
     }
 

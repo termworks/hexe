@@ -152,37 +152,6 @@ fn mergeEnvLines(allocator: std.mem.Allocator, env: ?[]const []const u8, extra: 
     return out;
 }
 
-fn appendEnvExport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, line: []const u8) !void {
-    const eq = std.mem.indexOfScalar(u8, line, '=') orelse return;
-    if (eq == 0) return;
-    const key = line[0..eq];
-    if (!isValidEnvKey(key)) return;
-    const value = line[eq + 1 ..];
-
-    const escaped = try escapeForShell(allocator, value);
-    defer allocator.free(escaped);
-
-    try list.appendSlice(allocator, "export ");
-    try list.appendSlice(allocator, key);
-    try list.appendSlice(allocator, "=");
-    try list.appendSlice(allocator, escaped);
-    try list.appendSlice(allocator, "; ");
-}
-
-fn shouldSkipEnvSyncKey(key: []const u8) bool {
-    if (std.mem.eql(u8, key, "PWD")) return true;
-    if (std.mem.eql(u8, key, "OLDPWD")) return true;
-    if (std.mem.eql(u8, key, "SHLVL")) return true;
-    if (std.mem.eql(u8, key, "_")) return true;
-    if (std.mem.eql(u8, key, "HEXE_PANE_UUID")) return true;
-    if (std.mem.eql(u8, key, "HEXE_POD_SOCKET")) return true;
-    if (std.mem.eql(u8, key, "HEXE_POD_NAME")) return true;
-    if (std.mem.eql(u8, key, "HEXE_MUX_SOCKET")) return true;
-    if (std.mem.eql(u8, key, "TERM")) return true;
-    if (std.mem.eql(u8, key, "BOX")) return true;
-    return false;
-}
-
 fn freeEnvLines(allocator: std.mem.Allocator, lines: []const []const u8) void {
     for (lines) |line| allocator.free(line);
     allocator.free(lines);
@@ -228,96 +197,6 @@ fn parseNulSeparatedEnv(allocator: std.mem.Allocator, data: []const u8) !?[]cons
         entries = try allocator.realloc(entries, idx);
     }
     return entries;
-}
-
-fn readPaneEnvSnapshot(allocator: std.mem.Allocator, uuid: [32]u8) !?[]const []const u8 {
-    var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/hexe-env-{s}", .{&uuid});
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
-        if (err != error.FileNotFound) {
-            core.logging.logError("terminal", "failed to open pane env snapshot", err);
-        }
-        return null;
-    };
-    defer file.close();
-
-    const data = try file.readToEndAlloc(allocator, 256 * 1024);
-    defer allocator.free(data);
-
-    return parseNulSeparatedEnv(allocator, data);
-}
-
-fn readProcEnvironByPid(allocator: std.mem.Allocator, pid: i32) !?[]const []const u8 {
-    if (pid <= 0) return null;
-
-    var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/environ", .{pid});
-    const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
-        if (err != error.FileNotFound) {
-            core.logging.logError("terminal", "failed to open process environ", err);
-        }
-        return null;
-    };
-    defer file.close();
-
-    const data = try file.readToEndAlloc(allocator, 256 * 1024);
-    defer allocator.free(data);
-
-    return parseNulSeparatedEnv(allocator, data);
-}
-
-fn syncEnvIntoExistingFloat(state: *State, pane: *Pane, parent_uuid: [32]u8) void {
-    var parent_env: ?[]const []const u8 = null;
-    if (state.runtime.getPaneInfoSnapshot(parent_uuid)) |info| {
-        defer {
-            if (info.name) |s| state.allocator.free(s);
-            if (info.cwd) |s| state.allocator.free(s);
-            if (info.sticky_pwd) |s| state.allocator.free(s);
-            if (info.fg_name) |s| state.allocator.free(s);
-        }
-        if (info.fg_pid) |pid| {
-            parent_env = readProcEnvironByPid(state.allocator, pid) catch |err| blk: {
-                core.logging.logError("terminal", "failed to read parent process environment for float sync", err);
-                break :blk null;
-            };
-        }
-    }
-
-    if (parent_env == null) {
-        parent_env = readPaneEnvSnapshot(state.allocator, parent_uuid) catch |err| blk: {
-            core.logging.logError("terminal", "failed to read pane environment snapshot for float sync", err);
-            break :blk null;
-        };
-    }
-    if (parent_env == null) return;
-    defer freeEnvLines(state.allocator, parent_env.?);
-
-    var cmd: std.ArrayList(u8) = .empty;
-    defer cmd.deinit(state.allocator);
-
-    for (parent_env.?) |line| {
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        if (eq == 0) continue;
-        const key = line[0..eq];
-        if (shouldSkipEnvSyncKey(key)) continue;
-        appendEnvExport(&cmd, state.allocator, line) catch |err| {
-            core.logging.logError("terminal", "failed to build pane environment sync command", err);
-            state.notifications.show("Environment sync failed");
-            state.needs_render = true;
-            return;
-        };
-    }
-
-    if (cmd.items.len == 0) return;
-    cmd.append(state.allocator, '\n') catch |err| {
-        core.logging.logError("terminal", "failed to finish pane environment sync command", err);
-        state.notifications.show("Environment sync failed");
-        state.needs_render = true;
-        return;
-    };
-    pane.write(cmd.items) catch |err| {
-        terminal_main.debugLogUuid(&pane.uuid, "syncPaneEnvFromParent write failed: {s}", .{@errorName(err)});
-    };
 }
 
 fn paneExistsInSes(state: *State, uuid: [32]u8) bool {

@@ -506,7 +506,13 @@ pub const SessionRenameTab = extern struct {
 };
 
 /// UpdatePaneAux: MUX syncs auxiliary pane info to SES.
-/// Used for focus tracking (created_from, focused_from).
+/// Followed by: cwd bytes (cwd_len), fg_process bytes (fg_len), layout path
+/// bytes (layout_len).
+///
+/// The frontend has always passed cursor position, screen mode, size, cwd, fg
+/// process and layout path to `updatePaneAux`; only focus tracking reached the
+/// wire, so `hexe com <pane> info` answered from never-written struct defaults
+/// (cursor 0,0 / 0x0 / primary screen).
 pub const UpdatePaneAux = extern struct {
     uuid: [32]u8 align(1),
     created_from: [32]u8 align(1),
@@ -516,6 +522,25 @@ pub const UpdatePaneAux = extern struct {
     has_focused_from: u8 align(1),
     has_active_tab: u8 align(1),
     is_focused: u8 align(1),
+    cursor_x: u16 align(1) = 0,
+    cursor_y: u16 align(1) = 0,
+    has_cursor: u8 align(1) = 0,
+    cursor_style: u8 align(1) = 0,
+    has_cursor_style: u8 align(1) = 0,
+    cursor_visible: u8 align(1) = 0,
+    has_cursor_visible: u8 align(1) = 0,
+    alt_screen: u8 align(1) = 0,
+    has_alt_screen: u8 align(1) = 0,
+    cols: u16 align(1) = 0,
+    rows: u16 align(1) = 0,
+    has_size: u8 align(1) = 0,
+    pane_type: u8 align(1) = 0,
+    is_floating: u8 align(1) = 0,
+    fg_pid: i32 align(1) = 0,
+    has_fg_pid: u8 align(1) = 0,
+    cwd_len: u16 align(1) = 0,
+    fg_len: u16 align(1) = 0,
+    layout_len: u16 align(1) = 0,
 };
 
 /// UpdatePaneShell: MUX syncs shell metadata to SES.
@@ -926,10 +951,6 @@ pub fn writeControlWithTrailTimeout(fd: posix.fd_t, msg_type: MsgType, fixed: []
     try writeControlMsgWithRequestIdTimeout(fd, msg_type, 0, fixed, &.{trail}, timeout_ms);
 }
 
-pub fn writeControlWithTrailAndRequestIdTimeout(fd: posix.fd_t, msg_type: MsgType, request_id: u32, fixed: []const u8, trail: []const u8, timeout_ms: i32) !void {
-    try writeControlMsgWithRequestIdTimeout(fd, msg_type, request_id, fixed, &.{trail}, timeout_ms);
-}
-
 pub fn writeControlMsgTimeout(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, trails: []const []const u8, timeout_ms: i32) !void {
     try writeControlMsgWithRequestIdTimeout(fd, msg_type, 0, fixed, trails, timeout_ms);
 }
@@ -1053,13 +1074,6 @@ pub fn writeMuxVt(fd: posix.fd_t, pane_id: u16, frame_type: u8, payload: []const
     if (payload.len > 0) {
         try writeAll(fd, payload);
     }
-}
-
-/// Read a MuxVtHeader from fd.
-pub fn readMuxVtHeader(fd: posix.fd_t) !MuxVtHeader {
-    var buf: [@sizeOf(MuxVtHeader)]u8 = undefined;
-    try readExact(fd, &buf);
-    return std.mem.bytesToValue(MuxVtHeader, &buf);
 }
 
 /// Non-blocking variant: returns error.WouldBlock if no data available.
@@ -1212,19 +1226,4 @@ pub fn sendCliHandshake(fd: posix.fd_t) !void {
     posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
     try sendHandshake(fd, SES_HANDSHAKE_CLI);
     try readAndValidateServerHello(fd);
-}
-
-/// Read a versioned handshake. Returns the channel type and version.
-/// Returns error.UnsupportedVersion if version doesn't match.
-pub fn readHandshake(fd: posix.fd_t) !struct { channel: u8, version: u8 } {
-    var buf: [2]u8 = undefined;
-    try readExact(fd, &buf);
-    return .{ .channel = buf[0], .version = buf[1] };
-}
-
-/// Read handshake and validate version is within supported range.
-pub fn readAndValidateHandshake(fd: posix.fd_t) !u8 {
-    const hs = try readHandshake(fd);
-    if (!isProtocolVersionSupported(hs.version)) return error.UnsupportedVersion;
-    return hs.channel;
 }

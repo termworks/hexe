@@ -1333,6 +1333,12 @@ test "cleanupOrphanedPanes: removes timed-out panes" {
 /// the test-process pid no longer passes for a pod.
 fn spawnFakePod(allocator: std.mem.Allocator, uuid: [32]u8) !std.process.Child {
     var child = std.process.Child.init(&.{ "/bin/sh", "-c", "sleep 30", uuid[0..] }, allocator);
+    // Detach from the test runner's stdio. Inheriting it keeps the runner's
+    // stdout pipe open in the child, so `zig build test` blocks reading to EOF
+    // for the child's full lifetime — 30s added to a sub-second suite.
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
     try child.spawn();
     // Wait out the fork->exec window: until exec completes, /proc/<pid>/cmdline
     // still shows the parent image and the pid-identity check would miss.
@@ -2047,12 +2053,18 @@ test "findStickyPaneWithAffinity: prefers same session" {
     try ses_state.store.panes.put(uuid1, pane1);
     try ses_state.store.panes.put(uuid2, pane2);
 
-    // Search with affinity for "beta"
-    const found = ses_state.findStickyPaneWithAffinity(pwd, key, "beta");
-    try testing.expect(found != null);
-    if (found) |pane| {
-        try testing.expectEqualSlices(u8, &uuid2, &pane.uuid);
-    }
+    // Assert BOTH directions. Checking only one is not a test of affinity:
+    // with the affinity branch deleted the lookup returns whichever pane the
+    // hash map yields first, and that satisfies a single-direction assertion
+    // by luck. Two opposite preferences over the same two panes cannot both be
+    // answered by any fixed iteration order.
+    const found_beta = ses_state.findStickyPaneWithAffinity(pwd, key, "beta");
+    try testing.expect(found_beta != null);
+    try testing.expectEqualSlices(u8, &uuid2, &found_beta.?.uuid);
+
+    const found_alpha = ses_state.findStickyPaneWithAffinity(pwd, key, "alpha");
+    try testing.expect(found_alpha != null);
+    try testing.expectEqualSlices(u8, &uuid1, &found_alpha.?.uuid);
 }
 
 test "findStickyPaneWithAffinity: fallback when no affinity match" {

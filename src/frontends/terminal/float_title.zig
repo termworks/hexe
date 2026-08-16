@@ -1,5 +1,4 @@
 const std = @import("std");
-const shp = @import("shp");
 const text_width = @import("text_width.zig");
 const vaxis = @import("vaxis");
 
@@ -48,7 +47,6 @@ pub fn getTitleRect(state: *const State, pane: *const Pane) ?TitleRect {
     if (title.len == 0) return null;
 
     const style = state.paneFloatStyle(pane) orelse return null;
-    const module = style.module orelse return null;
     const pos = style.position orelse return null;
 
     const outer_x = state.paneBorderX(pane);
@@ -60,8 +58,8 @@ pub fn getTitleRect(state: *const State, pane: *const Pane) ?TitleRect {
     const inner_w = borders.floatTitleInnerWidth(outer_w);
     if (inner_w == 0) return null;
 
-    const segments = statusbar.renderSegmentOutput(&module, title);
-    const total_len: u16 = @intCast(@min(@as(usize, inner_w), segments.total_len));
+    const runs = statusbar.titleRuns(state, title, inner_w, true);
+    const total_len: u16 = @intCast(@min(@as(usize, inner_w), statusbar.runsWidth(runs)));
     if (total_len == 0) return null;
 
     const place = borders.floatTitlePlacement(outer_x, outer_y, outer_w, outer_h, pos, total_len);
@@ -100,7 +98,7 @@ pub fn drawTitleEditor(state: *const State, renderer: *Renderer, pane: *const Pa
     const border_color = state.paneBorderColor(pane);
     const bg: Color = .{ .palette = border_color.active };
     const fg: Color = .{ .palette = 0 };
-    const text_style = shp.Style{ .fg = .{ .palette = 0 }, .bg = .{ .palette = border_color.active }, .bold = true };
+    const text_style = core.style.Style{ .fg = .{ .palette = 0 }, .bg = .{ .palette = border_color.active }, .bold = true };
 
     // Background box.
     var i: u16 = 0;

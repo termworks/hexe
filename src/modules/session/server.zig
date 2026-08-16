@@ -3315,7 +3315,7 @@ pub const Server = struct {
                 };
                 // Forward to MUX.
                 self.replyOrClose(mux_fd, .focus_move, std.mem.asBytes(&fm));
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .exit_intent => {
                 if (hdr.payload_len < @sizeOf(wire.ExitIntent)) {
@@ -3383,14 +3383,14 @@ pub const Server = struct {
                 const mux_fd = self.resolveFloatTargetMux(fr.source_session_id) orelse {
                     core.logging.warn("ses", "float_request target mux not found for session={s}", .{fr.source_session_id[0..8]});
                     self.sendBinaryError(fd, "no_mux");
-                    posix.close(fd);
+                    self.finishCliRequest(fd);
                     return;
                 };
                 // Forward entire float_request to MUX.
                 wire.writeControlWithTrailTimeout(mux_fd, .float_request, std.mem.asBytes(&fr), buf[0..trail_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
                     core.logging.logError("ses", "float_request forward to mux failed", err);
                     self.sendBinaryError(fd, "forward_failed");
-                    posix.close(fd);
+                    self.finishCliRequest(fd);
                     return;
                 };
                 // Store CLI fd — MUX will respond with float_created or float_result.
@@ -3430,7 +3430,7 @@ pub const Server = struct {
                     return;
                 };
                 self.replyOrClose(mux_fd, .notify, buf[0..hdr.payload_len]);
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .send_keys => {
                 if (hdr.payload_len < @sizeOf(wire.SendKeys)) {
@@ -3462,7 +3462,7 @@ pub const Server = struct {
                 if (mux_fd) |mfd| {
                     self.replyOrClose(mfd, .send_keys, buf[0..hdr.payload_len]);
                 }
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .targeted_notify => {
                 if (hdr.payload_len < @sizeOf(wire.TargetedNotify)) {
@@ -3493,7 +3493,7 @@ pub const Server = struct {
                 if (mux_fd) |mfd| {
                     self.replyOrClose(mfd, .targeted_notify, buf[0..hdr.payload_len]);
                 }
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .broadcast_notify => {
                 if (hdr.payload_len > buf.len) {
@@ -3514,7 +3514,7 @@ pub const Server = struct {
                         self.replyOrClose(mfd, .notify, buf[0..hdr.payload_len]);
                     }
                 }
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .pop_confirm => {
                 if (hdr.payload_len < @sizeOf(wire.PopConfirm)) {
@@ -3609,7 +3609,7 @@ pub const Server = struct {
                     return;
                 };
                 server_reporting_handlers.handleBinaryPaneInfo(self, fd, pu.uuid);
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .status => {
                 // Payload is 1 byte: full_mode flag (0 or 1).
@@ -3651,12 +3651,20 @@ pub const Server = struct {
             .get_session_state => {
                 server_cli_layout_handlers.handleGetSessionState(self, fd, hdr.payload_len, &buf);
             },
+            // `hexe ses export` and `hexe ses stats` both open with this. It was
+            // only wired on the MUX CTL channel, so both commands failed at
+            // their first request -- silently, with a non-zero exit and no
+            // message. The handler reads no request payload, so it is
+            // channel-agnostic.
+            .list_sessions => {
+                server_listing_handlers.handleBinaryListSessions(self, fd, &buf);
+            },
             // Named MsgTypes that never arrive on the CLI-tool request channel
             // (handshake 0x04): MUX→SES binary CTL messages, responses, and POD
             // channel-④ events, all dispatched elsewhere. Enumerated explicitly
             // so a new MsgType is a compile error here until categorized
             // (PLAN.md 2.1). Behavior matches the former `else`.
-            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_name, .update_pane_shell, .get_pane_cwd, .list_sessions, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .shell_event, .bell, .exited, .shp_shell_event => {
+            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_name, .update_pane_shell, .get_pane_cwd, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .shell_event, .bell, .exited, .shp_shell_event => {
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
                 self.closeCliRequest(fd, "unsupported cli request type");
             },
@@ -3665,6 +3673,16 @@ pub const Server = struct {
                 self.closeCliRequest(fd, "unsupported cli request type");
             },
         }
+    }
+
+    /// Close a finished CLI request fd. Same note-then-close discipline as
+    /// `closeCliRequest`, without the warn — these are success paths. The note
+    /// matters because `replyOrClose`/`sendBinaryError` earlier in the arm may
+    /// already have queued this fd, and the queued entry would otherwise fire
+    /// later against whatever connection reused the number.
+    fn finishCliRequest(self: *Server, fd: posix.fd_t) void {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
     }
 
     fn closeCliRequest(self: *Server, fd: posix.fd_t, comptime context: []const u8) void {

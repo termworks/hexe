@@ -9,7 +9,7 @@ const posix = std.posix;
 pub fn runMuxRecord(out_path: []const u8, capture_input: bool) !void {
     if (out_path.len == 0) {
         print("Error: --out is required for terminal record\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const term_size = tty.getTermSize();

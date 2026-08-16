@@ -89,18 +89,18 @@ fn outputJson(records: []const PodRecord) !void {
         try stdout.writeAll(uuid_str);
         // Escape JSON strings
         try stdout.writeAll("\"name\":\"");
-        try writeJsonEscaped(stdout, r.name);
+        try core.strings.writeJsonEscaped(stdout, r.name);
         try stdout.writeAll("\",");
         const pid_str = std.fmt.bufPrint(&buf, "\"pid\":{d},", .{r.pid}) catch continue;
         try stdout.writeAll(pid_str);
         const child_pid_str = std.fmt.bufPrint(&buf, "\"child_pid\":{d},", .{r.child_pid}) catch continue;
         try stdout.writeAll(child_pid_str);
         try stdout.writeAll("\"cwd\":\"");
-        try writeJsonEscaped(stdout, r.cwd);
+        try core.strings.writeJsonEscaped(stdout, r.cwd);
         try stdout.writeAll("\",");
         if (r.shell.len > 0) {
             try stdout.writeAll("\"shell\":\"");
-            try writeJsonEscaped(stdout, r.shell);
+            try core.strings.writeJsonEscaped(stdout, r.shell);
             try stdout.writeAll("\",");
         }
         const iso_str = std.fmt.bufPrint(&buf, "\"isolated\":{},", .{r.isolated}) catch continue;
@@ -113,7 +113,7 @@ fn outputJson(records: []const PodRecord) !void {
         for (r.labels, 0..) |lab, li| {
             if (li > 0) try stdout.writeAll(",");
             try stdout.writeAll("\"");
-            try writeJsonEscaped(stdout, lab);
+            try core.strings.writeJsonEscaped(stdout, lab);
             try stdout.writeAll("\"");
         }
         try stdout.writeAll("],");
@@ -121,22 +121,6 @@ fn outputJson(records: []const PodRecord) !void {
         try stdout.writeAll(created_str);
     }
     try stdout.writeAll("\n]\n");
-}
-
-fn writeJsonEscaped(stdout: std.fs.File, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try stdout.writeAll("\\\""),
-            '\\' => try stdout.writeAll("\\\\"),
-            '\n' => try stdout.writeAll("\\n"),
-            '\r' => try stdout.writeAll("\\r"),
-            '\t' => try stdout.writeAll("\\t"),
-            else => {
-                const buf = [1]u8{c};
-                try stdout.writeAll(&buf);
-            },
-        }
-    }
 }
 
 fn probeSockets(allocator: std.mem.Allocator, records: *std.ArrayList(PodRecord), alive_only: bool) void {

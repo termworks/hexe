@@ -31,9 +31,8 @@ reading twice.
 
 | | |
 |---|---|
-| [The status bar](statusbar.md) | three zones, priority budgets, buttons, progress from panes |
-| [The shell prompt](prompt.md) | the same segments, rendered into oslo, bash, zsh or fish |
-| [Sprites](sprites.md) | 2304 pokemon in 1.6 MB, and why the pane is named after one |
+| [Painting](regions.md) | the bar, titles, sprites and popups are drawn by an external painter |
+| [Shell integration](prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
 
 ## Configuring it
 

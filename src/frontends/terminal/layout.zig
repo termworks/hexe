@@ -781,32 +781,4 @@ pub const Layout = struct {
     pub fn splitCount(self: *Layout) usize {
         return self.splits.count();
     }
-
-    /// Get index of focused pane in iteration order
-    pub fn getFocusedIndex(self: *Layout) usize {
-        var panes: [16]*Pane = undefined;
-        var count: usize = 0;
-
-        var it = self.splits.valueIterator();
-        while (it.next()) |pane| {
-            if (count < 16) {
-                panes[count] = pane.*;
-                count += 1;
-            }
-        }
-
-        const Ctx = struct {
-            fn lessThan(_: void, a: *Pane, b: *Pane) bool {
-                return a.id < b.id;
-            }
-        };
-        std.mem.sort(*Pane, panes[0..count], {}, Ctx.lessThan);
-
-        const focused_uuid = self.focused_pane_uuid orelse return 0;
-        for (panes[0..count], 0..) |pane, i| {
-            if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) return i;
-        }
-
-        return 0;
-    }
 };

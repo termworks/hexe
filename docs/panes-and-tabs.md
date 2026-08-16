@@ -74,7 +74,7 @@ report waiting to be filed against the wrong component.
 ### Tabs
 
 Tabs are a list, not a tree: new, next, previous, close, and rename in place. The tab row lives in
-the status bar's centre zone (see [the status bar](statusbar.md)), and the tab title is either the
+the status bar (see [painting](regions.md)), and the tab title is either the
 name you gave it or the basename of the focused pane's directory — a per-segment setting, not a
 global one.
 
@@ -140,7 +140,7 @@ pane is focused and do nothing inside a float:
 
 ```lua
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.h }, hexe.action.split.horizontal(), {
-  when = function(ctx) local p = ctx.pane(0); return p and p.focus_split end,
+  when = function(ctx) local p = ctx.pane(); return p ~= nil and p.is_split end,
 }),
 ```
 

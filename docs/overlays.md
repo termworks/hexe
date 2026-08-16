@@ -51,7 +51,7 @@ and a pod that answering "attach" immediately throws away.
 Panes can raise them too, over OSC 9, 99 and 777. Hexe consumes those rather than forwarding them
 blindly to the host terminal, so the message names the pane it came from, and only sends a desktop
 notification when the frontend advertises that capability. OSC 9;4 progress goes to the status bar
-instead — see [the status bar](statusbar.md).
+instead — see [painting](regions.md).
 
 ### Widgets
 

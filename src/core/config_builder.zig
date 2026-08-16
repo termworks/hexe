@@ -2,14 +2,13 @@ const std = @import("std");
 const config = @import("config.zig");
 
 /// ConfigBuilder accumulates configuration from Lua API calls
-/// and builds the final Config structs for all sections (mux, ses, shp, pop)
+/// and builds the final Config structs for all sections (mux, ses, pop)
 pub const ConfigBuilder = struct {
     allocator: std.mem.Allocator,
 
     // Section builders
     mux: ?*MuxConfigBuilder = null,
     ses: ?*SesConfigBuilder = null,
-    shp: ?*ShpConfigBuilder = null,
     pop: ?*PopConfigBuilder = null,
 
     pub fn init(allocator: std.mem.Allocator) !ConfigBuilder {
@@ -17,7 +16,6 @@ pub const ConfigBuilder = struct {
             .allocator = allocator,
             .mux = null,
             .ses = null,
-            .shp = null,
             .pop = null,
         };
     }
@@ -31,10 +29,6 @@ pub const ConfigBuilder = struct {
             ses.deinit();
             self.allocator.destroy(ses);
         }
-        if (self.shp) |shp| {
-            shp.deinit();
-            self.allocator.destroy(shp);
-        }
         if (self.pop) |pop_builder| {
             pop_builder.deinit();
             self.allocator.destroy(pop_builder);
@@ -43,8 +37,8 @@ pub const ConfigBuilder = struct {
 
     // Note: there is no top-level `build()` because each section is consumed
     // independently — `MuxConfigBuilder.build()` by the mux config loader,
-    // `SesConfigBuilder.build()` by the ses config loader, and the shp/pop
-    // builders are read field-by-field by their respective loaders. Callers
+    // `SesConfigBuilder.build()` by the ses config loader, and the pop
+    // builder is read field-by-field by its loader. Callers
     // that need a section's final config should reach through the specific
     // section builder.
 };
@@ -105,9 +99,10 @@ pub const MuxConfigBuilder = struct {
 
     const TabsConfig = struct {
         status_enabled: ?bool = null,
-        segments_left: std.ArrayList(config.Segment),
-        segments_center: std.ArrayList(config.Segment),
-        segments_right: std.ArrayList(config.Segment),
+        status_view: ?[]const u8 = null,
+        status_socket: ?[]const u8 = null,
+        status_command: ?[]const u8 = null,
+        status_refresh_ms: ?u64 = null,
     };
 
     const SplitsConfig = struct {
@@ -123,11 +118,7 @@ pub const MuxConfigBuilder = struct {
             .allocator = allocator,
             .binds = .{},
             .float_matches = .{},
-            .tabs_config = .{
-                .segments_left = .{},
-                .segments_center = .{},
-                .segments_right = .{},
-            },
+            .tabs_config = .{},
             .splits_config = .{},
         };
         return self;
@@ -143,150 +134,29 @@ pub const MuxConfigBuilder = struct {
         }
         self.float_matches.deinit(self.allocator);
         self.binds.deinit(self.allocator);
-        self.tabs_config.segments_left.deinit(self.allocator);
-        self.tabs_config.segments_center.deinit(self.allocator);
-        self.tabs_config.segments_right.deinit(self.allocator);
     }
 
     /// Helper: Deep copy a Bind to prevent use-after-free
     fn duplicateBind(bind: config.Config.Bind, allocator: std.mem.Allocator) !config.Config.Bind {
         var result = bind;
 
-        // Deep copy when condition if present
-        if (bind.when) |w| {
-            result.when = try duplicateWhenDef(w, allocator);
+        // The condition is now just the callback reference string.
+        if (bind.when) |code| {
+            result.when = try allocator.dupe(u8, code);
+        }
+        // A Lua action carries an owned reference of the same kind.
+        if (bind.action == .lua) {
+            result.action = .{ .lua = try allocator.dupe(u8, bind.action.lua) };
         }
 
         return result;
     }
 
-    /// Helper: Deep copy a FloatStyle to prevent use-after-free
+    /// Helper: Deep copy a FloatStyle. Nothing in it is heap-owned any more --
+    /// the title's content comes from the painter -- so this is a plain copy.
     fn duplicateFloatStyle(style: config.FloatStyle, allocator: std.mem.Allocator) !config.FloatStyle {
-        var result = style;
-
-        // Deep copy module segment if present
-        if (style.module) |mod| {
-            result.module = try duplicateSegment(mod, allocator);
-        }
-
-        if (style.title_segments.len > 0) {
-            const title_segments = try allocator.alloc(config.Segment, style.title_segments.len);
-            for (style.title_segments, 0..) |seg, i| {
-                title_segments[i] = try duplicateSegment(seg, allocator);
-            }
-            result.title_segments = title_segments;
-        }
-
-        return result;
-    }
-
-    /// Helper: Deep copy a WhenDef to prevent use-after-free
-    fn duplicateWhenDef(when: config.WhenDef, allocator: std.mem.Allocator) !config.WhenDef {
-        var result: config.WhenDef = .{};
-
-        // Duplicate bash/lua/env strings
-        if (when.bash) |s| result.bash = try allocator.dupe(u8, s);
-        if (when.lua) |s| result.lua = try allocator.dupe(u8, s);
-        if (when.env) |s| result.env = try allocator.dupe(u8, s);
-        if (when.env_not) |s| result.env_not = try allocator.dupe(u8, s);
-
-        // Duplicate 'all' array of strings
-        if (when.all) |all_arr| {
-            var new_all = try allocator.alloc([]const u8, all_arr.len);
-            for (all_arr, 0..) |s, i| {
-                new_all[i] = try allocator.dupe(u8, s);
-            }
-            result.all = new_all;
-        }
-
-        // Duplicate 'any' array of WhenDef (recursive)
-        if (when.any) |any_arr| {
-            var new_any = try allocator.alloc(config.WhenDef, any_arr.len);
-            for (any_arr, 0..) |w, i| {
-                new_any[i] = try duplicateWhenDef(w, allocator);
-            }
-            result.any = new_any;
-        }
-
-        return result;
-    }
-
-    /// Helper: Deep copy a SpinnerDef to prevent use-after-free
-    fn duplicateSpinnerDef(spinner: config.SpinnerDef, allocator: std.mem.Allocator) !config.SpinnerDef {
-        var result = spinner;
-
-        // Duplicate kind string
-        result.kind = try allocator.dupe(u8, spinner.kind);
-
-        // Duplicate colors array
-        if (spinner.colors.len > 0) {
-            result.colors = try allocator.dupe(u8, spinner.colors);
-        }
-
-        return result;
-    }
-
-    /// Helper: Duplicate a segment's strings to prevent use-after-free
-    fn duplicateSegment(segment: config.Segment, allocator: std.mem.Allocator) !config.Segment {
-        var result = segment;
-
-        // Duplicate string fields
-        result.name = try allocator.dupe(u8, segment.name);
-        if (segment.command) |cmd| {
-            result.command = try allocator.dupe(u8, cmd);
-        }
-        if (segment.on_click) |cmd| {
-            result.on_click = try allocator.dupe(u8, cmd);
-        }
-        if (segment.on_right_click) |cmd| {
-            result.on_right_click = try allocator.dupe(u8, cmd);
-        }
-        if (segment.on_middle_click) |cmd| {
-            result.on_middle_click = try allocator.dupe(u8, cmd);
-        }
-        if (segment.button_active_bash) |cmd| {
-            result.button_active_bash = try allocator.dupe(u8, cmd);
-        }
-        if (segment.button_left_style) |s| {
-            result.button_left_style = try allocator.dupe(u8, s);
-        }
-        if (segment.button_middle_style) |s| {
-            result.button_middle_style = try allocator.dupe(u8, s);
-        }
-        if (segment.button_right_style) |s| {
-            result.button_right_style = try allocator.dupe(u8, s);
-        }
-        result.active_style = try allocator.dupe(u8, segment.active_style);
-        result.inactive_style = try allocator.dupe(u8, segment.inactive_style);
-        result.separator = try allocator.dupe(u8, segment.separator);
-        result.separator_style = try allocator.dupe(u8, segment.separator_style);
-        result.tab_title = try allocator.dupe(u8, segment.tab_title);
-        result.left_arrow = try allocator.dupe(u8, segment.left_arrow);
-        result.right_arrow = try allocator.dupe(u8, segment.right_arrow);
-
-        // Duplicate outputs array
-        if (segment.outputs.len > 0) {
-            var outputs = try allocator.alloc(config.OutputDef, segment.outputs.len);
-            for (segment.outputs, 0..) |out, i| {
-                outputs[i] = .{
-                    .style = try allocator.dupe(u8, out.style),
-                    .format = try allocator.dupe(u8, out.format),
-                };
-            }
-            result.outputs = outputs;
-        }
-
-        // Deep copy when condition
-        if (segment.when) |w| {
-            result.when = try duplicateWhenDef(w, allocator);
-        }
-
-        // Deep copy spinner
-        if (segment.spinner) |s| {
-            result.spinner = try duplicateSpinnerDef(s, allocator);
-        }
-
-        return result;
+        _ = allocator;
+        return style;
     }
 
     pub fn build(self: *MuxConfigBuilder) !config.Config {
@@ -347,30 +217,12 @@ pub const MuxConfigBuilder = struct {
             result.float_match_rules = rules;
         }
 
-        // Apply tabs config - duplicate segments to prevent use-after-free
+        // Apply tabs config
         if (self.tabs_config.status_enabled) |v| result.tabs.status.enabled = v;
-        if (self.tabs_config.segments_left.items.len > 0) {
-            var left = try self.allocator.alloc(config.Segment, self.tabs_config.segments_left.items.len);
-            for (self.tabs_config.segments_left.items, 0..) |seg, i| {
-                left[i] = try duplicateSegment(seg, self.allocator);
-            }
-            result.tabs.status.left = left;
-        }
-        if (self.tabs_config.segments_center.items.len > 0) {
-            var center = try self.allocator.alloc(config.Segment, self.tabs_config.segments_center.items.len);
-            for (self.tabs_config.segments_center.items, 0..) |seg, i| {
-                center[i] = try duplicateSegment(seg, self.allocator);
-            }
-            result.tabs.status.center = center;
-        }
-        if (self.tabs_config.segments_right.items.len > 0) {
-            var right = try self.allocator.alloc(config.Segment, self.tabs_config.segments_right.items.len);
-            for (self.tabs_config.segments_right.items, 0..) |seg, i| {
-                right[i] = try duplicateSegment(seg, self.allocator);
-            }
-            result.tabs.status.right = right;
-        }
-
+        if (self.tabs_config.status_view) |v| result.tabs.status.view = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_socket) |v| result.tabs.status.socket = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_command) |v| result.tabs.status.command = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_refresh_ms) |v| result.tabs.status.refresh_ms = v;
         // Apply splits config
         if (self.splits_config.color) |v| result.splits.color = v;
         if (self.splits_config.separator_v) |v| result.splits.separator_v = v;
@@ -442,72 +294,6 @@ pub const SesConfigBuilder = struct {
         };
 
         return result;
-    }
-};
-
-/// SHP section builder - accumulates shell prompt configuration
-pub const ShpConfigBuilder = struct {
-    allocator: std.mem.Allocator,
-
-    // Prompt segments
-    left_segments: std.ArrayList(SegmentDef),
-    right_segments: std.ArrayList(SegmentDef),
-
-    // Temporary struct for prompt segments (similar to config.Segment but for SHP)
-    pub const SegmentDef = struct {
-        name: []const u8,
-        kind: config.SegmentKind = .value,
-        priority: i64,
-        outputs: []const OutputDef,
-        command: ?[]const u8,
-        builtin: ?[]const u8 = null,
-        progress_every_ms: u64 = 1000,
-        progress_show_when: ?[]const u8 = null,
-        inverse_on_hover: bool = true,
-        when: ?config.WhenDef,
-    };
-
-    pub const OutputDef = struct {
-        style: []const u8,
-        format: []const u8,
-    };
-
-    pub fn init(allocator: std.mem.Allocator) !*ShpConfigBuilder {
-        const self = try allocator.create(ShpConfigBuilder);
-        self.* = .{
-            .allocator = allocator,
-            .left_segments = .{},
-            .right_segments = .{},
-        };
-        return self;
-    }
-
-    pub fn deinit(self: *ShpConfigBuilder) void {
-        // Clean up segments
-        for (self.left_segments.items) |seg| {
-            self.allocator.free(seg.name);
-            if (seg.command) |cmd| self.allocator.free(cmd);
-            if (seg.builtin) |b| self.allocator.free(b);
-            if (seg.progress_show_when) |s| self.allocator.free(s);
-            for (seg.outputs) |out| {
-                self.allocator.free(out.style);
-                self.allocator.free(out.format);
-            }
-            self.allocator.free(seg.outputs);
-        }
-        for (self.right_segments.items) |seg| {
-            self.allocator.free(seg.name);
-            if (seg.command) |cmd| self.allocator.free(cmd);
-            if (seg.builtin) |b| self.allocator.free(b);
-            if (seg.progress_show_when) |s| self.allocator.free(s);
-            for (seg.outputs) |out| {
-                self.allocator.free(out.style);
-                self.allocator.free(out.format);
-            }
-            self.allocator.free(seg.outputs);
-        }
-        self.left_segments.deinit(self.allocator);
-        self.right_segments.deinit(self.allocator);
     }
 };
 

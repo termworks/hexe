@@ -20,7 +20,7 @@ pub fn runMuxFloat(
 ) !void {
     if (command.len == 0) {
         print("Error: --command is required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     if (isolation_profile.len > 0) {
@@ -32,7 +32,7 @@ pub fn runMuxFloat(
             std.mem.eql(u8, isolation_profile, "full");
         if (!valid) {
             print("Error: invalid --isolation profile '{s}' (use: none|minimal|default|balanced|sandbox|full)\n", .{isolation_profile});
-            return;
+            std.process.exit(1);
         }
     }
 
@@ -94,14 +94,14 @@ pub fn runMuxFloat(
     // Connect to SES.
     const ses_path = ipc.getSesSocketPath(allocator) catch {
         print("Error: cannot determine ses socket path\n", .{});
-        return;
+        std.process.exit(1);
     };
     defer allocator.free(ses_path);
 
     var client = ipc.Client.connect(ses_path) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("ses is not running\n", .{});
-            return;
+            std.process.exit(1);
         }
         return err;
     };
@@ -111,7 +111,7 @@ pub fn runMuxFloat(
     // Send versioned CLI handshake.
     wire.sendCliHandshake(fd) catch |err| {
         print("Error: failed to handshake with ses: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     // Determine result path for wait_for_exit.
@@ -188,7 +188,7 @@ pub fn runMuxFloat(
     // Send the float_request message.
     wire.writeControlWithTrail(fd, .float_request, std.mem.asBytes(&req), trail.items) catch |err| {
         print("Error: failed to send float request: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     // Wait for the response. wait_for_exit is always on for the CLI, so this
@@ -198,7 +198,7 @@ pub fn runMuxFloat(
     // `dir=$(hexe mux float … yazi …)` and every other capture-based float.
     const hdr = wire.readControlHeaderBlocking(fd) catch {
         print("No response from ses\n", .{});
-        return;
+        std.process.exit(1);
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
 
@@ -206,19 +206,19 @@ pub fn runMuxFloat(
         .float_result => {
             const result = wire.readStruct(wire.FloatResult, fd) catch {
                 print("Error reading float result\n", .{});
-                return;
+                std.process.exit(1);
             };
             const exit_code: u8 = if (result.exit_code >= 0) @intCast(@min(result.exit_code, 255)) else 1;
             // Read output if any (but skip output if exit key was pressed - code 130)
             if (result.output_len > 0) {
                 const output = allocator.alloc(u8, result.output_len) catch {
                     print("Error allocating output buffer\n", .{});
-                    return;
+                    std.process.exit(1);
                 };
                 defer allocator.free(output);
                 wire.readExact(fd, output) catch {
                     print("Error reading output\n", .{});
-                    return;
+                    std.process.exit(1);
                 };
                 // Only output if not cancelled via exit key (130 = exit key pressed)
                 if (output.len > 0 and exit_code != 130) {
@@ -238,7 +238,7 @@ pub fn runMuxFloat(
                 var err_buf: [1024]u8 = undefined;
                 wire.readExact(fd, err_buf[0..hdr.payload_len]) catch |err| {
                     print("Error reading float error response: {s}\n", .{@errorName(err)});
-                    return;
+                    std.process.exit(1);
                 };
                 // The payload is wire.Error{msg_len} followed by the message;
                 // printing it raw leaked the length bytes ("\x06\x00no_mux").
@@ -255,7 +255,7 @@ pub fn runMuxFloat(
         },
         else => {
             print("Unexpected response from ses\n", .{});
-            return;
+            std.process.exit(1);
         },
     }
 }

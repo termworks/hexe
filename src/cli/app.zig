@@ -8,7 +8,7 @@ const web_frontend = @import("web");
 const syslink_frontend = @import("syslink");
 const ses = @import("ses");
 const pod = @import("pod");
-const shp = @import("shp");
+const shell_hooks = @import("shp");
 const pop_handlers = @import("pop_handlers.zig");
 const cli_cmds = @import("commands/com.zig");
 const config_validate = @import("commands/config_validate.zig");
@@ -74,16 +74,28 @@ fn parseOptionalI64(value: ?[]const u8, field_name: []const u8) !i64 {
     return 0;
 }
 
+/// Parse a `--timeout` in milliseconds. Returns i32 because that is what the
+/// popup wire carries: parsing as i64 and `@intCast`ing later turns an
+/// out-of-range value into a wrapped negative timeout under ReleaseFast.
+fn parseOptionalTimeoutMs(value: ?[]const u8) !i32 {
+    const raw = value orelse return 0;
+    const ms = std.fmt.parseInt(i64, raw, 10) catch {
+        print("Error: invalid integer for --timeout: {s}\n", .{raw});
+        return error.InvalidArgument;
+    };
+    if (ms < 0 or ms > std.math.maxInt(i32)) {
+        print("Error: --timeout out of range (0..{d} ms): {s}\n", .{ std.math.maxInt(i32), raw });
+        return error.InvalidArgument;
+    }
+    return @intCast(ms);
+}
+
 fn parseCliLogLevel(value: ?[]const u8) !?core.logging.Level {
     if (value) |raw| {
         const level = core.logging.parseLevel(raw) orelse {
-            print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{raw});
+            print("Error: invalid --log level '{s}' (use trace|debug|info|warn|err)\n", .{raw});
             return error.InvalidArgument;
         };
-        if (level != .trace and level != .debug and level != .info) {
-            print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{raw});
-            return error.InvalidArgument;
-        }
         return level;
     }
     return null;
@@ -376,9 +388,10 @@ pub fn main() !void {
     try ses_kill.addArg(Arg.positional("target", null, null));
     try ses_kill.addArg(Arg.singleValueOption("instance", 'I', null));
 
-    var ses_clear = app.createCommand("clear", "Kill all detached sessions");
+    var ses_clear = app.createCommand("clear", "Kill all detached sessions (--orphans: orphaned/sticky panes instead)");
     try ses_clear.addArg(Arg.singleValueOption("instance", 'I', null));
     try ses_clear.addArg(Arg.booleanOption("force", 'f', null));
+    try ses_clear.addArg(Arg.booleanOption("orphans", null, null));
 
     var ses_export_cmd = app.createCommand("export", "Export detached session to JSON");
     try ses_export_cmd.addArg(Arg.positional("session", null, null));
@@ -597,20 +610,9 @@ pub fn main() !void {
     try syslink_serve.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
     try syslink_cmd.addSubcommands(&[_]yazap.Command{ syslink_inspect, syslink_probe, syslink_serve });
 
-    // SHP subcommands
-    var shp_prompt = app.createCommand("prompt", "Render shell prompt");
-    try shp_prompt.addArg(Arg.singleValueOption("status", 's', null));
-    try shp_prompt.addArg(Arg.singleValueOption("duration", 'd', null));
-    try shp_prompt.addArg(Arg.booleanOption("right", 'r', null));
-    try shp_prompt.addArg(Arg.singleValueOption("shell", 'S', null));
-    try shp_prompt.addArg(Arg.singleValueOption("jobs", 'j', null));
-    // What a shell with more to say than bash can supply. Both are optional, and a shell that has
-    // no answer simply omits them — but the parser is strict, so they must be declared here or
-    // passing one is a hard error rather than an ignored flag.
-    try shp_prompt.addArg(Arg.singleValueOption("language", null, null));
-    try shp_prompt.addArg(Arg.singleValueOption("vimode", null, null));
-
-    var shp_init = app.createCommand("init", "Print shell initialization script");
+    // Shell integration: the hooks that report shell state to the mux. The
+    // prompt itself is painted by an external program, not by hexe.
+    var shp_init = app.createCommand("init", "Print shell integration hooks");
     try shp_init.addArg(Arg.positional("shell", null, null));
     try shp_init.addArg(Arg.booleanOption("no-comms", null, null));
 
@@ -626,14 +628,7 @@ pub fn main() !void {
     try shp_shell_event.addArg(Arg.booleanOption("running", null, null));
     try shp_shell_event.addArg(Arg.singleValueOption("started-at", null, null));
 
-    var shp_spinner = app.createCommand("spinner", "Render a spinner/animation frame");
-    try shp_spinner.addArg(Arg.positional("name", null, null));
-    try shp_spinner.addArg(Arg.singleValueOption("width", 'w', null));
-    try shp_spinner.addArg(Arg.singleValueOption("interval", 'i', null));
-    try shp_spinner.addArg(Arg.singleValueOption("hold", 'H', null));
-    try shp_spinner.addArg(Arg.booleanOption("loop", 'l', null));
-
-    try shp_cmd.addSubcommands(&[_]yazap.Command{ shp_prompt, shp_init, shp_exit_intent, shp_shell_event, shp_spinner });
+    try shp_cmd.addSubcommands(&[_]yazap.Command{ shp_init, shp_exit_intent, shp_shell_event });
 
     // POP subcommands
     var pop_notify = app.createCommand("notify", "Show notification");
@@ -736,7 +731,7 @@ pub fn main() !void {
                     return;
                 }
             }
-            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try runSesDaemon(m.containsArg("foreground"), log_level, m.getSingleValue("logfile") orelse "");
             return;
         }
@@ -761,7 +756,11 @@ pub fn main() !void {
         if (ses_matches.subcommandMatches("clear")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            try cli_cmds.runSesClear(allocator, m.containsArg("force"));
+            if (m.containsArg("orphans")) {
+                try cli_cmds.runSesClearOrphans(allocator, m.containsArg("force"));
+            } else {
+                try cli_cmds.runSesClear(allocator, m.containsArg("force"));
+            }
             return;
         }
         if (ses_matches.subcommandMatches("export")) |m| {
@@ -790,7 +789,7 @@ pub fn main() !void {
         if (layout_matches.subcommandMatches("open")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try cli_cmds.runSesOpen(
                 allocator,
                 m.getSingleValue("target") orelse ".",
@@ -822,7 +821,7 @@ pub fn main() !void {
                     return;
                 }
             }
-            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try runPodDaemon(
                 m.containsArg("foreground"),
                 m.getSingleValue("uuid") orelse "",
@@ -855,7 +854,7 @@ pub fn main() !void {
                     return;
                 }
             }
-            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try cli_cmds.runPodNew(
                 allocator,
                 m.getSingleValue("name") orelse "",
@@ -931,7 +930,7 @@ pub fn main() !void {
             } else if (m.containsArg("test-only")) {
                 setGeneratedTestInstance();
             }
-            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try runTerminalNew(
                 m.getSingleValue("name") orelse "",
                 log_level,
@@ -963,7 +962,7 @@ pub fn main() !void {
         if (mux_matches.subcommandMatches("attach")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try runTerminalAttach(
                 m.getSingleValue("name") orelse "",
                 log_level,
@@ -1103,21 +1102,6 @@ pub fn main() !void {
             return;
         }
     } else if (matches.subcommandMatches("shell")) |shp_matches| {
-        if (shp_matches.subcommandMatches("prompt")) |m| {
-            const status = try parseOptionalI64(m.getSingleValue("status"), "status");
-            const duration = try parseOptionalI64(m.getSingleValue("duration"), "duration");
-            const jobs = try parseOptionalI64(m.getSingleValue("jobs"), "jobs");
-            try runShpPrompt(
-                status,
-                duration,
-                m.containsArg("right"),
-                m.getSingleValue("shell") orelse "",
-                jobs,
-                m.getSingleValue("language") orelse "",
-                m.getSingleValue("vimode") orelse "",
-            );
-            return;
-        }
         if (shp_matches.subcommandMatches("init")) |m| {
             try runShpInit(m.getSingleValue("shell") orelse "", m.containsArg("no-comms"));
             return;
@@ -1143,26 +1127,19 @@ pub fn main() !void {
             );
             return;
         }
-        if (shp_matches.subcommandMatches("spinner")) |m| {
-            const width = try parseOptionalI64(m.getSingleValue("width"), "width");
-            const interval = try parseOptionalI64(m.getSingleValue("interval"), "interval");
-            const hold = try parseOptionalI64(m.getSingleValue("hold"), "hold");
-            try runShpSpinner(m.getSingleValue("name") orelse "", width, interval, hold, m.containsArg("loop"));
-            return;
-        }
     } else if (matches.subcommandMatches("popup")) |pop_matches| {
         if (pop_matches.subcommandMatches("notify")) |m| {
-            const timeout = try parseOptionalI64(m.getSingleValue("timeout"), "timeout");
+            const timeout = try parseOptionalTimeoutMs(m.getSingleValue("timeout"));
             try pop_handlers.runPopNotify(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("message") orelse "");
             return;
         }
         if (pop_matches.subcommandMatches("confirm")) |m| {
-            const timeout = try parseOptionalI64(m.getSingleValue("timeout"), "timeout");
+            const timeout = try parseOptionalTimeoutMs(m.getSingleValue("timeout"));
             try pop_handlers.runPopConfirm(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("message") orelse "");
             return;
         }
         if (pop_matches.subcommandMatches("choose")) |m| {
-            const timeout = try parseOptionalI64(m.getSingleValue("timeout"), "timeout");
+            const timeout = try parseOptionalTimeoutMs(m.getSingleValue("timeout"));
             try pop_handlers.runPopChoose(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("items") orelse "", m.getSingleValue("message") orelse "");
             return;
         }
@@ -1259,7 +1236,7 @@ fn runPodDaemon(
 ) !void {
     if (uuid.len == 0 or socket_path.len == 0) {
         print("Error: --uuid and --socket required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const effective_write_meta = if (no_write_meta) false else if (write_meta) true else true;
@@ -1426,69 +1403,10 @@ fn runTerminalAttach(name: []const u8, log_level: ?core.logging.Level, log_file:
     }
 }
 
-fn runShpPrompt(
-    status: i64,
-    duration: i64,
-    right: bool,
-    shell: []const u8,
-    jobs: i64,
-    language: []const u8,
-    vimode: []const u8,
-) !void {
-    try shp.run(.{
-        .prompt = true,
-        .status = status,
-        .duration = duration,
-        .right = right,
-        .shell = if (shell.len > 0) shell else null,
-        .jobs = jobs,
-        // Empty means the shell has no such notion, which is not the same as a value of "".
-        .language = if (language.len > 0) language else null,
-        .vimode = if (vimode.len > 0) vimode else null,
-    });
-}
-
 fn runShpInit(shell: []const u8, no_comms: bool) !void {
     if (shell.len > 0) {
-        try shp.run(.{ .init_shell = shell, .no_comms = no_comms });
+        try shell_hooks.printInit(shell, no_comms);
     } else {
         print("Error: shell name required (bash, zsh, fish)\n", .{});
     }
-}
-
-fn runShpSpinner(name: []const u8, width_i: i64, interval_i: i64, hold_i: i64, loop: bool) !void {
-    const stdout = std.fs.File.stdout();
-
-    if (name.len == 0) {
-        print("Error: spinner name required\n", .{});
-        return;
-    }
-
-    const width: u8 = if (width_i > 0 and width_i <= 64) @intCast(width_i) else 8;
-    const interval_ms: u64 = if (interval_i > 0 and interval_i <= 10_000) @intCast(interval_i) else 75;
-    const hold_frames: u8 = if (hold_i >= 0 and hold_i <= 60) @intCast(hold_i) else 9;
-
-    const start_ms: u64 = @intCast(std.time.milliTimestamp());
-
-    if (!loop) {
-        const now_ms: u64 = start_ms;
-        const frame = shp.animations.renderAnsiWithOptions(name, now_ms, start_ms, width, interval_ms, hold_frames);
-        try stdout.writeAll(frame);
-        try stdout.writeAll("\n");
-        return;
-    }
-
-    while (true) {
-        const now_ms: u64 = @intCast(std.time.milliTimestamp());
-        const frame = shp.animations.renderAnsiWithOptions(name, now_ms, start_ms, width, interval_ms, hold_frames);
-
-        stdout.writeAll("\r") catch break;
-        stdout.writeAll(frame) catch break;
-        stdout.writeAll("\x1b[0K") catch break;
-        std.Thread.sleep(interval_ms * std.time.ns_per_ms);
-    }
-
-    stdout.writeAll("\r\n") catch |err| {
-        core.logging.logError("cli", "failed to finish animation line", err);
-    };
 }

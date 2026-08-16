@@ -199,7 +199,7 @@ pub fn runPodAttach(
     var client = ipc.Client.connect(target_socket) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("pod is not running\n", .{});
-            return;
+            std.process.exit(1);
         }
         return err;
     };
@@ -208,7 +208,7 @@ pub fn runPodAttach(
     // Observer, NOT the authoritative VT client — see sendAuxFrame above.
     wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_OBSERVER) catch |err| {
         print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     var conn = client.toConnection();

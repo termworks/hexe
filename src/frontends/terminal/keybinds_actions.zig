@@ -13,6 +13,38 @@ const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 
 const BindAction = core.Config.BindAction;
+const lua_api = @import("lua_api.zig");
+
+/// Run a keybinding whose action is a Lua function.
+///
+/// Same invocation shape as a `when` predicate: the live query API is published
+/// for the duration of the call and revoked after, so the callback can inspect
+/// the session and act on it, and cannot retain a pointer past the call.
+fn runLuaAction(state: *State, code: []const u8) bool {
+    const rt = state.config._lua_runtime orelse return false;
+    const callback_id = std.fmt.parseInt(
+        i32,
+        if (std.mem.startsWith(u8, code, "__hexe_cb_ref:")) code["__hexe_cb_ref:".len..] else return false,
+        10,
+    ) catch return false;
+
+    const scope = lua_api.pushLiveState(rt, state);
+    defer lua_api.popLiveState(rt, scope);
+
+    if (!core.lua_runtime.pushRegisteredCallback(rt, callback_id)) return false;
+    if (!lua_api.pushCallbackContext(rt)) {
+        rt.lua.pop(2);
+        return false;
+    }
+    rt.lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
+        core.logging.warn("terminal", "keybind Lua action raised an error", .{});
+        rt.lua.pop(2);
+        return true;
+    };
+    rt.lua.pop(1); // callback table
+    state.needs_render = true;
+    return true;
+}
 
 fn layoutDirectionFromCore(direction: frontend_core.Direction) layout_mod.Layout.Direction {
     return switch (direction) {
@@ -33,9 +65,15 @@ fn focusedPane(state: *State) ?*Pane {
 
 pub fn dispatchAction(state: *State, action: BindAction) bool {
     const cfg = &state.config;
+
+    // A Lua action is handled here, before the shared mapping: it runs in this
+    // frontend's Lua runtime and has no shared-view representation.
+    if (action == .lua) return runLuaAction(state, action.lua);
+
     const request = frontend_core.actionRequestFromBindAction(action);
 
     switch (request) {
+        .frontend_local => return false,
         .mux_quit => {
             if (cfg.confirm_on_exit) {
                 _ = state.showConfirmOrNotify(.exit, "Exit terminal session?");

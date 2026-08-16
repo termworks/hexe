@@ -1,6 +1,5 @@
 const std = @import("std");
 const core = @import("core");
-const shp = @import("shp");
 const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
@@ -8,6 +7,7 @@ const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
+const State = @import("state.zig").State;
 
 pub const TitlePlacement = struct {
     x: u16,
@@ -29,24 +29,7 @@ pub fn floatTitlePlacement(x: u16, y: u16, w: u16, h: u16, pos: core.FloatStyleP
     };
 }
 
-fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
-    return .{
-        .fg = switch (seg.fg) {
-            .none => .none,
-            .palette => |idx| .{ .palette = idx },
-            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-        },
-        .bg = switch (seg.bg) {
-            .none => .none,
-            .palette => |idx| .{ .palette = idx },
-            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-        },
-        .bold = seg.bold,
-        .italic = seg.italic,
-    };
-}
-
-fn applyFloatTitleStyleDefaults(style: shp.Style, border_palette: u8) shp.Style {
+fn applyFloatTitleStyleDefaults(style: core.style.Style, border_palette: u8) core.style.Style {
     var out = style;
     if (out.bg == .none) out.bg = .{ .palette = border_palette };
     if (out.fg == .none) out.fg = .{ .palette = 0 };
@@ -332,8 +315,7 @@ pub fn drawFloatingBorder(
     name: []const u8,
     border_color: core.BorderColor,
     style: ?*const core.FloatStyle,
-    ctx: ?*shp.Context,
-    query: ?*const core.PaneQuery,
+    state: *const State,
 ) void {
     // Optional shadow (draw first so border overlays it)
     if (style) |s| {
@@ -390,98 +372,28 @@ pub fn drawFloatingBorder(
     _ = bold;
     drawBorderFrame(renderer, x, y, w, h, fg, .none, .{ top_left, horizontal, top_right, vertical, bottom_right, bottom_left });
 
-    // Render module/segments in border if present.
+    // The title is painted externally; hexe only places and clips it.
     if (style) |s| {
-        if (s.position) |pos| {
-            if (s.title_segments.len > 0 and ctx != null and query != null) {
-                const tctx = ctx.?;
-                const tq = query.?;
+        const pos = s.position orelse return;
+        const inner_w = floatTitleInnerWidth(w);
+        if (inner_w == 0) return;
 
-                var total_width: u16 = 0;
-                for (s.title_segments) |*seg| {
-                    total_width +|= statusbar.calcModuleWidth(tctx, tq, seg);
-                }
-
-                const inner_w = floatTitleInnerWidth(w);
-                if (inner_w == 0 or total_width == 0) return;
-                const place = floatTitlePlacement(x, y, w, h, pos, @min(total_width, inner_w));
-
-                var cur_x = place.x;
-                const max_x = x + w -| 2;
-                for (s.title_segments) |*seg| {
-                    if (cur_x >= max_x) break;
-                    cur_x = statusbar.drawModule(renderer, tctx, tq, seg, cur_x, place.y, false);
-                }
-                return;
-            }
+        const runs = statusbar.titleRuns(state, name, inner_w, true);
+        const runs_len = @min(statusbar.runsWidth(runs), inner_w);
+        if (runs_len > 0) {
+            const place = floatTitlePlacement(x, y, w, h, pos, runs_len);
+            _ = statusbar.drawRuns(renderer, place.x, place.y, runs, runs_len);
+            return;
         }
 
-        if (s.module) |*module| {
-            if (s.position) |pos| {
-                const inner_w = floatTitleInnerWidth(w);
-                if (inner_w == 0) return;
-
-                // Preferred path: evaluate the module directly so callbacks that
-                // return styled segments (including explicit padding spaces) are
-                // rendered exactly as configured.
-                if (ctx != null and query != null) {
-                    const tctx = ctx.?;
-                    const tq = query.?;
-                    const module_w = statusbar.calcModuleWidth(tctx, tq, module);
-                    if (module_w > 0 and module_w <= inner_w) {
-                        const place = floatTitlePlacement(x, y, w, h, pos, module_w);
-                        _ = statusbar.drawModule(renderer, tctx, tq, module, place.x, place.y, false);
-                        return;
-                    }
-                }
-
-                // Run the module to get output
-                var output_buf: [256]u8 = undefined;
-                // If a title is provided, treat the module area as the title widget.
-                const output = if (name.len > 0)
-                    name
-                else
-                    statusbar.runSegment(module, &output_buf) catch "";
-                if (output.len == 0) return;
-
-                // Render styled output
-                const segments = statusbar.renderSegmentOutput(module, output);
-
-                // If module formatting produced no visible text, fallback to raw name.
-                if (segments.total_len == 0 and name.len > 0) {
-                    const base_style = if (module.outputs.len > 0)
-                        shp.Style.parse(module.outputs[0].style)
-                    else
-                        shp.Style{};
-                    const fallback_style = applyFloatTitleStyleDefaults(base_style, color);
-
-                    const fallback_len = @min(inner_w, statusbar.measureText(name));
-                    const fallback_place = floatTitlePlacement(x, y, w, h, pos, fallback_len);
-                    const clipped_name = text_width.clipTextToWidth(name, inner_w);
-                    _ = statusbar.drawStyledText(renderer, fallback_place.x, fallback_place.y, clipped_name, fallback_style);
-                    return;
-                }
-
-                // Calculate position based on style position
-                const unclamped_len: u16 = @intCast(@min(segments.total_len, @as(usize, std.math.maxInt(u16))));
-                const total_len: u16 = @min(unclamped_len, inner_w);
-                const place = floatTitlePlacement(x, y, w, h, pos, total_len);
-
-                // Draw each segment with its style. Reslice each segment's
-                // bytes from our own copy of `segments` (segments.text(i)) so
-                // the slice never points into a moved-from return value.
-                var cur_x = place.x;
-                const max_x = x + w -| 2;
-                for (segments.items[0..segments.count], 0..) |seg, seg_i| {
-                    if (cur_x >= max_x) break;
-                    const remain = max_x - cur_x;
-                    const clipped = text_width.clipTextToWidth(segments.text(seg_i), remain);
-                    if (clipped.len == 0) continue;
-                    const seg_style = applyFloatTitleStyleDefaults(toShpStyle(seg), color);
-                    cur_x = statusbar.drawStyledText(renderer, cur_x, place.y, clipped, seg_style);
-                }
-                return;
-            }
-        }
+        // Nothing from the painter yet: draw the raw name so a float is never
+        // left nameless while the first frame is in flight.
+        if (name.len == 0) return;
+        const fallback_len = @min(inner_w, statusbar.measureText(name));
+        if (fallback_len == 0) return;
+        const place = floatTitlePlacement(x, y, w, h, pos, fallback_len);
+        const clipped = text_width.clipTextToWidth(name, inner_w);
+        const fallback_style = applyFloatTitleStyleDefaults(.{}, color);
+        _ = statusbar.drawStyledText(renderer, place.x, place.y, clipped, fallback_style);
     }
 }

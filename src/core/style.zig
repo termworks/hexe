@@ -97,40 +97,6 @@ pub const Color = union(enum) {
         return null;
     }
 
-    /// Write ANSI foreground color sequence
-    pub fn toAnsiFg(self: Color, writer: anytype) !void {
-        switch (self) {
-            .none => try writer.writeAll("\x1b[39m"),
-            .palette => |idx| {
-                if (idx < 8) {
-                    try writer.print("\x1b[{d}m", .{30 + idx});
-                } else if (idx < 16) {
-                    try writer.print("\x1b[{d}m", .{90 + idx - 8});
-                } else {
-                    try writer.print("\x1b[38;5;{d}m", .{idx});
-                }
-            },
-            .rgb => |rgb| try writer.print("\x1b[38;2;{d};{d};{d}m", .{ rgb.r, rgb.g, rgb.b }),
-        }
-    }
-
-    /// Write ANSI background color sequence
-    pub fn toAnsiBg(self: Color, writer: anytype) !void {
-        switch (self) {
-            .none => try writer.writeAll("\x1b[49m"),
-            .palette => |idx| {
-                if (idx < 8) {
-                    try writer.print("\x1b[{d}m", .{40 + idx});
-                } else if (idx < 16) {
-                    try writer.print("\x1b[{d}m", .{100 + idx - 8});
-                } else {
-                    try writer.print("\x1b[48;5;{d}m", .{idx});
-                }
-            },
-            .rgb => |rgb| try writer.print("\x1b[48;2;{d};{d};{d}m", .{ rgb.r, rgb.g, rgb.b }),
-        }
-    }
-
     /// Convert to libvaxis color representation.
     pub fn toVaxis(self: Color) vaxis.Color {
         return switch (self) {
@@ -182,24 +148,6 @@ pub const Style = struct {
         }
 
         return result;
-    }
-
-    /// Write ANSI escape sequences for this style
-    pub fn toAnsi(self: Style, writer: anytype) !void {
-        // Attributes
-        if (self.bold) try writer.writeAll("\x1b[1m");
-        if (self.dim) try writer.writeAll("\x1b[2m");
-        if (self.italic) try writer.writeAll("\x1b[3m");
-        if (self.underline) try writer.writeAll("\x1b[4m");
-
-        // Colors
-        if (self.fg != .none) try self.fg.toAnsiFg(writer);
-        if (self.bg != .none) try self.bg.toAnsiBg(writer);
-    }
-
-    /// Reset all attributes
-    pub fn reset(writer: anytype) !void {
-        try writer.writeAll("\x1b[0m");
     }
 
     /// Check if style has any attributes set

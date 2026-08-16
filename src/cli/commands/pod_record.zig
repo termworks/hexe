@@ -24,7 +24,7 @@ pub fn runPodRecord(
 ) !void {
     if (out_path.len == 0) {
         print("Error: --out is required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const target_socket = try resolveTargetSocket(allocator, uuid, name, socket_path);
@@ -33,7 +33,7 @@ pub fn runPodRecord(
     var client = ipc.Client.connect(target_socket) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("pod is not running\n", .{});
-            return;
+            std.process.exit(1);
         }
         return err;
     };
@@ -41,7 +41,7 @@ pub fn runPodRecord(
 
     wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_OBSERVER) catch |err| {
         print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
     const conn = client.toConnection();
 

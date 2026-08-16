@@ -1,23 +1,6 @@
 const std = @import("std");
 
 pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
-    try stdout.writeAll(
-        \\# Hexe prompt initialization for Fish
-        \\function fish_prompt
-        \\    set -l exit_status $status
-        \\    set -l duration (math $CMD_DURATION)
-        \\    set -l jobs (count (jobs -p))
-        \\    hexe shp prompt --status=$exit_status --duration=$duration --jobs=$jobs
-        \\    echo -n " "
-        \\end
-        \\
-        \\function fish_right_prompt
-        \\    set -l exit_status $status
-        \\    hexe shp prompt --right --status=$exit_status
-        \\end
-        \\
-    );
-
     if (no_comms) return;
 
     try stdout.writeAll(
@@ -43,7 +26,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\    if not set -q HEXE_PANE_UUID
         \\        return 0
         \\    end
-        \\    hexe shp exit-intent >/dev/null 2>/dev/null
+        \\    hexe shell exit-intent >/dev/null 2>/dev/null
         \\    return $status
         \\end
         \\
@@ -75,7 +58,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\    set -g __hexe_start (date +%s%3N)
         \\    __hexe_refresh_env_snapshot
         \\    set -l jobs_count (count (jobs -p))
-        \\    hexe shp shell-event --phase=start --running --started-at=$__hexe_start --cmd="$__hexe_last_cmd" --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
+        \\    hexe shell shell-event --phase=start --running --started-at=$__hexe_start --cmd="$__hexe_last_cmd" --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
         \\end
         \\
         \\function __hexe_fish_postexec --on-event fish_postexec
@@ -96,7 +79,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\    printf '\033]7;file://%s%s\007' "$hostname" "$PWD" 2>/dev/null
         \\    __hexe_refresh_env_snapshot
         \\    set -l jobs_count (count (jobs -p))
-        \\    hexe shp shell-event --phase=end --cmd="$cmdline" --status=$status --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
+        \\    hexe shell shell-event --phase=end --cmd="$cmdline" --status=$status --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
         \\end
         \\
     );

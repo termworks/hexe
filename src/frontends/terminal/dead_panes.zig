@@ -1,4 +1,5 @@
 const std = @import("std");
+const lua_events = @import("lua_events.zig");
 const core = @import("core");
 
 const State = @import("state.zig").State;
@@ -124,6 +125,17 @@ pub fn cleanupDeadSplits(state: *State, dead_splits: *std.ArrayList([32]u8)) voi
             state.clearTransientPaneState(dead_pane.?);
             // Multiple splits in tab - close the specific dead pane.
             _ = state.currentLayout().closePane(dead_uuid);
+            // If the dead pane was the zoomed one, its uuid now matches nothing
+            // and the render loop draws an empty tab.
+            state.revalidateZoom();
+
+            if (state.config._lua_runtime) |rt| {
+                lua_events.emit(state, rt, "pane_exited", &.{
+                    .{ .name = "pane_uuid", .value = .{ .uuid = dead_uuid } },
+                    .{ .name = "exit_status", .value = .{ .int = @intCast(exit_code) } },
+                    .{ .name = "was_focused", .value = .{ .boolean = was_focused } },
+                });
+            }
 
             // Log pane death.
             terminal_main.debugLog("pane died: view_id={d} exit_code={d} focused={}", .{ dead_view_id, exit_code, was_focused });

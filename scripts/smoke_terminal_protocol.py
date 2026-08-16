@@ -337,14 +337,16 @@ if "Live: Once" in screen.text():
     fail("matching Kitty and legacy notifications produced a duplicate queue entry")
 print("NOTIFY: pane-attributed Kitty/legacy fallback rendered exactly once")
 
+# OSC 9;4 progress used to be asserted here by scraping the built-in status
+# bar. hexe draws no chrome now — the bar is an external painter, and this test
+# starts none, so there is no bar to scrape. The pane still parses the sequence
+# and hexe forwards it in the painter request context; that path is asserted
+# end-to-end in smoke_region_painter.py (phase2b/2c), which has a painter.
 os.write(master, b"printf '\\033]9;4;1;73\\007'\r")
-if not wait_screen(master, "progress 73%", 15):
-    fail("pane progress did not reach the status bar")
+pump(master, 0.5)
 os.write(master, b"printf '\\033]9;4;0;100\\007'\r")
-pump(master, 0.8)
-if "progress 73%" in screen.text():
-    fail("completed pane progress did not clear from the status bar")
-print("PROGRESS: pane progress surfaced and cleared on completion")
+pump(master, 0.5)
+print("PROGRESS: OSC 9;4 accepted (rendering asserted in smoke_region_painter.py)")
 
 output = b"LIVE_OSC133_OUTPUT"
 lifecycle = (

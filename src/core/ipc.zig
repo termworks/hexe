@@ -2,12 +2,6 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 
-const c = @cImport({
-    @cInclude("sys/socket.h");
-    @cInclude("sys/un.h");
-    @cInclude("unistd.h");
-});
-
 const log = std.log.scoped(.ipc);
 
 fn setCloexec(fd: posix.fd_t) void {
@@ -332,91 +326,6 @@ pub const Connection = struct {
             total_sent += sent;
         }
     }
-
-    /// Send data along with a file descriptor using SCM_RIGHTS
-    pub fn sendWithFd(self: *Connection, data: []const u8, fd_to_send: posix.fd_t) !void {
-        var iov: c.struct_iovec = .{
-            .iov_base = @constCast(data.ptr),
-            .iov_len = data.len,
-        };
-
-        // Control message buffer for SCM_RIGHTS - use CMSG_SPACE macro equivalent
-        const cmsg_align = comptime @alignOf(c.struct_cmsghdr);
-        const cmsg_hdr_size = comptime @sizeOf(c.struct_cmsghdr);
-        const cmsg_data_size = comptime @sizeOf(c_int);
-        const cmsg_space = comptime std.mem.alignForward(usize, cmsg_hdr_size + cmsg_data_size, cmsg_align);
-        var cmsg_buf: [cmsg_space]u8 align(cmsg_align) = undefined;
-
-        // Set up control message header
-        const cmsg: *c.struct_cmsghdr = @ptrCast(&cmsg_buf);
-        cmsg.cmsg_len = cmsg_hdr_size + cmsg_data_size;
-        cmsg.cmsg_level = c.SOL_SOCKET;
-        cmsg.cmsg_type = c.SCM_RIGHTS;
-
-        // Copy fd into control message data area (after the header)
-        const cmsg_data: *c_int = @ptrCast(@alignCast(&cmsg_buf[cmsg_hdr_size]));
-        cmsg_data.* = fd_to_send;
-
-        var msg: c.struct_msghdr = .{
-            .msg_name = null,
-            .msg_namelen = 0,
-            .msg_iov = &iov,
-            .msg_iovlen = 1,
-            .msg_control = &cmsg_buf,
-            .msg_controllen = cmsg_space,
-            .msg_flags = 0,
-        };
-
-        const result = c.sendmsg(self.fd, &msg, 0);
-        if (result < 0) {
-            return error.SendFailed;
-        }
-        if (result == 0) return error.ConnectionClosed;
-    }
-
-    /// Receive data along with a file descriptor using SCM_RIGHTS
-    pub fn recvWithFd(self: *Connection, buf: []u8) !struct { len: usize, fd: ?posix.fd_t } {
-        var iov: c.struct_iovec = .{
-            .iov_base = buf.ptr,
-            .iov_len = buf.len,
-        };
-
-        // Control message buffer for SCM_RIGHTS - use CMSG_SPACE macro equivalent
-        const cmsg_align = comptime @alignOf(c.struct_cmsghdr);
-        const cmsg_hdr_size = comptime @sizeOf(c.struct_cmsghdr);
-        const cmsg_data_size = comptime @sizeOf(c_int);
-        const cmsg_space = comptime std.mem.alignForward(usize, cmsg_hdr_size + cmsg_data_size, cmsg_align);
-        var cmsg_buf: [cmsg_space]u8 align(cmsg_align) = undefined;
-
-        var msg: c.struct_msghdr = .{
-            .msg_name = null,
-            .msg_namelen = 0,
-            .msg_iov = &iov,
-            .msg_iovlen = 1,
-            .msg_control = &cmsg_buf,
-            .msg_controllen = cmsg_space,
-            .msg_flags = 0,
-        };
-
-        const result = c.recvmsg(self.fd, &msg, 0);
-        if (result < 0) {
-            return error.RecvFailed;
-        }
-        const len: usize = @intCast(result);
-        if (len == 0) return .{ .len = 0, .fd = null };
-
-        // Check if we received a file descriptor
-        var received_fd: ?posix.fd_t = null;
-        if (msg.msg_controllen >= cmsg_hdr_size) {
-            const cmsg: *c.struct_cmsghdr = @ptrCast(@alignCast(msg.msg_control));
-            if (cmsg.cmsg_level == c.SOL_SOCKET and cmsg.cmsg_type == c.SCM_RIGHTS) {
-                const fd_ptr: *const c_int = @ptrCast(@alignCast(&cmsg_buf[cmsg_hdr_size]));
-                received_fd = fd_ptr.*;
-            }
-        }
-
-        return .{ .len = len, .fd = received_fd };
-    }
 };
 
 /// SCM_RIGHTS constant for passing file descriptors
@@ -635,35 +544,6 @@ pub fn getTxLogPath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/ses.txlog", .{dir});
 }
 
-/// Check if ses is running by trying to connect.
-/// If socket file exists but connection fails, removes the stale socket.
-pub fn isSesRunning(allocator: std.mem.Allocator) bool {
-    const path = getSesSocketPath(allocator) catch |err| {
-        log.warn("failed to build ses socket path: {}", .{err});
-        return false;
-    };
-    defer allocator.free(path);
-
-    // First check if socket file exists
-    std.fs.cwd().access(path, .{}) catch |err| {
-        if (err != error.FileNotFound) log.warn("failed to access ses socket '{s}': {}", .{ path, err });
-        return false;
-    };
-
-    // Try to connect
-    var client = Client.connect(path) catch |err| {
-        log.warn("failed to connect to ses socket '{s}', treating as stale: {}", .{ path, err });
-        // Socket file exists but can't connect = stale socket
-        // Remove it so the new SES can bind
-        std.fs.cwd().deleteFile(path) catch |delete_err| {
-            if (delete_err != error.FileNotFound) log.warn("failed to remove stale ses socket '{s}': {}", .{ path, delete_err });
-        };
-        return false;
-    };
-    client.close();
-    return true;
-}
-
 /// Get a pod socket path for a given pane UUID
 pub fn getPodSocketPath(allocator: std.mem.Allocator, uuid: []const u8) ![]const u8 {
     const dir = try getSocketDir(allocator);
@@ -810,82 +690,6 @@ pub fn getLayoutDir(allocator: std.mem.Allocator) ![]const u8 {
     const home = posix.getenv("HOME") orelse "/tmp";
     return std.fmt.allocPrint(allocator, "{s}/.config/hexe/layouts", .{home});
 }
-
-// ============================================================================
-// Pop IPC types - for CLI popup commands
-// ============================================================================
-
-/// Pop request kind
-pub const PopKind = enum {
-    notify,
-    confirm,
-    choose,
-};
-
-/// Pop request - sent from CLI to mux via ses
-pub const PopRequest = struct {
-    kind: PopKind,
-    target_uuid: [32]u8,
-    message: []const u8,
-    items: ?[]const []const u8 = null, // for choose
-    duration_ms: ?i64 = null, // for notify
-
-    /// Serialize to JSON for IPC
-    pub fn toJson(self: PopRequest, allocator: std.mem.Allocator) ![]const u8 {
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(allocator);
-        const writer = buf.writer(allocator);
-
-        try writer.writeAll("{\"type\":\"pop_request\",");
-        try writer.print("\"kind\":\"{s}\",", .{@tagName(self.kind)});
-        try writer.print("\"uuid\":\"{s}\",", .{self.target_uuid});
-        try writer.print("\"message\":\"{s}\"", .{self.message});
-        if (self.duration_ms) |dur| {
-            try writer.print(",\"duration_ms\":{d}", .{dur});
-        }
-        if (self.items) |items| {
-            try writer.writeAll(",\"items\":[");
-            for (items, 0..) |item, i| {
-                if (i > 0) try writer.writeAll(",");
-                try writer.print("\"{s}\"", .{item});
-            }
-            try writer.writeAll("]");
-        }
-        try writer.writeAll("}");
-
-        return buf.toOwnedSlice(allocator);
-    }
-};
-
-/// Pop response - sent from mux back to CLI via ses
-pub const PopResponse = struct {
-    success: bool = true,
-    confirmed: ?bool = null, // for confirm
-    selected: ?usize = null, // for choose
-    error_msg: ?[]const u8 = null,
-
-    /// Serialize to JSON for IPC
-    pub fn toJson(self: PopResponse, allocator: std.mem.Allocator) ![]const u8 {
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(allocator);
-        const writer = buf.writer(allocator);
-
-        try writer.writeAll("{\"type\":\"pop_response\",");
-        try writer.print("\"success\":{}", .{self.success});
-        if (self.confirmed) |conf| {
-            try writer.print(",\"confirmed\":{}", .{conf});
-        }
-        if (self.selected) |sel| {
-            try writer.print(",\"selected\":{d}", .{sel});
-        }
-        if (self.error_msg) |msg| {
-            try writer.print(",\"error\":\"{s}\"", .{msg});
-        }
-        try writer.writeAll("}");
-
-        return buf.toOwnedSlice(allocator);
-    }
-};
 
 const testing = std.testing;
 

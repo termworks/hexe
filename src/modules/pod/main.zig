@@ -97,6 +97,13 @@ inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
 /// so on timeout the connection is dropped and SES heals via backlog replay.
 const CLIENT_WRITE_TIMEOUT_MS: i32 = 2_000;
 
+/// A pod serves ONE pane, so both of these are generous. Neither list was
+/// bounded: SES counts its half-open connections against `max_connections`,
+/// but the pod accepted without limit, and every observer additionally costs a
+/// full backlog dump at attach plus a write per broadcast.
+const MAX_PENDING_HANDSHAKES: usize = 64;
+const MAX_OBSERVERS: usize = 8;
+
 /// mux→pod INPUT frames from the SES main client carry a 16-byte
 /// `[epoch:u64][seq:u64]` (little-endian) prefix for exactly-once dedup across a
 /// frontend VT reconnect. Must match vt_write_queue.INPUT_SEQ_PREFIX_LEN.
@@ -166,7 +173,8 @@ pub fn run(args: PodArgs) !void {
         redirectStderrToLog(path);
     }
 
-    core.logging.setLogLevel(args.log_level);
+    const effective_level = core.logging.effectiveLevel(args.log_level, args.log_file);
+    core.logging.setLogLevel(effective_level);
 
     // Best-effort: name this process for `ps` discovery.
     setProcessName(args.name);
@@ -193,7 +201,7 @@ pub fn run(args: PodArgs) !void {
         };
     }
 
-    pod_debug = core.logging.levelEnablesDebug(args.log_level);
+    pod_debug = core.logging.levelEnablesDebug(effective_level);
     debugLog("started uuid={s} socket={s} name={s}", .{ args.uuid[0..@min(args.uuid.len, 8)], args.socket_path, args.name orelse "(none)" });
     debugLog("daemon={} level={s} logfile={s}", .{
         args.daemon,
@@ -1280,6 +1288,12 @@ const Pod = struct {
             tmp.close();
             return;
         }
+        if (self.pending_handshakes.items.len >= MAX_PENDING_HANDSHAKES) {
+            debugLog("reject fd={d}: pending handshake limit ({d}) reached", .{ conn.fd, MAX_PENDING_HANDSHAKES });
+            var tmp = conn;
+            tmp.close();
+            return;
+        }
         setNonBlocking(conn.fd);
 
         // Accumulate the handshake without blocking. The common case (the peer
@@ -1374,6 +1388,14 @@ const Pod = struct {
 
     fn acceptObserver(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
         var obs_conn = conn;
+        // Refuse before the backlog replay below, not at the append: the replay
+        // is the expensive part, so capping afterwards would let a caller pay
+        // for a full scrollback dump per rejected observer.
+        if (self.observers.items.len >= MAX_OBSERVERS) {
+            debugLog("reject observer fd={d}: observer limit ({d}) reached", .{ conn.fd, MAX_OBSERVERS });
+            obs_conn.close();
+            return;
+        }
         // Observers are secondary/diagnostic clients. Keep their fd
         // non-blocking so a stalled observer that stops draining returns
         // EAGAIN on write instead of blocking the PTY hot path forever; the

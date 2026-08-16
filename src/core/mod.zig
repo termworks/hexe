@@ -14,20 +14,19 @@ pub const config = @import("config.zig");
 pub const config_v2 = @import("config_v2.zig");
 pub const ipc = @import("ipc.zig");
 pub const wire = @import("wire.zig");
-pub const query = @import("query.zig");
 pub const style = @import("style.zig");
 pub const segment_render = @import("segment_render.zig");
-pub const segments = @import("segments/mod.zig");
+pub const regions = @import("regions.zig");
 pub const pod_protocol = @import("pod_protocol.zig");
 pub const pod_meta = @import("pod_meta.zig");
 pub const lua_runtime = @import("lua_runtime.zig");
 pub const config_builder = @import("config_builder.zig");
+pub const api_bridge = @import("api_bridge.zig");
 pub const uuid = @import("uuid.zig");
 pub const logging = @import("logging.zig");
 pub const cmd = @import("cmd.zig");
 pub const async_cmd = @import("async_cmd.zig");
 pub const strings = @import("strings.zig");
-pub const sprites_embedded = @import("sprites_embedded.zig");
 pub const constants = @import("constants.zig");
 pub const resource_limits = @import("resource_limits.zig");
 pub const isolation_voidbox = @import("isolation_voidbox.zig");
@@ -69,7 +68,6 @@ pub const IpcServer = ipc.Server;
 pub const IpcClient = ipc.Client;
 pub const IpcConnection = ipc.Connection;
 pub const Config = config.Config;
-pub const HexeConfigV2 = config_v2.HexeConfigV2;
 pub const FloatDef = config.FloatDef;
 pub const FloatStyle = config.FloatStyle;
 pub const FloatStylePosition = config.FloatStylePosition;
@@ -84,11 +82,9 @@ pub const LayoutSplitDef = config.LayoutSplitDef;
 pub const LayoutPaneDef = config.LayoutPaneDef;
 pub const Segment = config.Segment;
 pub const OutputDef = config.OutputDef;
-pub const WhenDef = config.WhenDef;
 pub const SpinnerDef = config.SpinnerDef;
 pub const NotificationStyleConfig = config.NotificationStyleConfig;
 pub const NotificationConfig = config.NotificationConfig;
-pub const PaneQuery = query.PaneQuery;
 
 /// Resumable, non-blocking framed stream reader. Lives in core because BOTH
 /// the session daemon and the pod need it: each accepts connections on a
@@ -106,7 +102,9 @@ test {
     // without deep-walking third-party module internals.
     _ = @import("strings.zig");
     _ = @import("uuid.zig");
+    _ = @import("regions.zig");
     _ = @import("config.zig");
+    _ = @import("logging.zig");
     _ = @import("config_v2.zig");
     _ = @import("session_config.zig");
     _ = @import("lua_runtime.zig");

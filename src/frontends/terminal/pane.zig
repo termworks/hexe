@@ -265,10 +265,6 @@ pub const Pane = struct {
         return !self.backend.pod.dead;
     }
 
-    pub fn getTerminal(self: *Pane) *ghostty.Terminal {
-        return &self.vt.terminal;
-    }
-
     /// Get a stable snapshot of the viewport for rendering.
     pub fn getRenderState(self: *Pane) !*const ghostty.RenderState {
         return self.vt.getRenderState();
@@ -346,20 +342,6 @@ pub const Pane = struct {
         return !self.vt.terminal.screens.active.viewportIsBottom();
     }
 
-    /// Show a notification on this pane
-    pub fn showNotification(self: *Pane, message: []const u8) void {
-        if (self.notifications_initialized) {
-            self.notifications.show(message);
-        }
-    }
-
-    /// Show a notification with custom duration
-    pub fn showNotificationFor(self: *Pane, message: []const u8, duration_ms: i64) void {
-        if (self.notifications_initialized) {
-            self.notifications.showFor(message, duration_ms);
-        }
-    }
-
     /// Update notifications (call each frame)
     pub fn updateNotifications(self: *Pane) bool {
         if (self.notifications_initialized) {
@@ -382,14 +364,6 @@ pub const Pane = struct {
             return self.notifications.hasActive();
         }
         return false;
-    }
-
-    /// Configure notifications from config
-    pub fn configureNotifications(self: *Pane, cfg: anytype) void {
-        if (self.notifications_initialized) {
-            self.notifications.default_style = pop.notification.Style.fromConfig(cfg);
-            self.notifications.default_duration_ms = @intCast(cfg.duration_ms);
-        }
     }
 
     /// Configure notifications from pop.NotificationStyle config

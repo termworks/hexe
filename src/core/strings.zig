@@ -68,3 +68,50 @@ test "sanitizeWithFallback: uses fallback only when the result is empty" {
     try std.testing.expectEqualSlices(u8, "default", sanitizeWithFallback(&buf, "", 24, "default"));
     try std.testing.expectEqualSlices(u8, "keep", sanitizeWithFallback(&buf, "keep", 24, "default"));
 }
+
+/// Escape a string into a JSON string body. Uses only `writeAll`, so it takes
+/// both a `std.fs.File` and a buffered writer.
+///
+/// The two copies this replaces stopped at `" \ \n \r \t` and passed every
+/// other control byte through verbatim, which is invalid JSON -- and pane
+/// names and cwds routinely carry ESC/BEL from terminal title sequences.
+pub fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
+    const hex = "0123456789abcdef";
+    for (s) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0c => try writer.writeAll("\\f"),
+            0x00...0x07, 0x0b, 0x0e...0x1f => {
+                const esc = [6]u8{ '\\', 'u', '0', '0', hex[(c >> 4) & 0xf], hex[c & 0xf] };
+                try writer.writeAll(&esc);
+            },
+            else => try writer.writeAll(&[1]u8{c}),
+        }
+    }
+}
+
+test "writeJsonEscaped escapes control bytes as \\uXXXX" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    const w = buf.writer(std.testing.allocator);
+    try writeJsonEscaped(w, "a\x1bb\x07c\"d\\e\nf\tg");
+    try std.testing.expectEqualSlices(u8, "a\\u001bb\\u0007c\\\"d\\\\e\\nf\\tg", buf.items);
+
+    buf.clearRetainingCapacity();
+    try writeJsonEscaped(buf.writer(std.testing.allocator), "\x00\x08\x0c\x1f");
+    try std.testing.expectEqualSlices(u8, "\\u0000\\b\\f\\u001f", buf.items);
+
+    // The escaped form must actually parse as JSON.
+    buf.clearRetainingCapacity();
+    try buf.appendSlice(std.testing.allocator, "{\"k\":\"");
+    try writeJsonEscaped(buf.writer(std.testing.allocator), "esc\x1b bel\x07 quote\"");
+    try buf.appendSlice(std.testing.allocator, "\"}");
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, buf.items, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualSlices(u8, "esc\x1b bel\x07 quote\"", parsed.value.object.get("k").?.string);
+}

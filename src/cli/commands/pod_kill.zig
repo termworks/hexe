@@ -15,20 +15,20 @@ pub fn runPodKill(allocator: std.mem.Allocator, uuid: []const u8, name: []const 
     };
     if (pid == null) {
         print("pod not found\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const sig = parseSignal(signal_name);
     if (sig == null) {
         print("Error: invalid --signal\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const rc = std.c.kill(@intCast(pid.?), sig.?);
     if (rc != 0) {
         // errno not surfaced here in a nice way; keep message simple.
         print("kill failed\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     if (force and sig.? != std.c.SIG.KILL) {
