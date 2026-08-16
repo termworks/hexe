@@ -199,6 +199,8 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .deferred_destroy_vt = .empty,
         .pending_float_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(allocator),
         .next_float_request_id = 1,
+        .pending_exit_intent_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(allocator),
+        .next_exit_intent_request_id = 1,
         .resource_monitor = core.resource_limits.ResourceMonitor.init(.{}),
         .vt_route_buf = allocator.alloc(u8, wire.MAX_PAYLOAD_LEN) catch unreachable,
     };
@@ -212,6 +214,7 @@ fn testServerWithState(allocator: std.mem.Allocator, ses_state: *state.SesState)
 
 fn deinitTestServer(server: *Server) void {
     server.pending_float_cli_fds.deinit();
+    server.pending_exit_intent_cli_fds.deinit();
     server.pending_pop_requests.deinit();
     server.ctl_watchers.deinit();
     server.pending_ctl_close_fds.deinit(server.allocator);
@@ -886,8 +889,16 @@ pub const Server = struct {
     deferred_destroy_ctl: std.ArrayList(*CtlWatcher),
     deferred_destroy_vt: std.ArrayList(*VtWatcher),
     loop_ptr: ?*xev.Loop = null,
-    // CLI fd waiting for exit_intent response.
-    pending_exit_intent_cli_fd: ?PendingCliWait = null,
+    // CLI fds waiting for an exit_intent answer, keyed by request id.
+    pending_exit_intent_cli_fds: std.AutoHashMap(u32, PendingCliWait),
+    /// Correlates an exit_intent with its exit_intent_result. `hexe com
+    /// exit-intent` runs from the shell's exit hook, so two shells exiting
+    /// together is ordinary. A single slot closed the older caller's fd, and
+    /// com.zig exits 0 on any read failure — that EOF reads as ALLOW, so a pane
+    /// exited while its confirmation popup was still on screen. Replies also
+    /// arrive out of order (the non-last-split path answers inline, the popup
+    /// path answers whenever the user does), so FIFO matching cannot work.
+    next_exit_intent_request_id: u32,
     // CLI fds waiting for float result, keyed by float pane UUID.
     pending_float_cli_fds: std.AutoHashMap(u32, PendingCliWait),
     /// Correlates a float_request with its float_result. Every waiter used to
@@ -937,13 +948,17 @@ pub const Server = struct {
             .deferred_destroy_vt = .empty,
             .pending_float_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(page_alloc),
             .next_float_request_id = 1,
+            .pending_exit_intent_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(page_alloc),
+            .next_exit_intent_request_id = 1,
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
             .vt_route_buf = try page_alloc.alloc(u8, wire.MAX_PAYLOAD_LEN),
         };
     }
 
     pub fn deinit(self: *Server) void {
-        if (self.pending_exit_intent_cli_fd) |wait| posix.close(wait.cli_fd);
+        var exit_it = self.pending_exit_intent_cli_fds.iterator();
+        while (exit_it.next()) |entry| posix.close(entry.value_ptr.cli_fd);
+        self.pending_exit_intent_cli_fds.deinit();
         var float_it = self.pending_float_cli_fds.iterator();
         while (float_it.next()) |entry| posix.close(entry.value_ptr.cli_fd);
         self.pending_float_cli_fds.deinit();
@@ -1215,18 +1230,26 @@ pub const Server = struct {
     /// an exit, so `allow = 1` is the correct verdict, and a float that will
     /// never run should report failure rather than an ambiguous EOF.
     fn releasePendingCliWaiters(self: *Server, owner_ctl_fd: posix.fd_t) void {
-        if (self.pending_exit_intent_cli_fd) |wait| {
-            if (wait.owner_ctl_fd == owner_ctl_fd) {
-                ses.debugLog("releasing exit_intent CLI waiter fd={d} (owner mux fd={d} gone)", .{ wait.cli_fd, owner_ctl_fd });
-                const allow = wire.ExitIntentResult{ .allow = 1 };
-                self.replyOrClose(wait.cli_fd, .exit_intent_result, std.mem.asBytes(&allow));
-                self.queueCtlClose(wait.cli_fd, null);
-                self.pending_exit_intent_cli_fd = null;
-            }
-        }
-
         // Collect first: replyOrClose/queueCtlClose must not run while the map
         // is being iterated.
+        var orphaned_exits: std.ArrayList(u32) = .empty;
+        defer orphaned_exits.deinit(self.allocator);
+        var exit_it = self.pending_exit_intent_cli_fds.iterator();
+        while (exit_it.next()) |entry| {
+            if (entry.value_ptr.owner_ctl_fd != owner_ctl_fd) continue;
+            orphaned_exits.append(self.allocator, entry.key_ptr.*) catch |err| {
+                core.logging.logError("ses", "failed to collect orphaned exit_intent CLI waiter", err);
+                break;
+            };
+        }
+        for (orphaned_exits.items) |key| {
+            const entry = self.pending_exit_intent_cli_fds.fetchRemove(key) orelse continue;
+            ses.debugLog("releasing exit_intent CLI waiter fd={d} (owner mux fd={d} gone)", .{ entry.value.cli_fd, owner_ctl_fd });
+            const allow = wire.ExitIntentResult{ .allow = 1 };
+            self.replyOrClose(entry.value.cli_fd, .exit_intent_result, std.mem.asBytes(&allow));
+            self.queueCtlClose(entry.value.cli_fd, null);
+        }
+
         var orphaned: std.ArrayList(u32) = .empty;
         defer orphaned.deinit(self.allocator);
         var it = self.pending_float_cli_fds.iterator();
@@ -3213,7 +3236,7 @@ pub const Server = struct {
                 server_listing_handlers.handleBinaryPopResponse(self, fd, hdr.payload_len, &buf);
             },
             .exit_intent_result => {
-                server_reporting_handlers.handleBinaryExitIntentResult(self, fd, hdr.payload_len, &buf);
+                server_reporting_handlers.handleBinaryExitIntentResult(self, fd, hdr.request_id, hdr.payload_len, &buf);
             },
             .float_result => {
                 server_reporting_handlers.handleBinaryFloatResult(self, fd, hdr.request_id, hdr.payload_len, &buf);
@@ -3363,20 +3386,28 @@ pub const Server = struct {
                     self.queueCtlClose(fd, null);
                     return;
                 };
-                // Close any previous pending exit_intent CLI fd.
-                if (self.pending_exit_intent_cli_fd) |old_wait| {
-                    self.ses_state.store.noteClosedFd(old_wait.cli_fd);
-                    posix.close(old_wait.cli_fd);
-                }
-                self.pending_exit_intent_cli_fd = .{ .cli_fd = fd, .owner_ctl_fd = mux_fd };
-                // Forward to MUX.
-                wire.writeControlTimeout(mux_fd, .exit_intent, std.mem.asBytes(&ei), HANDLER_IO_TIMEOUT_MS) catch |err| {
-                    core.logging.logError("ses", "failed to forward exit_intent to mux", err);
-                    // If forward fails, allow exit.
+                // Tag the request so its answer can be matched back to THIS
+                // caller — two shells exiting together is ordinary.
+                const exit_req_id = self.next_exit_intent_request_id;
+                self.next_exit_intent_request_id +%= 1;
+                if (self.next_exit_intent_request_id == 0) self.next_exit_intent_request_id = 1;
+
+                self.pending_exit_intent_cli_fds.put(exit_req_id, .{ .cli_fd = fd, .owner_ctl_fd = mux_fd }) catch |err| {
+                    core.logging.logError("ses", "failed to track pending exit_intent CLI request", err);
                     const allow = wire.ExitIntentResult{ .allow = 1 };
                     self.replyOrClose(fd, .exit_intent_result, std.mem.asBytes(&allow));
                     self.queueCtlClose(fd, null);
-                    self.pending_exit_intent_cli_fd = null;
+                    return;
+                };
+                // Forward to MUX.
+                const ei_trails: []const []const u8 = &.{};
+                wire.writeControlMsgWithRequestIdTimeout(mux_fd, .exit_intent, exit_req_id, std.mem.asBytes(&ei), ei_trails, HANDLER_IO_TIMEOUT_MS) catch |err| {
+                    core.logging.logError("ses", "failed to forward exit_intent to mux", err);
+                    // If forward fails, allow exit.
+                    _ = self.pending_exit_intent_cli_fds.remove(exit_req_id);
+                    const allow = wire.ExitIntentResult{ .allow = 1 };
+                    self.replyOrClose(fd, .exit_intent_result, std.mem.asBytes(&allow));
+                    self.queueCtlClose(fd, null);
                 };
             },
             .float_request => {
@@ -3432,7 +3463,9 @@ pub const Server = struct {
                 self.pending_float_cli_fds.put(float_req_id, .{ .cli_fd = fd, .owner_ctl_fd = mux_fd }) catch |err| {
                     core.logging.logError("ses", "failed to track pending float CLI request", err);
                     self.sendBinaryError(fd, "track_failed");
-                    posix.close(fd);
+                    // sendBinaryError queues this fd on write failure, so a
+                    // direct close here would double-close a recycled number.
+                    self.queueCtlClose(fd, null);
                 };
             },
             .notify => {

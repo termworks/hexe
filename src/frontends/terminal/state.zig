@@ -338,6 +338,9 @@ pub const State = struct {
     startup_attach_count: usize,
     exit_from_shell_death: bool,
     pending_exit_intent: bool,
+    /// Request id of the exit_intent the confirmation popup is answering, echoed
+    /// back so SES can match it to the CLI that is blocked on it.
+    pending_exit_intent_request_id: u32,
     /// If non-zero and in the future, skip confirm_on_exit for the next last-pane death.
     exit_intent_deadline_ms: i64,
     /// If true, respawn the focused pane after handling input
@@ -505,6 +508,7 @@ pub const State = struct {
             .startup_attach_count = 0,
             .exit_from_shell_death = false,
             .pending_exit_intent = false,
+            .pending_exit_intent_request_id = 0,
             .exit_intent_deadline_ms = 0,
             .needs_respawn = false,
             .skip_dead_check = false,

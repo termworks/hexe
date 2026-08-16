@@ -11,7 +11,7 @@ const server = @import("server.zig");
 const Server = server.Server;
 
 /// Handle exit_intent_result from MUX — forward to waiting CLI.
-pub fn handleBinaryExitIntentResult(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+pub fn handleBinaryExitIntentResult(self: *Server, fd: posix.fd_t, request_id: u32, payload_len: u32, buf: []u8) void {
     _ = buf;
     if (payload_len < @sizeOf(wire.ExitIntentResult)) {
         self.skipPayloadRest();
@@ -24,16 +24,19 @@ pub fn handleBinaryExitIntentResult(self: *Server, fd: posix.fd_t, payload_len: 
         self.sendBinaryError(fd, "exit_intent_result: read failed");
         return;
     };
-    if (self.pending_exit_intent_cli_fd) |wait| {
-        const cli_fd = wait.cli_fd;
+    // Match on the request id the frontend echoed back. Replies are not FIFO:
+    // a non-last-split pane is answered inline while an older confirmation is
+    // still waiting on the user's popup.
+    const entry = if (request_id != 0) self.pending_exit_intent_cli_fds.fetchRemove(request_id) else null;
+    if (entry) |e| {
+        const cli_fd = e.value.cli_fd;
         // Same single-owner rule as float_result: replyOrClose queues the
         // fd on write failure, so a direct close here would double-close
         // it. Route the success path through the queue too.
         self.replyOrClose(cli_fd, .exit_intent_result, std.mem.asBytes(&result));
         self.queueCtlClose(cli_fd, null);
-        self.pending_exit_intent_cli_fd = null;
     } else {
-        core.logging.warn("ses", "exit_intent_result arrived without pending CLI fd from mux fd={d}", .{fd});
+        core.logging.warn("ses", "exit_intent_result with no matching waiter (request_id={d}) from mux fd={d}", .{ request_id, fd });
     }
 }
 
@@ -307,7 +310,7 @@ pub fn handleBinaryStatus(self: *Server, fd: posix.fd_t, full_mode: bool) void {
         const session_json = if (full_mode and client.session_snapshot != null)
             client.session_snapshot.?.toJson(alloc) catch |err| {
                 core.logging.logError("ses", "failed to serialize attached session status snapshot", err);
-                posix.close(fd);
+                self.queueCtlClose(fd, null);
                 return;
             }
         else
@@ -362,7 +365,7 @@ pub fn handleBinaryStatus(self: *Server, fd: posix.fd_t, full_mode: bool) void {
         const session_json = if (full_mode)
             detached.session_snapshot.toJson(alloc) catch |err| {
                 core.logging.logError("ses", "failed to serialize detached session status snapshot", err);
-                posix.close(fd);
+                self.queueCtlClose(fd, null);
                 return;
             }
         else

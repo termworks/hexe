@@ -183,7 +183,7 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
             handleFocusMove(state, fd, ctl_event.payload_len, buffer);
         },
         .exit_intent => {
-            handleExitIntent(state, fd, ctl_event.payload_len, buffer);
+            handleExitIntent(state, fd, ctl_event.request_id, ctl_event.payload_len, buffer);
         },
         .float_request => {
             handleFloatRequest(state, fd, ctl_event.request_id, ctl_event.payload_len, buffer);
@@ -709,7 +709,7 @@ fn handleFocusMove(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
     state.needs_render = true;
 }
 
-fn handleExitIntent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+fn handleExitIntent(state: *State, fd: posix.fd_t, request_id: u32, payload_len: u32, buffer: []u8) void {
     _ = frontend_core.readExitIntentPayload(fd, payload_len, buffer) catch |err| {
         core.logging.logError("terminal", "failed to read exit_intent payload", err);
         return;
@@ -717,44 +717,49 @@ fn handleExitIntent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
 
     // If no tabs, allow exit.
     if (state.view.tab_views.items.len == 0) {
-        sendExitIntentResultPub(state, true);
+        sendExitIntentResultPub(state, true, request_id);
         return;
     }
 
     const is_last_split = (state.currentLayout().splitCount() <= 1 and state.view.tab_views.items.len <= 1);
     if (!is_last_split or !state.config.confirm_on_exit) {
-        sendExitIntentResultPub(state, true);
+        sendExitIntentResultPub(state, true, request_id);
         return;
     }
 
     // Need confirmation. Only one pending request at a time.
     if (state.pending_action != null or state.popups.isBlocked() or state.pending_exit_intent) {
-        sendExitIntentResultPub(state, false);
+        sendExitIntentResultPub(state, false, request_id);
         return;
     }
 
     state.pending_action = .exit_intent;
     // Mark that we have a pending exit_intent (no longer an fd, use sentinel).
     state.pending_exit_intent = true;
+    // Held until the user answers: SES matches the answer to the waiting CLI on
+    // it, and the reply can overtake a later request that was answered inline.
+    state.pending_exit_intent_request_id = request_id;
     state.popups.showConfirm("Exit terminal session?", .{}) catch |err| {
         core.logging.logError("terminal", "failed to show exit-intent confirmation popup", err);
         state.notifications.show("Confirmation failed");
         state.pending_action = null;
         state.pending_exit_intent = false;
-        sendExitIntentResultPub(state, true);
+        sendExitIntentResultPub(state, true, request_id);
         state.needs_render = true;
         return;
     };
     state.needs_render = true;
 }
 
-pub fn sendExitIntentResultPub(state: *State, allow: bool) void {
+pub fn sendExitIntentResultPub(state: *State, allow: bool, request_id: u32) void {
     const ctl_fd = state.runtime.getCtlFd() orelse {
         core.logging.warn("terminal", "sendExitIntentResult skipped: SES CTL channel is unavailable", .{});
         return;
     };
     const result = wire.ExitIntentResult{ .allow = if (allow) 1 else 0 };
-    writeControlLogged(ctl_fd, .exit_intent_result, std.mem.asBytes(&result), "failed to send exit intent result");
+    wire.writeControlWithTrailAndRequestId(ctl_fd, .exit_intent_result, request_id, std.mem.asBytes(&result), "") catch |err| {
+        core.logging.logError("terminal", "failed to send exit intent result", err);
+    };
 }
 
 fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_len: u32, buffer: []u8) void {

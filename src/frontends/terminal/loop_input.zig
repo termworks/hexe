@@ -606,8 +606,9 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
 
                         // Reply to a pending exit_intent request via SES.
                         if (action == .exit_intent) {
-                            loop_ipc.sendExitIntentResultPub(state, confirmed);
+                            loop_ipc.sendExitIntentResultPub(state, confirmed, state.pending_exit_intent_request_id);
                             state.pending_exit_intent = false;
+                            state.pending_exit_intent_request_id = 0;
                         }
                     }
                     state.pending_action = null;
