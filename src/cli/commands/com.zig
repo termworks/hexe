@@ -1443,6 +1443,7 @@ pub fn runSesKill(allocator: std.mem.Allocator, target: []const u8) !void {
             print("Error: {s}\n", .{err_buf[0..err_len]});
         } else {
             print("Error: session not found\n", .{});
+            std.process.exit(1);
         }
     }
 }
@@ -1577,5 +1578,6 @@ pub fn runTerminalKill(allocator: std.mem.Allocator, target: []const u8) !void {
         print("Error: {s}\n", .{err_buf[0..err_len]});
     } else {
         print("Error: target not found\n", .{});
+        std.process.exit(1);
     }
 }

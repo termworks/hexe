@@ -15,6 +15,7 @@ const Pane = @import("pane.zig").Pane;
 
 const BindAction = core.Config.BindAction;
 const lua_api = @import("lua_api.zig");
+const float_geometry = @import("float_geometry.zig");
 
 /// Run a keybinding whose action is a Lua function.
 ///
@@ -617,15 +618,16 @@ fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step
     if (outer_x > @as(i32, @intCast(max_x))) outer_x = @as(i32, @intCast(max_x));
     if (outer_y > @as(i32, @intCast(max_y))) outer_y = @as(i32, @intCast(max_y));
 
-    // Convert back to percentage (stable across resizes).
-    const pos_x_pct: u8 = if (max_x > 0)
-        @intCast(@min(100, (@as(u32, @intCast(outer_x)) * 100) / @as(u32, max_x)))
-    else
-        0;
-    const pos_y_pct: u8 = if (max_y > 0)
-        @intCast(@min(100, (@as(u32, @intCast(outer_y)) * 100) / @as(u32, max_y)))
-    else
-        0;
+    // Convert back to a percentage, which is what is stored (it survives a
+    // resize). Both directions of that conversion truncate, and the frame is
+    // recomputed from the percentage every frame — so the naive
+    // `pct = cells * 100 / max` round-tripped straight back to the ORIGINAL
+    // cell for most terminal widths, and nudging right or down did nothing at
+    // all while left and up jumped two cells.
+    //
+    // Pick the nearest percentage that actually lands on the requested cell.
+    const pos_x_pct: u8 = float_geometry.pctForCell(@intCast(outer_x), max_x, dx);
+    const pos_y_pct: u8 = float_geometry.pctForCell(@intCast(outer_y), max_y, dy);
     state.setPaneFloatGeometryUi(
         pane.uuid,
         state.paneFloatWidthPct(pane),

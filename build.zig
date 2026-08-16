@@ -383,6 +383,18 @@ pub fn build(b: *std.Build) void {
     const lua_events_tests = b.addTest(.{ .root_module = lua_events_test_module });
     const run_lua_events_tests = b.addRunArtifact(lua_events_tests);
 
+    // Float position arithmetic: a percent<->cell round trip that silently
+    // made float.nudge("right") a no-op, and a u16 multiply that overflowed
+    // above 655 columns.
+    const float_geometry_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/frontends/terminal/float_geometry.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_float_geometry_tests = b.addRunArtifact(float_geometry_tests);
+
     const prompt_navigation_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/frontends/terminal/prompt_navigation.zig"),
@@ -542,6 +554,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mouse_protocol_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
     test_step.dependOn(&run_lua_events_tests.step);
+    test_step.dependOn(&run_float_geometry_tests.step);
     test_step.dependOn(&run_prompt_navigation_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);
     test_step.dependOn(&run_pane_search_tests.step);

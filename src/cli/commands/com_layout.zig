@@ -77,7 +77,7 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
         } else {
             print("Error: server returned error\n", .{});
         }
-        return;
+        std.process.exit(1);
     }
     if (msg_type != .get_layout or hdr.payload_len == 0) {
         print("Error: unexpected response\n", .{});

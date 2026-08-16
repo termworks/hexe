@@ -39,7 +39,7 @@ pub fn runSesOpen(
         } else {
             print("Error: failed to parse config: {s}\n", .{@errorName(err)});
         }
-        return;
+        std.process.exit(1);
     };
     defer config.deinit(allocator);
 

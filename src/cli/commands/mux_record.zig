@@ -6,18 +6,31 @@ const tty = @import("tty.zig");
 const print = std.debug.print;
 const posix = std.posix;
 
-pub fn runMuxRecord(out_path: []const u8, capture_input: bool) !void {
+pub fn runMuxRecord(session: []const u8, out_path: []const u8, capture_input: bool) !void {
     if (out_path.len == 0) {
         print("Error: --out is required for terminal record\n", .{});
         std.process.exit(1);
     }
+    if (session.len == 0) {
+        print("Error: session name required\n", .{});
+        std.process.exit(1);
+    }
+
+    // The attach command has to name a session. It used to be the literal
+    // string "hexe terminal attach", which prints "session name required" and
+    // exits — so a recording contained nothing but that error message.
+    var cmd_buf: [512]u8 = undefined;
+    const attach_cmd = std.fmt.bufPrint(&cmd_buf, "hexe terminal attach {s}", .{session}) catch {
+        print("Error: session name too long\n", .{});
+        std.process.exit(1);
+    };
 
     const term_size = tty.getTermSize();
     var rec = try AsciicastWriter.init(out_path, .{
         .width = term_size.cols,
         .height = term_size.rows,
         .title = "hexe terminal record",
-        .command = "hexe terminal attach",
+        .command = attach_cmd,
     });
     defer {
         rec.flush() catch |err| {
@@ -26,7 +39,7 @@ pub fn runMuxRecord(out_path: []const u8, capture_input: bool) !void {
         rec.deinit();
     }
 
-    var pty = try core.Pty.spawn("hexe terminal attach");
+    var pty = try core.Pty.spawn(attach_cmd);
     defer pty.close();
     pty.setSize(term_size.cols, term_size.rows) catch |err| {
         print("Warning: failed to set PTY size: {s}\n", .{@errorName(err)});

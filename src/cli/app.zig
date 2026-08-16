@@ -530,7 +530,8 @@ pub fn main() !void {
     try mux_close.addArg(Arg.positional("id", null, null));
     try mux_close.addArg(Arg.singleValueOption("instance", 'I', null));
 
-    var mux_record = app.createCommand("record", "Attach to terminal frontend and record asciicast");
+    var mux_record = app.createCommand("record", "Attach to a session and record it as asciicast");
+    try mux_record.addArg(Arg.positional("session", null, null));
     try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
     try mux_record.addArg(Arg.booleanOption("capture-input", null, null));
     try mux_record.addArg(Arg.singleValueOption("instance", 'I', null));
@@ -982,10 +983,15 @@ pub fn main() !void {
             if (instance.len > 0) setInstanceFromCli(instance);
             const out = m.getSingleValue("out") orelse "";
             if (out.len == 0) {
-                print("Error: --out is required for mux record\n", .{});
-                return;
+                print("Error: --out is required for terminal record\n", .{});
+                std.process.exit(1);
             }
-            try cli_cmds.runMuxRecord(out, m.containsArg("capture-input"));
+            const session = m.getSingleValue("session") orelse "";
+            if (session.len == 0) {
+                print("Error: session name required (hexe terminal record <session> --out FILE)\n", .{});
+                std.process.exit(1);
+            }
+            try cli_cmds.runMuxRecord(session, out, m.containsArg("capture-input"));
             return;
         }
         if (mux_matches.subcommandMatches("float")) |m| {
@@ -1400,6 +1406,7 @@ fn runTerminalAttach(name: []const u8, log_level: ?core.logging.Level, log_file:
         });
     } else {
         print("Error: session name required\n", .{});
+        std.process.exit(1);
     }
 }
 
@@ -1408,5 +1415,6 @@ fn runShpInit(shell: []const u8, no_comms: bool) !void {
         try shell_hooks.printInit(shell, no_comms);
     } else {
         print("Error: shell name required (bash, zsh, fish)\n", .{});
+        std.process.exit(1);
     }
 }

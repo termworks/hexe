@@ -2390,12 +2390,16 @@ pub const State = struct {
         const pos_x = @min(pos_x_pct, 100);
         const pos_y = @min(pos_y_pct, 100);
 
-        const outer_w: u16 = usable.w * width / 100;
-        const outer_h: u16 = usable.h * height / 100;
+        // Widen for the multiply: these are all u16 and the product is not.
+        // `usable.w * width` overflows above 655 columns (700 * 100 = 70000
+        // wraps to 4464), collapsing any wide float to a sliver under
+        // ReleaseFast and panicking in Debug.
+        const outer_w: u16 = @intCast(@as(u32, usable.w) * @as(u32, width) / 100);
+        const outer_h: u16 = @intCast(@as(u32, usable.h) * @as(u32, height) / 100);
         const max_x: u16 = usable.w -| outer_w;
         const max_y: u16 = usable.h -| outer_h;
-        const outer_x: u16 = max_x * pos_x / 100;
-        const outer_y: u16 = max_y * pos_y / 100;
+        const outer_x: u16 = @intCast(@as(u32, max_x) * @as(u32, pos_x) / 100);
+        const outer_y: u16 = @intCast(@as(u32, max_y) * @as(u32, pos_y) / 100);
         const pad_x: u16 = 1 + pad_x_cfg;
         const pad_y: u16 = 1 + pad_y_cfg;
 
