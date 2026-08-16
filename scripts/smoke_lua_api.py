@@ -131,6 +131,12 @@ hexe.events.on("pane_focus_changed", function(ev)
   seen[#seen+1] = "focus"
   local f = io.open("MARKER_PATH", "w"); f:write(table.concat(seen, " ")); f:close()
 end)
+-- tab_changed used to be emitted only from nextTab/prevTab, which the
+-- tab_next/tab_prev binds do not call — so it effectively never fired.
+hexe.events.on("tab_changed", function(ev)
+  seen[#seen+1] = "changed:" .. tostring(ev.previous_tab) .. "->" .. tostring(ev.active_tab)
+  local f = io.open("MARKER_PATH", "w"); f:write(table.concat(seen, " ")); f:close()
+end)
 return hexe.setup({
   keys = { hexe.key({ hexe.key.ctrl, hexe.key.t }, hexe.action.tab.new()) },
 })
@@ -313,6 +319,9 @@ if not os.path.exists(emarker):
 ev_out = open(emarker).read()
 if "created:" not in ev_out:
     fail(f"tab_created never fired; got {ev_out!r}")
+if "changed:" not in ev_out:
+    fail(f"tab_changed never fired — it is emitted on a path the tab binds "
+         f"do not take; got {ev_out!r}")
 print(f"events:      hexe.events.on delivered -> {ev_out!r}")
 
 cleanup()

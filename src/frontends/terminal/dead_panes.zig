@@ -42,6 +42,16 @@ pub fn cleanupDeadFloat(state: *State, index: usize) void {
     state.renderer.invalidate();
     state.clearLocalFloatState(pane_uuid);
 
+    if (state.config._lua_runtime) |rt| {
+        lua_events.emit(state, rt, "pane_exited", &.{
+            .{ .name = "pane_uuid", .value = .{ .uuid = pane_uuid } },
+            .{ .name = "exit_status", .value = .{ .int = @intCast(exit_code) } },
+            .{ .name = "was_focused", .value = .{ .boolean = was_active } },
+            .{ .name = "is_float", .value = .{ .boolean = true } },
+            .{ .name = "closes_tab", .value = .{ .boolean = false } },
+        });
+    }
+
     if (was_active) {
         state.setActiveFloatingIndex(null);
         state.cursor_needs_restore = true;
@@ -120,6 +130,16 @@ pub fn cleanupDeadSplits(state: *State, dead_splits: *std.ArrayList([32]u8)) voi
         const was_focused = if (state.currentLayout().getFocusedPane()) |fp| std.mem.eql(u8, &fp.uuid, &dead_uuid) else false;
         const exit_code = if (dead_pane) |p| state.paneExitCode(p.uuid) else 0;
 
+        if (state.config._lua_runtime) |rt| {
+            lua_events.emit(state, rt, "pane_exited", &.{
+                .{ .name = "pane_uuid", .value = .{ .uuid = dead_uuid } },
+                .{ .name = "exit_status", .value = .{ .int = @intCast(exit_code) } },
+                .{ .name = "was_focused", .value = .{ .boolean = was_focused } },
+                .{ .name = "is_float", .value = .{ .boolean = false } },
+                .{ .name = "closes_tab", .value = .{ .boolean = state.currentLayout().splitCount() <= 1 } },
+            });
+        }
+
         if (state.currentLayout().splitCount() > 1) {
             const dead_view_id = dead_pane.?.id;
             state.clearTransientPaneState(dead_pane.?);
@@ -128,14 +148,6 @@ pub fn cleanupDeadSplits(state: *State, dead_splits: *std.ArrayList([32]u8)) voi
             // If the dead pane was the zoomed one, its uuid now matches nothing
             // and the render loop draws an empty tab.
             state.revalidateZoom();
-
-            if (state.config._lua_runtime) |rt| {
-                lua_events.emit(state, rt, "pane_exited", &.{
-                    .{ .name = "pane_uuid", .value = .{ .uuid = dead_uuid } },
-                    .{ .name = "exit_status", .value = .{ .int = @intCast(exit_code) } },
-                    .{ .name = "was_focused", .value = .{ .boolean = was_focused } },
-                });
-            }
 
             // Log pane death.
             terminal_main.debugLog("pane died: view_id={d} exit_code={d} focused={}", .{ dead_view_id, exit_code, was_focused });

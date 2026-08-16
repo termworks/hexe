@@ -28,7 +28,7 @@ fn runLuaAction(state: *State, code: []const u8) bool {
         10,
     ) catch return false;
 
-    const scope = lua_api.pushLiveState(rt, state);
+    const scope = lua_api.pushLiveState(rt, state, .handler);
     defer lua_api.popLiveState(rt, scope);
 
     if (!core.lua_runtime.pushRegisteredCallback(rt, callback_id)) return false;
@@ -383,6 +383,11 @@ fn performConfigReload(state: *State) void {
     var old = state.config;
     state.config = new_config;
     old.deinit();
+    // The new config carries a NEW LuaRuntime, and `hexe.live` is installed on
+    // a runtime, not on a config. Without this, every `ctx.*` accessor and
+    // every callback registered by the reloaded config is dead after a reload —
+    // conditions silently stop matching and actions silently do nothing.
+    if (state.config._lua_runtime) |rt| lua_api.install(rt);
     state.renderer.invalidate();
     state.force_full_render = true;
     state.needs_render = true;

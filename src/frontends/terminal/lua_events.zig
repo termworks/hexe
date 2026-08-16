@@ -51,7 +51,7 @@ pub fn emit(state: anytype, runtime: *LuaRuntime, event_name: []const u8, fields
 /// inside an event handler as inside a keybinding callback. `state` is
 /// `anytype` because this file is imported by State itself.
 pub fn emitWithState(state: anytype, runtime: *LuaRuntime, event_name: []const u8) void {
-    const scope = lua_api.pushLiveState(runtime, state);
+    const scope = lua_api.pushLiveState(runtime, state, .handler);
     defer lua_api.popLiveState(runtime, scope);
     emitAutocmdWithPayloadOnStack(runtime, event_name);
 }

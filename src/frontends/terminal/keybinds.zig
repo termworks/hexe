@@ -168,7 +168,7 @@ fn matchesWhen(state: *State, when: ?[]const u8) bool {
     };
 
     // The accessors read this pointer; it must not outlive the call.
-    const scope = lua_api.pushLiveState(rt, state);
+    const scope = lua_api.pushLiveState(rt, state, .predicate);
     defer lua_api.popLiveState(rt, scope);
 
     if (!core.lua_runtime.pushRegisteredCallback(rt, callback_id)) {

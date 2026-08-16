@@ -520,46 +520,14 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
 /// Switch to next tab.
 pub fn nextTab(self: anytype) void {
     if (self.view.tab_views.items.len > 1) {
-        const prev_tab = self.activeTabIndex();
         tab_switch.switchToTab(self, (self.activeTabIndex() + 1) % self.view.tab_views.items.len);
-
-        if (self.config._lua_runtime) |rt| {
-            rt.lua.createTable(0, 6);
-            _ = rt.lua.pushString("tab_changed");
-            rt.lua.setField(-2, "event");
-            rt.lua.pushInteger(@intCast(prev_tab + 1));
-            rt.lua.setField(-2, "previous_tab");
-            rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
-            rt.lua.setField(-2, "active_tab");
-            rt.lua.pushInteger(@intCast(self.view.tab_views.items.len));
-            rt.lua.setField(-2, "tab_count");
-            rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
-            rt.lua.setField(-2, "now_ms");
-            lua_events.emitWithState(self, rt, "tab_changed");
-        }
     }
 }
 
 /// Switch to previous tab.
 pub fn prevTab(self: anytype) void {
     if (self.view.tab_views.items.len > 1) {
-        const prev_tab = self.activeTabIndex();
         tab_switch.switchToTab(self, if (self.activeTabIndex() == 0) self.view.tab_views.items.len - 1 else self.activeTabIndex() - 1);
-
-        if (self.config._lua_runtime) |rt| {
-            rt.lua.createTable(0, 6);
-            _ = rt.lua.pushString("tab_changed");
-            rt.lua.setField(-2, "event");
-            rt.lua.pushInteger(@intCast(prev_tab + 1));
-            rt.lua.setField(-2, "previous_tab");
-            rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
-            rt.lua.setField(-2, "active_tab");
-            rt.lua.pushInteger(@intCast(self.view.tab_views.items.len));
-            rt.lua.setField(-2, "tab_count");
-            rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
-            rt.lua.setField(-2, "now_ms");
-            lua_events.emitWithState(self, rt, "tab_changed");
-        }
     }
 }
 

@@ -5,6 +5,7 @@ const cregex = @cImport({
 });
 
 const core = @import("core");
+const lua_events = @import("lua_events.zig");
 const frontend_core = @import("frontend_core");
 const wire = core.wire;
 const pop = @import("pop");
@@ -1251,7 +1252,21 @@ pub const State = struct {
         // zoomed uuid — drop it on any tab change.
         self.zoomed_pane_uuid = null;
         const clamped = if (self.view.tab_views.items.len == 0) 0 else @min(idx, self.view.tab_views.items.len - 1);
+        // Read BEFORE the change: `tab_changed` is emitted here rather than in
+        // nextTab/prevTab because the tab_next/tab_prev binds, statusbar clicks
+        // and ctx.tab_select all reach the active tab through this function and
+        // never through those — so the event almost never fired.
+        const previous = self.runtime.activeTab(self.view.tab_views.items.len);
         self.runtime.setActiveTab(clamped);
+        if (previous != clamped) {
+            if (self.config._lua_runtime) |rt| {
+                lua_events.emit(self, rt, "tab_changed", &.{
+                    .{ .name = "previous_tab", .value = .{ .int = @intCast(previous + 1) } },
+                    .{ .name = "active_tab", .value = .{ .int = @intCast(clamped + 1) } },
+                    .{ .name = "tab_count", .value = .{ .int = @intCast(self.view.tab_views.items.len) } },
+                });
+            }
+        }
         if (self.frontend_view) |*view| {
             _ = frontend_core.applyViewActionWithContext(view, .tab_select, .{
                 .active_tab_idx = clamped,

@@ -38,6 +38,8 @@ const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const api_bridge = core.api_bridge;
 const keybinds_actions = @import("keybinds_actions.zig");
+const mouse_selection = @import("mouse_selection.zig");
+const tab_switch = @import("tab_switch.zig");
 
 const log = std.log.scoped(.lua_api);
 
@@ -51,13 +53,27 @@ const LIVE_STATE_KEY = "_hexe_live_state";
 /// `pane_focus_changed`, which publishes state for the handler and then has to
 /// restore — not clear — or every accessor after that call in the OUTER
 /// callback goes dead. A plain set/clear pair silently broke exactly that.
-pub const Scope = struct { prev: ?*State };
+pub const Scope = struct { prev: ?*State, prev_kind: i64 };
 
-pub fn pushLiveState(rt: *LuaRuntime, state: *State) Scope {
+/// Where the callback is running from.
+///
+/// A predicate runs on the input path for every candidate bind of every
+/// keypress, so it must not do anything that blocks or costs much. A handler
+/// (a keybind action, an event handler) runs once in response to something the
+/// user did, and may. Verbs that block check this rather than trusting a
+/// comment in the docs.
+pub const Kind = enum(i64) { predicate = 1, handler = 2 };
+
+const SCOPE_KIND_KEY = "_hexe_live_scope";
+
+pub fn pushLiveState(rt: *LuaRuntime, state: *State, kind: Kind) Scope {
     const prev = liveState(rt.lua);
+    const prev_kind = scopeKind(rt.lua);
     rt.lua.pushLightUserdata(state);
     rt.lua.setField(zlua.registry_index, LIVE_STATE_KEY);
-    return .{ .prev = prev };
+    rt.lua.pushInteger(@intFromEnum(kind));
+    rt.lua.setField(zlua.registry_index, SCOPE_KIND_KEY);
+    return .{ .prev = prev, .prev_kind = prev_kind };
 }
 
 pub fn popLiveState(rt: *LuaRuntime, scope: Scope) void {
@@ -67,6 +83,20 @@ pub fn popLiveState(rt: *LuaRuntime, scope: Scope) void {
         rt.lua.pushNil();
     }
     rt.lua.setField(zlua.registry_index, LIVE_STATE_KEY);
+    rt.lua.pushInteger(scope.prev_kind);
+    rt.lua.setField(zlua.registry_index, SCOPE_KIND_KEY);
+}
+
+fn scopeKind(lua: *Lua) i64 {
+    _ = lua.getField(zlua.registry_index, SCOPE_KIND_KEY);
+    defer lua.pop(1);
+    if (lua.typeOf(-1) != .number) return 0;
+    return lua.toInteger(-1) catch 0;
+}
+
+/// True when the current callback may do expensive or blocking work.
+fn inHandlerScope(lua: *Lua) bool {
+    return scopeKind(lua) == @intFromEnum(Kind.handler);
 }
 
 fn liveState(lua: *Lua) ?*State {
@@ -143,8 +173,28 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     setInt(lua, "width", pane.width);
     setInt(lua, "height", pane.height);
 
+    // Liveness. Handlers run before the reaper collects corpses, so without
+    // these a plugin cannot tell a dead pane from a live one, and everything
+    // below is transient garbage while a backlog is replaying.
+    setBool(lua, "alive", pane.isAlive());
+    setBool(lua, "replaying", pane.backlog_replaying);
+
     // Terminal state
     setBool(lua, "alt_screen", pane.vt.inAltScreen());
+    setInt(lua, "cursor_style", pane.vt.getCursorStyle());
+    setBool(lua, "cursor_visible", pane.vt.isCursorVisible());
+    // The shell's own idea of where it is, as opposed to `cwd`, which falls
+    // back to the last shell event.
+    setOptStr(lua, "osc7_cwd", pane.vt.getPwd());
+
+    // Input modes the pane's application has set. A bind that grabs Ctrl+V or
+    // the arrow keys has to know these or it silently breaks inside vim/fzf,
+    // and a plugin intercepting clicks has to know whether the app wants them.
+    setBool(lua, "bracketed_paste", pane.vt.terminal.modes.get(.bracketed_paste));
+    setBool(lua, "app_cursor", pane.vt.terminal.modes.get(.cursor_keys));
+    setBool(lua, "synchronized_output", pane.vt.outputSynchronized());
+    setInt(lua, "kitty_keyboard", @intCast(pane.vt.terminal.screens.active.kitty_keyboard.current().int()));
+    setBool(lua, "mouse_tracking", pane.vt.terminal.flags.mouse_event != .none);
     setBool(lua, "scrolled", pane.isScrolled());
     const cursor = pane.getCursorPos();
     setInt(lua, "cursor_x", cursor.x);
@@ -202,19 +252,46 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     var isolated = false;
     var destroyable = false;
     var global = state.paneParentTab(pane) == null;
+    var command: ?[]const u8 = null;
     if (float_key != 0) {
         if (state.getLayoutFloatByKey(float_key)) |fd| {
             exclusive = fd.attributes.exclusive;
             isolated = fd.attributes.isolated;
             destroyable = fd.attributes.destroy;
             global = global or fd.attributes.global;
+            // Already looked up; discarding it was free information lost.
+            command = fd.command;
         }
     }
+    setOptStr(lua, "command", command);
     setBool(lua, "exclusive", exclusive);
     setBool(lua, "isolated", isolated);
     setBool(lua, "destroyable", destroyable);
     setBool(lua, "global", global);
     setBool(lua, "adhoc", is_float and float_key == 0);
+    // Geometry the bind actions can already CHANGE but Lua could not READ, so
+    // every size-cycling plugin had to shadow it and desynced on a mouse resize.
+    // nil on a split: the underlying getters return float defaults for any
+    // pane, and reporting 60% width for a tiled pane is a lie.
+    if (is_float) {
+        setInt(lua, "width_pct", state.paneFloatWidthPct(pane));
+        setInt(lua, "height_pct", state.paneFloatHeightPct(pane));
+        setInt(lua, "pos_x_pct", state.paneFloatPosXPct(pane));
+        setInt(lua, "pos_y_pct", state.paneFloatPosYPct(pane));
+        setInt(lua, "pad_x", state.paneFloatPadX(pane));
+        setInt(lua, "pad_y", state.paneFloatPadY(pane));
+    } else {
+        setOptInt(lua, "width_pct", null);
+        setOptInt(lua, "height_pct", null);
+        setOptInt(lua, "pos_x_pct", null);
+        setOptInt(lua, "pos_y_pct", null);
+        setOptInt(lua, "pad_x", null);
+        setOptInt(lua, "pad_y", null);
+    }
+    // Which directory this per-cwd instance belongs to; `per_cwd` alone cannot
+    // distinguish two instances of one float key.
+    setOptStr(lua, "pwd_dir", state.panePwdDir(pane));
+    setOptStr(lua, "exit_key", state.paneExitKey(pane));
     setOptStr(lua, "title", if (is_float) state.paneFloatTitle(pane) else null);
 }
 
@@ -498,6 +575,42 @@ fn hexe_ui(lstate: ?*LuaState) callconv(.c) c_int {
     setBool(lua, "tab_rename", state.isTabRenameActive());
     setBool(lua, "pane_select", state.overlays.isPaneSelectActive());
     setBool(lua, "float_focused", state.activeFloatingIndex() != null);
+    setBool(lua, "sync_input", state.sync_input);
+
+    // Copy-mode cursor, so a plugin can follow it.
+    setInt(lua, "copy_x", state.copy_mode.x);
+    setInt(lua, "copy_y", state.copy_mode.y);
+    setBool(lua, "copy_selecting", state.copy_mode.selecting);
+
+    // Search: `search_mode` says a search is open, these say what it is.
+    setStr(lua, "search_query", state.search_mode.query.items);
+    setInt(lua, "search_matches", @intCast(state.search_mode.match_count));
+    return 1;
+}
+
+/// `ctx.selection()` — the currently selected text, or nil.
+///
+/// Allocates only the selected span, and only when there is a selection, so a
+/// predicate that calls it on an empty selection costs nothing.
+fn hexe_selection(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const tab = state.activeTabIndex();
+    var it = state.currentLayout().splitIterator();
+    while (it.next()) |p| {
+        const range = state.mouse_selection.bufRangeForPane(tab, p.*) orelse continue;
+        const text = mouse_selection.extractText(state.allocator, p.*, range) catch {
+            lua.pushNil();
+            return 1;
+        };
+        defer state.allocator.free(text);
+        _ = lua.pushString(text);
+        return 1;
+    }
+    lua.pushNil();
     return 1;
 }
 
@@ -677,7 +790,7 @@ fn hexe_focus(lstate: ?*LuaState) callconv(.c) c_int {
         }
     } else {
         if (state.paneParentTab(pane)) |t| {
-            if (t != state.activeTabIndex()) state.setActiveTabIndex(t);
+            if (t != state.activeTabIndex()) tab_switch.switchToTab(state, t);
         }
         state.setActiveFloatingIndex(null);
         state.unfocusAllPanes();
@@ -704,7 +817,11 @@ fn hexe_tab_select(lstate: ?*LuaState) callconv(.c) c_int {
         lua.pushBoolean(false);
         return 1;
     }
-    state.setActiveTabIndex(@intCast(n - 1));
+    // Through switchToTab, not setActiveTabIndex: the former also clears the
+    // mouse selection and float rename, resets the drag, and unfocus-syncs the
+    // outgoing pane. Skipping it leaves a selection highlighted on a tab that
+    // is no longer visible.
+    tab_switch.switchToTab(state, @intCast(n - 1));
     state.needs_render = true;
     lua.pushBoolean(true);
     return 1;
@@ -738,7 +855,17 @@ fn hexe_rename_tab(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
-/// `ctx.close(selector)` — close any pane, not just the focused one.
+/// `ctx.close(selector [, {kill = false}])` — close any pane, not just the
+/// focused one.
+///
+/// cost: BLOCKING-IPC by default. `Layout.closePane` kills the live pane, which
+/// waits on a SES ack; a predicate must not call it. `{kill = false}` drops the
+/// pane locally only and never touches the socket.
+///
+/// This also does the bookkeeping the bind path does — clearing transient pane
+/// state, telling the shared view the pane went away, and re-syncing focus.
+/// Skipping it left the shared projection pointing at a pane that no longer
+/// existed.
 fn hexe_close(lstate: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(lstate orelse return 0);
     const state = liveState(lua) orelse {
@@ -749,9 +876,38 @@ fn hexe_close(lstate: ?*LuaState) callconv(.c) c_int {
         lua.pushBoolean(false);
         return 1;
     };
+
+    var kill = true;
+    if (lua.typeOf(2) == .table) {
+        if (lua.getField(2, "kill") == .boolean) kill = lua.toBoolean(-1);
+        lua.pop(1);
+    }
+    if (kill and !inHandlerScope(lua)) {
+        log.warn("ctx.close with kill=true is not allowed in a predicate", .{});
+        lua.pushBoolean(false);
+        return 1;
+    }
+
     const uuid = pane.uuid;
-    const ok = state.currentLayout().closePane(uuid);
-    if (ok) state.revalidateZoom();
+    const layout = state.currentLayout();
+    if (kill) {
+        state.runtime.killPane(uuid) catch |err| {
+            core.logging.logError("terminal", "ctx.close: killPane failed", err);
+            lua.pushBoolean(false);
+            return 1;
+        };
+    }
+    state.clearTransientPaneState(pane);
+    const ok = layout.closePaneLocal(uuid);
+    if (ok) {
+        if (layout.getFocusedPane()) |new_pane| {
+            state.applyFrontendPaneRemoved(uuid, new_pane.uuid);
+            state.syncPaneFocus(new_pane, null);
+        } else {
+            state.applyFrontendPaneRemoved(uuid, null);
+        }
+        state.revalidateZoom();
+    }
     state.needs_render = true;
     lua.pushBoolean(ok);
     return 1;
@@ -785,6 +941,46 @@ fn hexe_scroll(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// `ctx.config()` — what the config DECLARES, as opposed to what is running.
+///
+/// `ctx.floats()` lists live float panes; this lists the float definitions a
+/// user configured, so a plugin can ask "is there a float bound to key g, and
+/// what would it run" before deciding to toggle it.
+fn hexe_config(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    lua.createTable(0, 4);
+
+    lua.createTable(@intCast(state.active_layout_floats.len), 0);
+    for (state.active_layout_floats, 0..) |*f, i| {
+        lua.createTable(0, 12);
+        setInt(lua, "key", f.key);
+        setBool(lua, "enabled", f.enabled);
+        setOptStr(lua, "command", f.command);
+        setOptStr(lua, "title", f.title);
+        setOptInt(lua, "width_pct", if (f.width_percent) |v| @intCast(v) else null);
+        setOptInt(lua, "height_pct", if (f.height_percent) |v| @intCast(v) else null);
+        setOptInt(lua, "pos_x_pct", if (f.pos_x) |v| @intCast(v) else null);
+        setOptInt(lua, "pos_y_pct", if (f.pos_y) |v| @intCast(v) else null);
+        setBool(lua, "sticky", f.attributes.sticky);
+        setBool(lua, "per_cwd", f.attributes.per_cwd);
+        setBool(lua, "global", f.attributes.global);
+        setBool(lua, "exclusive", f.attributes.exclusive);
+        setBool(lua, "isolated", f.attributes.isolated);
+        setBool(lua, "destroy", f.attributes.destroy);
+        lua.rawSetIndex(-2, @intCast(i + 1));
+    }
+    lua.setField(-2, "floats");
+
+    setInt(lua, "keybind_count", @intCast(state.config.input.binds.len));
+    setBool(lua, "status_enabled", state.config.tabs.status.enabled);
+    setBool(lua, "confirm_on_exit", state.config.confirm_on_exit);
+    return 1;
+}
+
 // ─── installation ───────────────────────────────────────────────────────────
 
 const Entry = struct { name: [:0]const u8, func: *const fn (?*LuaState) callconv(.c) c_int };
@@ -807,6 +1003,8 @@ const ENTRIES = [_]Entry{
     .{ .name = "rename_tab", .func = hexe_rename_tab },
     .{ .name = "close", .func = hexe_close },
     .{ .name = "scroll", .func = hexe_scroll },
+    .{ .name = "selection", .func = hexe_selection },
+    .{ .name = "config", .func = hexe_config },
 };
 
 /// Registry slot holding the accessor table, so a callback invocation can push

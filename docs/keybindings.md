@@ -298,9 +298,11 @@ Every accessor reads live state; nothing is computed until you ask for it.
 | `ctx.splits([filter])` | array of tiled panes |
 | `ctx.tabs()` | array of `{index, name, active, pane_count, focused_uuid}` |
 | `ctx.session()` | `{name, uuid, root, connected, tab_count, active_tab}` |
-| `ctx.ui()` | `{width, height, status_height, zoomed, copy_mode, search_mode, tab_rename, pane_select, float_focused}` |
+| `ctx.ui()` | `{width, height, status_height, zoomed, sync_input, copy_mode, copy_x, copy_y, copy_selecting, search_mode, search_query, search_matches, tab_rename, pane_select, float_focused}` |
 | `ctx.count(what)` | `"tabs"`, `"panes"`, `"splits"`, `"floats"`, `"visible_floats"` |
 | `ctx.env(name)` | one environment variable, or nil |
+| `ctx.selection()` | the selected text, or nil |
+| `ctx.config()` | what the config *declares* — `floats` (key, command, geometry, attributes), `keybind_count`, `status_enabled`, `confirm_on_exit` |
 
 `sel` selects a pane: omitted / `0` / `"focused"` / `"current"` for the focused
 one, a number for its index in `ctx.panes()`, or a uuid (a prefix is enough).
@@ -313,12 +315,21 @@ one, a number for its index in `ctx.panes()`, or a uuid (a prefix is enough).
 |---|---|
 | identity | `uuid` `id` `pane_id` `index` `name` `tab` `focused` |
 | kind | `is_float` `is_split` `adhoc` `title` |
+| liveness | `alive` `replaying` |
 | geometry | `x` `y` `width` `height` `zoomed` |
-| terminal | `alt_screen` `scrolled` `cursor_x` `cursor_y` `sync_input` |
+| terminal | `alt_screen` `scrolled` `cursor_x` `cursor_y` `cursor_style` `cursor_visible` `sync_input` |
+| input modes | `bracketed_paste` `app_cursor` `synchronized_output` `kitty_keyboard` `mouse_tracking` |
 | process | `process` `process_pid` `process_running` |
-| shell | `cwd` `last_command` `exit_status` `duration_ms` `jobs` `shell_running` `started_at_ms` |
+| shell | `cwd` `osc7_cwd` `last_command` `exit_status` `duration_ms` `jobs` `shell_running` `started_at_ms` |
 | progress | `progress_state` `progress_pct` |
-| float | `float_key` `visible` `sticky` `per_cwd` `global` `exclusive` `isolated` `destroyable` |
+| float | `float_key` `visible` `sticky` `per_cwd` `global` `exclusive` `isolated` `destroyable` `command` `exit_key` `pwd_dir` |
+| float geometry | `width_pct` `height_pct` `pos_x_pct` `pos_y_pct` `pad_x` `pad_y` (nil on splits) |
+
+`alive` and `replaying` matter more than they look: handlers run before dead
+panes are reaped, and during a reattach the VT is still being rebuilt from the
+pod backlog, so cursor and screen state are transient. The input-mode flags are
+what you check before binding over a key an application wants — `app_cursor`
+tells you vim owns the arrows, `bracketed_paste` that it wants the paste.
 
 **Cost.** Each accessor builds only what it is asked for, so a predicate reading
 one field is one small table. Materialising every pane (`ctx.panes()`) in a
@@ -436,8 +447,8 @@ You can register runtime event callbacks through `hexe.events`.
 
 Supported events:
 - `pane_focus_changed`
-- `pane_exited` — `ev.pane_uuid`, `ev.exit_status`, `ev.was_focused`
-- `tab_changed`
+- `pane_exited` — `ev.pane_uuid`, `ev.exit_status`, `ev.was_focused`, `ev.is_float`, `ev.closes_tab`
+- `tab_changed` — `ev.previous_tab`, `ev.active_tab`, `ev.tab_count`
 - `tab_created` — `ev.tab`, `ev.tab_count`, `ev.pane_uuid`
 - `tab_closed` — `ev.tab`, `ev.tab_count`
 - `command_finished`
