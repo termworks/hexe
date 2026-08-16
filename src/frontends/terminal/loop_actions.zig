@@ -30,7 +30,9 @@ fn writeControlLogged(fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u
 pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
     if (state.paneCaptureOutput(pane)) {
         // CLI is waiting - destroy the float and send cancellation result.
-        destroyBlockingFloat(state, pane);
+        destroyFloatPane(state, pane);
+    } else if (floatDestroysOnHide(state, pane)) {
+        destroyFloatPane(state, pane);
     } else {
         // Normal float - just hide it.
         const was_visible = state.paneVisibleOnTab(pane, tab);
@@ -54,21 +56,34 @@ pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
     }
 }
 
-/// Destroy a blocking float and send result back to CLI.
-fn destroyBlockingFloat(state: *State, pane: *Pane) void {
+/// Does this float's declaration say its process must not survive being hidden?
+///
+/// `attributes.destroy` parsed, merged with the defaults and was reported to
+/// Lua, but nothing ever read it: a float declared `destroy = true` hid and kept
+/// running forever. Per-cwd floats are documented to ignore the attribute.
+fn floatDestroysOnHide(state: *State, pane: *const Pane) bool {
+    if (state.paneIsPwd(pane)) return false;
+    const key = state.paneFloatKey(pane);
+    if (key == 0) return false;
+    const def = state.getLayoutFloatByKey(key) orelse return false;
+    return def.attributes.destroy;
+}
+
+/// Destroy a float pane, answering a blocking CLI caller if one is waiting.
+fn destroyFloatPane(state: *State, pane: *Pane) void {
     // Send completion with exit code 130 (like Ctrl+C cancellation).
     if (state.pending_float_requests.fetchRemove(pane.uuid)) |entry| {
         if (entry.value.result_path) |path| {
             std.fs.cwd().deleteFile(path) catch |err| {
                 if (err != error.FileNotFound) {
-                    terminal_main.debugLog("destroyBlockingFloat: failed to delete result file '{s}': {s}", .{ path, @errorName(err) });
+                    terminal_main.debugLog("destroyFloatPane: failed to delete result file '{s}': {s}", .{ path, @errorName(err) });
                 }
             };
             state.allocator.free(path);
         }
         // Send cancellation result to CLI.
         const ctl_fd = state.runtime.getCtlFd() orelse {
-            core.logging.warn("terminal", "destroyBlockingFloat: cannot send cancellation result because SES CTL channel is unavailable", .{});
+            core.logging.warn("terminal", "destroyFloatPane: cannot send cancellation result because SES CTL channel is unavailable", .{});
             return;
         };
         const result = wire.FloatResult{
@@ -86,7 +101,7 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
         if (p == pane) {
             if (state.runtime.isConnected()) {
                 state.runtime.killPane(pane.uuid) catch |e| {
-                    terminal_main.debugLogUuid(&pane.uuid, "destroyBlockingFloat: killPane failed: {s}", .{@errorName(e)});
+                    terminal_main.debugLogUuid(&pane.uuid, "destroyFloatPane: killPane failed: {s}", .{@errorName(e)});
                     state.notifications.show("Close float failed: session rejected pane kill");
                     return;
                 };
@@ -776,6 +791,28 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
             // Toggle visibility (per-tab for global/per_cwd floats).
             const old_uuid = state.getCurrentFocusedUuid();
+
+            // `destroy = true` means the process must not outlive being hidden.
+            // The keybind toggle hides directly rather than through
+            // hideOrDestroyFloat, so the attribute has to be honoured here too
+            // — this is the path that made the attribute look inert.
+            if (state.paneVisibleOnTab(pane, state.activeTabIndex()) and
+                float_def.attributes.destroy and !float_def.attributes.per_cwd)
+            {
+                if (state.activeFloatingIndex()) |afi| {
+                    if (afi == existing_idx) {
+                        state.syncPaneUnfocus(pane);
+                        state.setActiveFloatingIndex(null);
+                        if (state.currentLayout().getFocusedPane()) |tiled| {
+                            state.syncPaneFocus(tiled, old_uuid);
+                        }
+                    }
+                }
+                destroyFloatPane(state, pane);
+                state.needs_render = true;
+                return;
+            }
+
             state.togglePaneVisibleOnTab(pane, state.activeTabIndex());
             if (state.paneVisibleOnTab(pane, state.activeTabIndex())) {
                 // Unfocus current pane (tiled or another float).
