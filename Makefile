@@ -49,6 +49,7 @@ smoke: smoke-clean
 	python3 -u scripts/smoke_kill.py
 	python3 -u scripts/smoke_pane_info.py
 	python3 -u scripts/smoke_lua_api.py
+	python3 -u scripts/smoke_config_reload.py
 	python3 -u scripts/smoke_cli_waiter_release.py
 	python3 -u scripts/smoke_stalled_peer.py
 	python3 -u scripts/smoke_stalled_pod_peer.py

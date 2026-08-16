@@ -108,6 +108,48 @@ const adhoc_title_style = core.FloatStyle{
 /// Keyboard copy-mode cursor state. Coordinates are local to the focused pane
 /// (same convention mouse_selection.begin/update expect), so selection reuses
 /// the exact scroll-aware machinery the mouse path uses.
+/// Resolve the enabled layout's float definitions, merging in the global
+/// default attributes.
+///
+/// Shared by startup and `config.reload`. It used to exist only inline in
+/// `init`, so a reload kept the OLD float definitions forever: editing a float
+/// in the config and reloading appeared to do nothing, and the previous
+/// allocation leaked.
+pub fn resolveLayoutFloats(
+    allocator: std.mem.Allocator,
+    cfg: *const core.Config,
+    ses_cfg: *const core.SesConfig,
+) []const core.LayoutFloatDef {
+    var layout_floats: []const core.LayoutFloatDef = &[_]core.LayoutFloatDef{};
+    for (ses_cfg.layouts) |*layout| {
+        if (!layout.enabled) continue;
+        const floats_with_defaults = allocator.alloc(core.LayoutFloatDef, layout.floats.len) catch {
+            return layout.floats;
+        };
+        for (layout.floats, 0..) |float_def, i| {
+            var merged = float_def;
+            if (!float_def.has_custom_attributes) {
+                merged.attributes = cfg.float_default_attributes;
+            } else {
+                // OR-merge: a default of true stays true unless the float
+                // overrides it. (Known limitation: a float cannot set false
+                // when the default is true.)
+                merged.attributes.exclusive = cfg.float_default_attributes.exclusive or float_def.attributes.exclusive;
+                merged.attributes.sticky = cfg.float_default_attributes.sticky or float_def.attributes.sticky;
+                merged.attributes.global = cfg.float_default_attributes.global or float_def.attributes.global;
+                merged.attributes.destroy = cfg.float_default_attributes.destroy or float_def.attributes.destroy;
+                merged.attributes.isolated = cfg.float_default_attributes.isolated or float_def.attributes.isolated;
+                merged.attributes.per_cwd = cfg.float_default_attributes.per_cwd or float_def.attributes.per_cwd;
+                merged.attributes.inherit_env = cfg.float_default_attributes.inherit_env or float_def.attributes.inherit_env;
+            }
+            floats_with_defaults[i] = merged;
+        }
+        layout_floats = floats_with_defaults;
+        break;
+    }
+    return layout_floats;
+}
+
 pub const CopyMode = struct {
     active: bool = false,
     x: u16 = 0,
@@ -422,39 +464,7 @@ pub const State = struct {
         const pop_cfg = pop.PopConfig.load(allocator);
         const ses_cfg = core.SesConfig.load(allocator);
 
-        // Find enabled layout's floats and merge with default attributes
-        var layout_floats: []const core.LayoutFloatDef = &[_]core.LayoutFloatDef{};
-        for (ses_cfg.layouts) |*layout| {
-            if (layout.enabled) {
-                // Merge default attributes into each float definition
-                const floats_with_defaults = allocator.alloc(core.LayoutFloatDef, layout.floats.len) catch {
-                    layout_floats = layout.floats;
-                    break;
-                };
-                for (layout.floats, 0..) |float_def, i| {
-                    var merged = float_def;
-                    if (!float_def.has_custom_attributes) {
-                        // Float has no custom attributes table - use all defaults
-                        merged.attributes = cfg.float_default_attributes;
-                    } else {
-                        // Float has custom attributes - merge with defaults using OR
-                        // This means: if default is true, it stays true unless float explicitly overrides
-                        // If float sets something true, it becomes true
-                        // Limitation: can't explicitly set to false when default is true
-                        merged.attributes.exclusive = cfg.float_default_attributes.exclusive or float_def.attributes.exclusive;
-                        merged.attributes.sticky = cfg.float_default_attributes.sticky or float_def.attributes.sticky;
-                        merged.attributes.global = cfg.float_default_attributes.global or float_def.attributes.global;
-                        merged.attributes.destroy = cfg.float_default_attributes.destroy or float_def.attributes.destroy;
-                        merged.attributes.isolated = cfg.float_default_attributes.isolated or float_def.attributes.isolated;
-                        merged.attributes.per_cwd = cfg.float_default_attributes.per_cwd or float_def.attributes.per_cwd;
-                        merged.attributes.inherit_env = cfg.float_default_attributes.inherit_env or float_def.attributes.inherit_env;
-                    }
-                    floats_with_defaults[i] = merged;
-                }
-                layout_floats = floats_with_defaults;
-                break;
-            }
-        }
+        const layout_floats = resolveLayoutFloats(allocator, &cfg, &ses_cfg);
 
         const status_h: u16 = if (cfg.tabs.status.enabled) 1 else 0;
         const layout_h = height - status_h;

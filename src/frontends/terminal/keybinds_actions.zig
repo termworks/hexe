@@ -9,6 +9,7 @@ const mouse_selection = @import("mouse_selection.zig");
 const prompt_navigation = @import("prompt_navigation.zig");
 const statusbar = @import("statusbar.zig");
 
+const state_mod = @import("state.zig");
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 
@@ -380,9 +381,22 @@ fn performConfigReload(state: *State) void {
     // Drop every cache/threadlocal that holds a reference into the old runtime
     // before we free it.
     statusbar.deinitThreadlocals();
+    // Reload the SES-side config too. `state.ses_config` holds the layouts and
+    // `state.active_layout_floats` the resolved float definitions; neither was
+    // refreshed, so editing a float and reloading did nothing (and leaked the
+    // previous resolution).
+    var new_ses = core.SesConfig.load(state.allocator);
+    const new_floats = state_mod.resolveLayoutFloats(state.allocator, &new_config, &new_ses);
+
     var old = state.config;
     state.config = new_config;
     old.deinit();
+
+    if (state.active_layout_floats.len > 0) state.allocator.free(state.active_layout_floats);
+    state.active_layout_floats = new_floats;
+    var old_ses = state.ses_config;
+    state.ses_config = new_ses;
+    old_ses.deinit(state.allocator);
     // The new config carries a NEW LuaRuntime, and `hexe.live` is installed on
     // a runtime, not on a config. Without this, every `ctx.*` accessor and
     // every callback registered by the reloaded config is dead after a reload —
