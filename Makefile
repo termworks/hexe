@@ -38,39 +38,63 @@ smoke-clean:
 	-rm -rf "$${HEXE_SMOKE_TMP:-/tmp/hexe-smoke}" 2>/dev/null || true
 	-rm -rf "$${XDG_RUNTIME_DIR:-/tmp}"/hexe/smk* 2>/dev/null || true
 
+# One recipe line per smoke made `make` stop at the first failure, so a single
+# flake hid every test after it: a 25-minute run reported one result and left
+# ~20 unknown. The list runs to completion and the tally decides the exit code.
+# Set SMOKE_FAILFAST=1 to stop at the first failure instead (bisecting).
+define run_smokes
+@set -u; fail=""; pass=0; failed=0; \
+for s in $(1); do \
+  printf '\n=== %s\n' "$$s"; \
+  if python3 -u scripts/$$s; then \
+    pass=$$((pass+1)); \
+  else \
+    failed=$$((failed+1)); fail="$$fail $$s"; \
+    if [ -n "$${SMOKE_FAILFAST:-}" ]; then \
+      printf '\nSMOKE FAILFAST after %s\n' "$$s"; exit 1; \
+    fi; \
+  fi; \
+done; \
+printf '\n%d passed, %d failed\n' "$$pass" "$$failed"; \
+if [ "$$failed" -ne 0 ]; then printf 'FAILED:%s\n' "$$fail"; exit 1; fi
+endef
+
+SMOKES := \
+	smoke_reconnect.py \
+	smoke_detach_reattach.py \
+	smoke_fullscreen_reattach.py \
+	smoke_paste.py \
+	smoke_input_batch.py \
+	smoke_terminal_protocol.py \
+	smoke_kill.py \
+	smoke_pane_info.py \
+	smoke_lua_api.py \
+	smoke_config_reload.py \
+	smoke_recording.py \
+	smoke_cli_waiter_release.py \
+	smoke_stalled_peer.py \
+	smoke_stalled_pod_peer.py \
+	smoke_rate_limit_attach.py \
+	smoke_log_not_in_tmp.py \
+	smoke_pod_attach.py \
+	smoke_wedged_ctl_reader.py \
+	smoke_bighistory.py \
+	smoke_dot_attach.py \
+	smoke_attach_stress.py \
+	smoke_attach_chaos.py \
+	smoke_slow_exec.py \
+	smoke_region_painter.py \
+	smoke_startup_chooser.py \
+	smoke_bad_config.py \
+	smoke_session_env.py \
+	smoke_float_concurrent.py \
+	smoke_pod_record_input.py \
+	smoke_exit_intent_concurrent.py \
+	smoke_float_destroy.py
+
 smoke: smoke-clean
 	zig build
-	python3 -u scripts/smoke_reconnect.py
-	python3 -u scripts/smoke_detach_reattach.py
-	python3 -u scripts/smoke_fullscreen_reattach.py
-	python3 -u scripts/smoke_paste.py
-	python3 -u scripts/smoke_input_batch.py
-	python3 -u scripts/smoke_terminal_protocol.py
-	python3 -u scripts/smoke_kill.py
-	python3 -u scripts/smoke_pane_info.py
-	python3 -u scripts/smoke_lua_api.py
-	python3 -u scripts/smoke_config_reload.py
-	python3 -u scripts/smoke_recording.py
-	python3 -u scripts/smoke_cli_waiter_release.py
-	python3 -u scripts/smoke_stalled_peer.py
-	python3 -u scripts/smoke_stalled_pod_peer.py
-	python3 -u scripts/smoke_rate_limit_attach.py
-	python3 -u scripts/smoke_log_not_in_tmp.py
-	python3 -u scripts/smoke_pod_attach.py
-	python3 -u scripts/smoke_wedged_ctl_reader.py
-	python3 -u scripts/smoke_bighistory.py
-	python3 -u scripts/smoke_dot_attach.py
-	python3 -u scripts/smoke_attach_stress.py
-	python3 -u scripts/smoke_attach_chaos.py
-	python3 -u scripts/smoke_slow_exec.py
-	python3 -u scripts/smoke_region_painter.py
-	python3 -u scripts/smoke_startup_chooser.py
-	python3 -u scripts/smoke_bad_config.py
-	python3 -u scripts/smoke_session_env.py
-	python3 -u scripts/smoke_float_concurrent.py
-	python3 -u scripts/smoke_pod_record_input.py
-	python3 -u scripts/smoke_exit_intent_concurrent.py
-	python3 -u scripts/smoke_float_destroy.py
+	$(call run_smokes,$(SMOKES))
 
 smoke-protocol:
 	zig build
@@ -79,20 +103,23 @@ smoke-protocol:
 # Heavy-load scenario: splits + floats + fullscreen apps + huge buffers +
 # pastes, then chaos rounds. Needs a ReleaseFast build (Debug VT parsing is
 # ~50x slower and cannot keep up with a 5-pod session).
+HEAVY_SMOKES := \
+	smoke_heavy.py \
+	smoke_heavy2.py \
+	smoke_multi_bighistory.py \
+	smoke_input_flood.py \
+	smoke_wedged.py \
+	smoke_input_exactly_once.py \
+	smoke_float.py \
+	smoke_float_session.py \
+	smoke_float_content.py \
+	smoke_float_tui.py \
+	smoke_input_after_float.py \
+	smoke_float_toggle.py
+
 smoke-heavy: smoke-clean
 	zig build -Doptimize=ReleaseFast
-	python3 -u scripts/smoke_heavy.py
-	python3 -u scripts/smoke_heavy2.py
-	python3 -u scripts/smoke_multi_bighistory.py
-	python3 -u scripts/smoke_input_flood.py
-	python3 -u scripts/smoke_wedged.py
-	python3 -u scripts/smoke_input_exactly_once.py
-	python3 -u scripts/smoke_float.py
-	python3 -u scripts/smoke_float_session.py
-	python3 -u scripts/smoke_float_content.py
-	python3 -u scripts/smoke_float_tui.py
-	python3 -u scripts/smoke_input_after_float.py
-	python3 -u scripts/smoke_float_toggle.py
+	$(call run_smokes,$(HEAVY_SMOKES))
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"
