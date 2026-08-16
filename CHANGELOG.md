@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.3.0] - 2026-08-16
+
+### <!-- 0 -->⛰️  Features
+
+- Forward pod cwd and process to frontend
+- Expose ses-side pane facts
+- Bounded pane content reads
+- Expose pane modes, config, selection
+- [**breaking**] Pluggable lua api and external painter
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Reject unknown keys in nested tables
+- Honour the destroy attribute on hide
+- Reset inherited SIG_IGN before exec
+- Correlate exit-intent waiters by request id
+- Derive password mode from the pty termios
+- Correlate blocking float waiters by request id
+- Harden state, fix nudge and float overflow
+- Reload layouts and float definitions
+- Match v-prefixed tags in release trigger
+- Stop the frontend when its terminal is gone
+
+### <!-- 2 -->🚜 Refactor
+
+- Drop dead statusbar segment defs
+
+### <!-- 3 -->📚 Documentation
+
+- Republish every film as a full feature showcase
+- List every flag and what ignores it
+- Record the limits that parse but never apply
+- Document the popup and Lua API surface the sweep found
+- Explain why a renamed tab still shows its directory
+- Expand every page from the source sweep
+- Film every attribute and correct two that do nothing
+- Drop orphaned table and refresh quick start
+- Merge features into docs/ and refilm demos with real config
+- Add feature docs with recorded demos
+
+### <!-- 6 -->🧪 Testing
+
+- Run every smoke, then fail on the tally
+- Cover float destroy and orphaned commands
+- Cover pod input capture and exit intents
+- Run float concurrency in default suite
+- Drain pty masters to stop false hangs
+
 ## [0.2.13] - 2026-08-11
 
 ### <!-- 6 -->🧪 Testing
