@@ -301,7 +301,12 @@ Every accessor reads live state; nothing is computed until you ask for it.
 | `ctx.ui()` | `{width, height, status_height, zoomed, sync_input, copy_mode, copy_x, copy_y, copy_selecting, search_mode, search_query, search_matches, tab_rename, pane_select, float_focused}` |
 | `ctx.count(what)` | `"tabs"`, `"panes"`, `"splits"`, `"floats"`, `"visible_floats"` |
 | `ctx.env(name)` | one environment variable, or nil |
-| `ctx.selection()` | the selected text, or nil |
+| `ctx.selection([{max_bytes}])` | the selected text, or nil (capped, default 64 KiB) |
+| `ctx.selection_range()` | where the selection is, without reading it |
+| `ctx.line([sel,] n)` | one viewport row, 0-based; negative counts from the bottom |
+| `ctx.cursor_line([sel])` | the row the cursor is on |
+| `ctx.screen_text([sel,] {max_bytes})` | the visible viewport, capped (default 64 KiB) |
+| `ctx.find([sel,] needle)` | first viewport row containing `needle` (1-based), or nil |
 | `ctx.config()` | what the config *declares* — `floats` (key, command, geometry, attributes), `keybind_count`, `status_enabled`, `confirm_on_exit` |
 
 `sel` selects a pane: omitted / `0` / `"focused"` / `"current"` for the focused
@@ -330,6 +335,16 @@ panes are reaped, and during a reattach the VT is still being rebuilt from the
 pod backlog, so cursor and screen state are transient. The input-mode flags are
 what you check before binding over a key an application wants — `app_cursor`
 tells you vim owns the arrows, `bracketed_paste` that it wants the paste.
+
+**Content reads are bounded, deliberately.** `ctx.line` allocates one row.
+`ctx.screen_text` and `ctx.selection` take `{max_bytes = N}` (default 64 KiB,
+ceiling 1 MiB) and clamp to whole rows — when the budget cannot hold the whole
+viewport the window is anchored at the cursor, not at the last row, because the
+bottom of a half-empty screen is blank. `ctx.find` searches the viewport only.
+
+None of them touch the scrollback. Searching it walks up to 16 MiB, which is
+fine behind the search UI and not fine behind a predicate that runs on every
+keystroke. If you need that, drive the search mode and read `ctx.ui()`.
 
 **Cost.** Each accessor builds only what it is asked for, so a predicate reading
 one field is one small table. Materialising every pane (`ctx.panes()`) in a

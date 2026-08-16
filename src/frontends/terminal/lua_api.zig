@@ -39,6 +39,7 @@ const Pane = @import("pane.zig").Pane;
 const api_bridge = core.api_bridge;
 const keybinds_actions = @import("keybinds_actions.zig");
 const mouse_selection = @import("mouse_selection.zig");
+const ghostty = @import("ghostty-vt");
 const tab_switch = @import("tab_switch.zig");
 
 const log = std.log.scoped(.lua_api);
@@ -588,26 +589,37 @@ fn hexe_ui(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
-/// `ctx.selection()` — the currently selected text, or nil.
+/// `ctx.selection([{max_bytes = N}])` — the selected text, or nil.
 ///
-/// Allocates only the selected span, and only when there is a selection, so a
-/// predicate that calls it on an empty selection costs nothing.
+/// Bounded. `extractText` runs `selectionString` over the whole range and then
+/// copies it again to trim blank lines, so a drag-select to the top of a 16 MiB
+/// scrollback allocated that twice — per call, and a predicate calls it once
+/// per keystroke. The row span is clamped to the budget before extracting.
 fn hexe_selection(lstate: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(lstate orelse return 0);
     const state = liveState(lua) orelse {
         lua.pushNil();
         return 1;
     };
+    const max_bytes = readMaxBytes(lua, 1);
     const tab = state.activeTabIndex();
     var it = state.currentLayout().splitIterator();
     while (it.next()) |p| {
         const range = state.mouse_selection.bufRangeForPane(tab, p.*) orelse continue;
-        const text = mouse_selection.extractText(state.allocator, p.*, range) catch {
+        var clamped = range;
+        const budget_rows = rowsForBudget(p.*, max_bytes);
+        const top = @min(clamped.a.y, clamped.b.y);
+        const bottom = @max(clamped.a.y, clamped.b.y);
+        if (bottom - top + 1 > budget_rows) {
+            const new_bottom: u32 = top + @as(u32, @intCast(budget_rows - 1));
+            if (clamped.a.y <= clamped.b.y) clamped.b.y = new_bottom else clamped.a.y = new_bottom;
+        }
+        const text = mouse_selection.extractText(state.allocator, p.*, clamped) catch {
             lua.pushNil();
             return 1;
         };
         defer state.allocator.free(text);
-        _ = lua.pushString(text);
+        _ = lua.pushString(text[0..@min(text.len, max_bytes)]);
         return 1;
     }
     lua.pushNil();
@@ -981,6 +993,220 @@ fn hexe_config(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+// ─── content ────────────────────────────────────────────────────────────────
+
+/// Ceiling for any single content read, and the default when none is given.
+/// A predicate runs per candidate bind per keypress, so an unbounded read here
+/// is an input-latency bug waiting to happen.
+const DEFAULT_CONTENT_BYTES: usize = 64 * 1024;
+const MAX_CONTENT_BYTES: usize = 1024 * 1024;
+
+fn readMaxBytes(lua: *Lua, idx: i32) usize {
+    if (lua.typeOf(idx) != .table) return DEFAULT_CONTENT_BYTES;
+    const ty = lua.getField(idx, "max_bytes");
+    defer lua.pop(1);
+    if (ty != .number) return DEFAULT_CONTENT_BYTES;
+    const n = lua.toInteger(-1) catch return DEFAULT_CONTENT_BYTES;
+    if (n <= 0) return DEFAULT_CONTENT_BYTES;
+    return @min(@as(usize, @intCast(n)), MAX_CONTENT_BYTES);
+}
+
+/// Rows of a viewport a byte budget allows, worst case 4 bytes per column.
+fn rowsForBudget(pane: *Pane, max_bytes: usize) usize {
+    const cols: usize = @max(pane.vt.terminal.cols, 1);
+    return @max(max_bytes / (cols * 4 + 1), 1);
+}
+
+/// Text between two viewport rows of a pane, inclusive.
+///
+/// Goes through ghostty's own `selectionString` rather than decoding cells by
+/// hand: it already handles wide cells, spacer tails and graphemes. The CALLER
+/// bounds the row span, which is what keeps the allocation bounded — one row is
+/// at most `cols * 4` bytes.
+fn extractRows(allocator: std.mem.Allocator, pane: *Pane, top: usize, bottom: usize) ?[]u8 {
+    const screen = pane.vt.terminal.screens.active;
+    const pages = &screen.pages;
+    const cols = pane.vt.terminal.cols;
+    if (cols == 0) return null;
+
+    const start_pin = pages.pin(.{ .viewport = .{ .x = 0, .y = @intCast(top) } }) orelse return null;
+    const end_pin = pages.pin(.{ .viewport = .{ .x = @intCast(cols - 1), .y = @intCast(bottom) } }) orelse return null;
+
+    const sel = ghostty.Selection.init(start_pin, end_pin, false);
+    const text_z = screen.selectionString(allocator, .{ .sel = sel, .trim = true }) catch return null;
+    defer allocator.free(text_z);
+    return allocator.dupe(u8, std.mem.sliceTo(text_z, 0)) catch null;
+}
+
+/// `ctx.line([selector,] n)` — one row of the viewport, 0-based from the top;
+/// negative counts from the bottom. One row allocated, at most.
+fn hexe_line(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const two_args = lua.typeOf(2) == .number;
+    const n = (if (two_args) lua.toInteger(2) else lua.toInteger(1)) catch {
+        lua.pushNil();
+        return 1;
+    };
+    const pane = (if (two_args) resolvePane(lua, state, 1) else focusedPane(state)) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    const rows: i64 = @intCast(pane.vt.terminal.rows);
+    const row = if (n < 0) rows + n else n;
+    if (row < 0 or row >= rows) {
+        lua.pushNil();
+        return 1;
+    }
+    const text = extractRows(state.allocator, pane, @intCast(row), @intCast(row)) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    defer state.allocator.free(text);
+    _ = lua.pushString(text);
+    return 1;
+}
+
+/// `ctx.cursor_line([selector])` — the row the cursor is on.
+///
+/// Not sugar for `ctx.line(p.cursor_y)`: `cursor_x`/`cursor_y` are SCREEN
+/// coordinates (Pane.getCursorPos adds the pane origin), so indexing a viewport
+/// row with them reads the wrong line for any pane not at the top of the screen.
+fn hexe_cursor_line(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const pane = resolvePane(lua, state, 1) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const cur = pane.vt.getCursor(); // pane-local, unlike Pane.getCursorPos
+    if (cur.y >= pane.vt.terminal.rows) {
+        lua.pushNil();
+        return 1;
+    }
+    const text = extractRows(state.allocator, pane, cur.y, cur.y) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    defer state.allocator.free(text);
+    _ = lua.pushString(text);
+    return 1;
+}
+
+/// `ctx.screen_text([selector,] {max_bytes = N})` — the visible viewport only,
+/// never the scrollback. Keeps the last whole rows that fit the budget.
+fn hexe_screen_text(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const sel_first = switch (lua.typeOf(1)) {
+        .number, .string => true,
+        else => false,
+    };
+    const pane = (if (sel_first) resolvePane(lua, state, 1) else focusedPane(state)) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const max_bytes = readMaxBytes(lua, if (sel_first) 2 else 1);
+
+    const rows: usize = pane.vt.terminal.rows;
+    if (rows == 0) {
+        lua.pushNil();
+        return 1;
+    }
+    // When the budget cannot hold the whole viewport, anchor the window at the
+    // cursor rather than at the last row. On a mostly-blank screen the bottom
+    // rows are empty, so a capped read there returns nothing at all — which
+    // looks exactly like "the pane has no text".
+    const budget_rows = @min(rowsForBudget(pane, max_bytes), rows);
+    const anchor: usize = if (budget_rows >= rows) rows - 1 else @min(@as(usize, pane.vt.getCursor().y), rows - 1);
+    const bottom = @max(anchor, budget_rows - 1);
+    const top = bottom + 1 - budget_rows;
+    const text = extractRows(state.allocator, pane, top, bottom) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    defer state.allocator.free(text);
+    _ = lua.pushString(text);
+    return 1;
+}
+
+/// `ctx.find([selector,] needle)` — first viewport row containing `needle`
+/// (1-based), or nil.
+///
+/// Viewport only. The scrollback search walks the whole page list — up to 16
+/// MiB — and belongs behind the search UI, not behind a predicate.
+fn hexe_find(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const two_args = lua.typeOf(2) == .string;
+    const needle = (if (two_args) lua.toString(2) else lua.toString(1)) catch {
+        lua.pushNil();
+        return 1;
+    };
+    if (needle.len == 0 or needle.len > 256) {
+        lua.pushNil();
+        return 1;
+    }
+    const pane = (if (two_args) resolvePane(lua, state, 1) else focusedPane(state)) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    var row: usize = 0;
+    while (row < pane.vt.terminal.rows) : (row += 1) {
+        const text = extractRows(state.allocator, pane, row, row) orelse continue;
+        defer state.allocator.free(text);
+        if (std.mem.indexOf(u8, text, needle) != null) {
+            lua.pushInteger(@intCast(row + 1));
+            return 1;
+        }
+    }
+    lua.pushNil();
+    return 1;
+}
+
+/// `ctx.selection_range()` — where the selection is, without reading its text.
+/// A plugin that only needs "is something selected, and how big" should not pay
+/// for the extraction.
+fn hexe_selection_range(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const tab = state.activeTabIndex();
+    var it = state.currentLayout().splitIterator();
+    while (it.next()) |p| {
+        const range = state.mouse_selection.bufRangeForPane(tab, p.*) orelse continue;
+        const top = @min(range.a.y, range.b.y);
+        const bottom = @max(range.a.y, range.b.y);
+        lua.createTable(0, 7);
+        setStr(lua, "pane_uuid", p.*.uuid[0..]);
+        setInt(lua, "start_x", range.a.x);
+        setInt(lua, "start_y", @intCast(range.a.y));
+        setInt(lua, "end_x", range.b.x);
+        setInt(lua, "end_y", @intCast(range.b.y));
+        setInt(lua, "rows", @intCast(bottom - top + 1));
+        setBool(lua, "dragging", state.mouse_selection.dragging);
+        return 1;
+    }
+    lua.pushNil();
+    return 1;
+}
+
 // ─── installation ───────────────────────────────────────────────────────────
 
 const Entry = struct { name: [:0]const u8, func: *const fn (?*LuaState) callconv(.c) c_int };
@@ -1005,6 +1231,11 @@ const ENTRIES = [_]Entry{
     .{ .name = "scroll", .func = hexe_scroll },
     .{ .name = "selection", .func = hexe_selection },
     .{ .name = "config", .func = hexe_config },
+    .{ .name = "line", .func = hexe_line },
+    .{ .name = "cursor_line", .func = hexe_cursor_line },
+    .{ .name = "screen_text", .func = hexe_screen_text },
+    .{ .name = "find", .func = hexe_find },
+    .{ .name = "selection_range", .func = hexe_selection_range },
 };
 
 /// Registry slot holding the accessor table, so a callback invocation can push

@@ -142,6 +142,30 @@ return hexe.setup({
 })
 """
 
+# Bounded content reads. Every one of these is capped by construction; the
+# assertion below is that they return the pane's ACTUAL text, since a read that
+# silently returns "" is indistinguishable from a working one that found nothing.
+CONTENT = """
+local hexe = require("hexe")
+return hexe.setup({
+  keys = {
+    hexe.key({ hexe.key.ctrl, hexe.key.t }, function(ctx)
+      local out = {}
+      out[#out+1] = "line0=" .. tostring(ctx.line(0))
+      out[#out+1] = "cursor=" .. tostring(ctx.cursor_line())
+      out[#out+1] = "find=" .. tostring(ctx.find("HEXEMARK"))
+      out[#out+1] = "absent=" .. tostring(ctx.find("zzzznope"))
+      local full = ctx.screen_text() or ""
+      local capped = ctx.screen_text{ max_bytes = 2048 } or ""
+      out[#out+1] = "full_mark=" .. tostring(full:find("HEXEMARK") ~= nil)
+      out[#out+1] = "capped_mark=" .. tostring(capped:find("HEXEMARK") ~= nil)
+      out[#out+1] = "capped_len_ok=" .. tostring(#capped <= 2048)
+      local f = io.open("MARKER_PATH", "w"); f:write(table.concat(out, " ")); f:close()
+    end),
+  },
+})
+"""
+
 CONTROL = """
 local hexe = require("hexe")
 return hexe.setup({
@@ -202,7 +226,7 @@ def tab_count(inst):
         return 0
 
 
-def run_case(name, config, presses):
+def run_case(name, config, presses, pretype=None):
     """Boot a frontend with `config`, send ctrl+t `presses` times, return tabs."""
     inst = f"smk{os.getpid()}{name}"
     instances.append(inst)
@@ -233,6 +257,10 @@ def run_case(name, config, presses):
     # runs a Debug build alongside two dozen other frontends, and a fixed sleep
     # made this report "the action did not fire" when the machine was merely
     # busy.
+    if pretype:
+        os.write(master, pretype)
+        time.sleep(2.0)
+
     for _ in range(presses):
         before_n = tab_count(inst)
         os.write(master, b"\x14")  # ctrl+t
@@ -290,6 +318,26 @@ written = open(marker).read()
 print(f"action:      action = function(ctx) ... -> wrote {written!r}")
 if "tabs=1" not in written:
     fail(f"the action ran but read the wrong live state: {written!r}")
+# Content reads. Type into the pane first so there is text to find.
+cmarker = os.path.join(SCRATCH, f"luacontent{os.getpid()}.txt")
+if os.path.exists(cmarker):
+    os.unlink(cmarker)
+run_case("t", CONTENT.replace("MARKER_PATH", cmarker), 1, pretype=b"echo HEXEMARK\r")
+if not os.path.exists(cmarker):
+    fail("the content-read callback never ran")
+c_out = open(cmarker).read()
+for needle, why in [
+    ("find=1", "ctx.find did not locate text that is on screen"),
+    ("absent=nil", "ctx.find matched a string that is not on screen"),
+    ("full_mark=true", "ctx.screen_text did not return the pane's text"),
+    ("capped_mark=true", "a capped ctx.screen_text returned the wrong window "
+                         "(it must anchor at the cursor, not at the last row)"),
+    ("capped_len_ok=true", "ctx.screen_text ignored max_bytes"),
+]:
+    if needle not in c_out:
+        fail(f"{why}; got {c_out!r}")
+print(f"content:     line/cursor_line/find/screen_text read real text -> {c_out[:70]!r}")
+
 # The imperative half.
 pmarker = os.path.join(SCRATCH, f"luaplugin{os.getpid()}.txt")
 if os.path.exists(pmarker):
