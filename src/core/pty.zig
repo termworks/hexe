@@ -116,6 +116,22 @@ pub const Pty = struct {
                 posix.close(done_pipe[1]);
             }
 
+            // Restore default signal dispositions before the shell inherits ours.
+            //
+            // SIG_IGN survives both fork AND exec. SES ignores SIGHUP so it can
+            // outlive its launching terminal, and both SES and POD ignore
+            // SIGPIPE — all of which reached every pane's shell. An ignored
+            // SIGHUP is the reason a killed pane leaked its process tree: the
+            // pod died, the kernel hung up the pty, and the shell shrugged it
+            // off and ran forever.
+            const dfl = std.os.linux.Sigaction{
+                .handler = .{ .handler = std.os.linux.SIG.DFL },
+                .mask = std.os.linux.sigemptyset(),
+                .flags = 0,
+            };
+            _ = std.os.linux.sigaction(posix.SIG.HUP, &dfl, null);
+            _ = std.os.linux.sigaction(posix.SIG.PIPE, &dfl, null);
+
             // Create new session, becoming session leader
             _ = posix.setsid() catch posix.exit(1);
 
