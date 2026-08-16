@@ -97,7 +97,6 @@ pub const Pane = struct {
     focused: bool = false,
     // Tracks whether we saw a clear-screen sequence in the last output.
     did_clear: bool = false,
-    last_reported_password_input: bool = false,
     // Keep last bytes so we can detect escape sequences across boundaries.
     esc_tail: [3]u8 = .{ 0, 0, 0 },
     esc_tail_len: u8 = 0,
@@ -207,7 +206,6 @@ pub const Pane = struct {
         try self.vt.init(self.allocator, self.width, self.height);
 
         self.did_clear = false;
-        self.last_reported_password_input = false;
         self.esc_tail = .{ 0, 0, 0 };
         self.esc_tail_len = 0;
         self.osc_in_progress = false;
@@ -232,11 +230,6 @@ pub const Pane = struct {
     pub fn feedPodOutput(self: *Pane, data: []const u8) void {
         self.did_clear = false;
         pane_output.feedOutput(self, data);
-        const password_input = self.vt.terminal.flags.password_input;
-        if (password_input != self.last_reported_password_input) {
-            self.sendPasswordModeToPod(password_input);
-            self.last_reported_password_input = password_input;
-        }
     }
 
     /// Write input to backend.
@@ -381,15 +374,6 @@ pub const Pane = struct {
         const frame_type = @intFromEnum(pod_protocol.FrameType.resize);
         queuePodFrame(pod.pane_id, pod.vt_fd, frame_type, &payload) catch |err| {
             core.logging.logError("terminal", "pane resize mux write failed", err);
-        };
-    }
-
-    fn sendPasswordModeToPod(self: *Pane, enabled: bool) void {
-        const pod = self.backend.pod;
-        const payload = [_]u8{@intFromBool(enabled)};
-        const frame_type = @intFromEnum(pod_protocol.FrameType.password_mode);
-        queuePodFrame(pod.pane_id, pod.vt_fd, frame_type, &payload) catch |err| {
-            core.logging.logError("terminal", "pane password-mode mux write failed", err);
         };
     }
 };

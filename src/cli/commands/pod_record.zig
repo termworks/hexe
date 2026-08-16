@@ -11,6 +11,7 @@ const print = std.debug.print;
 const RecordContext = struct {
     writer: *AsciicastWriter,
     capture_input: bool,
+    password_mode: bool = false,
     failed: ?anyerror = null,
 };
 
@@ -87,11 +88,14 @@ fn podFrameCallback(ctx_ptr: *anyopaque, frame: pod_protocol.Frame) void {
             };
         },
         .input => {
-            if (ctx.capture_input) {
+            if (ctx.capture_input and !ctx.password_mode) {
                 ctx.writer.writeInput(frame.payload) catch |err| {
                     ctx.failed = err;
                 };
             }
+        },
+        .password_mode => {
+            if (frame.payload.len >= 1) ctx.password_mode = frame.payload[0] != 0;
         },
         else => {},
     }

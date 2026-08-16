@@ -591,11 +591,42 @@ const Pod = struct {
         if (self.osc7_cwd) |cwd| self.allocator.free(cwd);
     }
 
+    /// Detect a password prompt the way a terminal has to: the child put its
+    /// tty into canonical mode with echo off. Only this process can see that —
+    /// the PTY master lives here, not in the frontend, so nothing else in hexe
+    /// is in a position to notice.
+    fn pollPasswordMode(self: *Pod) void {
+        const t = posix.tcgetattr(self.pty.master_fd) catch return;
+        self.setPasswordMode(t.lflag.ICANON and !t.lflag.ECHO);
+    }
+
     fn setPasswordMode(self: *Pod, enabled: bool) void {
         const old = self.password_mode;
         applyPasswordMode(&self.backlog, &self.password_mode, enabled);
         if (old == self.password_mode) return;
         debugLog("password_mode: {}", .{enabled});
+
+        // Tell observers, so a recorder stops writing keystrokes into its cast
+        // for as long as the prompt is hidden. Written directly rather than via
+        // broadcastToObservers, which drops everything while password mode is
+        // on — that would swallow the very edge that turns it on.
+        const flag: [1]u8 = .{@intFromBool(enabled)};
+        if (self.client) |*client| {
+            pod_protocol.writeFrameBounded(client, .password_mode, &flag, CLIENT_WRITE_TIMEOUT_MS) catch {
+                client.close();
+                self.client = null;
+            };
+        }
+        var i: usize = 0;
+        while (i < self.observers.items.len) {
+            const obs = &self.observers.items[i];
+            pod_protocol.writeFrameBounded(obs, .password_mode, &flag, CLIENT_WRITE_TIMEOUT_MS) catch {
+                obs.close();
+                _ = self.observers.swapRemove(i);
+                continue;
+            };
+            i += 1;
+        }
     }
 
     pub fn run(self: *Pod, opts: RunOptions) !void {
@@ -1109,6 +1140,11 @@ const Pod = struct {
     /// Tries to write directly first; any remainder is buffered and
     /// an xev write-readiness watcher drains it asynchronously.
     fn queuePtyWrite(self: *Pod, data: []const u8) void {
+        // Every input path (mux frames, aux input from `pod attach`) funnels
+        // through here, so this is the one place a recorder can see keystrokes.
+        // Password mode suppresses it exactly as it suppresses output.
+        self.broadcastToObservers(.input, data);
+
         // Try to drain any previously buffered data first.
         self.drainPtyWriteBuf();
 
@@ -1233,6 +1269,8 @@ const Pod = struct {
                 settleAfterAccept(timer_ctx.accept_ctx);
             }
         }
+
+        timer_ctx.pod.pollPasswordMode();
 
         const uplink_attached = timer_ctx.pod.client != null or timer_ctx.pod.observers.items.len > 0;
         timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid, uplink_attached);
@@ -1455,14 +1493,14 @@ const Pod = struct {
         self.uplink.tick(self.pty.child_pid, true);
     }
 
-    fn broadcastToObservers(self: *Pod, data: []const u8) void {
+    fn broadcastToObservers(self: *Pod, frame_type: pod_protocol.FrameType, data: []const u8) void {
         if (self.password_mode) return;
         var i: usize = 0;
         while (i < self.observers.items.len) {
             const obs = &self.observers.items[i];
             // Same reasoning as the replay above: one transient EAGAIN on a
             // live observer used to evict it permanently.
-            pod_protocol.writeFrameBounded(obs, .output, data, CLIENT_WRITE_TIMEOUT_MS) catch {
+            pod_protocol.writeFrameBounded(obs, frame_type, data, CLIENT_WRITE_TIMEOUT_MS) catch {
                 obs.close();
                 _ = self.observers.swapRemove(i);
                 continue;
@@ -1490,7 +1528,7 @@ const Pod = struct {
         } else if (self.observers.items.len == 0) {
             debugLog("processPtyOutput: no client, data goes to backlog only ({d} bytes)", .{data.len});
         }
-        self.broadcastToObservers(data);
+        self.broadcastToObservers(.output, data);
     }
 
     fn flushRemainingPtyOutput(self: *Pod, io_buf: []u8) void {
