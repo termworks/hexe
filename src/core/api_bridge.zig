@@ -50,22 +50,6 @@ fn setBridgeStringSlot(slot: *?[]const u8, allocator: std.mem.Allocator, value: 
     slot.* = dupeBridgeString(allocator, value, context);
 }
 
-fn ownSegmentDefaultStrings(segment: *config.Segment, allocator: std.mem.Allocator) !void {
-    segment.active_style = try allocator.dupe(u8, segment.active_style);
-    errdefer allocator.free(@constCast(segment.active_style));
-    segment.inactive_style = try allocator.dupe(u8, segment.inactive_style);
-    errdefer allocator.free(@constCast(segment.inactive_style));
-    segment.separator = try allocator.dupe(u8, segment.separator);
-    errdefer allocator.free(@constCast(segment.separator));
-    segment.separator_style = try allocator.dupe(u8, segment.separator_style);
-    errdefer allocator.free(@constCast(segment.separator_style));
-    segment.tab_title = try allocator.dupe(u8, segment.tab_title);
-    errdefer allocator.free(@constCast(segment.tab_title));
-    segment.left_arrow = try allocator.dupe(u8, segment.left_arrow);
-    errdefer allocator.free(@constCast(segment.left_arrow));
-    segment.right_arrow = try allocator.dupe(u8, segment.right_arrow);
-}
-
 pub fn bridgeLuaString(lua: *Lua, idx: i32, comptime context: []const u8) ?[]const u8 {
     return lua.toString(idx) catch |err| {
         log.warn(context ++ ": {}", .{err});

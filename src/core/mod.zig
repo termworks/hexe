@@ -80,7 +80,6 @@ pub const LayoutTabDef = config.LayoutTabDef;
 pub const LayoutFloatDef = config.LayoutFloatDef;
 pub const LayoutSplitDef = config.LayoutSplitDef;
 pub const LayoutPaneDef = config.LayoutPaneDef;
-pub const Segment = config.Segment;
 pub const OutputDef = config.OutputDef;
 pub const SpinnerDef = config.SpinnerDef;
 pub const NotificationStyleConfig = config.NotificationStyleConfig;

@@ -65,82 +65,6 @@ fn freeOwnedStr(a: std.mem.Allocator, slice: []const u8, comptime default: []con
     a.free(@constCast(slice));
 }
 
-pub const OutputDef = struct {
-    style: []const u8 = "",
-    format: []const u8 = "$output",
-};
-
-/// Spinner definition for mux statusbar modules.
-pub const SpinnerDef = struct {
-    kind: []const u8 = "knight_rider",
-    width: u8 = 8,
-    step_ms: u64 = 75,
-    hold_frames: u8 = 9,
-    trail_len: u8 = 6,
-    colors: []const u8 = &[_]u8{},
-    bg_color: ?u8 = null,
-    placeholder_color: ?u8 = null,
-
-    // Filled at render time by the statusbar module.
-    started_at_ms: u64 = 0,
-
-    pub fn deinit(self: *SpinnerDef, allocator: std.mem.Allocator) void {
-        freeOwnedStr(allocator, self.kind, "knight_rider");
-        if (self.colors.len > 0) freeSlice(allocator, self.colors);
-        self.* = .{};
-    }
-};
-
-/// Segment definition for statusbar and prompt.
-/// Both statusbar modules and shell prompt segments use this unified type.
-pub const SegmentKind = enum {
-    value,
-    builtin,
-    button,
-    progress,
-};
-
-pub const Segment = struct {
-    name: []const u8,
-    kind: SegmentKind = .value,
-    // Priority for width-based hiding (lower = higher priority, stays longer)
-    priority: u8 = 50,
-    // Array of outputs (each with style + format)
-    outputs: []const OutputDef = &[_]OutputDef{},
-    // Optional for custom modules
-    command: ?[]const u8 = null,
-    // Optional explicit builtin source name
-    builtin: ?[]const u8 = null,
-    // Progress behavior tuning
-    progress_every_ms: u64 = 1000,
-    progress_show_when: ?[]const u8 = null,
-    // Optional statusbar click actions (shell commands)
-    on_click: ?[]const u8 = null,
-    on_right_click: ?[]const u8 = null,
-    on_middle_click: ?[]const u8 = null,
-    // Optional statusbar button active-state condition (bash, exit 0 = active)
-    button_active_bash: ?[]const u8 = null,
-    // Optional per-button active style overrides for clicked state.
-    button_left_style: ?[]const u8 = null,
-    button_middle_style: ?[]const u8 = null,
-    button_right_style: ?[]const u8 = null,
-    // If true, invert button style when hovered.
-    inverse_on_hover: bool = true,
-
-    // Optional spinner configuration
-    spinner: ?SpinnerDef = null,
-    // For tabs segment
-    active_style: []const u8 = "bg:1 fg:0",
-    inactive_style: []const u8 = "bg:237 fg:250",
-    separator: []const u8 = " | ",
-    separator_style: []const u8 = "fg:7",
-    // For tabs segment: what to show as tab title ("name" or "basename")
-    tab_title: []const u8 = "basename",
-    // For tabs segment: arrow decorations (empty string = no arrows)
-    left_arrow: []const u8 = "",
-    right_arrow: []const u8 = "",
-};
-
 /// Status bar config
 pub const StatusBarConfig = struct {
     enabled: bool = true,
@@ -306,9 +230,6 @@ pub const SplitStyle = struct {
 
 /// Splits configuration
 pub const SplitsConfig = struct {
-    // Keys
-    key_split_h: u8 = 'h',
-    key_split_v: u8 = 'v',
     // Border color
     color: BorderColor = .{},
     // Simple separator (when no style)
@@ -320,13 +241,6 @@ pub const SplitsConfig = struct {
 
 /// Tabs configuration (includes status bar)
 pub const TabsConfig = struct {
-    // Keys
-    key_new: u8 = 't',
-    key_next: u8 = 'n',
-    key_prev: u8 = 'p',
-    key_close: u8 = 'x',
-    key_detach: u8 = 'd',
-    // Status bar
     status: StatusBarConfig = .{},
 };
 
