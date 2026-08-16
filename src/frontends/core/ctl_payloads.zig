@@ -19,6 +19,11 @@ pub const PaneInfoPayload = struct {
     name: ?[]u8 = null,
     fg_name: ?[]u8 = null,
     fg_pid: ?i32 = null,
+    /// SES-side facts that used to be parsed off the wire and dropped on the
+    /// floor. All fixed-size, so keeping them costs nothing.
+    shell_pid: ?i32 = null,
+    ses_state: u8 = 0,
+    created_at: i64 = 0,
 
     pub fn deinit(self: *PaneInfoPayload, allocator: std.mem.Allocator) void {
         if (self.name) |value| allocator.free(value);
@@ -185,6 +190,9 @@ pub fn readPaneInfoPayload(
     var payload = PaneInfoPayload{
         .uuid = resp.uuid,
         .fg_pid = if (resp.fg_pid != 0) resp.fg_pid else null,
+        .shell_pid = if (resp.pid != 0) resp.pid else null,
+        .ses_state = resp.state,
+        .created_at = resp.created_at,
     };
     errdefer payload.deinit(allocator);
 

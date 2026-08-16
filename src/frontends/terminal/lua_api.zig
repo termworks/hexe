@@ -196,6 +196,11 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     setBool(lua, "synchronized_output", pane.vt.outputSynchronized());
     setInt(lua, "kitty_keyboard", @intCast(pane.vt.terminal.screens.active.kitty_keyboard.current().int()));
     setBool(lua, "mouse_tracking", pane.vt.terminal.flags.mouse_event != .none);
+    // The shell is reading a password (DECSET 2004-adjacent; hexe already
+    // suppresses keycast on it, pane.zig:235). Any plugin that logs keys,
+    // mirrors input or renders a preview MUST hard-stop on this — without it
+    // there is no way for Lua to know, and a sudo prompt looks like any other.
+    setBool(lua, "password_input", pane.vt.terminal.flags.password_input);
     setBool(lua, "scrolled", pane.isScrolled());
     const cursor = pane.getCursorPos();
     setInt(lua, "cursor_x", cursor.x);
@@ -203,6 +208,22 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
 
     // Process
     if (state.getPaneProc(pane.uuid)) |proc| {
+        // SES-side facts, arriving on the fire-and-forget pane_info response.
+        // The frontend cannot compute any of them: Pane.getFgPid is a stub, and
+        // the lifecycle state and birth time live only in the daemon.
+        setOptInt(lua, "pid", if (proc.shell_pid) |v| @intCast(v) else null);
+        setStr(lua, "ses_state", switch (proc.ses_state) {
+            0 => "attached",
+            1 => "detached",
+            2 => "sticky",
+            3 => "orphaned",
+            else => "unknown",
+        });
+        setOptInt(lua, "created_at", if (proc.created_at != 0) proc.created_at else null);
+        setOptInt(lua, "age_ms", if (proc.created_at != 0)
+            @max(std.time.milliTimestamp() - proc.created_at * 1000, 0)
+        else
+            null);
         setOptStr(lua, "process", proc.name);
         setOptInt(lua, "process_pid", if (proc.pid) |p| @intCast(p) else null);
         setBool(lua, "process_running", proc.name != null);
@@ -248,6 +269,25 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     setBool(lua, "sticky", state.paneSticky(pane));
     setBool(lua, "per_cwd", state.paneIsPwd(pane));
     setBool(lua, "visible", paneIsVisible(state, pane, is_float));
+    // Which tabs a float shows on. `visible` answers only for the active tab;
+    // a global float is a per-tab bitmask and a plugin cycling floats needs to
+    // know where else it is showing.
+    if (is_float) {
+        if (state.paneFloatState(pane)) |fs| {
+            lua.createTable(8, 0);
+            var n: i32 = 0;
+            var t: u6 = 0;
+            while (t < 63) : (t += 1) {
+                if (t >= state.view.tab_views.items.len) break;
+                if ((fs.tab_visible & (@as(u64, 1) << t)) != 0) {
+                    n += 1;
+                    lua.pushInteger(@as(i64, t) + 1);
+                    lua.rawSetIndex(-2, n);
+                }
+            }
+            lua.setField(-2, "visible_tabs");
+        }
+    }
 
     var exclusive = false;
     var isolated = false;

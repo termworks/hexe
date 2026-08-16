@@ -160,6 +160,13 @@ return hexe.setup({
       out[#out+1] = "full_mark=" .. tostring(full:find("HEXEMARK") ~= nil)
       out[#out+1] = "capped_mark=" .. tostring(capped:find("HEXEMARK") ~= nil)
       out[#out+1] = "capped_len_ok=" .. tostring(#capped <= 2048)
+      -- SES-side facts. These ride the pane_info response, which can arrive on
+      -- either of two reader paths; both must keep them or the fields flicker.
+      local p = ctx.pane()
+      out[#out+1] = "pid_ok=" .. tostring(type(p.pid) == "number" and p.pid > 0)
+      out[#out+1] = "ses_state=" .. tostring(p.ses_state)
+      out[#out+1] = "age_ok=" .. tostring(type(p.age_ms) == "number")
+      out[#out+1] = "pw=" .. tostring(p.password_input)
       local f = io.open("MARKER_PATH", "w"); f:write(table.concat(out, " ")); f:close()
     end),
   },
@@ -333,6 +340,11 @@ for needle, why in [
     ("capped_mark=true", "a capped ctx.screen_text returned the wrong window "
                          "(it must anchor at the cursor, not at the last row)"),
     ("capped_len_ok=true", "ctx.screen_text ignored max_bytes"),
+    ("pid_ok=true", "pane.pid is missing — the SES pane_info fields are dropped "
+                    "on one of the two reader paths"),
+    ("ses_state=attached", "pane.ses_state did not come through from SES"),
+    ("age_ok=true", "pane.age_ms is missing (created_at not carried)"),
+    ("pw=false", "pane.password_input is missing"),
 ]:
     if needle not in c_out:
         fail(f"{why}; got {c_out!r}")

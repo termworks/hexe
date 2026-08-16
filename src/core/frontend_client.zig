@@ -132,6 +132,12 @@ pub const SesClient = struct {
         name: ?[]u8 = null,
         fg_name: ?[]u8 = null,
         fg_pid: ?i32 = null,
+        /// Same SES-side facts the direct path keeps. A pane_info can arrive on
+        /// either path depending on whether a sync reader was mid-wait, so both
+        /// must carry them or the fields appear and disappear at random.
+        shell_pid: ?i32 = null,
+        ses_state: u8 = 0,
+        created_at: i64 = 0,
 
         pub fn deinit(self: *PendingPaneInfoResponse, allocator: std.mem.Allocator) void {
             if (self.name) |name| allocator.free(name);

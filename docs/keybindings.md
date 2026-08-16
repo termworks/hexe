@@ -324,11 +324,23 @@ one, a number for its index in `ctx.panes()`, or a uuid (a prefix is enough).
 | geometry | `x` `y` `width` `height` `zoomed` |
 | terminal | `alt_screen` `scrolled` `cursor_x` `cursor_y` `cursor_style` `cursor_visible` `sync_input` |
 | input modes | `bracketed_paste` `app_cursor` `synchronized_output` `kitty_keyboard` `mouse_tracking` |
-| process | `process` `process_pid` `process_running` |
+| process | `process` `process_pid` `process_running` `pid` `password_input` |
+| from SES | `ses_state` `created_at` `age_ms` |
 | shell | `cwd` `osc7_cwd` `last_command` `exit_status` `duration_ms` `jobs` `shell_running` `started_at_ms` |
 | progress | `progress_state` `progress_pct` |
-| float | `float_key` `visible` `sticky` `per_cwd` `global` `exclusive` `isolated` `destroyable` `command` `exit_key` `pwd_dir` |
+| float | `float_key` `visible` `visible_tabs` `sticky` `per_cwd` `global` `exclusive` `isolated` `destroyable` `command` `exit_key` `pwd_dir` |
 | float geometry | `width_pct` `height_pct` `pos_x_pct` `pos_y_pct` `pad_x` `pad_y` (nil on splits) |
+
+`password_input` is a safety gate, not a curiosity: the shell is reading a
+password, and any plugin that logs keys, mirrors input or renders a preview must
+stop on it. hexe already suppresses its own keycast on this bit.
+
+`ses_state` (`attached` / `detached` / `sticky` / `orphaned`), `pid` (the pane's
+shell, not the foreground process) and `created_at` come from the session
+daemon, which is the only place they exist. They ride the `pane_info` response,
+which is requested every tick for the *focused* pane and once at attach for the
+others — so identity fields are reliable, and `ses_state` can lag for a
+background pane.
 
 `alive` and `replaying` matter more than they look: handlers run before dead
 panes are reaped, and during a reattach the VT is still being rebuilt from the

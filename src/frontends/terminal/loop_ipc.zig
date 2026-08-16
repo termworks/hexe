@@ -999,6 +999,9 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
     if (payload.fg_name != null or payload.fg_pid != null) {
         state.setPaneProc(payload.uuid, payload.fg_name, payload.fg_pid);
     }
+    // SES-only facts: the pane's shell pid, its lifecycle state and its birth
+    // time. None of these are computable in the frontend.
+    state.setPaneSesInfo(payload.uuid, payload.shell_pid, payload.ses_state, payload.created_at);
 }
 
 fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {

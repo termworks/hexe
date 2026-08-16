@@ -673,6 +673,10 @@ pub const FrontendRuntime = struct {
         self.projection.clearPaneShellStartedAt(uuid);
     }
 
+    pub fn setPaneSesInfo(self: *FrontendRuntime, uuid: [32]u8, shell_pid: ?i32, ses_state: u8, created_at: i64) void {
+        self.projection.setPaneSesInfo(uuid, shell_pid, ses_state, created_at);
+    }
+
     pub fn setPaneProc(self: *FrontendRuntime, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
         self.projection.setPaneProc(uuid, name, pid);
     }

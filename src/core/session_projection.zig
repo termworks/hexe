@@ -35,6 +35,12 @@ pub const PaneShellInfo = struct {
 pub const PaneProcInfo = struct {
     name: ?[]u8 = null,
     pid: ?i32 = null,
+    /// From SES's `pane_info`. The frontend cannot compute any of these:
+    /// `Pane.getFgPid` is a stub, and the pane's lifecycle state and birth time
+    /// live only in the daemon.
+    shell_pid: ?i32 = null,
+    ses_state: u8 = 0,
+    created_at: i64 = 0,
 
     pub fn deinit(self: *PaneProcInfo, allocator: std.mem.Allocator) void {
         if (self.name) |n| allocator.free(n);
@@ -699,6 +705,22 @@ pub const SessionProjection = struct {
 
     pub fn getPaneShell(self: *const SessionProjection, uuid: [32]u8) ?PaneShellInfo {
         return self.pane_shell.get(uuid);
+    }
+
+    pub fn setPaneSesInfo(self: *SessionProjection, uuid: [32]u8, shell_pid: ?i32, ses_state: u8, created_at: i64) void {
+        var entry = self.pane_proc.getPtr(uuid);
+        if (entry == null) {
+            self.pane_proc.put(uuid, .{}) catch |err| {
+                logging.logError("session_projection", "failed to allocate pane process metadata", err);
+                return;
+            };
+            entry = self.pane_proc.getPtr(uuid);
+        }
+        if (entry) |e| {
+            if (shell_pid) |v| e.shell_pid = v;
+            e.ses_state = ses_state;
+            if (created_at != 0) e.created_at = created_at;
+        }
     }
 
     pub fn setPaneProc(self: *SessionProjection, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {

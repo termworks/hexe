@@ -536,6 +536,9 @@ pub fn queuePaneInfoResponseBody(self: *SesClient, fd: posix.fd_t, resp: wire.Pa
     var pending = PendingPaneInfoResponse{
         .uuid = resp.uuid,
         .fg_pid = if (resp.fg_pid != 0) resp.fg_pid else null,
+        .shell_pid = if (resp.pid != 0) resp.pid else null,
+        .ses_state = resp.state,
+        .created_at = resp.created_at,
     };
     var queued = false;
     defer if (!queued) pending.deinit(self.allocator);

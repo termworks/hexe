@@ -2077,6 +2077,10 @@ pub const State = struct {
         self.runtime.clearPaneShellStartedAt(uuid);
     }
 
+    pub fn setPaneSesInfo(self: *State, uuid: [32]u8, shell_pid: ?i32, ses_state: u8, created_at: i64) void {
+        self.runtime.setPaneSesInfo(uuid, shell_pid, ses_state, created_at);
+    }
+
     pub fn setPaneProc(self: *State, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
         self.runtime.setPaneProc(uuid, name, pid);
     }
