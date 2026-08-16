@@ -67,6 +67,7 @@ smoke: smoke-clean
 	python3 -u scripts/smoke_startup_chooser.py
 	python3 -u scripts/smoke_bad_config.py
 	python3 -u scripts/smoke_session_env.py
+	python3 -u scripts/smoke_float_concurrent.py
 
 smoke-protocol:
 	zig build
@@ -89,7 +90,6 @@ smoke-heavy: smoke-clean
 	python3 -u scripts/smoke_float_tui.py
 	python3 -u scripts/smoke_input_after_float.py
 	python3 -u scripts/smoke_float_toggle.py
-	python3 -u scripts/smoke_float_concurrent.py
 
 install: build
 	install -Dm755 "./zig-out/bin/hexe" "$(HOME)/.local/bin/hexe"
