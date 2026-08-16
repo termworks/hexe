@@ -342,6 +342,11 @@ which is requested every tick for the *focused* pane and once at attach for the
 others — so identity fields are reliable, and `ses_state` can lag for a
 background pane.
 
+`cwd` and `process` are different: each pod watches its own pane and pushes
+changes through SES to the frontend, so they are live for **every** pane, not
+just the focused one, and `pane_cwd_changed` / `pane_process_changed` fire as
+they happen.
+
 `alive` and `replaying` matter more than they look: handlers run before dead
 panes are reaped, and during a reattach the VT is still being rebuilt from the
 pod backlog, so cursor and screen state are transient. The input-mode flags are
@@ -476,6 +481,8 @@ Supported events:
 - `pane_focus_changed`
 - `pane_exited` — `ev.pane_uuid`, `ev.exit_status`, `ev.was_focused`, `ev.is_float`, `ev.closes_tab`
 - `tab_changed` — `ev.previous_tab`, `ev.active_tab`, `ev.tab_count`
+- `pane_cwd_changed` — `ev.pane_uuid`, `ev.cwd`
+- `pane_process_changed` — `ev.pane_uuid`, `ev.process`, `ev.pid`
 - `tab_created` — `ev.tab`, `ev.tab_count`, `ev.pane_uuid`
 - `tab_closed` — `ev.tab`, `ev.tab_count`
 - `command_finished`

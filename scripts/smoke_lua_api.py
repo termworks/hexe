@@ -173,6 +173,27 @@ return hexe.setup({
 })
 """
 
+# The pod->SES->frontend path. The pod tracks cwd and foreground process; SES
+# used to record both and forward neither, so a background pane reported
+# whatever was true when it attached. Asserting the EVENTS (not just the fields)
+# because a sync reader that consumed a forwarded push used to drop it silently.
+PODPUSH = """
+local hexe = require("hexe")
+local seen = {}
+local function w() local f = io.open("MARKER_PATH", "w"); f:write(table.concat(seen, " ")); f:close() end
+hexe.events.on("pane_cwd_changed", function(ev) seen[#seen+1] = "cwd:" .. tostring(ev.cwd); w() end)
+hexe.events.on("pane_process_changed", function(ev) seen[#seen+1] = "proc:" .. tostring(ev.process); w() end)
+return hexe.setup({
+  keys = {
+    hexe.key({ hexe.key.ctrl, hexe.key.t }, function(ctx)
+      seen[#seen+1] = "read_cwd=" .. tostring(ctx.pane().cwd)
+      seen[#seen+1] = "read_proc=" .. tostring(ctx.pane().process)
+      w()
+    end),
+  },
+})
+"""
+
 CONTROL = """
 local hexe = require("hexe")
 return hexe.setup({
@@ -233,7 +254,7 @@ def tab_count(inst):
         return 0
 
 
-def run_case(name, config, presses, pretype=None):
+def run_case(name, config, presses, pretype=None, pretype2=None):
     """Boot a frontend with `config`, send ctrl+t `presses` times, return tabs."""
     inst = f"smk{os.getpid()}{name}"
     instances.append(inst)
@@ -266,7 +287,10 @@ def run_case(name, config, presses, pretype=None):
     # busy.
     if pretype:
         os.write(master, pretype)
-        time.sleep(2.0)
+        time.sleep(3.0)
+    if pretype2:
+        os.write(master, pretype2)
+        time.sleep(4.0)
 
     for _ in range(presses):
         before_n = tab_count(inst)
@@ -349,6 +373,26 @@ for needle, why in [
     if needle not in c_out:
         fail(f"{why}; got {c_out!r}")
 print(f"content:     line/cursor_line/find/screen_text read real text -> {c_out[:70]!r}")
+
+# Pod-pushed cwd/process. `cd /usr` then a long-running command, so both the
+# directory and the foreground process demonstrably change.
+ppmarker = os.path.join(SCRATCH, f"luapod{os.getpid()}.txt")
+if os.path.exists(ppmarker):
+    os.unlink(ppmarker)
+run_case("d", PODPUSH.replace("MARKER_PATH", ppmarker), 1,
+         pretype=b"cd /usr\r", pretype2=b"sleep 6\r")
+if not os.path.exists(ppmarker):
+    fail("no pod-pushed event or read ever happened")
+pp = open(ppmarker).read()
+for needle, why in [
+    ("cwd:/usr", "pane_cwd_changed never fired — SES records the pod's cwd but "
+                 "does not forward it, or the push is dropped by a sync reader"),
+    ("proc:sleep", "pane_process_changed never fired for a real foreground change"),
+    ("read_cwd=/usr", "pane.cwd did not follow the pod's cwd"),
+]:
+    if needle not in pp:
+        fail(f"{why}; got {pp!r}")
+print(f"pod push:    cwd/process forwarded live -> {pp[:72]!r}")
 
 # The imperative half.
 pmarker = os.path.join(SCRATCH, f"luaplugin{os.getpid()}.txt")

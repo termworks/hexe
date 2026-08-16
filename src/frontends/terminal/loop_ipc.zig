@@ -154,6 +154,12 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
         .shell_event => {
             handleShellEvent(state, fd, ctl_event.payload_len, buffer);
         },
+        .cwd_changed => {
+            handlePodCwdChanged(state, fd, ctl_event.payload_len, buffer);
+        },
+        .fg_changed => {
+            handlePodFgChanged(state, fd, ctl_event.payload_len, buffer);
+        },
         .send_keys => {
             handleSendKeys(state, fd, ctl_event.payload_len, buffer);
         },
@@ -377,6 +383,75 @@ fn setPendingPopupTarget(state: *State, target: PopupTarget) void {
             state.pending_pop_pane = target.pane;
         },
     }
+}
+
+/// A pod noticed its pane's cwd change. SES records it and now forwards it, so
+/// every pane's `cwd` is live rather than whatever was true at attach time.
+fn handlePodCwdChanged(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(core.wire.CwdChanged)) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+    const cc = core.wire.readStruct(core.wire.CwdChanged, fd) catch |err| {
+        core.logging.logError("terminal", "failed to read cwd_changed", err);
+        return;
+    };
+    const trail = payload_len - @sizeOf(core.wire.CwdChanged);
+    if (trail > buffer.len or cc.cwd_len > trail) {
+        skipPayload(fd, trail, buffer);
+        return;
+    }
+    if (trail > 0) {
+        core.wire.readExact(fd, buffer[0..trail]) catch |err| {
+            core.logging.logError("terminal", "failed to read cwd_changed path", err);
+            return;
+        };
+    }
+    if (cc.cwd_len == 0) return;
+    const cwd = buffer[0..cc.cwd_len];
+
+    state.setPaneShell(cc.uuid, null, cwd, null, null, null);
+    if (state.config._lua_runtime) |rt| {
+        lua_events.emit(state, rt, "pane_cwd_changed", &.{
+            .{ .name = "pane_uuid", .value = .{ .uuid = cc.uuid } },
+            .{ .name = "cwd", .value = .{ .str = cwd } },
+        });
+    }
+    state.needs_render = true;
+}
+
+/// A pod noticed its pane's foreground process change.
+fn handlePodFgChanged(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(core.wire.FgChanged)) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+    const fc = core.wire.readStruct(core.wire.FgChanged, fd) catch |err| {
+        core.logging.logError("terminal", "failed to read fg_changed", err);
+        return;
+    };
+    const trail = payload_len - @sizeOf(core.wire.FgChanged);
+    if (trail > buffer.len or fc.name_len > trail) {
+        skipPayload(fd, trail, buffer);
+        return;
+    }
+    if (trail > 0) {
+        core.wire.readExact(fd, buffer[0..trail]) catch |err| {
+            core.logging.logError("terminal", "failed to read fg_changed name", err);
+            return;
+        };
+    }
+    const name: ?[]const u8 = if (fc.name_len > 0) buffer[0..fc.name_len] else null;
+
+    state.setPaneProc(fc.uuid, name, if (fc.pid != 0) fc.pid else null);
+    if (state.config._lua_runtime) |rt| {
+        lua_events.emit(state, rt, "pane_process_changed", &.{
+            .{ .name = "pane_uuid", .value = .{ .uuid = fc.uuid } },
+            .{ .name = "process", .value = .{ .str = name orelse "" } },
+            .{ .name = "pid", .value = .{ .int = fc.pid } },
+        });
+    }
+    state.needs_render = true;
 }
 
 fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
