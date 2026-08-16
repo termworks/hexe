@@ -10,7 +10,17 @@ Also covers the record-state lifecycle: start must not claim success for a
 child that died, and stop/status must agree with it.
 """
 import atexit
-import fcntl, os, pty, signal, struct, subprocess, sys, termios, time
+import fcntl, os, pty, signal, struct, subprocess, sys, termios, threading, time
+
+
+def drain_pty(fd):
+    """An undrained master fills at ~64 KiB and blocks the writer in writev(2)."""
+    while True:
+        try:
+            if not os.read(fd, 65536):
+                return
+        except OSError:
+            return
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HEXE = os.path.join(REPO, "zig-out/bin/hexe")
@@ -62,6 +72,7 @@ fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
 fe = subprocess.Popen([HEXE, "mux", "new", "-n", "rectarget"], stdin=slave, stdout=slave,
                       stderr=slave, env=env, cwd=SCRATCH, start_new_session=True)
 os.close(slave); procs.append(fe)
+threading.Thread(target=drain_pty, args=(master,), daemon=True).start()
 time.sleep(3.5)
 if fe.poll() is not None:
     fail(f"frontend exited rc={fe.returncode}")
@@ -82,6 +93,7 @@ fcntl.ioctl(s2, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
 rec = subprocess.Popen([HEXE, "terminal", "record", "rectarget", "--out", CAST],
                        stdin=s2, stdout=s2, stderr=s2, env=env, cwd=SCRATCH, start_new_session=True)
 os.close(s2); procs.append(rec)
+threading.Thread(target=drain_pty, args=(m2,), daemon=True).start()
 time.sleep(3.0)
 os.write(m2, f"echo {MARKER}\r".encode())
 time.sleep(2.5)

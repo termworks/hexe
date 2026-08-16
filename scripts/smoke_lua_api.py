@@ -12,7 +12,17 @@ test would pass against a predicate that is never evaluated at all. Only the
 pair shows the predicate is what stopped it.
 """
 import atexit
-import fcntl, os, pty, signal, struct, subprocess, sys, termios, time, json
+import fcntl, os, pty, signal, struct, subprocess, sys, termios, threading, time, json
+
+
+def drain_pty(fd):
+    """An undrained master fills at ~64 KiB and blocks the frontend in writev(2)."""
+    while True:
+        try:
+            if not os.read(fd, 65536):
+                return
+        except OSError:
+            return
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HEXE = os.path.join(REPO, "zig-out/bin/hexe")
@@ -271,6 +281,7 @@ def run_case(name, config, presses, pretype=None, pretype2=None):
     fe = subprocess.Popen([HEXE, "mux", "new", "-n", f"lua{name}"], stdin=slave, stdout=slave,
                           stderr=slave, env=e, cwd=SCRATCH, start_new_session=True)
     os.close(slave); procs.append(fe)
+    threading.Thread(target=drain_pty, args=(master,), daemon=True).start()
     time.sleep(3.0)
     if fe.poll() is not None:
         fail(f"[{name}] frontend exited rc={fe.returncode} — config did not load")

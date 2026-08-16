@@ -10,7 +10,17 @@ The float definition is read back through `ctx.config().floats`, which is the
 only way to observe the resolved set from outside.
 """
 import atexit
-import fcntl, os, pty, signal, struct, subprocess, sys, termios, time
+import fcntl, os, pty, signal, struct, subprocess, sys, termios, threading, time
+
+
+def drain_pty(fd):
+    """An undrained master fills at ~64 KiB and blocks the frontend in writev(2)."""
+    while True:
+        try:
+            if not os.read(fd, 65536):
+                return
+        except OSError:
+            return
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HEXE = os.path.join(REPO, "zig-out/bin/hexe")
@@ -100,6 +110,7 @@ fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
 fe = subprocess.Popen([HEXE, "mux", "new", "-n", "reload"], stdin=slave, stdout=slave,
                       stderr=slave, env=env, cwd=SCRATCH, start_new_session=True)
 os.close(slave); procs.append(fe)
+threading.Thread(target=drain_pty, args=(master,), daemon=True).start()
 time.sleep(3.5)
 if fe.poll() is not None:
     fail(f"frontend exited rc={fe.returncode}")

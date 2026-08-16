@@ -1,33 +1,19 @@
 #!/usr/bin/env python3
-"""KNOWN-FAILING repro: blocking `hexe terminal float` never returns.
-
-NOT wired into `make smoke` — it fails, and it failed before the correlation
-fix too (verified by stashing). Two separate defects live here:
-
-1. FIXED — SES kept every waiting CLI caller in ONE slot keyed by an all-zero
-   uuid, so a second concurrent float closed the first caller's fd and then
-   received its output. Waiters are now keyed by a request id that the frontend
-   echoes back on `float_result`.
-
-2. NOT FIXED — a blocking float never completes AT ALL, even with a single
-   caller. SES sends `pane_exited` for the float's pane, and the frontend never
-   dispatches it, so `handleBlockingFloatCompletion` never runs. Ruled out:
-   request-id stamping on notifications, queued-push stranding, and fd
-   mismatch. Root cause still unknown.
-
-Run it directly to reproduce:  python3 scripts/smoke_float_concurrent.py
-
-Original description:
-Live check: two blocking `hexe terminal float` calls do not steal from each other.
+"""Live check: two blocking `hexe terminal float` calls do not steal from each other.
 
 SES kept every waiting CLI caller in ONE slot keyed by an all-zero uuid — the
 re-key on `float_created` that the code comment described was never implemented,
 because `float_created` is never sent. So a second concurrent float closed the
 first caller's fd (it exits "No response from ses" while its float is still on
-screen) and then received the first float's output.
+screen) and then received the first float's output. Waiters are now keyed by a
+request id that the frontend echoes back on `float_result`.
 
 Each float here echoes a distinct marker. The test fails if either caller gets
 the other's output, or if either is dropped.
+
+The pty master MUST be drained. An undrained master fills after ~64 KiB of
+render output and the frontend blocks forever in writev(2) on stdout, which
+looks exactly like a hung float and is not one.
 """
 import atexit
 import fcntl, os, pty, signal, struct, subprocess, sys, termios, threading, time
@@ -74,6 +60,20 @@ fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 160, 0, 0))
 fe = subprocess.Popen([HEXE, "mux", "new", "-n", "floatconc"], stdin=slave, stdout=slave,
                       stderr=slave, env=env, cwd=SCRATCH, start_new_session=True)
 os.close(slave); procs.append(fe)
+
+drained = True
+
+
+def drain():
+    while drained:
+        try:
+            if not os.read(master, 65536):
+                break
+        except OSError:
+            break
+
+
+threading.Thread(target=drain, daemon=True).start()
 time.sleep(3.5)
 if fe.poll() is not None:
     fail(f"frontend exited rc={fe.returncode}")
@@ -86,9 +86,11 @@ def run_float(tag):
     rf = os.path.join(SCRATCH, f"floatres{os.getpid()}{tag}.txt")
     if os.path.exists(rf):
         os.unlink(rf)
+    # The sleep is load-bearing: both floats must be pending at once, or the
+    # first finishes before the second registers and nothing overlaps.
     r = subprocess.run(
-        [HEXE, "terminal", "float", "--command", f"sh -c 'printf MARKER_{tag} > {rf}'",
-         "--result-file", rf],
+        [HEXE, "terminal", "float", "--command",
+         f"sh -c 'sleep 3; printf MARKER_{tag} > {rf}'", "--result-file", rf],
         capture_output=True, text=True, env=env, timeout=45)
     body = ""
     if os.path.exists(rf):
@@ -113,14 +115,19 @@ for tag in ("A", "B"):
 
 # Each caller must see its OWN marker, not the other's.
 for tag, other in (("A", "B"), ("B", "A")):
-    _, out, body = results[tag]
+    rc, out, body = results[tag]
     if f"MARKER_{other}" in body or f"MARKER_{other}" in out:
         fail(f"caller {tag} received caller {other}'s result — waiters are sharing a slot")
     if "No response from ses" in out:
         fail(f"caller {tag} was dropped: its fd was closed by the other request")
+    if rc != 0:
+        fail(f"caller {tag} failed rc={rc}: {out!r}")
+    if f"MARKER_{tag}" not in out and f"MARKER_{tag}" not in body:
+        fail(f"caller {tag} never received its own result: out={out!r} body={body!r}")
 
 if fe.poll() is not None:
     fail("frontend died handling concurrent float requests")
 
+drained = False
 cleanup()
 print("SMOKE PASS: concurrent blocking floats are matched to their own callers")
