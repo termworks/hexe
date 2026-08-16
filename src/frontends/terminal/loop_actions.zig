@@ -76,7 +76,9 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
             .exit_code = 130, // Cancelled (like SIGINT)
             .output_len = 0,
         };
-        writeControlLogged(ctl_fd, .float_result, std.mem.asBytes(&result), "failed to send cancelled float result");
+        wire.writeControlWithRequestId(ctl_fd, .float_result, entry.value.ses_request_id, std.mem.asBytes(&result)) catch |err| {
+            core.logging.logError("terminal", "failed to send cancelled float result", err);
+        };
     }
 
     // Find and remove the float from state.view.float_views.

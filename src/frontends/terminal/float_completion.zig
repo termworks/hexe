@@ -6,8 +6,10 @@ const wire = core.wire;
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 
-fn writeControlWithTrailLogged(fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8, trail: []const u8, comptime context: []const u8) void {
-    wire.writeControlWithTrail(fd, msg_type, payload, trail) catch |err| {
+fn writeControlWithTrailLogged(fd: posix.fd_t, msg_type: wire.MsgType, request_id: u32, payload: []const u8, trail: []const u8, comptime context: []const u8) void {
+    // With the request id: SES matches the waiting CLI caller on it, so a
+    // result sent with id 0 is delivered to nobody.
+    wire.writeControlWithTrailAndRequestId(fd, msg_type, request_id, payload, trail) catch |err| {
         core.logging.logError("terminal", context, err);
     };
 }
@@ -59,5 +61,5 @@ pub fn handleBlockingFloatCompletion(state: *State, pane: *Pane) void {
         .exit_code = exit_code,
         .output_len = @intCast(output.len),
     };
-    writeControlWithTrailLogged(ctl_fd, .float_result, std.mem.asBytes(&result), output, "failed to send blocking float result");
+    writeControlWithTrailLogged(ctl_fd, .float_result, entry.value.ses_request_id, std.mem.asBytes(&result), output, "failed to send blocking float result");
 }

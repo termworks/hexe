@@ -197,7 +197,8 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
         .deferred_destroy_ctl = .empty,
         .deferred_destroy_vt = .empty,
-        .pending_float_cli_fds = std.AutoHashMap([32]u8, PendingCliWait).init(allocator),
+        .pending_float_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(allocator),
+        .next_float_request_id = 1,
         .resource_monitor = core.resource_limits.ResourceMonitor.init(.{}),
         .vt_route_buf = allocator.alloc(u8, wire.MAX_PAYLOAD_LEN) catch unreachable,
     };
@@ -888,7 +889,11 @@ pub const Server = struct {
     // CLI fd waiting for exit_intent response.
     pending_exit_intent_cli_fd: ?PendingCliWait = null,
     // CLI fds waiting for float result, keyed by float pane UUID.
-    pending_float_cli_fds: std.AutoHashMap([32]u8, PendingCliWait),
+    pending_float_cli_fds: std.AutoHashMap(u32, PendingCliWait),
+    /// Correlates a float_request with its float_result. Every waiter used to
+    /// share one all-zero uuid key, so a second concurrent request closed the
+    /// first caller's fd and then received its result.
+    next_float_request_id: u32,
     current_ctl_request_fd: ?posix.fd_t = null,
     current_ctl_request_id: u32 = 0,
 
@@ -930,7 +935,8 @@ pub const Server = struct {
             .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .deferred_destroy_ctl = .empty,
             .deferred_destroy_vt = .empty,
-            .pending_float_cli_fds = std.AutoHashMap([32]u8, PendingCliWait).init(page_alloc),
+            .pending_float_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(page_alloc),
+            .next_float_request_id = 1,
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
             .vt_route_buf = try page_alloc.alloc(u8, wire.MAX_PAYLOAD_LEN),
         };
@@ -1221,7 +1227,7 @@ pub const Server = struct {
 
         // Collect first: replyOrClose/queueCtlClose must not run while the map
         // is being iterated.
-        var orphaned: std.ArrayList([32]u8) = .empty;
+        var orphaned: std.ArrayList(u32) = .empty;
         defer orphaned.deinit(self.allocator);
         var it = self.pending_float_cli_fds.iterator();
         while (it.next()) |entry| {
@@ -1235,7 +1241,9 @@ pub const Server = struct {
             const entry = self.pending_float_cli_fds.fetchRemove(key) orelse continue;
             ses.debugLog("releasing float CLI waiter fd={d} (owner mux fd={d} gone)", .{ entry.value.cli_fd, owner_ctl_fd });
             const result = wire.FloatResult{
-                .uuid = key,
+                // The waiter is keyed by request id now; the caller only cares
+                // about the non-zero exit code here.
+                .uuid = .{0} ** 32,
                 .exit_code = 1,
                 .output_len = 0,
             };
@@ -1720,6 +1728,24 @@ pub const Server = struct {
     /// connection for close so stale fds don't accumulate.
     pub fn replyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
         _ = self.sendCtlFrame(fd, msg_type, payload, &.{}, "reply");
+    }
+
+    /// Send an UNSOLICITED push to a client, never stamped with a request id.
+    ///
+    /// `sendCtlFrame` tags every frame with `responseRequestIdForFd`, which is
+    /// the id of the request currently being serviced. That is right for a
+    /// reply and wrong for a notification: pushing `pane_exited` to a mux while
+    /// servicing a request from that same fd made the notification look like
+    /// the response, and the frontend's synchronous reader consumed it instead
+    /// of dispatching it. A blocking float then never learned its pane had
+    /// exited, so `hexe terminal float` hung forever.
+    pub fn notifyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
+        var stack: [CTL_FRAME_STACK_LEN]u8 = undefined;
+        if (buildCtlFrame(&stack, msg_type, 0, payload, &.{})) |frame| {
+            if (self.writeCtlBytes(fd, frame)) return;
+            core.logging.warnWithSource("ses", "notify failed: fd={d} type={s}", .{ fd, @tagName(msg_type) }, @src());
+            self.queueCtlClose(fd, null);
+        }
     }
 
     /// Same as replyOrClose but for messages with a trailing byte blob.
@@ -2984,7 +3010,7 @@ pub const Server = struct {
                                 const uuid = entry.key_ptr.*;
                                 ses.debugLog("pane_exited: uuid={s} pane_id={?d}", .{ uuid[0..8], pane_id });
                                 var msg = wire.PaneUuid{ .uuid = uuid };
-                                self.replyOrClose(ctl_fd, .pane_exited, std.mem.asBytes(&msg));
+                                self.notifyOrClose(ctl_fd, .pane_exited, std.mem.asBytes(&msg));
                             }
                         }
                     }
@@ -3190,7 +3216,7 @@ pub const Server = struct {
                 server_reporting_handlers.handleBinaryExitIntentResult(self, fd, hdr.payload_len, &buf);
             },
             .float_result => {
-                server_reporting_handlers.handleBinaryFloatResult(self, fd, hdr.payload_len, &buf);
+                server_reporting_handlers.handleBinaryFloatResult(self, fd, hdr.request_id, hdr.payload_len, &buf);
             },
             .session_add_tab => {
                 server_session_handlers.handleBinarySessionAddTab(self, fd, hdr.payload_len, &buf);
@@ -3387,25 +3413,23 @@ pub const Server = struct {
                     return;
                 };
                 // Forward entire float_request to MUX.
-                wire.writeControlWithTrailTimeout(mux_fd, .float_request, std.mem.asBytes(&fr), buf[0..trail_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
+                // Tag the request so its result can be matched back to THIS
+                // caller. Concurrent `hexe terminal float` calls are ordinary
+                // (a picker float in two panes); without a correlation id they
+                // shared one slot.
+                const float_req_id = self.next_float_request_id;
+                self.next_float_request_id +%= 1;
+                if (self.next_float_request_id == 0) self.next_float_request_id = 1;
+
+                const trails: []const []const u8 = &.{buf[0..trail_len]};
+                wire.writeControlMsgWithRequestIdTimeout(mux_fd, .float_request, float_req_id, std.mem.asBytes(&fr), trails, HANDLER_IO_TIMEOUT_MS) catch |err| {
                     core.logging.logError("ses", "float_request forward to mux failed", err);
                     self.sendBinaryError(fd, "forward_failed");
                     self.finishCliRequest(fd);
                     return;
                 };
-                // Store CLI fd — MUX will respond with float_created or float_result.
-                // We'll use a placeholder UUID (zeroed) until float_created gives us the real one.
-                // For now, keep the fd in a temporary spot. When MUX sends float_created,
-                // we move it to pending_float_cli_fds keyed by UUID.
-                // Use a simple approach: store as pending with zeroed UUID.
-                const zero_uuid: [32]u8 = .{0} ** 32;
-                // A second concurrent float request would overwrite (and leak)
-                // the previous waiter's fd; close the stale one first.
-                if (self.pending_float_cli_fds.fetchRemove(zero_uuid)) |stale| {
-                    self.ses_state.store.noteClosedFd(stale.value.cli_fd);
-                    posix.close(stale.value.cli_fd);
-                }
-                self.pending_float_cli_fds.put(zero_uuid, .{ .cli_fd = fd, .owner_ctl_fd = mux_fd }) catch |err| {
+                // Keyed by the request id, so concurrent waiters coexist.
+                self.pending_float_cli_fds.put(float_req_id, .{ .cli_fd = fd, .owner_ctl_fd = mux_fd }) catch |err| {
                     core.logging.logError("ses", "failed to track pending float CLI request", err);
                     self.sendBinaryError(fd, "track_failed");
                     posix.close(fd);

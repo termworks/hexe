@@ -38,7 +38,7 @@ pub fn handleBinaryExitIntentResult(self: *Server, fd: posix.fd_t, payload_len: 
 }
 
 /// Handle float_result from MUX — forward to waiting CLI.
-pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, request_id: u32, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.FloatResult)) {
         self.skipPayloadRest();
         self.sendBinaryError(fd, "float_result: payload too small");
@@ -52,16 +52,17 @@ pub fn handleBinaryFloatResult(self: *Server, fd: posix.fd_t, payload_len: u32, 
     };
     const trail_len = payload_len - @sizeOf(wire.FloatResult);
 
-    // Find CLI fd by UUID.
+    // Match the waiter by the request id the frontend echoed back. The old
+    // code looked up by pane uuid and, on the miss it always took, fell back to
+    // a single shared slot — delivering one caller's output to another.
     var cli_fd: ?posix.fd_t = null;
-    if (self.pending_float_cli_fds.fetchRemove(result.uuid)) |entry| {
-        cli_fd = entry.value.cli_fd;
-    } else {
-        // Try zero UUID (pending assignment).
-        const zero_uuid: [32]u8 = .{0} ** 32;
-        if (self.pending_float_cli_fds.fetchRemove(zero_uuid)) |entry| {
+    if (request_id != 0) {
+        if (self.pending_float_cli_fds.fetchRemove(request_id)) |entry| {
             cli_fd = entry.value.cli_fd;
         }
+    }
+    if (cli_fd == null) {
+        core.logging.warn("ses", "float_result with no matching waiter (request_id={d})", .{request_id});
     }
 
     if (cli_fd) |cfd| {

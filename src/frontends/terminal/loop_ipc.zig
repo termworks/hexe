@@ -57,7 +57,7 @@ fn readExactLogged(fd: posix.fd_t, dest: []u8, comptime context: []const u8) boo
     return true;
 }
 
-fn sendFailedFloatResult(state: *State, exit_code: i32, comptime context: []const u8) void {
+fn sendFailedFloatResult(state: *State, request_id: u32, exit_code: i32, comptime context: []const u8) void {
     const ctl_fd = state.runtime.getCtlFd() orelse {
         core.logging.warn("terminal", context ++ ": SES CTL channel is unavailable", .{});
         return;
@@ -67,7 +67,11 @@ fn sendFailedFloatResult(state: *State, exit_code: i32, comptime context: []cons
         .exit_code = exit_code,
         .output_len = 0,
     };
-    writeControlLogged(ctl_fd, .float_result, std.mem.asBytes(&result), context);
+    // Must carry the request id: these are the paths where creation FAILED and
+    // a CLI caller is blocked waiting. An unmatched result leaves it hanging.
+    wire.writeControlWithRequestId(ctl_fd, .float_result, request_id, std.mem.asBytes(&result)) catch |err| {
+        core.logging.logError("terminal", context, err);
+    };
 }
 
 /// Handle binary control messages from the SES control channel.
@@ -92,6 +96,18 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
             state.notifications.showFor("Lost connection to ses daemon — reconnecting...", 5000);
         }
     };
+}
+
+/// Drain pushes a synchronous reader swallowed while it was waiting.
+///
+/// This must run every loop turn, not only when the CTL fd is readable. A
+/// sync request (createPane, for instance) consumes any async frame that
+/// arrives mid-wait and queues it; if no FURTHER ctl traffic ever arrives,
+/// `handleSesMessage` is never entered again and the queued frame is stranded.
+/// That is how a blocking float's `pane_exited` went missing: the float's own
+/// creation request swallowed it, and nothing else was ever sent.
+pub fn drainQueuedPushes(state: *State, buffer: []u8) void {
+    replayQueuedPushes(state, buffer);
 }
 
 fn replayQueuedPushes(state: *State, buffer: []u8) void {
@@ -170,7 +186,7 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
             handleExitIntent(state, fd, ctl_event.payload_len, buffer);
         },
         .float_request => {
-            handleFloatRequest(state, fd, ctl_event.payload_len, buffer);
+            handleFloatRequest(state, fd, ctl_event.request_id, ctl_event.payload_len, buffer);
         },
         .pane_exited => {
             // A pane (possibly the one being searched) is about to be freed;
@@ -741,7 +757,7 @@ pub fn sendExitIntentResultPub(state: *State, allow: bool) void {
     writeControlLogged(ctl_fd, .exit_intent_result, std.mem.asBytes(&result), "failed to send exit intent result");
 }
 
-fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_len: u32, buffer: []u8) void {
     if (payload_len < @sizeOf(wire.FloatRequest)) {
         skipPayload(fd, payload_len, buffer);
         return;
@@ -964,7 +980,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         state.notifications.show("Float failed");
         state.needs_render = true;
         if (wait_for_exit) {
-            sendFailedFloatResult(state, 127, "failed to send failed float result after command allocation failure");
+            sendFailedFloatResult(state, request_id, 127, "failed to send failed float result after command allocation failure");
         }
         return;
     };
@@ -980,7 +996,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
-            sendFailedFloatResult(state, 127, "failed to send failed float result");
+            sendFailedFloatResult(state, request_id, 127, "failed to send failed float result");
         }
         return;
     };
@@ -1007,11 +1023,12 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         state.pending_float_requests.put(new_uuid, .{
             .result_path = stored_path,
             .cursor_snapshot = cursor_snapshot,
+            .ses_request_id = request_id,
         }) catch |err| {
             core.logging.logError("terminal", "failed to track pending float request", err);
             if (stored_path) |path| state.allocator.free(path);
             state.notifications.show("Float result tracking failed");
-            sendFailedFloatResult(state, 127, "failed to send failed float result after tracking failure");
+            sendFailedFloatResult(state, request_id, 127, "failed to send failed float result after tracking failure");
         };
     }
 }
