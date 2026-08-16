@@ -1,27 +1,6 @@
 const std = @import("std");
 
 pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
-    try stdout.writeAll(
-        \\# Hexe prompt initialization for Bash
-        \\__shp_precmd() {
-        \\    local exit_status=$?
-        \\    local duration=0
-        \\    if [[ -n "$__shp_start" ]]; then
-        \\        duration=$(( $(date +%s%3N) - __shp_start ))
-        \\    fi
-        \\    PS1="$(hexe shp prompt --status=$exit_status --duration=$duration --jobs=$(jobs -p 2>/dev/null | wc -l)) "
-        \\    unset __shp_start
-        \\}
-        \\
-        \\__shp_preexec() {
-        \\    __shp_start=$(date +%s%3N)
-        \\}
-        \\
-        \\trap '__shp_preexec' DEBUG
-        \\PROMPT_COMMAND="__shp_precmd"
-        \\
-    );
-
     if (no_comms) return;
 
     try stdout.writeAll(
@@ -38,7 +17,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\
         \\__hexe_exit_intent() {
         \\    [[ -n "$HEXE_MUX_SOCKET" && -n "$HEXE_PANE_UUID" ]] || return 0
-        \\    hexe shp exit-intent >/dev/null 2>/dev/null
+        \\    hexe shell exit-intent >/dev/null 2>/dev/null
         \\    return $?
         \\}
         \\
@@ -49,12 +28,12 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\    local cmd="$BASH_COMMAND"
         \\    case "$cmd" in
         \\        __shp_precmd|__shp_preexec|__hexe_precmd|__hexe_preexec) return 0 ;;
-        \\        hexe\ shp\ shell-event*|hexe\ shp\ exit-intent*) return 0 ;;
+        \\        hexe\ shell\ shell-event*|hexe\ shell\ exit-intent*) return 0 ;;
         \\    esac
         \\    __hexe_last_cmd="$cmd"
         \\    __hexe_start=$(date +%s%3N)
         \\    __hexe_refresh_env_snapshot
-        \\    hexe shp shell-event --phase=start --running --started-at=$__hexe_start --cmd="$__hexe_last_cmd" --cwd="$PWD" --jobs=$(jobs -p 2>/dev/null | wc -l) >/dev/null 2>/dev/null
+        \\    hexe shell shell-event --phase=start --running --started-at=$__hexe_start --cmd="$__hexe_last_cmd" --cwd="$PWD" --jobs=$(jobs -p 2>/dev/null | wc -l) >/dev/null 2>/dev/null
         \\}
         \\
         \\__hexe_precmd() {
@@ -76,7 +55,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\    fi
         \\
         \\    local jobs_count=$(jobs -p 2>/dev/null | wc -l)
-        \\    hexe shp shell-event --phase=end --cmd="$cmd" --status=$exit_status --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
+        \\    hexe shell shell-event --phase=end --cmd="$cmd" --status=$exit_status --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
         \\    unset __hexe_start
         \\    unset __hexe_last_cmd
         \\}

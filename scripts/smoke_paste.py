@@ -16,7 +16,12 @@ INST = f"smk{os.getpid()}"
 env = os.environ.copy()
 env.update({"HEXE_INSTANCE": INST, "XDG_STATE_HOME": os.path.join(SCRATCH, "smoke-state"),
             "TERM": "xterm-256color", "SHELL": "/bin/sh"})
-env.pop("HEXE_SESSION", None)
+# A smoke run from inside a hexe pane inherits that pane's identity; the new
+# frontend then hits the nested-mux confirmation and exits rc=0 with no output,
+# which is indistinguishable from a product bug. Scrub the whole set.
+for _k in ("HEXE_SESSION", "HEXE_PANE_UUID", "HEXE_MUX_SOCKET", "HEXE_POD_SOCKET",
+           "HEXE_POD_NAME", "HEXE_FLOAT", "HEXE_FLOAT_NAME"):
+    env.pop(_k, None)
 os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
 procs = []
 PASTE_BYTES = 400_000

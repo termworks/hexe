@@ -7,37 +7,6 @@ pub fn build(b: *std.Build) void {
     const runtime_epoch = computeRuntimeEpoch(b);
     const version = manifestVersion(b);
 
-    // Pack the Pokemon sprites into a compressed archive at build time and
-    // expose it as the "sprites_pack" module (consumed by
-    // src/core/sprites_embedded.zig). Raw sprites stay in src/core/sprites;
-    // the binary only embeds the ~1.6MB archive of per-sprite gzip streams.
-    const sprite_pack_tool = b.addExecutable(.{
-        .name = "sprite-pack",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tools/sprite_pack.zig"),
-            .target = b.graph.host,
-            .optimize = .ReleaseSafe,
-        }),
-    });
-    const run_sprite_pack = b.addRunArtifact(sprite_pack_tool);
-    const sprites_pack_file = run_sprite_pack.addOutputFileArg("sprites.pack");
-    run_sprite_pack.addDirectoryArg(b.path("src/core/sprites"));
-    // Directory args are hashed by path only, so feed a content fingerprint
-    // into the cache manifest to re-pack when sprite files change.
-    run_sprite_pack.addArg(b.fmt("{x}", .{spritesFingerprint(b)}));
-
-    const sprites_wf = b.addWriteFiles();
-    _ = sprites_wf.addCopyFile(sprites_pack_file, "sprites.pack");
-    const sprites_pack_root = sprites_wf.add("sprites_pack.zig",
-        \\pub const data = @embedFile("sprites.pack");
-        \\
-    );
-    const sprites_pack_mod = b.createModule(.{
-        .root_source_file = sprites_pack_root,
-        .target = target,
-        .optimize = optimize,
-    });
-
     // Get ghostty-vt module from dependency
     const ghostty_vt_mod = if (b.lazyDependency("ghostty", .{
         .target = target,
@@ -110,7 +79,6 @@ pub fn build(b: *std.Build) void {
         core_module.addImport("liblink", ll);
     }
     core_module.addImport("logly", logly_mod);
-    core_module.addImport("sprites_pack", sprites_pack_mod);
 
     // Create frontend-core module (host-neutral frontend event/action boundary)
     const frontend_core_module = b.createModule(.{
@@ -153,6 +121,11 @@ pub fn build(b: *std.Build) void {
         terminal_module.addImport("ghostty-vt", vt);
     }
     terminal_module.addImport("vaxis", vaxis_mod);
+    // The frontend binds its own Lua accessors (src/frontends/terminal/lua_api.zig),
+    // which needs the Lua C API directly rather than through core.
+    if (ziglua_dep) |dep| {
+        terminal_module.addImport("zlua", dep.module("zlua"));
+    }
 
     // Create web/syslink frontend adapter modules for CLI entrypoints.
     const web_module = b.createModule(.{
@@ -248,23 +221,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run hexe");
     run_step.dependOn(&run_hexe.step);
 
-    // Optional runtime smoke: expects a SES daemon to be running for the
-    // current HEXE_INSTANCE and drives register/create/detach/reattach/adopt.
-    const session_protocol_smoke_module = b.createModule(.{
-        .root_source_file = b.path("src/tools/session_protocol_smoke.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    session_protocol_smoke_module.addImport("core", core_module);
-    const session_protocol_smoke_exe = b.addExecutable(.{
-        .name = "hexe-session-protocol-smoke",
-        .root_module = session_protocol_smoke_module,
-    });
-    const run_session_protocol_smoke = b.addRunArtifact(session_protocol_smoke_exe);
-    const session_protocol_smoke_step = b.step("session-protocol-smoke", "Run SES protocol detach/reattach smoke against an already-running daemon");
-    session_protocol_smoke_step.dependOn(&run_session_protocol_smoke.step);
-
     // Test step for session module error handling tests
     const ses_test_module = b.createModule(.{
         .root_source_file = b.path("src/modules/session/state_test.zig"),
@@ -308,18 +264,6 @@ pub fn build(b: *std.Build) void {
         .root_module = wire_test_module,
     });
     const run_wire_tests = b.addRunArtifact(wire_tests);
-
-    // Bounded external-command execution (statusbar segments etc.).
-    const cmd_test_module = b.createModule(.{
-        .root_source_file = b.path("src/core/cmd.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    cmd_test_module.addImport("logly", logly_mod);
-    const cmd_tests = b.addTest(.{
-        .root_module = cmd_test_module,
-    });
-    const run_cmd_tests = b.addRunArtifact(cmd_tests);
 
     // Non-blocking (async) command cache used by the render path.
     const async_cmd_test_module = b.createModule(.{
@@ -421,6 +365,35 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_pane_osc_tests = b.addRunArtifact(pane_osc_tests);
+
+    // Lua event dispatch. These tests existed but were in no test target, so
+    // they never ran — and they cover exactly the two bugs that shipped: a
+    // stack underflow after a handler call, and a dropped second handler.
+    const lua_events_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/lua_events.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    lua_events_test_module.addImport("core", core_module);
+    lua_events_test_module.addImport("vaxis", vaxis_mod);
+    if (ziglua_dep) |dep| {
+        lua_events_test_module.addImport("zlua", dep.module("zlua"));
+    }
+    const lua_events_tests = b.addTest(.{ .root_module = lua_events_test_module });
+    const run_lua_events_tests = b.addRunArtifact(lua_events_tests);
+
+    // Float position arithmetic: a percent<->cell round trip that silently
+    // made float.nudge("right") a no-op, and a u16 multiply that overflowed
+    // above 655 columns.
+    const float_geometry_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/frontends/terminal/float_geometry.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_float_geometry_tests = b.addRunArtifact(float_geometry_tests);
 
     const prompt_navigation_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -572,7 +545,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);
-    test_step.dependOn(&run_cmd_tests.step);
     test_step.dependOn(&run_async_cmd_tests.step);
     test_step.dependOn(&run_ipc_tests.step);
     test_step.dependOn(&run_vtwq_tests.step);
@@ -581,6 +553,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_input_tests.step);
     test_step.dependOn(&run_mouse_protocol_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
+    test_step.dependOn(&run_lua_events_tests.step);
+    test_step.dependOn(&run_float_geometry_tests.step);
     test_step.dependOn(&run_prompt_navigation_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);
     test_step.dependOn(&run_pane_search_tests.step);
@@ -651,27 +625,6 @@ fn hashDirRecursive(b: *std.Build, hasher: anytype, root_path: []const u8) void 
         defer b.allocator.free(path);
         hashFile(b, hasher, path);
     }
-}
-
-/// Order-independent fingerprint of the sprites directory (path + size per
-/// file). Cheap enough to run on every configure; only used to invalidate
-/// the sprite-pack Run-step cache, which otherwise hashes the directory path
-/// but not its contents.
-fn spritesFingerprint(b: *std.Build) u64 {
-    var acc: u64 = 0;
-    var dir = std.fs.cwd().openDir("src/core/sprites", .{ .iterate = true }) catch return 0;
-    defer dir.close();
-    var walker = dir.walk(b.allocator) catch return 0;
-    defer walker.deinit();
-    while (walker.next() catch null) |entry| {
-        if (entry.kind != .file) continue;
-        const st = entry.dir.statFile(entry.basename) catch continue;
-        var h = std.hash.Wyhash.init(0);
-        h.update(entry.path);
-        h.update(std.mem.asBytes(&st.size));
-        acc ^= h.final();
-    }
-    return acc;
 }
 
 fn hasRuntimeEpochExtension(path: []const u8) bool {

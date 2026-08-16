@@ -9,6 +9,7 @@ const log = std.log.scoped(.terminal_keybinds);
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
+const lua_api = @import("lua_api.zig");
 
 const input = @import("input.zig");
 const loop_ipc = @import("loop_ipc.zig");
@@ -21,7 +22,6 @@ pub const BindWhen = core.Config.BindWhen;
 pub const BindKey = core.Config.BindKey;
 pub const BindKeyKind = core.Config.BindKeyKind;
 pub const BindAction = core.Config.BindAction;
-const PaneQuery = core.PaneQuery;
 const FocusContext = @import("state.zig").FocusContext;
 const LuaRuntime = core.LuaRuntime;
 const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
@@ -147,381 +147,17 @@ fn currentFocusContext(state: *State) FocusContext {
     return if (state.activeFloatingIndex() != null) .float else .split;
 }
 
-/// Build a PaneQuery from the current terminal session state for condition evaluation.
-fn buildPaneQuery(state: *State) PaneQuery {
-    const is_float = state.activeFloatingIndex() != null;
-    const pane: ?*Pane = if (state.activeFloatingIndex()) |idx| blk: {
-        if (idx < state.view.float_views.items.len) break :blk state.view.float_views.items[idx];
-        break :blk @as(?*Pane, null);
-    } else state.currentLayout().getFocusedPane();
-
-    // Get foreground process name.
-    const fg_proc: ?[]const u8 = blk: {
-        if (pane) |p| {
-            if (p.getFgProcess()) |proc_name| break :blk proc_name;
-        }
-        if (state.getCurrentFocusedUuid()) |uuid| {
-            if (state.getPaneProc(uuid)) |pi| {
-                if (pi.name) |n| break :blk n;
-            }
-        }
-        break :blk null;
-    };
-
-    // Get float attributes if this is a float.
-    var float_key: u8 = 0;
-    var float_sticky = false;
-    var float_exclusive = false;
-    var float_per_cwd = false;
-    var float_global = false;
-    var float_isolated = false;
-    var float_destroyable = false;
-
-    if (pane) |p| {
-        if (is_float) {
-            float_key = state.paneFloatKey(p);
-            float_sticky = state.paneSticky(p);
-            // Look up float def for other attributes.
-            if (float_key != 0) {
-                if (state.getLayoutFloatByKey(float_key)) |fd| {
-                    float_exclusive = fd.attributes.exclusive;
-                    float_per_cwd = fd.attributes.per_cwd;
-                    float_global = fd.attributes.global or fd.attributes.per_cwd;
-                    float_isolated = fd.attributes.isolated;
-                    float_destroyable = fd.attributes.destroy;
-                }
-            }
-        }
-    }
-
-    return .{
-        .is_float = is_float,
-        .is_split = !is_float,
-        .float_key = float_key,
-        .float_sticky = float_sticky,
-        .float_exclusive = float_exclusive,
-        .float_per_cwd = float_per_cwd,
-        .float_global = float_global,
-        .float_isolated = float_isolated,
-        .float_destroyable = float_destroyable,
-        .tab_count = @intCast(state.view.tab_views.items.len),
-        .active_tab = @intCast(state.activeTabIndex()),
-        .fg_process = fg_proc,
-        .now_ms = @intCast(std.time.milliTimestamp()),
-    };
-}
-
-/// Evaluate a bind's when condition against the current state.
-fn matchesWhen(state: *State, when: ?core.config.WhenDef, query: *const PaneQuery) bool {
-    if (when) |w| {
-        return matchesLuaWhen(state, query, w);
-    }
-    return true; // No condition = always matches.
-}
-
-fn callbackIdFromCode(code: []const u8) ?i32 {
-    if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
-    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch |err| {
-        log.warn("failed to parse keybind callback id: {}", .{err});
-        return null;
-    };
-}
-
-fn pushPaneLuaTable(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: bool, tab_index: usize, pane_index: usize) void {
-    rt.lua.createTable(0, 24);
-
-    _ = rt.lua.pushString(pane.uuid[0..]);
-    rt.lua.setField(-2, "uuid");
-    rt.lua.pushInteger(pane.id);
-    rt.lua.setField(-2, "id");
-    rt.lua.pushInteger(@intCast(tab_index));
-    rt.lua.setField(-2, "tab_index");
-    rt.lua.pushInteger(@intCast(pane_index));
-    rt.lua.setField(-2, "pane_index");
-
-    rt.lua.pushBoolean(is_focused);
-    rt.lua.setField(-2, "focused");
-    rt.lua.pushBoolean(!state.paneIsFloating(pane));
-    rt.lua.setField(-2, "focus_split");
-    rt.lua.pushBoolean(state.paneIsFloating(pane));
-    rt.lua.setField(-2, "focus_float");
-    rt.lua.pushBoolean(!state.paneIsFloating(pane));
-    rt.lua.setField(-2, "is_split");
-    rt.lua.pushBoolean(state.paneIsFloating(pane));
-    rt.lua.setField(-2, "is_float");
-    rt.lua.pushBoolean(state.paneIsFloating(pane));
-    rt.lua.setField(-2, "floating");
-
-    const float_key = state.paneFloatKey(pane);
-    rt.lua.pushInteger(float_key);
-    rt.lua.setField(-2, "float_key");
-    rt.lua.pushBoolean(state.paneSticky(pane));
-    rt.lua.setField(-2, "float_sticky");
-
-    var float_exclusive = false;
-    var float_per_cwd = false;
-    var float_global = state.paneParentTab(pane) == null;
-    var float_isolated = false;
-    var float_destroyable = false;
-    if (float_key != 0) {
-        if (state.getLayoutFloatByKey(float_key)) |fd| {
-            float_destroyable = fd.attributes.destroy;
-            float_exclusive = fd.attributes.exclusive;
-            float_per_cwd = fd.attributes.per_cwd;
-            float_isolated = fd.attributes.isolated;
-            float_global = float_global or fd.attributes.global;
-        }
-    }
-    rt.lua.pushBoolean(float_destroyable);
-    rt.lua.setField(-2, "float_destroyable");
-    rt.lua.pushBoolean(float_exclusive);
-    rt.lua.setField(-2, "float_exclusive");
-    rt.lua.pushBoolean(float_per_cwd);
-    rt.lua.setField(-2, "float_per_cwd");
-    rt.lua.pushBoolean(float_global);
-    rt.lua.setField(-2, "float_global");
-    rt.lua.pushBoolean(float_isolated);
-    rt.lua.setField(-2, "float_isolated");
-
-    const alt_screen = pane.vt.inAltScreen();
-    rt.lua.pushBoolean(alt_screen);
-    rt.lua.setField(-2, "alt_screen");
-
-    if (state.getPaneProc(pane.uuid)) |proc_info| {
-        if (proc_info.name) |name| {
-            _ = rt.lua.pushString(name);
-            rt.lua.setField(-2, "process_name");
-            _ = rt.lua.pushString(name);
-            rt.lua.setField(-2, "fg_process");
-            rt.lua.pushBoolean(true);
-            rt.lua.setField(-2, "process_running");
-        }
-        if (proc_info.pid) |pid| {
-            rt.lua.pushInteger(pid);
-            rt.lua.setField(-2, "fg_pid");
-        }
-    } else {
-        rt.lua.pushBoolean(false);
-        rt.lua.setField(-2, "process_running");
-    }
-
-    if (state.getPaneShell(pane.uuid)) |shell_info| {
-        if (shell_info.cwd) |cwd| {
-            _ = rt.lua.pushString(cwd);
-            rt.lua.setField(-2, "cwd");
-        }
-        if (shell_info.cmd) |cmd| {
-            _ = rt.lua.pushString(cmd);
-            rt.lua.setField(-2, "last_command");
-        }
-        rt.lua.pushBoolean(shell_info.running);
-        rt.lua.setField(-2, "shell_running");
-    }
-}
-
-fn appendPaneApiEntry(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: bool, tab_index: usize, pane_index: usize, tab_focus_slot: ?usize) void {
-    pushPaneLuaTable(rt, state, pane, is_focused, tab_index, pane_index);
-
-    rt.lua.pushValue(-1);
-    rt.lua.rawSetIndex(-5, @intCast(pane_index));
-
-    _ = rt.lua.pushString(pane.uuid[0..]);
-    rt.lua.pushValue(-2);
-    rt.lua.setTable(-5);
-
-    if (tab_focus_slot) |slot| {
-        rt.lua.pushValue(-1);
-        rt.lua.rawSetIndex(-3, @intCast(slot));
-    }
-
-    if (is_focused) {
-        rt.lua.pushValue(-1);
-        rt.lua.setGlobal("__hexe_when_pane0");
-    }
-
-    rt.lua.pop(1);
-}
-
-fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuery) void {
-    rt.lua.createTable(0, 20);
-
-    rt.lua.pushBoolean(query.is_split);
-    rt.lua.setField(-2, "focus_split");
-    rt.lua.pushBoolean(query.is_float);
-    rt.lua.setField(-2, "focus_float");
-
-    rt.lua.pushBoolean(query.is_float);
-    rt.lua.setField(-2, "is_float");
-    rt.lua.pushBoolean(query.is_split);
-    rt.lua.setField(-2, "is_split");
-    rt.lua.pushBoolean(query.alt_screen);
-    rt.lua.setField(-2, "alt_screen");
-    rt.lua.pushBoolean(query.shell_running);
-    rt.lua.setField(-2, "shell_running");
-    rt.lua.pushBoolean(query.fg_process != null);
-    rt.lua.setField(-2, "process_running");
-    rt.lua.pushBoolean(query.is_float and query.float_key == 0);
-    rt.lua.setField(-2, "adhoc_float");
-
-    rt.lua.pushInteger(query.float_key);
-    rt.lua.setField(-2, "float_key");
-    rt.lua.pushInteger(query.tab_count);
-    rt.lua.setField(-2, "tab_count");
-    rt.lua.pushInteger(query.active_tab);
-    rt.lua.setField(-2, "active_tab");
-    rt.lua.pushInteger(query.jobs);
-    rt.lua.setField(-2, "jobs");
-    rt.lua.pushInteger(@intCast(query.now_ms));
-    rt.lua.setField(-2, "now_ms");
-
-    if (query.fg_process) |p| {
-        _ = rt.lua.pushString(p);
-        rt.lua.setField(-2, "fg_process");
-        _ = rt.lua.pushString(p);
-        rt.lua.setField(-2, "process_name");
-    }
-    if (query.fg_pid) |pid| {
-        rt.lua.pushInteger(pid);
-        rt.lua.setField(-2, "fg_pid");
-    }
-
-    var env_map_opt = std.process.getEnvMap(rt.allocator) catch |err| blk: {
-        core.logging.logError("terminal", "keybind Lua query failed to copy environment", err);
-        break :blk null;
-    };
-    if (env_map_opt) |*env_map| {
-        defer env_map.deinit();
-        rt.lua.createTable(0, @intCast(env_map.count()));
-        var it = env_map.iterator();
-        while (it.next()) |entry| {
-            _ = rt.lua.pushString(entry.key_ptr.*);
-            _ = rt.lua.pushString(entry.value_ptr.*);
-            rt.lua.setTable(-3);
-        }
-        rt.lua.setField(-2, "env");
-    } else {
-        rt.lua.createTable(0, 0);
-        rt.lua.setField(-2, "env");
-    }
-
-    // Build pane lookup maps: numeric index, uuid, and tab focus.
-    rt.lua.createTable(0, 64); // index map (1-based)
-    rt.lua.createTable(0, 64); // uuid map
-    rt.lua.createTable(0, 32); // tab:N/focus map (1-based tabs)
-
-    rt.lua.pushValue(-3);
-    rt.lua.setGlobal("__hexe_when_pane0");
-
-    const focused_uuid = state.getCurrentFocusedUuid();
-    const previous_focused_uuid = last_focused_pane_uuid;
-    if (focused_uuid) |fu| {
-        if (previous_focused_uuid == null or !std.mem.eql(u8, &previous_focused_uuid.?, &fu)) {
-            last_focused_pane_uuid = fu;
-        }
-    }
-    var pane_index: usize = 1;
-
-    for (state.view.tab_views.items, 0..) |*tab, tab_idx| {
-        const tab_focused_uuid = if (tab.layout.getFocusedPane()) |fp| fp.uuid else null;
-        var pane_it = tab.layout.splitIterator();
-        while (pane_it.next()) |pane| {
-            const is_focused = if (focused_uuid) |fu|
-                std.mem.eql(u8, &pane.*.uuid, &fu)
-            else
-                false;
-            const tab_focus_slot: ?usize = if (tab_focused_uuid) |tfu|
-                if (std.mem.eql(u8, &pane.*.uuid, &tfu)) (tab_idx + 1) else null
-            else
-                null;
-            appendPaneApiEntry(rt, state, pane.*, is_focused, tab_idx, pane_index, tab_focus_slot);
-            pane_index += 1;
-        }
-    }
-
-    for (state.view.float_views.items) |pane| {
-        const is_focused = if (focused_uuid) |fu|
-            std.mem.eql(u8, &pane.uuid, &fu)
-        else
-            false;
-        const tab_idx = state.paneParentTab(pane) orelse state.activeTabIndex();
-        appendPaneApiEntry(rt, state, pane, is_focused, tab_idx, pane_index, null);
-        pane_index += 1;
-    }
-
-    rt.lua.pushValue(-3);
-    rt.lua.setField(-5, "panes");
-
-    rt.lua.pushValue(-2);
-    rt.lua.setGlobal("__hexe_panes_by_uuid");
-    rt.lua.pushValue(-3);
-    rt.lua.setGlobal("__hexe_panes_by_index");
-    rt.lua.pushValue(-1);
-    rt.lua.setGlobal("__hexe_panes_by_tab_focus");
-
-    if (previous_focused_uuid) |pu| {
-        _ = rt.lua.pushString(pu[0..]);
-        rt.lua.setGlobal("__hexe_last_pane_uuid");
-    } else {
-        rt.lua.pushNil();
-        rt.lua.setGlobal("__hexe_last_pane_uuid");
-    }
-
-    rt.lua.pop(3);
-
-    // Expose pragmatic pane API: ctx.pane(0)
-    rt.lua.pushValue(-1);
-    rt.lua.setGlobal("ctx");
-
-    const status_api =
-        "if type(ctx)=='table' then " ++
-        "ctx.pane=function(id) " ++
-        "if id==nil or id==0 then return __hexe_when_pane0 end " ++
-        "local t=type(id); " ++
-        "if t=='number' then return __hexe_panes_by_index[id] end; " ++
-        "if t=='string' then " ++
-        "if id=='focused' or id=='current' then return __hexe_when_pane0 end; " ++
-        "if id=='last' and __hexe_last_pane_uuid then return __hexe_panes_by_uuid[__hexe_last_pane_uuid] end; " ++
-        "local n=string.match(id,'^tab:(%d+)/focus$'); " ++
-        "if n then return __hexe_panes_by_tab_focus[tonumber(n)] end; " ++
-        "return __hexe_panes_by_uuid[id] end; " ++
-        "return nil end; " ++
-        "__hexe_ctx_cache=__hexe_ctx_cache or {}; " ++
-        "ctx.cache = ctx.cache or {}; " ++
-        "ctx.cache.get=function(key) " ++
-        "local k=tostring(key); local e=__hexe_ctx_cache[k]; if not e then return nil end; " ++
-        "local now=(ctx.now_ms or 0); if e.exp and e.exp < now then __hexe_ctx_cache[k]=nil; return nil end; " ++
-        "return e.val end; " ++
-        "ctx.cache.set=function(key,val,ttl_ms) " ++
-        "local k=tostring(key); local exp=nil; " ++
-        "if ttl_ms and type(ttl_ms)=='number' and ttl_ms>0 then exp=(ctx.now_ms or 0)+ttl_ms end; " ++
-        "__hexe_ctx_cache[k]={ val=val, exp=exp }; return val end; " ++
-        "ctx.cache.del=function(key) __hexe_ctx_cache[tostring(key)]=nil end; " ++
-        "ctx.status = ctx.pane(0); " ++
-        "end; " ++
-        "if type(hexe)=='table' then " ++
-        "hexe.status=hexe.status or {}; " ++
-        "hexe.status.pane=ctx.pane; " ++
-        "end";
-    const status_api_z = rt.allocator.dupeZ(u8, status_api) catch |err| {
-        core.logging.logError("terminal", "failed to allocate status Lua API", err);
-        return;
-    };
-    defer rt.allocator.free(status_api_z);
-    rt.lua.loadString(status_api_z) catch |err| {
-        core.logging.logError("terminal", "failed to load status Lua API", err);
-        return;
-    };
-    rt.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
-        rt.lua.pop(1);
-        return;
-    };
-
-    rt.lua.setGlobal("ctx");
-}
-
-fn matchesLuaWhen(state: *State, query: *const PaneQuery, w: core.config.WhenDef) bool {
-    const code = w.lua orelse return true;
+/// Evaluate a bind's condition.
+///
+/// A condition is a Lua predicate invoked with the live query API bound. The
+/// old path built a whole context table first — every pane in every tab, the
+/// entire process environment, and a compiled Lua chunk to define `ctx.pane` —
+/// on every evaluation of every candidate bind. Now the callback is handed
+/// accessor functions and pays only for what it reads.
+fn matchesWhen(state: *State, when: ?[]const u8) bool {
+    const code = when orelse return true; // No condition = always matches.
     const trace_start_ms = std.time.milliTimestamp();
+
     const callback_id = callbackIdFromCode(code) orelse {
         traceLuaEval("keybind.when", code, false, trace_start_ms);
         return false;
@@ -531,17 +167,19 @@ fn matchesLuaWhen(state: *State, query: *const PaneQuery, w: core.config.WhenDef
         return false;
     };
 
-    populateWhenLuaContext(state, rt, query);
+    // The accessors read this pointer; it must not outlive the call.
+    const scope = lua_api.pushLiveState(rt, state, .predicate);
+    defer lua_api.popLiveState(rt, scope);
 
     if (!core.lua_runtime.pushRegisteredCallback(rt, callback_id)) {
         traceLuaEval("keybind.when", code, false, trace_start_ms);
         return false;
     }
-    _ = rt.lua.getGlobal("ctx") catch {
+    if (!lua_api.pushCallbackContext(rt)) {
         rt.lua.pop(2);
         traceLuaEval("keybind.when", code, false, trace_start_ms);
         return false;
-    };
+    }
 
     rt.lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
         rt.lua.pop(2);
@@ -553,13 +191,24 @@ fn matchesLuaWhen(state: *State, query: *const PaneQuery, w: core.config.WhenDef
         rt.lua.pop(1); // callback table
     }
 
-    if (rt.lua.typeOf(-1) != .boolean) {
-        traceLuaEval("keybind.when", code, false, trace_start_ms);
-        return false;
-    }
-    const ok = rt.lua.toBoolean(-1);
+    // Lua truthiness, not "is a boolean": the previous check rejected every
+    // non-boolean, so `when = function() return hexe.pane() end` was false.
+    const ty = rt.lua.typeOf(-1);
+    const ok = switch (ty) {
+        .nil, .none => false,
+        .boolean => rt.lua.toBoolean(-1),
+        else => true,
+    };
     traceLuaEval("keybind.when", code, true, trace_start_ms);
     return ok;
+}
+
+fn callbackIdFromCode(code: []const u8) ?i32 {
+    if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
+    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch |err| {
+        log.warn("failed to parse keybind callback id: {}", .{err});
+        return null;
+    };
 }
 
 fn keyEq(a: BindKey, b: BindKey) bool {
@@ -568,7 +217,7 @@ fn keyEq(a: BindKey, b: BindKey) bool {
     return true;
 }
 
-fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_tabs: bool, query: *const PaneQuery) ?core.Config.Bind {
+fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_tabs: bool) ?core.Config.Bind {
     const cfg = &state.config;
 
     var best: ?core.Config.Bind = null;
@@ -580,7 +229,7 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
         if (b.on != on) continue;
         if (b.mods != mods) continue;
         if (!keyEq(b.key, key)) continue;
-        const when_match = matchesWhen(state, b.when, query);
+        const when_match = matchesWhen(state, b.when);
         if (!when_match) continue;
 
         if (allow_only_tabs) {
@@ -716,7 +365,6 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
 
 pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, allow_only_tabs: bool) bool {
     const cfg = &state.config;
-    const query = buildPaneQuery(state);
     const focus_ctx = currentFocusContext(state);
     const now_ms = std.time.milliTimestamp();
 
@@ -729,9 +377,9 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
     };
 
     return switch (when) {
-        .release => handleReleaseEvent(state, cfg, &query, mods_eff, key, allow_only_tabs, focus_ctx, now_ms),
-        .repeat => handleRepeatEvent(state, &query, mods_eff, key, allow_only_tabs, focus_ctx, now_ms),
-        .press => handlePressEvent(state, cfg, &query, mods_eff, key, allow_only_tabs, focus_ctx, now_ms),
+        .release => handleReleaseEvent(state, cfg, mods_eff, key, allow_only_tabs, focus_ctx, now_ms),
+        .repeat => handleRepeatEvent(state, mods_eff, key, allow_only_tabs, focus_ctx, now_ms),
+        .press => handlePressEvent(state, cfg, mods_eff, key, allow_only_tabs, focus_ctx, now_ms),
         .hold => false,
     };
 }
@@ -774,7 +422,7 @@ fn consumeHoldPendingTimer(state: *State, mods_eff: u8, key: BindKey) HoldPendin
     return info;
 }
 
-fn handleReleaseEvent(state: *State, cfg: *const core.Config, query: *const PaneQuery, mods_eff: u8, key: BindKey, allow_only_tabs: bool, focus_ctx: FocusContext, now_ms: i64) bool {
+fn handleReleaseEvent(state: *State, cfg: *const core.Config, mods_eff: u8, key: BindKey, allow_only_tabs: bool, focus_ctx: FocusContext, now_ms: i64) bool {
     if (consumeHoldFiredTimer(state, mods_eff, key)) return true;
 
     const pending = consumeHoldPendingTimer(state, mods_eff, key);
@@ -790,7 +438,7 @@ fn handleReleaseEvent(state: *State, cfg: *const core.Config, query: *const Pane
             return true;
         }
 
-        const maybe_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs, query);
+        const maybe_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs);
         if (duration_ms >= cfg.input.tap_ms) {
             main.debugLog("release: TAP (duration >= {d}ms)", .{cfg.input.tap_ms});
             if (maybe_bind) |b| {
@@ -809,7 +457,7 @@ fn handleReleaseEvent(state: *State, cfg: *const core.Config, query: *const Pane
         return true;
     }
 
-    if (findBestBind(state, mods_eff, key, .release, allow_only_tabs, query)) |b| {
+    if (findBestBind(state, mods_eff, key, .release, allow_only_tabs)) |b| {
         return dispatchBindWithMode(state, b, mods_eff, key);
     }
     return true;
@@ -830,18 +478,18 @@ fn touchRepeatActiveTimer(state: *State, mods_eff: u8, key: BindKey, focus_ctx: 
     }
 }
 
-fn handleRepeatEvent(state: *State, query: *const PaneQuery, mods_eff: u8, key: BindKey, allow_only_tabs: bool, focus_ctx: FocusContext, now_ms: i64) bool {
+fn handleRepeatEvent(state: *State, mods_eff: u8, key: BindKey, allow_only_tabs: bool, focus_ctx: FocusContext, now_ms: i64) bool {
     cancelTimer(state, .hold, mods_eff, key);
     cancelTimer(state, .hold_fired, mods_eff, key);
     touchRepeatActiveTimer(state, mods_eff, key, focus_ctx, now_ms);
 
-    if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs, query)) |b| {
+    if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs)) |b| {
         return dispatchBindWithMode(state, b, mods_eff, key);
     }
     if (mods_eff != 0) {
-        const has_press = findBestBind(state, mods_eff, key, .press, false, query) != null;
-        const has_hold = findBestBind(state, mods_eff, key, .hold, false, query) != null;
-        const has_release = findBestBind(state, mods_eff, key, .release, false, query) != null;
+        const has_press = findBestBind(state, mods_eff, key, .press, false) != null;
+        const has_hold = findBestBind(state, mods_eff, key, .hold, false) != null;
+        const has_release = findBestBind(state, mods_eff, key, .release, false) != null;
         if (has_press or has_hold or has_release) return true;
         return false;
     }
@@ -885,7 +533,7 @@ fn consumeTapPending(state: *State, mods_eff: u8, key: BindKey) bool {
     return had_tap_pending;
 }
 
-fn handlePressEvent(state: *State, cfg: *const core.Config, query: *const PaneQuery, mods_eff: u8, key: BindKey, allow_only_tabs: bool, focus_ctx: FocusContext, now_ms: i64) bool {
+fn handlePressEvent(state: *State, cfg: *const core.Config, mods_eff: u8, key: BindKey, allow_only_tabs: bool, focus_ctx: FocusContext, now_ms: i64) bool {
     if (mods_eff == 3 and @as(BindKeyKind, key) == .char) {
         main.debugLog("press: Ctrl+Alt+{c} (0x{x})", .{ key.char, key.char });
     }
@@ -903,10 +551,10 @@ fn handlePressEvent(state: *State, cfg: *const core.Config, query: *const PaneQu
     }
 
     if (mods_eff != 0) {
-        const press_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs, query);
+        const press_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs);
         const has_press = press_bind != null;
-        const has_hold = findBestBind(state, mods_eff, key, .hold, allow_only_tabs, query) != null;
-        const has_release = findBestBind(state, mods_eff, key, .release, allow_only_tabs, query) != null;
+        const has_hold = findBestBind(state, mods_eff, key, .hold, allow_only_tabs) != null;
+        const has_release = findBestBind(state, mods_eff, key, .release, allow_only_tabs) != null;
 
         if (!has_press and !has_hold and !has_release) return false;
 
@@ -917,7 +565,7 @@ fn handlePressEvent(state: *State, cfg: *const core.Config, query: *const PaneQu
         }
 
         main.debugLog("press defer: mods_eff={d} key={any}", .{ mods_eff, key });
-        if (findBestBind(state, mods_eff, key, .hold, allow_only_tabs, query)) |hb| {
+        if (findBestBind(state, mods_eff, key, .hold, allow_only_tabs)) |hb| {
             const hold_ms = hb.hold_ms orelse cfg.input.hold_ms;
             cancelTimer(state, .hold, mods_eff, key);
             cancelTimer(state, .hold_fired, mods_eff, key);
@@ -929,7 +577,7 @@ fn handlePressEvent(state: *State, cfg: *const core.Config, query: *const PaneQu
         return true;
     }
 
-    if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, query)) |b| {
+    if (findBestBind(state, mods_eff, key, .press, allow_only_tabs)) |b| {
         return dispatchBindWithMode(state, b, mods_eff, key);
     }
     return false;

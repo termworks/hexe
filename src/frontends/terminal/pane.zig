@@ -97,7 +97,6 @@ pub const Pane = struct {
     focused: bool = false,
     // Tracks whether we saw a clear-screen sequence in the last output.
     did_clear: bool = false,
-    last_reported_password_input: bool = false,
     // Keep last bytes so we can detect escape sequences across boundaries.
     esc_tail: [3]u8 = .{ 0, 0, 0 },
     esc_tail_len: u8 = 0,
@@ -207,7 +206,6 @@ pub const Pane = struct {
         try self.vt.init(self.allocator, self.width, self.height);
 
         self.did_clear = false;
-        self.last_reported_password_input = false;
         self.esc_tail = .{ 0, 0, 0 };
         self.esc_tail_len = 0;
         self.osc_in_progress = false;
@@ -232,11 +230,6 @@ pub const Pane = struct {
     pub fn feedPodOutput(self: *Pane, data: []const u8) void {
         self.did_clear = false;
         pane_output.feedOutput(self, data);
-        const password_input = self.vt.terminal.flags.password_input;
-        if (password_input != self.last_reported_password_input) {
-            self.sendPasswordModeToPod(password_input);
-            self.last_reported_password_input = password_input;
-        }
     }
 
     /// Write input to backend.
@@ -263,10 +256,6 @@ pub const Pane = struct {
 
     pub fn isAlive(self: *Pane) bool {
         return !self.backend.pod.dead;
-    }
-
-    pub fn getTerminal(self: *Pane) *ghostty.Terminal {
-        return &self.vt.terminal;
     }
 
     /// Get a stable snapshot of the viewport for rendering.
@@ -346,20 +335,6 @@ pub const Pane = struct {
         return !self.vt.terminal.screens.active.viewportIsBottom();
     }
 
-    /// Show a notification on this pane
-    pub fn showNotification(self: *Pane, message: []const u8) void {
-        if (self.notifications_initialized) {
-            self.notifications.show(message);
-        }
-    }
-
-    /// Show a notification with custom duration
-    pub fn showNotificationFor(self: *Pane, message: []const u8, duration_ms: i64) void {
-        if (self.notifications_initialized) {
-            self.notifications.showFor(message, duration_ms);
-        }
-    }
-
     /// Update notifications (call each frame)
     pub fn updateNotifications(self: *Pane) bool {
         if (self.notifications_initialized) {
@@ -384,14 +359,6 @@ pub const Pane = struct {
         return false;
     }
 
-    /// Configure notifications from config
-    pub fn configureNotifications(self: *Pane, cfg: anytype) void {
-        if (self.notifications_initialized) {
-            self.notifications.default_style = pop.notification.Style.fromConfig(cfg);
-            self.notifications.default_duration_ms = @intCast(cfg.duration_ms);
-        }
-    }
-
     /// Configure notifications from pop.NotificationStyle config
     pub fn configureNotificationsFromPop(self: *Pane, cfg: anytype) void {
         if (self.notifications_initialized) {
@@ -407,15 +374,6 @@ pub const Pane = struct {
         const frame_type = @intFromEnum(pod_protocol.FrameType.resize);
         queuePodFrame(pod.pane_id, pod.vt_fd, frame_type, &payload) catch |err| {
             core.logging.logError("terminal", "pane resize mux write failed", err);
-        };
-    }
-
-    fn sendPasswordModeToPod(self: *Pane, enabled: bool) void {
-        const pod = self.backend.pod;
-        const payload = [_]u8{@intFromBool(enabled)};
-        const frame_type = @intFromEnum(pod_protocol.FrameType.password_mode);
-        queuePodFrame(pod.pane_id, pod.vt_fd, frame_type, &payload) catch |err| {
-            core.logging.logError("terminal", "pane password-mode mux write failed", err);
         };
     }
 };

@@ -10,6 +10,32 @@ const ses = @import("main.zig");
 const server = @import("server.zig");
 const Server = server.Server;
 
+/// Forward a pod event to the mux that owns the pane.
+///
+/// `cwd_changed` and `fg_changed` used to stop here: SES recorded them and
+/// returned, so a frontend only learned a pane's cwd or foreground process by
+/// asking (`pane_info`), which it does every tick for the FOCUSED pane and once
+/// at attach for the rest. Background panes therefore reported whatever was
+/// true when they were attached, forever.
+fn forwardToOwningMux(
+    self: *Server,
+    uuid: [32]u8,
+    msg_type: wire.MsgType,
+    fixed: []const u8,
+    trail: []const u8,
+) void {
+    const pane = self.ses_state.store.panes.get(uuid) orelse return;
+    const client_id = pane.attached_to orelse return;
+    const client = self.ses_state.getClient(client_id) orelse return;
+    const mux_fd = client.mux_ctl_fd orelse return;
+
+    const trails: []const []const u8 = &.{trail};
+    wire.writeControlMsgTimeout(mux_fd, msg_type, fixed, trails, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        core.logging.warnWithSource("ses", "{s} forward failed: fd={d} err={s}", .{ @tagName(msg_type), mux_fd, @errorName(err) }, @src());
+        self.queueCtlClose(mux_fd, null);
+    };
+}
+
 pub fn handleBinaryCwdChanged(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.CwdChanged)) {
         self.skipPayloadRest();
@@ -47,6 +73,8 @@ pub fn handleBinaryCwdChanged(self: *Server, fd: posix.fd_t, payload_len: u32, b
         pane.cwd = new_cwd;
         self.ses_state.markDirty();
     }
+
+    forwardToOwningMux(self, cc.uuid, .cwd_changed, std.mem.asBytes(&cc), buf[0..cc.cwd_len]);
 }
 
 pub fn handleBinaryFgChanged(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -87,6 +115,8 @@ pub fn handleBinaryFgChanged(self: *Server, fd: posix.fd_t, payload_len: u32, bu
         pane.fg_process = new_fg_process;
         self.ses_state.markDirty();
     }
+
+    forwardToOwningMux(self, fc.uuid, .fg_changed, std.mem.asBytes(&fc), buf[0..fc.name_len]);
 }
 
 pub fn handleBinaryShellEvent(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {

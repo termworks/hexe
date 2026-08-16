@@ -128,8 +128,23 @@ def plain(text):
     return text
 
 
+_screen_src = open(os.path.join(REPO, "scripts/smoke_float_content.py")).read()
+_screen_ns = {}
+exec("import re\nROWS,COLS=40,120\n"
+     + _screen_src[_screen_src.index("class Screen:"):_screen_src.index("m, sl = pty.openpty()")],
+     _screen_ns)
+
+
 def wait_for_text(fd, needle, timeout_s):
-    """Accumulate output until `needle` shows up in the escape-stripped text."""
+    """Accumulate output until `needle` shows up on the RECONSTRUCTED screen.
+
+    Escape-stripped concatenation is not enough. The frontend paints vaxis cell
+    diffs, so a blank cell is a cursor move rather than a space byte: a screen
+    reading "local layout loaded" reaches the pty as "local layoutloaded" and a
+    substring match misses it. That made this test fail ~1 run in 3 under load
+    while the product was fine.
+    """
+    screen = _screen_ns["Screen"]()
     deadline = time.time() + timeout_s
     buf = b""
     while time.time() < deadline:
@@ -143,7 +158,8 @@ def wait_for_text(fd, needle, timeout_s):
                 break
             buf += chunk
             log.write(chunk)
-            if needle in plain(buf.decode("utf-8", "replace")):
+            screen.feed(chunk)
+            if needle in plain(buf.decode("utf-8", "replace")) or needle in screen.text():
                 log.flush()
                 return True, plain(buf.decode("utf-8", "replace"))
     log.flush()

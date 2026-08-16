@@ -81,6 +81,9 @@ pub const TerminalViewState = struct {
 pub const PendingFloatRequest = struct {
     result_path: ?[]u8,
     cursor_snapshot: ?CursorSnapshot = null,
+    /// The `float_request` control-header id SES is waiting on. Echoed back on
+    /// `float_result` so SES can tell concurrent callers apart.
+    ses_request_id: u32 = 0,
 };
 
 pub const CursorSnapshot = struct {

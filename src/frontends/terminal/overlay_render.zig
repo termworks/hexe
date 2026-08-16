@@ -1,5 +1,4 @@
 const std = @import("std");
-const shp = @import("shp");
 const core = @import("core");
 const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
@@ -299,7 +298,7 @@ fn calculateCornerPosition(
         .center => .{ .x = screen_width / 2 -| box_width / 2, .y = screen_height / 2 -| box_height / 2 },
     };
 }
-fn textStyle(fg: core.style.Color, bg: core.style.Color, bold: bool) shp.Style {
+fn textStyle(fg: core.style.Color, bg: core.style.Color, bold: bool) core.style.Style {
     return .{
         .fg = switch (fg) {
             .none => .none,

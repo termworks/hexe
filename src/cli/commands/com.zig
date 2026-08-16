@@ -140,7 +140,7 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool, d
         if (filter_abs) |f| print("Directory: {s}\n", .{f});
     }
 
-    const fd = connectSesCliChannel(allocator) orelse return;
+    const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
     // Send status request with full_mode flag. Full mode makes the daemon
@@ -151,33 +151,33 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool, d
     const flag: [1]u8 = .{if (full_mode) @as(u8, 1) else @as(u8, 0)};
     wire.writeControl(fd, .status, &flag) catch |err| {
         print("Error: failed to request session status: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     // Read response
     const hdr = wire.readControlHeader(fd) catch |err| {
         print("Error: failed to read session status response: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .status or hdr.payload_len < @sizeOf(wire.StatusResp)) {
         print("Invalid response from daemon\n", .{});
-        return;
+        std.process.exit(1);
     }
     if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
         print("Status response too large\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     // Read the entire payload into a buffer
     const payload = allocator.alloc(u8, hdr.payload_len) catch {
         print("Allocation failed\n", .{});
-        return;
+        std.process.exit(1);
     };
     defer allocator.free(payload);
     wire.readExact(fd, payload) catch |err| {
         print("Error: failed to read session status payload: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     var off: usize = 0;
@@ -264,7 +264,7 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool, d
             if (pname.len > 0) {
                 pane_names.put(pe.uuid, pname) catch |err| {
                     print("Error: failed to build pane name map: {s}\n", .{@errorName(err)});
-                    return;
+                    std.process.exit(1);
                 };
             }
         }
@@ -482,7 +482,7 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
     if (uuid_arg.len > 0) {
         target_uuid = parseUuid32Hex(uuid_arg) orelse {
             print("Invalid UUID\n", .{});
-            return;
+            std.process.exit(1);
         };
     } else if (show_creator or show_last) {
         if (resolveRelatedPane(allocator, show_creator)) |resolved| {
@@ -491,43 +491,43 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
     } else {
         const env_uuid = posix.getenv("HEXE_PANE_UUID") orelse {
             print("Not inside a hexe terminal session (use --uuid to query a specific pane)\n", .{});
-            return;
+            std.process.exit(1);
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
             print("Invalid HEXE_PANE_UUID\n", .{});
-            return;
+            std.process.exit(1);
         };
     }
 
     // Query SES for pane info via binary protocol
-    const fd = connectSesCliChannel(allocator) orelse return;
+    const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
     var pu: wire.PaneUuid = undefined;
     pu.uuid = target_uuid;
     wire.writeControl(fd, .pane_info, std.mem.asBytes(&pu)) catch |err| {
         print("Error: failed to request pane info: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     // Read response
     const hdr = wire.readControlHeader(fd) catch |err| {
         print("Error: failed to read pane info response: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type == .pane_not_found) {
         print("Pane not found\n", .{});
-        return;
+        std.process.exit(1);
     }
     if (msg_type != .pane_info or hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
         print("Invalid response from daemon\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const resp = wire.readStruct(wire.PaneInfoResp, fd) catch |err| {
         print("Error: failed to read pane info payload: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     // Read trailing data
@@ -535,12 +535,12 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
     var trail_buf: [8192]u8 = undefined;
     if (trail_len > trail_buf.len) {
         print("Invalid response from daemon (pane_info payload too large)\n", .{});
-        return;
+        std.process.exit(1);
     }
     if (trail_len > 0) {
         wire.readExact(fd, trail_buf[0..trail_len]) catch |err| {
             print("Error: failed to read pane info trail: {s}\n", .{@errorName(err)});
-            return;
+            std.process.exit(1);
         };
     }
 
@@ -548,61 +548,61 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
     var off: usize = 0;
     if (off + resp.name_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     const name = trail_buf[off .. off + resp.name_len];
     off += resp.name_len;
     if (off + resp.fg_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     const fg_process = trail_buf[off .. off + resp.fg_len];
     off += resp.fg_len;
     if (off + resp.cwd_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     const cwd_str = trail_buf[off .. off + resp.cwd_len];
     off += resp.cwd_len;
     if (off + resp.tty_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     const tty_str = trail_buf[off .. off + resp.tty_len];
     off += resp.tty_len;
     if (off + resp.socket_path_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     const socket_path = trail_buf[off .. off + resp.socket_path_len];
     off += resp.socket_path_len;
     if (off + resp.session_name_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     const session_name = trail_buf[off .. off + resp.session_name_len];
     off += resp.session_name_len;
     if (off + resp.layout_path_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     const layout_path = trail_buf[off .. off + resp.layout_path_len];
     off += resp.layout_path_len;
     if (off + resp.last_cmd_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     const last_cmd = trail_buf[off .. off + resp.last_cmd_len];
     off += resp.last_cmd_len;
     if (off + resp.base_process_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     const base_process = trail_buf[off .. off + resp.base_process_len];
     off += resp.base_process_len;
     if (off + resp.sticky_pwd_len > trail_len) {
         print("Invalid response from daemon (malformed pane_info payload)\n", .{});
-        return;
+        std.process.exit(1);
     }
     _ = trail_buf[off .. off + resp.sticky_pwd_len]; // sticky_pwd (not displayed currently)
 
@@ -683,7 +683,7 @@ pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, 
     if (uuid.len > 0) {
         target_uuid = parseUuid32Hex(uuid) orelse {
             print("Error: --uuid must be 32 hex chars\n", .{});
-            return;
+            std.process.exit(1);
         };
         has_target = true;
     } else if (creator or last) {
@@ -694,16 +694,16 @@ pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, 
     } else if (!broadcast) {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
             print("Error: no target (use --uuid, --creator, --last, --broadcast, or run inside mux)\n", .{});
-            return;
+            std.process.exit(1);
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
             print("Error: invalid HEXE_PANE_UUID\n", .{});
-            return;
+            std.process.exit(1);
         };
         has_target = true;
     }
 
-    const fd = connectSesCliChannel(allocator) orelse return;
+    const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
     if (has_target) {
@@ -736,6 +736,11 @@ pub fn connectSesCliChannel(allocator: std.mem.Allocator) ?std.posix.fd_t {
     var client = ipc.Client.connect(socket_path) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("ses daemon is not running\n", .{});
+        } else {
+            // Anything else (PermissionDenied on the socket, ENOENT on a stale
+            // runtime dir, timeout) used to return null with nothing printed,
+            // so the command died mute.
+            print("Error: cannot connect to ses daemon: {s}\n", .{@errorName(err)});
         }
         return null;
     };
@@ -961,12 +966,12 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
             data_len = 1;
         } else {
             print("Error: --ctrl requires a single letter (a-z)\n", .{});
-            return;
+            std.process.exit(1);
         }
     } else if (text.len > 0) {
         if (text.len > data_buf.len - 1) {
             print("Error: text too long\n", .{});
-            return;
+            std.process.exit(1);
         }
         @memcpy(data_buf[0..text.len], text);
         data_len = text.len;
@@ -979,7 +984,7 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
 
     if (data_len == 0) {
         print("Error: no data to send (use text argument, --ctrl, or --enter)\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     var target_uuid: [32]u8 = .{0} ** 32;
@@ -987,7 +992,7 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
     if (uuid.len > 0) {
         target_uuid = parseUuid32Hex(uuid) orelse {
             print("Error: --uuid must be 32 hex chars\n", .{});
-            return;
+            std.process.exit(1);
         };
     } else if (creator or last) {
         if (resolveRelatedPane(allocator, creator)) |resolved| {
@@ -998,15 +1003,15 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
             print("Error: no target specified (use --uuid, --creator, --last, --broadcast, or run inside mux)\n", .{});
-            return;
+            std.process.exit(1);
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
             print("Error: invalid HEXE_PANE_UUID\n", .{});
-            return;
+            std.process.exit(1);
         };
     }
 
-    const fd = connectSesCliChannel(allocator) orelse return;
+    const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
     const sk = wire.SendKeys{
@@ -1036,19 +1041,19 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
         3
     else {
         print("Error: invalid dir (use left/right/up/down)\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     const ses_path = ipc.getSesSocketPath(allocator) catch {
         print("Error: cannot determine ses socket path\n", .{});
-        return;
+        std.process.exit(1);
     };
     defer allocator.free(ses_path);
 
     var client = ipc.Client.connect(ses_path) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("ses is not running\n", .{});
-            return;
+            std.process.exit(1);
         }
         return err;
     };
@@ -1057,17 +1062,17 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
 
     const pane_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
         print("Error: HEXE_PANE_UUID not set (not running inside mux?)\n", .{});
-        return;
+        std.process.exit(1);
     };
     const pane_uuid_arr = parseUuid32Hex(pane_uuid) orelse {
         print("Error: HEXE_PANE_UUID invalid length\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     // Send versioned CLI handshake.
     wire.sendCliHandshake(fd) catch {
         print("Error: handshake failed\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     // Send focus_move message.
@@ -1076,7 +1081,7 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
     fm.dir = dir_byte;
     wire.writeControl(fd, .focus_move, std.mem.asBytes(&fm)) catch {
         print("Error: failed to send focus_move\n", .{});
-        return;
+        std.process.exit(1);
     };
 }
 
@@ -1152,15 +1157,15 @@ pub fn runShellEvent(
 
     if (status < std.math.minInt(i32) or status > std.math.maxInt(i32)) {
         print("Error: status out of range for shell event\n", .{});
-        return;
+        std.process.exit(1);
     }
     if (jobs < 0 or jobs > std.math.maxInt(u16)) {
         print("Error: jobs out of range for shell event\n", .{});
-        return;
+        std.process.exit(1);
     }
     if (cmd.len > std.math.maxInt(u16) or cwd.len > std.math.maxInt(u16)) {
         print("Error: shell event payload too long\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const wire = core.wire;
@@ -1395,33 +1400,33 @@ pub fn runSesKill(allocator: std.mem.Allocator, target: []const u8) !void {
 
     if (target.len == 0) {
         print("Error: session name or UUID prefix required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
-    const fd = connectSesCliChannel(allocator) orelse return;
+    const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
     // Send kill_session request.
     const ks = wire.KillSession{ .id_len = @intCast(target.len) };
     wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&ks), target) catch {
         print("Error: failed to send request\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     // Read response.
     const hdr = wire.readControlHeader(fd) catch {
         print("Error: failed to read response\n", .{});
-        return;
+        std.process.exit(1);
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .kill_session or hdr.payload_len < @sizeOf(wire.KillSessionResult)) {
         print("Error: unexpected response\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const result = wire.readStruct(wire.KillSessionResult, fd) catch {
         print("Error: failed to read result\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     if (result.success != 0) {
@@ -1433,11 +1438,12 @@ pub fn runSesKill(allocator: std.mem.Allocator, target: []const u8) !void {
             const err_len = @min(result.error_len, err_buf.len);
             wire.readExact(fd, err_buf[0..err_len]) catch {
                 print("Error: session not found\n", .{});
-                return;
+                std.process.exit(1);
             };
             print("Error: {s}\n", .{err_buf[0..err_len]});
         } else {
             print("Error: session not found\n", .{});
+            std.process.exit(1);
         }
     }
 }
@@ -1448,35 +1454,75 @@ pub fn runSesClear(allocator: std.mem.Allocator, force: bool) !void {
 
     if (!force) {
         print("Warning: This will kill ALL detached sessions. Use -f to confirm.\n", .{});
-        return;
+        std.process.exit(1);
     }
 
-    const fd = connectSesCliChannel(allocator) orelse return;
+    const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
     // Send clear_sessions request (no payload).
     wire.writeControl(fd, .clear_sessions, &.{}) catch {
         print("Error: failed to send request\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     // Read response.
     const hdr = wire.readControlHeader(fd) catch {
         print("Error: failed to read response\n", .{});
-        return;
+        std.process.exit(1);
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .clear_sessions or hdr.payload_len < @sizeOf(wire.ClearSessionsResult)) {
         print("Error: unexpected response\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const result = wire.readStruct(wire.ClearSessionsResult, fd) catch {
         print("Error: failed to read result\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     print("Killed {d} sessions ({d} panes)\n", .{ result.killed_sessions, result.killed_panes });
+}
+
+/// `hexe ses clear --orphans -f`: kill orphaned and sticky panes that outlived
+/// their session. Distinct from `clear`, which kills detached SESSIONS: a
+/// sticky float survives its session by design, so nothing else reaps it. SES
+/// has handled this request all along; it had no CLI entry point, leaving
+/// orphaned pods only killable by hand.
+pub fn runSesClearOrphans(allocator: std.mem.Allocator, force: bool) !void {
+    const wire = core.wire;
+    const posix = std.posix;
+
+    if (!force) {
+        print("Warning: This will kill ALL orphaned and sticky panes. Use -f to confirm.\n", .{});
+        std.process.exit(1);
+    }
+
+    const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
+    defer posix.close(fd);
+
+    wire.writeControl(fd, .clear_orphaned_panes, &.{}) catch {
+        print("Error: failed to send request\n", .{});
+        std.process.exit(1);
+    };
+
+    const hdr = wire.readControlHeader(fd) catch {
+        print("Error: failed to read response\n", .{});
+        std.process.exit(1);
+    };
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    if (msg_type != .clear_orphaned_panes or hdr.payload_len < @sizeOf(wire.ClearOrphanedPanesResult)) {
+        print("Error: unexpected response\n", .{});
+        std.process.exit(1);
+    }
+
+    const result = wire.readStruct(wire.ClearOrphanedPanesResult, fd) catch {
+        print("Error: failed to read result\n", .{});
+        std.process.exit(1);
+    };
+
+    print("Killed {d} orphaned panes\n", .{result.killed_panes});
 }
 
 /// `hexe terminal kill|close <id>`: kill a whole session (detached or
@@ -1487,31 +1533,31 @@ pub fn runTerminalKill(allocator: std.mem.Allocator, target: []const u8) !void {
 
     if (target.len == 0) {
         print("Error: session name, pane uuid, or uuid prefix required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
-    const fd = connectSesCliChannel(allocator) orelse return;
+    const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
     const kt = wire.KillTarget{ .id_len = @intCast(target.len) };
     wire.writeControlWithTrail(fd, .kill_target, std.mem.asBytes(&kt), target) catch {
         print("Error: failed to send request\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     const hdr = wire.readControlHeader(fd) catch {
         print("Error: failed to read response\n", .{});
-        return;
+        std.process.exit(1);
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .kill_target or hdr.payload_len < @sizeOf(wire.KillTargetResult)) {
         print("Error: unexpected response\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const result = wire.readStruct(wire.KillTargetResult, fd) catch {
         print("Error: failed to read result\n", .{});
-        return;
+        std.process.exit(1);
     };
 
     if (result.success != 0) {
@@ -1527,10 +1573,11 @@ pub fn runTerminalKill(allocator: std.mem.Allocator, target: []const u8) !void {
         const err_len = @min(result.error_len, err_buf.len);
         wire.readExact(fd, err_buf[0..err_len]) catch {
             print("Error: target not found\n", .{});
-            return;
+            std.process.exit(1);
         };
         print("Error: {s}\n", .{err_buf[0..err_len]});
     } else {
         print("Error: target not found\n", .{});
+        std.process.exit(1);
     }
 }

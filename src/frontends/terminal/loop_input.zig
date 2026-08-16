@@ -606,8 +606,9 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
 
                         // Reply to a pending exit_intent request via SES.
                         if (action == .exit_intent) {
-                            loop_ipc.sendExitIntentResultPub(state, confirmed);
+                            loop_ipc.sendExitIntentResultPub(state, confirmed, state.pending_exit_intent_request_id);
                             state.pending_exit_intent = false;
+                            state.pending_exit_intent_request_id = 0;
                         }
                     }
                     state.pending_action = null;
@@ -645,6 +646,32 @@ fn handleTabLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
     return true;
 }
 
+/// Pane-scope popups, checked alongside the mux and tab levels. The only other
+/// place a blocked pane popup gets input is LEVEL 3, which sits *after*
+/// `dispatchParsedEvent` — and dispatch consumes any bound key and every
+/// decoded-but-unmapped event, so a bound 'y'/Escape ran its binding instead of
+/// answering the dialog and the popup waited out its timeout.
+fn handlePaneLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
+    const pane = resolveFocusedPaneForInput(state) orelse return false;
+    if (!pane.popups.isBlocked()) return false;
+    defer freeParsedEventPayload(state, parsed_event);
+
+    // Same escape hatch the tab level allows: tab switching still works.
+    if (parsed_event) |ev_raw| {
+        if (input.keyEventFromVaxisEvent(ev_raw)) |ev| {
+            if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true)) {
+                return true;
+            }
+        }
+    }
+
+    if (handleBlockedPopupInput(&pane.popups, parsed_event)) {
+        loop_ipc.sendPopResponse(state);
+    }
+    state.needs_render = true;
+    return true;
+}
+
 fn appendFloatRenameText(state: *State, text: []const u8) void {
     if (text.len == 0) return;
     const max_len: usize = 64;
@@ -665,6 +692,13 @@ fn handleCopyModeParsedEvent(state: *State, parsed: ParsedEventHead) bool {
     const event = parsed.event orelse return true;
     return switch (event) {
         .mouse => false,
+        // Copy mode ignores pasted text, but the payload is heap-allocated and
+        // the caller only frees what it dispatches -- swallowing it here
+        // without the free leaks the whole paste.
+        .paste => |txt| blk: {
+            state.allocator.free(txt);
+            break :blk true;
+        },
         .key_release => true,
         .key_press => |k| blk: {
             switch (k.codepoint) {
@@ -1358,6 +1392,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
     if (handleMuxLevelPopup(state, popup_event)) return;
     if (handleTabLevelPopup(state, popup_event)) return;
+    if (handlePaneLevelPopup(state, popup_event)) return;
 
     // ==========================================================================
     // LEVEL 2.5: Pane select mode - captures all input

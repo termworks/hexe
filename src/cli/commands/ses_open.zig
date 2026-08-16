@@ -17,17 +17,17 @@ pub fn runSesOpen(
     if (target.len == 0) {
         print("Error: target required (directory path, .lua file, or session name)\n", .{});
         print("Usage: hexe ses open <path-or-name>[:<tab>]\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     // Resolve the config path
     const resolved = session_config.resolveConfigPath(allocator, target) catch |err| {
         print("Error resolving config path: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     } orelse {
         print("Error: config not found for '{s}'\n", .{target});
         print("Looked for .hexe.lua in directory/path or registered layout name in sessions.json\n", .{});
-        return;
+        std.process.exit(1);
     };
     defer allocator.free(resolved.path);
     defer if (resolved.tab_filter) |tf| allocator.free(tf);
@@ -39,7 +39,7 @@ pub fn runSesOpen(
         } else {
             print("Error: failed to parse config: {s}\n", .{@errorName(err)});
         }
-        return;
+        std.process.exit(1);
     };
     defer config.deinit(allocator);
 
@@ -69,7 +69,7 @@ pub fn runSesOpen(
     if (root_path) |rp| {
         std.posix.chdir(rp) catch |err| {
             print("Error: cannot chdir to root '{s}': {s}\n", .{ rp, @errorName(err) });
-            return;
+            std.process.exit(1);
         };
     }
 

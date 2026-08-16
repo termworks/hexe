@@ -264,10 +264,6 @@ pub const FrontendRuntime = struct {
         return self.client.vt_fd;
     }
 
-    pub fn currentCtlFd(self: *FrontendRuntime) ?posix.fd_t {
-        return self.client.ctl_fd;
-    }
-
     pub fn closeVtFdIf(self: *FrontendRuntime, fd: posix.fd_t) bool {
         if (self.client.vt_fd) |live_fd| {
             if (live_fd == fd) {
@@ -567,10 +563,6 @@ pub const FrontendRuntime = struct {
         return count;
     }
 
-    pub fn orphanedPaneCount(self: *const FrontendRuntime) usize {
-        return self.attach_state.adopt_orphan_count;
-    }
-
     pub fn orphanedPaneInfo(self: *const FrontendRuntime, idx: usize) ?OrphanedPaneInfo {
         if (idx >= self.attach_state.adopt_orphan_count) return null;
         return self.attach_state.adopt_orphans[idx];
@@ -656,6 +648,13 @@ pub const FrontendRuntime = struct {
         jobs: ?u16,
     ) void {
         self.projection.setPaneShell(uuid, cmd, cwd, status, duration_ms, jobs);
+        // Mirror to SES. The sender existed with no caller, so SES's copy of
+        // last_cmd/cwd/status stayed null and `hexe com <pane> info` reported
+        // an empty "Last Cmd" for a pane that had run commands all session.
+        if (!self.isConnected()) return;
+        self.client.updatePaneShell(uuid, cmd, cwd, status, duration_ms, jobs) catch |err| {
+            logging.logError("frontend_runtime", "failed to sync pane shell state to ses", err);
+        };
     }
 
     pub fn setPaneShellRunning(
@@ -674,6 +673,10 @@ pub const FrontendRuntime = struct {
         self.projection.clearPaneShellStartedAt(uuid);
     }
 
+    pub fn setPaneSesInfo(self: *FrontendRuntime, uuid: [32]u8, shell_pid: ?i32, ses_state: u8, created_at: i64) void {
+        self.projection.setPaneSesInfo(uuid, shell_pid, ses_state, created_at);
+    }
+
     pub fn setPaneProc(self: *FrontendRuntime, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
         self.projection.setPaneProc(uuid, name, pid);
     }
@@ -688,6 +691,17 @@ pub const FrontendRuntime = struct {
 
     pub fn setPaneNameOwned(self: *FrontendRuntime, uuid: [32]u8, name_owned: []u8) void {
         self.projection.setPaneNameOwned(uuid, name_owned);
+        self.syncPaneNameToSes(uuid, name_owned);
+    }
+
+    /// Mirror a pane name to SES so `hexe com <pane> info` and the session
+    /// snapshot report it. The sender had no caller, so renames stayed local
+    /// to the frontend and were lost on reattach.
+    fn syncPaneNameToSes(self: *FrontendRuntime, uuid: [32]u8, name: ?[]const u8) void {
+        if (!self.isConnected()) return;
+        self.client.updatePaneName(uuid, name) catch |err| {
+            logging.logError("frontend_runtime", "failed to sync pane name to ses", err);
+        };
     }
 
     pub fn paneName(self: *const FrontendRuntime, uuid: [32]u8) ?[]const u8 {
@@ -704,6 +718,7 @@ pub const FrontendRuntime = struct {
 
     pub fn removePaneName(self: *FrontendRuntime, uuid: [32]u8) void {
         self.projection.removePaneName(uuid);
+        self.syncPaneNameToSes(uuid, null);
     }
 
     pub fn applySessionStateJson(self: *FrontendRuntime, session_state_json: []const u8) bool {
@@ -785,8 +800,10 @@ pub const FrontendRuntime = struct {
         );
         try self.projection.replaceAttachedSnapshotOwned(try snapshot.clone(self.allocator));
         logging.debug("frontend-runtime", "replaceProjectionFromSnapshot: attached snapshot replaced", .{});
-        self.client.session_id = self.projection.sessionUuid();
-        self.client.session_name = self.projection.sessionName();
+        // All three identity fields, not two: replacing the snapshot can move
+        // base_root_owned, and a hand-rolled two-field copy leaves
+        // client.base_root aimed at the snapshot just freed.
+        self.syncClientSessionIdentity();
         self.projection.setActiveTab(self.projection.activeTab(live_tab_count));
         logging.debug("frontend-runtime", "replaceProjectionFromSnapshot: active tab normalized", .{});
     }

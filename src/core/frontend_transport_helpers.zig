@@ -38,15 +38,16 @@ pub fn resolveTransport(options: ConnectOptions) frontend_client.Transport {
     return localIpcTransport(options.socket_path, options.autostart_ses);
 }
 
+/// Sole constructor for the `preconnected` transport (a caller that already
+/// holds the ctl/vt fd pair). Unused in-tree today, but kept: the variant is a
+/// protocol-level `FrontendTransportKind` with a full connect path, and
+/// dropping only its constructor would leave that variant unconstructible
+/// while every switch still handles it.
 pub fn preconnectedTransport(ctl_fd: std.posix.fd_t, vt_fd: std.posix.fd_t) frontend_client.Transport {
     return .{ .preconnected = .{
         .ctl_fd = ctl_fd,
         .vt_fd = vt_fd,
     } };
-}
-
-pub fn liblinkTransport(config: frontend_client.LiblinkTransport) frontend_client.Transport {
-    return .{ .liblink = config };
 }
 
 pub fn sendNotify(

@@ -1,6 +1,7 @@
 const core = @import("core");
 const LuaRuntime = core.LuaRuntime;
 const std = @import("std");
+const lua_api = @import("lua_api.zig");
 
 /// Emit autocmd callback(s) for `event_name`.
 /// Expects payload table at stack top and always consumes it.
@@ -9,52 +10,109 @@ const std = @import("std");
 /// - `hexe.events.on(event_name, function(ev) ... end)` (canonical)
 /// Internally, handlers are stored under `hexe.__events[event_name]` as a function
 /// or an array of functions.
+/// One payload field. Keeps `emit` call sites to one line each.
+pub const Value = union(enum) {
+    str: []const u8,
+    int: i64,
+    boolean: bool,
+    uuid: [32]u8,
+};
+
+pub const Field = struct { name: [:0]const u8, value: Value };
+
+/// Emit `event` with `fields` as its payload, plus `event` and `now_ms` which
+/// every handler can rely on.
+///
+/// Building the payload by hand is ~14 lines of stack juggling per site, which
+/// is why there were only five events. Adding one is now a single call.
+pub fn emit(state: anytype, runtime: *LuaRuntime, event_name: []const u8, fields: []const Field) void {
+    const lua = runtime.lua;
+    lua.createTable(0, @intCast(fields.len + 2));
+
+    _ = lua.pushString(event_name);
+    lua.setField(-2, "event");
+    lua.pushInteger(@intCast(std.time.milliTimestamp()));
+    lua.setField(-2, "now_ms");
+
+    for (fields) |f| {
+        switch (f.value) {
+            .str => |v| _ = lua.pushString(v),
+            .int => |v| lua.pushInteger(v),
+            .boolean => |v| lua.pushBoolean(v),
+            .uuid => |v| _ = lua.pushString(v[0..]),
+        }
+        lua.setField(-2, f.name);
+    }
+
+    emitWithState(state, runtime, event_name);
+}
+
+/// Emit with the live query API bound, so `ctx`-style accessors work the same
+/// inside an event handler as inside a keybinding callback. `state` is
+/// `anytype` because this file is imported by State itself.
+pub fn emitWithState(state: anytype, runtime: *LuaRuntime, event_name: []const u8) void {
+    const scope = lua_api.pushLiveState(runtime, state, .handler);
+    defer lua_api.popLiveState(runtime, scope);
+    emitAutocmdWithPayloadOnStack(runtime, event_name);
+}
+
 pub fn emitAutocmdWithPayloadOnStack(runtime: *LuaRuntime, event_name: []const u8) void {
-    // Stack: [..., payload]
-    _ = runtime.lua.getGlobal("hexe") catch {
-        runtime.lua.pop(1); // payload
-        return;
-    };
-    if (runtime.lua.typeOf(-1) != .table) {
-        runtime.lua.pop(2); // hexe, payload
+    const lua = runtime.lua;
+    // Absolute index of the payload. The previous version addressed it
+    // relatively (-4, and -6 inside the multi-handler loop) and popped a fixed
+    // 4 at the end -- but `protectedCall` consumes the function and its
+    // argument, so after a handler ran only three values remained and the pop
+    // underflowed into `unreachable`. It never showed up because handlers were
+    // being stored in a different table than this one reads, so no handler was
+    // ever invoked.
+    const payload_idx = lua.getTop();
+    defer lua.pop(1); // payload
+
+    _ = lua.getGlobal("hexe") catch return;
+    if (lua.typeOf(-1) != .table) {
+        lua.pop(1);
         return;
     }
+    defer lua.pop(1); // hexe
 
-    _ = runtime.lua.getField(-1, "__events");
-    if (runtime.lua.typeOf(-1) != .table) {
-        runtime.lua.pop(3); // autocmd/hexe/payload
+    _ = lua.getField(-1, "__events");
+    if (lua.typeOf(-1) != .table) {
+        lua.pop(1);
         return;
     }
+    defer lua.pop(1); // __events
 
-    _ = runtime.lua.pushString(event_name);
-    _ = runtime.lua.getTable(-2);
-    const handler_ty = runtime.lua.typeOf(-1);
-    switch (handler_ty) {
+    _ = lua.pushString(event_name);
+    _ = lua.getTable(-2);
+    defer lua.pop(1); // handler slot
+
+    switch (lua.typeOf(-1)) {
         .function => {
-            runtime.lua.pushValue(-4); // payload
-            runtime.lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
-                runtime.lua.pop(1); // lua error object
+            lua.pushValue(payload_idx);
+            lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
+                lua.pop(1); // error object
             };
+            // The call consumed the function, so put a placeholder back for
+            // the deferred pop to balance against.
+            lua.pushNil();
         },
         .table => {
-            const len: i32 = @intCast(runtime.lua.rawLen(-1));
+            const len: i32 = @intCast(lua.rawLen(-1));
             var i: i32 = 1;
             while (i <= len) : (i += 1) {
-                _ = runtime.lua.rawGetIndex(-1, i);
-                if (runtime.lua.typeOf(-1) != .function) {
-                    runtime.lua.pop(1);
+                _ = lua.rawGetIndex(-1, i);
+                if (lua.typeOf(-1) != .function) {
+                    lua.pop(1);
                     continue;
                 }
-                runtime.lua.pushValue(-6); // payload
-                runtime.lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
-                    runtime.lua.pop(1); // lua error object
+                lua.pushValue(payload_idx);
+                lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
+                    lua.pop(1); // error object
                 };
             }
         },
         else => {},
     }
-
-    runtime.lua.pop(4); // handler/autocmd/hexe/payload
 }
 
 test "emitAutocmdWithPayloadOnStack calls single function handler" {

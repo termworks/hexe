@@ -42,7 +42,7 @@ duplicate `start` from launching a second recorder, and what a status-bar button
 
 ### A button in the status bar
 
-Because the state is queryable, recording can live in the bar (see [the status bar](statusbar.md)):
+Because the state is queryable, recording can live in the bar (see [painting](regions.md)):
 
 ```lua
 {

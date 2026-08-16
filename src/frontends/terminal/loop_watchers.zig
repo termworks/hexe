@@ -399,6 +399,15 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
                 state.mux_vt_write_queue.rebuildForReconnect(state.allocator);
                 state.flushPendingMuxVtWrites();
             },
+            .password_mode => {
+                // The pod owns the PTY, so it is the only process that can see
+                // the child switch its tty to canonical+noecho. Everything here
+                // that must hard-stop on a password prompt (keycast, the Lua
+                // `password_input` field) reads this flag.
+                if (payload.len >= 1) pane.vt.terminal.flags.password_input = payload[0] != 0;
+                terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} password_input={}", .{ vt_event.pane_id, pane.vt.terminal.flags.password_input });
+                state.needs_render = true;
+            },
             .ignored => {},
         }
     } else {

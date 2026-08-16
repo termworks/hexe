@@ -12,6 +12,7 @@ const wire = core.wire;
 pub const VtFrameKind = enum {
     output,
     backlog_end,
+    password_mode,
     ignored,
 };
 
@@ -31,6 +32,7 @@ pub const VtFrameReadResult = union(enum) {
 pub fn vtFrameKindFromRaw(frame_type: u8) VtFrameKind {
     if (frame_type == @intFromEnum(pod_protocol.FrameType.output)) return .output;
     if (frame_type == @intFromEnum(pod_protocol.FrameType.backlog_end)) return .backlog_end;
+    if (frame_type == @intFromEnum(pod_protocol.FrameType.password_mode)) return .password_mode;
     return .ignored;
 }
 

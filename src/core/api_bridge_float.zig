@@ -12,9 +12,9 @@ const ab = @import("api_bridge.zig");
 const Lua = zlua.Lua;
 const log = std.log.scoped(.api_bridge);
 const luaNumberOrRaise = ab.luaNumberOrRaise;
-const parseSegment = ab.parseSegment;
 
 fn parseFloatStyleTable(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.FloatStyle {
+    _ = allocator;
     if (lua.typeOf(idx) != .table) return null;
 
     var style = config.FloatStyle{};
@@ -96,50 +96,6 @@ fn parseFloatStyleTable(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?conf
             }
         }
         lua.pop(1);
-    }
-    lua.pop(1);
-
-    _ = lua.getField(idx, "title");
-    if (lua.typeOf(-1) == .table) {
-        _ = lua.getField(-1, "position");
-        if (lua.typeOf(-1) == .string) {
-            const pos_str = lua.toString(-1) catch "";
-            style.position = std.meta.stringToEnum(config.FloatStylePosition, pos_str);
-        }
-        lua.pop(1);
-
-        _ = lua.getField(-1, "segments");
-        if (lua.typeOf(-1) == .table) {
-            const seg_len: usize = @intCast(lua.rawLen(-1));
-            if (seg_len > 0) {
-                const segs = allocator.alloc(config.Segment, seg_len) catch |err| blk: {
-                    log.warn("failed to allocate API bridge float title segments: {}", .{err});
-                    break :blk null;
-                };
-                if (segs) |arr| {
-                    var count: usize = 0;
-                    var i: i32 = 1;
-                    while (i <= @as(i32, @intCast(seg_len))) : (i += 1) {
-                        _ = lua.rawGetIndex(-1, i);
-                        if (lua.typeOf(-1) == .table) {
-                            if (parseSegment(lua, -1, allocator)) |segment| {
-                                arr[count] = segment;
-                                count += 1;
-                            }
-                        }
-                        lua.pop(1);
-                    }
-                    style.title_segments = arr[0..count];
-                }
-            }
-        }
-        lua.pop(1);
-
-        if (style.title_segments.len == 0) {
-            if (parseSegment(lua, -1, allocator)) |segment| {
-                style.module = segment;
-            }
-        }
     }
     lua.pop(1);
 

@@ -35,6 +35,12 @@ pub const PaneShellInfo = struct {
 pub const PaneProcInfo = struct {
     name: ?[]u8 = null,
     pid: ?i32 = null,
+    /// From SES's `pane_info`. The frontend cannot compute any of these:
+    /// `Pane.getFgPid` is a stub, and the pane's lifecycle state and birth time
+    /// live only in the daemon.
+    shell_pid: ?i32 = null,
+    ses_state: u8 = 0,
+    created_at: i64 = 0,
 
     pub fn deinit(self: *PaneProcInfo, allocator: std.mem.Allocator) void {
         if (self.name) |n| allocator.free(n);
@@ -128,20 +134,6 @@ pub const SessionProjection = struct {
 
     pub fn baseRoot(self: *const SessionProjection) []const u8 {
         return self.base_root_owned;
-    }
-
-    pub fn setBaseRoot(self: *SessionProjection, base_root: []const u8) !void {
-        const owned = try self.allocator.dupe(u8, base_root);
-        const snapshot_owned: ?[]u8 = if (self.attached_snapshot != null)
-            try self.allocator.dupe(u8, base_root)
-        else
-            null;
-        self.allocator.free(self.base_root_owned);
-        self.base_root_owned = owned;
-        if (self.attached_snapshot) |*snapshot| {
-            if (snapshot.base_root) |old| self.allocator.free(old);
-            snapshot.base_root = snapshot_owned.?;
-        }
     }
 
     pub fn setSessionIdentity(
@@ -256,11 +248,6 @@ pub const SessionProjection = struct {
         // Normalize a corrupt tab_counter in-place while keeping projection
         // convenience field in sync.
         self.setTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
-    }
-
-    pub fn clearAttachedSnapshot(self: *SessionProjection) void {
-        if (self.attached_snapshot) |*snapshot| snapshot.deinit();
-        self.attached_snapshot = null;
     }
 
     pub fn attachedSnapshot(self: *const SessionProjection) ?*const session_model.SessionSnapshot {
@@ -584,16 +571,6 @@ pub const SessionProjection = struct {
         return next;
     }
 
-    pub fn replaceTabMetaFromSnapshot(
-        self: *SessionProjection,
-        tabs: []const session_model.SessionTab,
-    ) !void {
-        const next = try self.buildTabMetaFromSnapshot(tabs);
-        self.clearTabMeta();
-        self.tabs.deinit(self.allocator);
-        self.tabs = next;
-    }
-
     pub fn appendTab(
         self: *SessionProjection,
         uuid: [32]u8,
@@ -728,6 +705,22 @@ pub const SessionProjection = struct {
 
     pub fn getPaneShell(self: *const SessionProjection, uuid: [32]u8) ?PaneShellInfo {
         return self.pane_shell.get(uuid);
+    }
+
+    pub fn setPaneSesInfo(self: *SessionProjection, uuid: [32]u8, shell_pid: ?i32, ses_state: u8, created_at: i64) void {
+        var entry = self.pane_proc.getPtr(uuid);
+        if (entry == null) {
+            self.pane_proc.put(uuid, .{}) catch |err| {
+                logging.logError("session_projection", "failed to allocate pane process metadata", err);
+                return;
+            };
+            entry = self.pane_proc.getPtr(uuid);
+        }
+        if (entry) |e| {
+            if (shell_pid) |v| e.shell_pid = v;
+            e.ses_state = ses_state;
+            if (created_at != 0) e.created_at = created_at;
+        }
     }
 
     pub fn setPaneProc(self: *SessionProjection, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {

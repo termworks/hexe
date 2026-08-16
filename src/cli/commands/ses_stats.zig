@@ -15,8 +15,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
         print("Make sure the daemon is running with: hexe ses daemon\n", .{});
         return error.SesNotRunning;
     };
-    defer client.close();
-
     const fd = client.fd;
 
     // Send versioned CLI handshake
@@ -41,10 +39,20 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer allocator.free(status_payload);
     try wire.readExact(fd, status_payload);
 
-    // For now, show basic info from list operations
-    // Request sessions list to count
-    try wire.writeControl(fd, .list_sessions, &.{});
-    const sessions_hdr = try wire.readControlHeader(fd);
+    // Second request, second connection: the CLI request channel serves one
+    // message per accept, so reusing `fd` here read EOF and the command exited
+    // non-zero with nothing printed.
+    client.close();
+    var list_client = core.ipc.Client.connect(ses_path) catch {
+        print("Error: Could not reconnect to ses daemon\n", .{});
+        return error.SesNotRunning;
+    };
+    defer list_client.close();
+    const list_fd = list_client.fd;
+    try wire.sendCliHandshake(list_fd);
+
+    try wire.writeControl(list_fd, .list_sessions, &.{});
+    const sessions_hdr = try wire.readControlHeader(list_fd);
     const sessions_msg_type: wire.MsgType = @enumFromInt(sessions_hdr.msg_type);
 
     if (sessions_msg_type != .sessions_list) {
@@ -58,7 +66,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
     const payload = try allocator.alloc(u8, sessions_hdr.payload_len);
     defer allocator.free(payload);
-    try wire.readExact(fd, payload);
+    try wire.readExact(list_fd, payload);
 
     if (payload.len < @sizeOf(wire.SessionsList)) {
         print("Error: malformed sessions list response\n", .{});

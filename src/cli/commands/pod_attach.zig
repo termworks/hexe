@@ -52,6 +52,7 @@ const AttachContext = struct {
     detach_code: u8,
     saw_prefix: bool = false,
     running: bool = true,
+    password_mode: bool = false,
     net_buf: [4096]u8 = undefined,
     in_buf: [4096]u8 = undefined,
 };
@@ -94,7 +95,7 @@ fn stdinCallback(
                 c.running = false;
                 return .disarm;
             };
-            if (c.capture_input) {
+            if (c.capture_input and !c.password_mode) {
                 if (c.recorder) |r| {
                     r.writeInput(tmp[0..2]) catch |err| {
                         core.logging.logError("pod_attach", "failed to record detach-prefix input", err);
@@ -114,7 +115,7 @@ fn stdinCallback(
         c.running = false;
         return .disarm;
     };
-    if (c.capture_input) {
+    if (c.capture_input and !c.password_mode) {
         if (c.recorder) |r| {
             r.writeInput(c.in_buf[0..n]) catch |err| {
                 core.logging.logError("pod_attach", "failed to record input", err);
@@ -199,7 +200,7 @@ pub fn runPodAttach(
     var client = ipc.Client.connect(target_socket) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("pod is not running\n", .{});
-            return;
+            std.process.exit(1);
         }
         return err;
     };
@@ -208,7 +209,7 @@ pub fn runPodAttach(
     // Observer, NOT the authoritative VT client — see sendAuxFrame above.
     wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_OBSERVER) catch |err| {
         print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
 
     var conn = client.toConnection();
@@ -340,6 +341,9 @@ fn podFrameCallback(ctx: *anyopaque, frame: pod_protocol.Frame) void {
             }
         },
         .backlog_end => {},
+        .password_mode => {
+            if (frame.payload.len >= 1) attach.password_mode = frame.payload[0] != 0;
+        },
         else => {},
     }
 }

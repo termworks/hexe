@@ -136,6 +136,12 @@ pub fn queuePendingPush(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeade
         .pane_exited,
         .pop_confirm,
         .pop_choose,
+        // Pod-originated pane facts. A sync reader that consumes one of these
+        // mid-request used to drop it on the floor, so a forwarded cwd/fg
+        // update simply vanished whenever it raced a request — which is most
+        // of the time, since the frontend polls pane_info every tick.
+        .cwd_changed,
+        .fg_changed,
         => true,
         else => false,
     };

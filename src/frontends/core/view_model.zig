@@ -211,6 +211,10 @@ pub const SessionView = struct {
             if (float.parent_tab) |parent| {
                 if (parent >= insert_idx) float.parent_tab = parent + 1;
             }
+            // tab_visible is indexed by tab position, so inserting a tab
+            // renumbers it exactly like parent_tab. Leaving it unshifted made a
+            // global float visible on whatever tab inherited the old index.
+            float.tab_visible = session_model.shiftTabVisibleForInsert(float.tab_visible, insert_idx);
         }
 
         try self.tabs.insert(self.allocator, insert_idx, .{
@@ -471,6 +475,7 @@ pub const SessionView = struct {
                     float.parent_tab = parent - 1;
                 }
             }
+            float.tab_visible = session_model.shiftTabVisibleForRemove(float.tab_visible, tab_idx);
             float_idx += 1;
         }
 

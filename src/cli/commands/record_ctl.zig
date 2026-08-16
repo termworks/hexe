@@ -1,4 +1,5 @@
 const std = @import("std");
+const core = @import("core");
 
 const print = std.debug.print;
 
@@ -13,6 +14,8 @@ const RecordState = struct {
     out: []const u8 = "",
     capture_input: bool = false,
     started_ms: i64 = 0,
+    /// /proc start time of `pid`, so a recycled pid is not mistaken for ours.
+    start_tick: u64 = 0,
 };
 
 fn deleteStateFile(path: []const u8, comptime context: []const u8) void {
@@ -35,7 +38,7 @@ pub fn runRecordStart(
 ) !void {
     const scope = parseScope(scope_raw) orelse {
         print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
-        return;
+        std.process.exit(1);
     };
 
     const state_path = try getStatePath(allocator, scope);
@@ -45,7 +48,7 @@ pub fn runRecordStart(
         defer freeState(allocator, st);
         if (isPidAlive(st.pid)) {
             print("already recording (pid={d})\n", .{st.pid});
-            return;
+            std.process.exit(1);
         }
         deleteStateFile(state_path, "start");
     }
@@ -66,7 +69,7 @@ pub fn runRecordStart(
         owned_target_uuid = try resolveActivePodUuid(allocator);
         if (owned_target_uuid == null) {
             print("Error: no active pod target found (use --uuid/--name/--socket)\n", .{});
-            return;
+            std.process.exit(1);
         }
         target_uuid = owned_target_uuid.?;
     }
@@ -85,8 +88,16 @@ pub fn runRecordStart(
             try argv.append(allocator, socket);
         }
     } else {
+        // `terminal record` needs a session to attach to. Without this the
+        // child exits immediately with "session name required" while
+        // `record start` still reported success.
+        if (name.len == 0) {
+            print("Error: --scope mux needs --name <session>\n", .{});
+            std.process.exit(1);
+        }
         try argv.append(allocator, "terminal");
         try argv.append(allocator, "record");
+        try argv.append(allocator, name);
     }
     try argv.append(allocator, "--out");
     try argv.append(allocator, out_final);
@@ -99,6 +110,15 @@ pub fn runRecordStart(
     try child.spawn();
 
     const pid: i32 = @intCast(child.id);
+    // Confirm the recorder is still alive before claiming success. A child
+    // that dies instantly (no pod, wrong instance, unwritable --out) used to
+    // produce "recording started pid=N" followed by a status of inactive and a
+    // stop of "not recording".
+    std.Thread.sleep(200 * std.time.ns_per_ms);
+    if (!isPidAlive(pid)) {
+        print("Error: recorder exited immediately (check --out path and that the target exists)\n", .{});
+        std.process.exit(1);
+    }
     const state = RecordState{
         .pid = pid,
         .scope = scope,
@@ -108,6 +128,7 @@ pub fn runRecordStart(
         .out = out_final,
         .capture_input = capture_input,
         .started_ms = std.time.milliTimestamp(),
+        .start_tick = pidStartTime(allocator, pid) orelse 0,
     };
     try saveState(allocator, state_path, state);
     print("recording started pid={d} out={s}\n", .{ pid, out_final });
@@ -116,19 +137,26 @@ pub fn runRecordStart(
 pub fn runRecordStop(allocator: std.mem.Allocator, scope_raw: []const u8) !void {
     const scope = parseScope(scope_raw) orelse {
         print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
-        return;
+        std.process.exit(1);
     };
     const state_path = try getStatePath(allocator, scope);
     defer allocator.free(state_path);
 
     const st = (try loadState(allocator, state_path)) orelse {
         print("not recording\n", .{});
-        return;
+        std.process.exit(1);
     };
     defer freeState(allocator, st);
 
     if (st.pid > 0 and isPidAlive(st.pid)) {
-        if (std.c.kill(st.pid, std.c.SIG.TERM) != 0) {
+        // Nothing removes the state file when a recorder exits cleanly, so a
+        // stale file plus a recycled pid would have us SIGTERM an unrelated
+        // process. Only signal when the start time still matches.
+        const now_tick = pidStartTime(allocator, st.pid);
+        const same_process = st.start_tick == 0 or now_tick == null or now_tick.? == st.start_tick;
+        if (!same_process) {
+            print("Warning: recorder pid={d} was recycled; not signalling\n", .{st.pid});
+        } else if (std.c.kill(st.pid, std.c.SIG.TERM) != 0) {
             print("Warning: failed to signal recorder pid={d}\n", .{st.pid});
         }
     }
@@ -186,7 +214,7 @@ pub fn runRecordToggle(
 ) !void {
     const scope = parseScope(scope_raw) orelse {
         print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
-        return;
+        std.process.exit(1);
     };
     const state_path = try getStatePath(allocator, scope);
     defer allocator.free(state_path);
@@ -260,18 +288,44 @@ fn isUuid32Hex(s: []const u8) bool {
 
 fn isPidAlive(pid: i32) bool {
     if (pid <= 0) return false;
-    const rc = std.c.kill(pid, 0);
-    return rc == 0;
+    // kill(pid, 0) also returns -1 for EPERM — a live process we may not
+    // signal. Treat only ESRCH as dead, or a recorder owned by another uid is
+    // reported inactive and its state file deleted.
+    if (std.c.kill(pid, 0) == 0) return true;
+    return std.c._errno().* != @intFromEnum(std.c.E.SRCH);
+}
+
+/// Field 22 of /proc/<pid>/stat: the process start time in clock ticks.
+///
+/// Pids are recycled. Recording state outlives the recorder (nothing removes
+/// it on a clean exit), so `stop` must confirm the pid is still the SAME
+/// process before signalling it.
+fn pidStartTime(allocator: std.mem.Allocator, pid: i32) ?u64 {
+    const path = std.fmt.allocPrint(allocator, "/proc/{d}/stat", .{pid}) catch return null;
+    defer allocator.free(path);
+    const data = std.fs.cwd().readFileAlloc(allocator, path, 8 * 1024) catch return null;
+    defer allocator.free(data);
+    // comm may contain spaces and parentheses; fields are counted after the
+    // final ')'.
+    const close = std.mem.lastIndexOfScalar(u8, data, ')') orelse return null;
+    var it = std.mem.tokenizeScalar(u8, data[close + 1 ..], ' ');
+    var idx: usize = 2; // the token after ')' is field 3 (state)
+    while (it.next()) |tok| : (idx += 1) {
+        if (idx == 22) return std.fmt.parseInt(u64, std.mem.trim(u8, tok, " \n"), 10) catch null;
+    }
+    return null;
 }
 
 fn getStatePath(allocator: std.mem.Allocator, scope: Scope) ![]u8 {
-    const inst = std.posix.getenv("HEXE_INSTANCE") orelse "default";
-    var safe_buf: [64]u8 = undefined;
-    const safe = sanitizeInstance(safe_buf[0..], inst);
-    const dir = try std.fmt.allocPrint(allocator, "/tmp/hexe/{s}", .{safe});
+    // The per-boot runtime dir, uid-checked, not a hand-rolled /tmp path.
+    // `record stop` signals the pid it reads out of this file, so anyone able
+    // to plant a file here could make hexe SIGTERM an arbitrary process of the
+    // user's. `ensurePrivateDir` fstats the opened directory and refuses one
+    // owned by anybody else.
+    const dir = try core.ipc.getSocketDir(allocator);
     defer allocator.free(dir);
-    try std.fs.cwd().makePath(dir);
-    return std.fmt.allocPrint(allocator, "/tmp/hexe/{s}/record-{s}.state", .{ safe, @tagName(scope) });
+    try core.ipc.ensurePrivateDir(dir);
+    return std.fmt.allocPrint(allocator, "{s}/record-{s}.state", .{ dir, @tagName(scope) });
 }
 
 fn sanitizeInstance(buf: []u8, input: []const u8) []const u8 {
@@ -293,7 +347,7 @@ fn sanitizeInstance(buf: []u8, input: []const u8) []const u8 {
 
 fn saveState(allocator: std.mem.Allocator, path: []const u8, st: RecordState) !void {
     const capture_input_u8: u8 = if (st.capture_input) 1 else 0;
-    const payload = try std.fmt.allocPrint(allocator, "pid={d}\nscope={s}\nuuid={s}\nname={s}\nsocket={s}\nout={s}\ncapture_input={d}\nstarted_ms={d}\n", .{
+    const payload = try std.fmt.allocPrint(allocator, "pid={d}\nscope={s}\nuuid={s}\nname={s}\nsocket={s}\nout={s}\ncapture_input={d}\nstarted_ms={d}\nstart_tick={d}\n", .{
         st.pid,
         @tagName(st.scope),
         st.uuid,
@@ -302,15 +356,22 @@ fn saveState(allocator: std.mem.Allocator, path: []const u8, st: RecordState) !v
         st.out,
         capture_input_u8,
         st.started_ms,
+        st.start_tick,
     });
     defer allocator.free(payload);
 
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+    // Per-pid tmp name: two concurrent `record start`s used to share one
+    // `<path>.tmp`, and the loser's rename failed. The old fallback then
+    // DELETED the winner's state and re-tried, leaving live recorders with no
+    // state file at all — unkillable by `record stop`.
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.{d}.tmp", .{ path, std.os.linux.getpid() });
     defer allocator.free(tmp_path);
     try std.fs.cwd().writeFile(.{ .sub_path = tmp_path, .data = payload });
-    std.fs.cwd().rename(tmp_path, path) catch {
-        deleteStateFile(path, "save");
-        try std.fs.cwd().rename(tmp_path, path);
+    // rename(2) replaces atomically on Linux; there is no case where deleting
+    // the destination first is correct.
+    std.fs.cwd().rename(tmp_path, path) catch |err| {
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+        return err;
     };
 }
 
@@ -334,6 +395,7 @@ fn loadState(allocator: std.mem.Allocator, path: []const u8) !?RecordState {
         if (std.mem.eql(u8, k, "out")) st.out = try allocator.dupe(u8, v);
         if (std.mem.eql(u8, k, "capture_input")) st.capture_input = (std.fmt.parseInt(u8, v, 10) catch 0) != 0;
         if (std.mem.eql(u8, k, "started_ms")) st.started_ms = std.fmt.parseInt(i64, v, 10) catch 0;
+        if (std.mem.eql(u8, k, "start_tick")) st.start_tick = std.fmt.parseInt(u64, v, 10) catch 0;
     }
     allocator.free(data);
     return st;

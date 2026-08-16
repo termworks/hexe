@@ -5,9 +5,11 @@ const cregex = @cImport({
 });
 
 const core = @import("core");
+const lua_events = @import("lua_events.zig");
 const frontend_core = @import("frontend_core");
 const wire = core.wire;
 const pop = @import("pop");
+const lua_api = @import("lua_api.zig");
 
 const state_types = @import("state_types.zig");
 pub const PendingAction = state_types.PendingAction;
@@ -98,25 +100,56 @@ const ReplacementNewPaneRollback = enum {
     orphan_new_pane,
 };
 
-const adhoc_title_outputs = [_]core.OutputDef{
-    .{ .style = "bg:1 fg:0", .format = " $output " },
-};
-
-const adhoc_title_segment = core.Segment{
-    .name = "title",
-    .kind = .builtin,
-    .builtin = "title",
-    .outputs = adhoc_title_outputs[0..],
-};
-
+/// Adhoc floats get a title slot; the painter fills it (`float.title`).
 const adhoc_title_style = core.FloatStyle{
     .position = .bottomright,
-    .module = adhoc_title_segment,
 };
 
 /// Keyboard copy-mode cursor state. Coordinates are local to the focused pane
 /// (same convention mouse_selection.begin/update expect), so selection reuses
 /// the exact scroll-aware machinery the mouse path uses.
+/// Resolve the enabled layout's float definitions, merging in the global
+/// default attributes.
+///
+/// Shared by startup and `config.reload`. It used to exist only inline in
+/// `init`, so a reload kept the OLD float definitions forever: editing a float
+/// in the config and reloading appeared to do nothing, and the previous
+/// allocation leaked.
+pub fn resolveLayoutFloats(
+    allocator: std.mem.Allocator,
+    cfg: *const core.Config,
+    ses_cfg: *const core.SesConfig,
+) []const core.LayoutFloatDef {
+    var layout_floats: []const core.LayoutFloatDef = &[_]core.LayoutFloatDef{};
+    for (ses_cfg.layouts) |*layout| {
+        if (!layout.enabled) continue;
+        const floats_with_defaults = allocator.alloc(core.LayoutFloatDef, layout.floats.len) catch {
+            return layout.floats;
+        };
+        for (layout.floats, 0..) |float_def, i| {
+            var merged = float_def;
+            if (!float_def.has_custom_attributes) {
+                merged.attributes = cfg.float_default_attributes;
+            } else {
+                // OR-merge: a default of true stays true unless the float
+                // overrides it. (Known limitation: a float cannot set false
+                // when the default is true.)
+                merged.attributes.exclusive = cfg.float_default_attributes.exclusive or float_def.attributes.exclusive;
+                merged.attributes.sticky = cfg.float_default_attributes.sticky or float_def.attributes.sticky;
+                merged.attributes.global = cfg.float_default_attributes.global or float_def.attributes.global;
+                merged.attributes.destroy = cfg.float_default_attributes.destroy or float_def.attributes.destroy;
+                merged.attributes.isolated = cfg.float_default_attributes.isolated or float_def.attributes.isolated;
+                merged.attributes.per_cwd = cfg.float_default_attributes.per_cwd or float_def.attributes.per_cwd;
+                merged.attributes.inherit_env = cfg.float_default_attributes.inherit_env or float_def.attributes.inherit_env;
+            }
+            floats_with_defaults[i] = merged;
+        }
+        layout_floats = floats_with_defaults;
+        break;
+    }
+    return layout_floats;
+}
+
 pub const CopyMode = struct {
     active: bool = false,
     x: u16 = 0,
@@ -132,10 +165,11 @@ fn clampAdd(cur: u16, delta: i16, max: u16) u16 {
 }
 
 pub const State = struct {
+    /// A float shows a title when it has somewhere to put one. What goes in it
+    /// is the painter's business.
     fn floatStyleShowsTitle(style: ?*const core.FloatStyle) bool {
         const value = style orelse return false;
-        if (value.position == null) return false;
-        return value.module != null or value.title_segments.len > 0;
+        return value.position != null;
     }
 
     fn titleMatchesPattern(self: *const State, pattern: []const u8, title: ?[]const u8) bool {
@@ -268,6 +302,8 @@ pub const State = struct {
     /// (tmux `resize-pane -Z`). Local view state — resets on reattach. Toggled
     /// by pane.zoom; auto-cleared by any layout-mutating operation.
     zoomed_pane_uuid: ?[32]u8 = null,
+    /// Pane focused before the current one. Feeds `hexe.pane("last")`.
+    prev_focused_pane_uuid: ?[32]u8 = null,
     /// Keyboard copy-mode (tmux copy-mode): a cursor over the focused pane that
     /// drives the shared mouse_selection machinery. When active, input is
     /// captured for navigation/selection instead of forwarded to the pane.
@@ -302,6 +338,9 @@ pub const State = struct {
     startup_attach_count: usize,
     exit_from_shell_death: bool,
     pending_exit_intent: bool,
+    /// Request id of the exit_intent the confirmation popup is answering, echoed
+    /// back so SES can match it to the CLI that is blocked on it.
+    pending_exit_intent_request_id: u32,
     /// If non-zero and in the future, skip confirm_on_exit for the next last-pane death.
     exit_intent_deadline_ms: i64,
     /// If true, respawn the focused pane after handling input
@@ -331,6 +370,12 @@ pub const State = struct {
     /// Driven once per event-loop iteration; the render path only ever reads
     /// its last completed values, so a slow command can never stall a frame.
     async_cmds: core.async_cmd.AsyncCmdCache,
+    /// Content for regions painted by an external program. Same contract as
+    /// `async_cmds`: the render path reads only completed responses, so a slow
+    /// or dead painter costs a stale region rather than a frame.
+    regions: core.regions.Registry,
+    /// Headless terminals backing surface-mode regions, one per region.
+    region_surfaces: @import("region_render.zig").SurfaceCache,
     /// Resumable non-blocking reader for the SES VT stream. Reset whenever
     /// the VT connection is replaced (loop_watchers arms a new node).
     mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
@@ -415,42 +460,14 @@ pub const State = struct {
         connect_options: core.FrontendConnectOptions,
     ) !State {
         const cfg = core.Config.load(allocator);
+        // Bind the live query API onto the `hexe` table the config already
+        // built. Done after load so callbacks registered during load can call
+        // it, and once per runtime rather than per evaluation.
+        if (cfg._lua_runtime) |rt| lua_api.install(rt);
         const pop_cfg = pop.PopConfig.load(allocator);
         const ses_cfg = core.SesConfig.load(allocator);
 
-        // Find enabled layout's floats and merge with default attributes
-        var layout_floats: []const core.LayoutFloatDef = &[_]core.LayoutFloatDef{};
-        for (ses_cfg.layouts) |*layout| {
-            if (layout.enabled) {
-                // Merge default attributes into each float definition
-                const floats_with_defaults = allocator.alloc(core.LayoutFloatDef, layout.floats.len) catch {
-                    layout_floats = layout.floats;
-                    break;
-                };
-                for (layout.floats, 0..) |float_def, i| {
-                    var merged = float_def;
-                    if (!float_def.has_custom_attributes) {
-                        // Float has no custom attributes table - use all defaults
-                        merged.attributes = cfg.float_default_attributes;
-                    } else {
-                        // Float has custom attributes - merge with defaults using OR
-                        // This means: if default is true, it stays true unless float explicitly overrides
-                        // If float sets something true, it becomes true
-                        // Limitation: can't explicitly set to false when default is true
-                        merged.attributes.exclusive = cfg.float_default_attributes.exclusive or float_def.attributes.exclusive;
-                        merged.attributes.sticky = cfg.float_default_attributes.sticky or float_def.attributes.sticky;
-                        merged.attributes.global = cfg.float_default_attributes.global or float_def.attributes.global;
-                        merged.attributes.destroy = cfg.float_default_attributes.destroy or float_def.attributes.destroy;
-                        merged.attributes.isolated = cfg.float_default_attributes.isolated or float_def.attributes.isolated;
-                        merged.attributes.per_cwd = cfg.float_default_attributes.per_cwd or float_def.attributes.per_cwd;
-                        merged.attributes.inherit_env = cfg.float_default_attributes.inherit_env or float_def.attributes.inherit_env;
-                    }
-                    floats_with_defaults[i] = merged;
-                }
-                layout_floats = floats_with_defaults;
-                break;
-            }
-        }
+        const layout_floats = resolveLayoutFloats(allocator, &cfg, &ses_cfg);
 
         const status_h: u16 = if (cfg.tabs.status.enabled) 1 else 0;
         const layout_h = height - status_h;
@@ -491,6 +508,7 @@ pub const State = struct {
             .startup_attach_count = 0,
             .exit_from_shell_death = false,
             .pending_exit_intent = false,
+            .pending_exit_intent_request_id = 0,
             .exit_intent_deadline_ms = 0,
             .needs_respawn = false,
             .skip_dead_check = false,
@@ -514,6 +532,8 @@ pub const State = struct {
 
             .mux_vt_write_queue = .{},
             .async_cmds = core.async_cmd.AsyncCmdCache.init(allocator),
+            .regions = core.regions.Registry.init(allocator),
+            .region_surfaces = @import("region_render.zig").SurfaceCache.init(allocator),
             .mux_vt_write_overflow_notified = false,
 
             .terminal_query_in_flight = false,
@@ -683,8 +703,23 @@ pub const State = struct {
         self.zoomed_pane_uuid = null;
     }
 
-    pub fn isZoomed(self: *const State) bool {
-        return self.zoomed_pane_uuid != null;
+    /// Reconcile zoom with the current layout. The uuid is a bare key with no
+    /// owner: nothing dropped it when the zoomed pane exited (the renderer then
+    /// matches no pane and draws an empty tab), and `Layout.resize` hands the
+    /// zoomed pane its small tiled rect back while zoom stays on.
+    pub fn revalidateZoom(self: *State) void {
+        const zu = self.zoomed_pane_uuid orelse return;
+        const layout = self.currentLayout();
+        const pane = layout.splits.get(zu) orelse {
+            self.zoomed_pane_uuid = null;
+            layout.resize(self.layout_width, self.layout_height);
+            return;
+        };
+        pane.resize(0, 0, self.layout_width, self.layout_height) catch |err| {
+            core.logging.logError("terminal", "zoom re-apply resize failed", err);
+            self.zoomed_pane_uuid = null;
+            layout.resize(self.layout_width, self.layout_height);
+        };
     }
 
     /// Enter keyboard copy-mode over the focused tiled pane.
@@ -1014,6 +1049,9 @@ pub const State = struct {
             self.float_ui.deinit();
         }
         self.config.deinit();
+        // After view/empty_layout: setPanePopConfig hands layouts a pointer
+        // into this struct, so it has to outlive them.
+        self.pop_config.deinit();
         var ses_cfg = self.ses_config;
         ses_cfg.deinit(self.allocator);
         self.osc_reply_targets.deinit(self.allocator);
@@ -1025,6 +1063,8 @@ pub const State = struct {
         self.stdin_tail.deinit(self.allocator);
         self.mux_vt_write_queue.deinit(self.allocator);
         self.async_cmds.deinit();
+        self.regions.deinit();
+        self.region_surfaces.deinit();
         self.bracketed_paste_buf.deinit(self.allocator);
         self.renderer.deinit();
         self.notifications.deinit();
@@ -1159,6 +1199,8 @@ pub const State = struct {
         // command in the render path is served from cache and executed in the
         // background instead of blocking the loop.
         core.cmd.setAsyncCache(&self.async_cmds);
+        core.regions.setActive(&self.regions);
+        @import("region_render.zig").setActive(&self.region_surfaces, self.config.tabs.status.socket);
     }
 
     pub fn writePaneInput(self: *State, pane: *Pane, data: []const u8) void {
@@ -1196,19 +1238,6 @@ pub const State = struct {
         is_repeat: bool = false, // True if this press was part of a repeat sequence (don't fire tap)
     };
 
-    pub fn nextKeyTimerDeadlineMs(self: *const State, now_ms: i64) ?i64 {
-        var next: ?i64 = null;
-        for (self.key_timers.items) |t| {
-            if (t.kind == .hold_fired) continue;
-            if (t.kind == .repeat_wait or t.kind == .repeat_active) continue;
-            // tap_pending needs to fire to trigger deferred tap action
-            if (t.deadline_ms <= now_ms) return now_ms;
-            const d = t.deadline_ms;
-            if (next == null or d < next.?) next = d;
-        }
-        return next;
-    }
-
     pub fn currentLayout(self: *State) *Layout {
         // No tab yet (startup chooser): hand back the empty stand-in rather
         // than indexing an empty list.
@@ -1237,7 +1266,21 @@ pub const State = struct {
         // zoomed uuid — drop it on any tab change.
         self.zoomed_pane_uuid = null;
         const clamped = if (self.view.tab_views.items.len == 0) 0 else @min(idx, self.view.tab_views.items.len - 1);
+        // Read BEFORE the change: `tab_changed` is emitted here rather than in
+        // nextTab/prevTab because the tab_next/tab_prev binds, statusbar clicks
+        // and ctx.tab_select all reach the active tab through this function and
+        // never through those — so the event almost never fired.
+        const previous = self.runtime.activeTab(self.view.tab_views.items.len);
         self.runtime.setActiveTab(clamped);
+        if (previous != clamped) {
+            if (self.config._lua_runtime) |rt| {
+                lua_events.emit(self, rt, "tab_changed", &.{
+                    .{ .name = "previous_tab", .value = .{ .int = @intCast(previous + 1) } },
+                    .{ .name = "active_tab", .value = .{ .int = @intCast(clamped + 1) } },
+                    .{ .name = "tab_count", .value = .{ .int = @intCast(self.view.tab_views.items.len) } },
+                });
+            }
+        }
         if (self.frontend_view) |*view| {
             _ = frontend_core.applyViewActionWithContext(view, .tab_select, .{
                 .active_tab_idx = clamped,
@@ -1491,28 +1534,6 @@ pub const State = struct {
             }) catch |err| {
                 core.logging.logError("terminal", "failed to mirror synced float into shared frontend view", err);
                 return;
-            };
-        }
-    }
-
-    pub fn applyFrontendFloatGeometry(self: *State, pane: *Pane) void {
-        if (self.frontend_view) |*view| {
-            _ = frontend_core.applyViewActionWithContext(
-                view,
-                .{ .float_nudge = .right },
-                .{
-                    .float_geometry = .{
-                        .pane_uuid = pane.uuid,
-                        .width_pct = self.paneFloatWidthPct(pane),
-                        .height_pct = self.paneFloatHeightPct(pane),
-                        .pos_x_pct = self.paneFloatPosXPct(pane),
-                        .pos_y_pct = self.paneFloatPosYPct(pane),
-                        .pad_x = self.paneFloatPadX(pane),
-                        .pad_y = self.paneFloatPadY(pane),
-                    },
-                },
-            ) catch |err| {
-                core.logging.logError("terminal", "failed to mirror float geometry into shared frontend view", err);
             };
         }
     }
@@ -2047,6 +2068,7 @@ pub const State = struct {
         for (self.view.tab_views.items) |*tab| {
             tab.layout.resize(self.layout_width, self.layout_height);
         }
+        self.revalidateZoom();
 
         self.resizeFloatingPanes();
         self.renderer.resize(cols, rows) catch |err| {
@@ -2067,6 +2089,10 @@ pub const State = struct {
 
     pub fn clearPaneShellStartedAt(self: *State, uuid: [32]u8) void {
         self.runtime.clearPaneShellStartedAt(uuid);
+    }
+
+    pub fn setPaneSesInfo(self: *State, uuid: [32]u8, shell_pid: ?i32, ses_state: u8, created_at: i64) void {
+        self.runtime.setPaneSesInfo(uuid, shell_pid, ses_state, created_at);
     }
 
     pub fn setPaneProc(self: *State, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
@@ -2098,14 +2124,6 @@ pub const State = struct {
             }
         }
         return null;
-    }
-
-    pub fn paneSessionMeta(self: *const State, pane: *const Pane) core.session_model.SessionPane {
-        if (self.runtime.paneMeta(pane.uuid)) |meta| return meta;
-        return .{
-            .uuid = pane.uuid,
-            .kind = .split,
-        };
     }
 
     pub fn paneFloatState(self: *const State, pane: *const Pane) ?core.session_model.SessionFloat {
@@ -2376,12 +2394,16 @@ pub const State = struct {
         const pos_x = @min(pos_x_pct, 100);
         const pos_y = @min(pos_y_pct, 100);
 
-        const outer_w: u16 = usable.w * width / 100;
-        const outer_h: u16 = usable.h * height / 100;
+        // Widen for the multiply: these are all u16 and the product is not.
+        // `usable.w * width` overflows above 655 columns (700 * 100 = 70000
+        // wraps to 4464), collapsing any wide float to a sliver under
+        // ReleaseFast and panicking in Debug.
+        const outer_w: u16 = @intCast(@as(u32, usable.w) * @as(u32, width) / 100);
+        const outer_h: u16 = @intCast(@as(u32, usable.h) * @as(u32, height) / 100);
         const max_x: u16 = usable.w -| outer_w;
         const max_y: u16 = usable.h -| outer_h;
-        const outer_x: u16 = max_x * pos_x / 100;
-        const outer_y: u16 = max_y * pos_y / 100;
+        const outer_x: u16 = @intCast(@as(u32, max_x) * @as(u32, pos_x) / 100);
+        const outer_y: u16 = @intCast(@as(u32, max_y) * @as(u32, pos_y) / 100);
         const pad_x: u16 = 1 + pad_x_cfg;
         const pad_y: u16 = 1 + pad_y_cfg;
 
@@ -2456,22 +2478,6 @@ pub const State = struct {
             };
         }
         return true;
-    }
-
-    pub fn paneNavigatable(self: *const State, pane: *const Pane) bool {
-        if (self.floatUiConst(pane)) |ui| return ui.navigatable;
-        return false;
-    }
-
-    pub fn paneRetainedAfterExit(self: *const State, pane: *const Pane) bool {
-        if (self.floatUiConst(pane)) |ui| return ui.retained_after_exit;
-        return false;
-    }
-
-    pub fn setPaneRetainedAfterExit(self: *State, pane_uuid: [32]u8, retained: bool) void {
-        if (self.ensureFloatUi(pane_uuid)) |ui| {
-            ui.retained_after_exit = retained;
-        }
     }
 
     pub fn paneCaptureOutput(self: *const State, pane: *const Pane) bool {
@@ -2596,10 +2602,6 @@ pub const State = struct {
             pad_x,
             pad_y,
         );
-    }
-
-    pub fn swapPaneFloatGeometry(self: *State, a: *const Pane, b: *const Pane) void {
-        self.runtime.swapFloatGeometry(a.uuid, b.uuid);
     }
 
     pub fn reindexFloatParentTabsAfterRemovedTab(self: *State, removed_idx: usize) void {

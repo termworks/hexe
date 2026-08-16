@@ -132,6 +132,12 @@ pub const SesClient = struct {
         name: ?[]u8 = null,
         fg_name: ?[]u8 = null,
         fg_pid: ?i32 = null,
+        /// Same SES-side facts the direct path keeps. A pane_info can arrive on
+        /// either path depending on whether a sync reader was mid-wait, so both
+        /// must carry them or the fields appear and disappear at random.
+        shell_pid: ?i32 = null,
+        ses_state: u8 = 0,
+        created_at: i64 = 0,
 
         pub fn deinit(self: *PendingPaneInfoResponse, allocator: std.mem.Allocator) void {
             if (self.name) |name| allocator.free(name);
@@ -1087,22 +1093,30 @@ pub const SesClient = struct {
         self: *SesClient,
         uuid: [32]u8,
         active_tab: ?usize,
-        _: bool, // is_floating (not used)
+        is_floating: bool,
         is_focused: bool,
-        _: PaneType, // pane_type (not used)
+        pane_type: PaneType,
         created_from: ?[32]u8,
         focused_from: ?[32]u8,
-        _: ?struct { x: u16, y: u16 }, // cursor (not used)
-        _: ?u8, // cursor_style (not used)
-        _: ?bool, // cursor_visible (not used)
-        _: ?bool, // alt_screen (not used)
-        _: ?struct { cols: u16, rows: u16 }, // size (not used)
-        _: ?[]const u8, // cwd (not used)
-        _: ?[]const u8, // fg_process (not used)
-        _: ?posix.pid_t, // fg_pid (not used)
-        _: ?[]const u8, // layout_path (not used)
+        cursor: ?struct { x: u16, y: u16 },
+        cursor_style: ?u8,
+        cursor_visible: ?bool,
+        alt_screen: ?bool,
+        size: ?struct { cols: u16, rows: u16 },
+        cwd: ?[]const u8,
+        fg_process: ?[]const u8,
+        fg_pid: ?posix.pid_t,
+        layout_path: ?[]const u8,
     ) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
+
+        // Bound each string so the three lengths always describe the trail we
+        // actually write.
+        const max_field: usize = 1024;
+        const cwd_s = if (cwd) |c| c[0..@min(c.len, max_field)] else "";
+        const fg_s = if (fg_process) |f| f[0..@min(f.len, max_field)] else "";
+        const layout_s = if (layout_path) |l| l[0..@min(l.len, max_field)] else "";
+
         var msg: wire.UpdatePaneAux = .{
             .uuid = uuid,
             .created_from = if (created_from) |cf| cf else .{0} ** 32,
@@ -1112,9 +1126,38 @@ pub const SesClient = struct {
             .has_focused_from = if (focused_from != null) 1 else 0,
             .has_active_tab = if (active_tab != null) 1 else 0,
             .is_focused = if (is_focused) 1 else 0,
+            .cursor_x = if (cursor) |c| c.x else 0,
+            .cursor_y = if (cursor) |c| c.y else 0,
+            .has_cursor = if (cursor != null) 1 else 0,
+            .cursor_style = cursor_style orelse 0,
+            .has_cursor_style = if (cursor_style != null) 1 else 0,
+            .cursor_visible = if (cursor_visible) |v| @intFromBool(v) else 0,
+            .has_cursor_visible = if (cursor_visible != null) 1 else 0,
+            .alt_screen = if (alt_screen) |v| @intFromBool(v) else 0,
+            .has_alt_screen = if (alt_screen != null) 1 else 0,
+            .cols = if (size) |s| s.cols else 0,
+            .rows = if (size) |s| s.rows else 0,
+            .has_size = if (size != null) 1 else 0,
+            .pane_type = @intFromEnum(pane_type),
+            .is_floating = @intFromBool(is_floating),
+            .fg_pid = if (fg_pid) |p| @intCast(p) else 0,
+            .has_fg_pid = if (fg_pid != null) 1 else 0,
+            .cwd_len = @intCast(cwd_s.len),
+            .fg_len = @intCast(fg_s.len),
+            .layout_len = @intCast(layout_s.len),
         };
+
+        var trail: [3 * 1024]u8 = undefined;
+        var n: usize = 0;
+        @memcpy(trail[n .. n + cwd_s.len], cwd_s);
+        n += cwd_s.len;
+        @memcpy(trail[n .. n + fg_s.len], fg_s);
+        n += fg_s.len;
+        @memcpy(trail[n .. n + layout_s.len], layout_s);
+        n += layout_s.len;
+
         self.drainQueuedControlResponses(fd);
-        const request_id = try self.writeControlRequest(fd, .update_pane_aux, std.mem.asBytes(&msg));
+        const request_id = try self.writeControlTrailRequest(fd, .update_pane_aux, std.mem.asBytes(&msg), trail[0..n]);
         try self.readCommandAckForRequest(fd, request_id);
     }
 
@@ -1497,16 +1540,6 @@ pub const SesClient = struct {
     /// Get the control channel fd (for polling async messages).
     pub fn getCtlFd(self: *SesClient) ?posix.fd_t {
         return self.ctl_fd;
-    }
-
-    /// Check if CTL channel is available. Logs a warning if not.
-    /// Returns true if CTL is available, false otherwise.
-    pub fn ensureCtlConnected(self: *SesClient) bool {
-        if (self.ctl_fd == null) {
-            self.debugLog("CTL channel not available (disconnected)", .{});
-            return false;
-        }
-        return true;
     }
 
     // Synchronous response readers: bodies live in `ses_client_reads`; aliased

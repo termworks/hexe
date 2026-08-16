@@ -51,6 +51,18 @@ pub fn run() !void {
     defer unloadConfig(allocator, &loaded);
     const config = loaded.config;
 
+    // Schema check against config_v2: catches wrong types and out-of-range
+    // values with the path that caused them, which loading alone cannot.
+    if (schemaError(allocator, loaded.path)) |problem| {
+        print("✗ Config invalid: {s}\n", .{loaded.path});
+        if (problem.path.len > 0) {
+            print("  {s}: {s}\n", .{ problem.path, problem.message });
+        } else {
+            print("  {s}\n", .{problem.message});
+        }
+        return error.InvalidConfig;
+    }
+
     // Success!
     print("✓ Config valid: {s}\n", .{loaded.path});
     print("\nConfiguration loaded successfully:\n", .{});
@@ -74,6 +86,28 @@ fn jsonBool(value: bool) []const u8 {
 
 fn dumpSegmentList(name: []const u8, len: usize, trailing_comma: bool) void {
     print("      \"{s}\": {{ \"count\": {} }}{s}\n", .{ name, len, if (trailing_comma) "," else "" });
+}
+
+const SchemaProblem = struct {
+    path: []const u8,
+    message: []const u8,
+};
+
+/// Run the declared schema over the config Lua actually produced.
+fn schemaError(allocator: std.mem.Allocator, path: []const u8) ?SchemaProblem {
+    var runtime = core.LuaRuntime.init(allocator) catch return null;
+    defer runtime.deinit();
+
+    runtime.loadConfig(path) catch return null;
+    defer runtime.pop();
+
+    var ctx = core.config_v2.ValidationContext{};
+    core.config_v2.validateLoaded(&runtime, &ctx) catch {
+        // `ctx` owns its own buffer, but it dies with this frame, so copy out.
+        const p = allocator.dupe(u8, ctx.path) catch "";
+        return .{ .path = p, .message = ctx.message };
+    };
+    return null;
 }
 
 fn summarizeLuaConfig(allocator: std.mem.Allocator, path: []const u8) core.config_v2.LuaShapeSummary {
@@ -101,14 +135,12 @@ pub fn runDump() !void {
             "  \"config_path\": \"{s}\",\n" ++
             "  \"lua\": {{\n" ++
             "    \"type\": \"{s}\",\n" ++
-            "    \"sections\": {{ \"theme\": {s}, \"keys\": {s}, \"mux\": {s}, \"status\": {s}, \"prompt\": {s}, \"pop\": {s}, \"ses\": {s} }},\n" ++
+            "    \"sections\": {{ \"theme\": {s}, \"keys\": {s}, \"mux\": {s}, \"status\": {s}, \"pop\": {s}, \"ses\": {s} }},\n" ++
             "    \"keys\": {{ \"count\": {} }},\n" ++
-            "    \"status\": {{ \"left\": {{ \"count\": {} }}, \"center\": {{ \"count\": {} }}, \"right\": {{ \"count\": {} }} }},\n" ++
-            "    \"prompt\": {{ \"left\": {{ \"count\": {} }}, \"right\": {{ \"count\": {} }} }},\n" ++
+            "    \"status\": {{ \"view\": {s} }},\n" ++
             "    \"ses\": {{ \"layouts\": {{ \"count\": {}, \"source\": \"global\" }} }}\n" ++
             "  }},\n" ++
-            "  \"theme\": {{ \"present\": {s}, \"colors\": {{ \"count\": {} }}, \"styles\": {{ \"count\": {} }}, \"chars\": {{ \"count\": {} }} }},\n" ++
-            "  \"prompt\": {{ \"present\": {s}, \"left\": {{ \"count\": {} }}, \"right\": {{ \"count\": {} }} }},\n",
+            "  \"theme\": {{ \"present\": {s}, \"colors\": {{ \"count\": {} }}, \"styles\": {{ \"count\": {} }}, \"chars\": {{ \"count\": {} }} }},\n",
         .{
             loaded.path,
             if (lua_summary.is_config) "config" else "unknown",
@@ -116,23 +148,15 @@ pub fn runDump() !void {
             jsonBool(lua_summary.has_keys),
             jsonBool(lua_summary.has_mux),
             jsonBool(lua_summary.has_status),
-            jsonBool(lua_summary.has_prompt),
             jsonBool(lua_summary.has_pop),
             jsonBool(lua_summary.has_ses),
             lua_summary.keys,
-            lua_summary.status_left,
-            lua_summary.status_center,
-            lua_summary.status_right,
-            lua_summary.prompt_left,
-            lua_summary.prompt_right,
+            jsonBool(lua_summary.status_view),
             lua_summary.ses_layouts,
             jsonBool(lua_summary.has_theme),
             lua_summary.theme_colors,
             lua_summary.theme_styles,
             lua_summary.theme_chars,
-            jsonBool(lua_summary.has_prompt),
-            lua_summary.prompt_left,
-            lua_summary.prompt_right,
         },
     );
     print(
@@ -163,9 +187,8 @@ pub fn runDump() !void {
             jsonBool(cfg.tabs.status.enabled),
         },
     );
-    dumpSegmentList("left", cfg.tabs.status.left.len, true);
-    dumpSegmentList("center", cfg.tabs.status.center.len, true);
-    dumpSegmentList("right", cfg.tabs.status.right.len, false);
+    print("      \"view\": \"{s}\",\n", .{cfg.tabs.status.view});
+    print("      \"refresh_ms\": {}\n", .{cfg.tabs.status.refresh_ms});
     print(
         "    }}\n" ++
             "  }},\n" ++

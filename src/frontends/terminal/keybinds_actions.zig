@@ -9,10 +9,44 @@ const mouse_selection = @import("mouse_selection.zig");
 const prompt_navigation = @import("prompt_navigation.zig");
 const statusbar = @import("statusbar.zig");
 
+const state_mod = @import("state.zig");
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 
 const BindAction = core.Config.BindAction;
+const lua_api = @import("lua_api.zig");
+const float_geometry = @import("float_geometry.zig");
+
+/// Run a keybinding whose action is a Lua function.
+///
+/// Same invocation shape as a `when` predicate: the live query API is published
+/// for the duration of the call and revoked after, so the callback can inspect
+/// the session and act on it, and cannot retain a pointer past the call.
+fn runLuaAction(state: *State, code: []const u8) bool {
+    const rt = state.config._lua_runtime orelse return false;
+    const callback_id = std.fmt.parseInt(
+        i32,
+        if (std.mem.startsWith(u8, code, "__hexe_cb_ref:")) code["__hexe_cb_ref:".len..] else return false,
+        10,
+    ) catch return false;
+
+    const scope = lua_api.pushLiveState(rt, state, .handler);
+    defer lua_api.popLiveState(rt, scope);
+
+    if (!core.lua_runtime.pushRegisteredCallback(rt, callback_id)) return false;
+    if (!lua_api.pushCallbackContext(rt)) {
+        rt.lua.pop(2);
+        return false;
+    }
+    rt.lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
+        core.logging.warn("terminal", "keybind Lua action raised an error", .{});
+        rt.lua.pop(2);
+        return true;
+    };
+    rt.lua.pop(1); // callback table
+    state.needs_render = true;
+    return true;
+}
 
 fn layoutDirectionFromCore(direction: frontend_core.Direction) layout_mod.Layout.Direction {
     return switch (direction) {
@@ -33,9 +67,15 @@ fn focusedPane(state: *State) ?*Pane {
 
 pub fn dispatchAction(state: *State, action: BindAction) bool {
     const cfg = &state.config;
+
+    // A Lua action is handled here, before the shared mapping: it runs in this
+    // frontend's Lua runtime and has no shared-view representation.
+    if (action == .lua) return runLuaAction(state, action.lua);
+
     const request = frontend_core.actionRequestFromBindAction(action);
 
     switch (request) {
+        .frontend_local => return false,
         .mux_quit => {
             if (cfg.confirm_on_exit) {
                 _ = state.showConfirmOrNotify(.exit, "Exit terminal session?");
@@ -342,9 +382,27 @@ fn performConfigReload(state: *State) void {
     // Drop every cache/threadlocal that holds a reference into the old runtime
     // before we free it.
     statusbar.deinitThreadlocals();
+    // Reload the SES-side config too. `state.ses_config` holds the layouts and
+    // `state.active_layout_floats` the resolved float definitions; neither was
+    // refreshed, so editing a float and reloading did nothing (and leaked the
+    // previous resolution).
+    var new_ses = core.SesConfig.load(state.allocator);
+    const new_floats = state_mod.resolveLayoutFloats(state.allocator, &new_config, &new_ses);
+
     var old = state.config;
     state.config = new_config;
     old.deinit();
+
+    if (state.active_layout_floats.len > 0) state.allocator.free(state.active_layout_floats);
+    state.active_layout_floats = new_floats;
+    var old_ses = state.ses_config;
+    state.ses_config = new_ses;
+    old_ses.deinit(state.allocator);
+    // The new config carries a NEW LuaRuntime, and `hexe.live` is installed on
+    // a runtime, not on a config. Without this, every `ctx.*` accessor and
+    // every callback registered by the reloaded config is dead after a reload —
+    // conditions silently stop matching and actions silently do nothing.
+    if (state.config._lua_runtime) |rt| lua_api.install(rt);
     state.renderer.invalidate();
     state.force_full_render = true;
     state.needs_render = true;
@@ -560,15 +618,16 @@ fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step
     if (outer_x > @as(i32, @intCast(max_x))) outer_x = @as(i32, @intCast(max_x));
     if (outer_y > @as(i32, @intCast(max_y))) outer_y = @as(i32, @intCast(max_y));
 
-    // Convert back to percentage (stable across resizes).
-    const pos_x_pct: u8 = if (max_x > 0)
-        @intCast(@min(100, (@as(u32, @intCast(outer_x)) * 100) / @as(u32, max_x)))
-    else
-        0;
-    const pos_y_pct: u8 = if (max_y > 0)
-        @intCast(@min(100, (@as(u32, @intCast(outer_y)) * 100) / @as(u32, max_y)))
-    else
-        0;
+    // Convert back to a percentage, which is what is stored (it survives a
+    // resize). Both directions of that conversion truncate, and the frame is
+    // recomputed from the percentage every frame — so the naive
+    // `pct = cells * 100 / max` round-tripped straight back to the ORIGINAL
+    // cell for most terminal widths, and nudging right or down did nothing at
+    // all while left and up jumped two cells.
+    //
+    // Pick the nearest percentage that actually lands on the requested cell.
+    const pos_x_pct: u8 = float_geometry.pctForCell(@intCast(outer_x), max_x, dx);
+    const pos_y_pct: u8 = float_geometry.pctForCell(@intCast(outer_y), max_y, dy);
     state.setPaneFloatGeometryUi(
         pane.uuid,
         state.paneFloatWidthPct(pane),

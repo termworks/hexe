@@ -9,6 +9,7 @@ const loop_watchers = @import("loop_watchers.zig");
 const runtime_events = @import("runtime_events.zig");
 const dead_panes = @import("dead_panes.zig");
 const loop_updates = @import("loop_updates.zig");
+const loop_ipc = @import("loop_ipc.zig");
 const terminal_main = @import("main.zig");
 
 const LoopTimerContext = struct {
@@ -234,6 +235,9 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         // conditions): drain their output, reap finished ones, kill overruns.
         // Never blocks — that is the whole point.
         state.async_cmds.poll();
+        // Same contract for externally painted regions: advance in-flight
+        // fetches with non-blocking syscalls only.
+        state.regions.poll();
         maybeReconnectSes(state, &reconnect_state);
         runtime_events.applyDeferredPaneExits(state);
         runtime_events.applyDeferredCwdResponse(state);
@@ -317,6 +321,10 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         // dead-pane sweep reads "no panes left" as "last shell exited" and
         // would tear the frontend down before the user could answer.
         const skip_dead_sweep = state.startup_choice_pending;
+
+        // Before the dead sweep: a queued pane_exited is what marks a float
+        // dead in the first place.
+        loop_ipc.drainQueuedPushes(state, &resources.ses_ctl_buffer);
 
         if (!skip_dead_sweep) dead_panes.cleanupDeadFloats(state);
 

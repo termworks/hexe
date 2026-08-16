@@ -19,30 +19,6 @@ const std = @import("std");
 /// zsh can count columns, and oslo measures visible width itself, so those markers would be
 /// printed literally.
 pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
-    try stdout.writeAll(
-        \\-- Hexe prompt initialization for oslo. This is Lua: put it in
-        \\--   ~/.config/oslo/conf.d/20-hexe.lua
-        \\-- or write `dofile(...)` for it from config.lua. Do not `eval` it.
-        \\
-        \\oslo.prompt.left = {
-        \\  command = "hexe",
-        \\  args = { "shp", "prompt", "--shell=bash", "--status=$status",
-        \\           "--duration=$duration_ms", "--jobs=$jobs",
-        \\           "--language=$language", "--vimode=$vimode" },
-        \\  timeout_ms = 400,
-        \\  async = false,
-        \\}
-        \\
-        \\oslo.prompt.right = {
-        \\  command = "hexe",
-        \\  args = { "shp", "prompt", "--shell=bash", "--right", "--status=$status",
-        \\           "--language=$language", "--vimode=$vimode" },
-        \\  timeout_ms = 400,
-        \\  async = false,
-        \\}
-        \\
-    );
-
     if (no_comms) return;
 
     try stdout.writeAll(

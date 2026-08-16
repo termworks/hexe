@@ -172,6 +172,32 @@ pub fn setLogLevel(level: ?Level) void {
     disableAll();
 }
 
+/// Resolve the level a process should run at from its two flags.
+///
+/// `--logfile PATH` on its own used to redirect stderr to PATH and leave
+/// logging disabled, so the file was created and stayed 0 bytes. Asking for a
+/// log file is a request for logs.
+///
+/// The implied level is `debug`, not `info`: hexe's own startup and lifecycle
+/// lines are all logged at debug, so an info default reproduced the empty file
+/// on any clean run. `--log` still overrides.
+pub fn effectiveLevel(level: ?Level, log_file: ?[]const u8) ?Level {
+    if (level) |value| return value;
+    if (log_file) |path| {
+        if (path.len > 0) return .debug;
+    }
+    return null;
+}
+
+test "effectiveLevel: --logfile alone implies logging" {
+    try std.testing.expectEqual(@as(?Level, null), effectiveLevel(null, null));
+    try std.testing.expectEqual(@as(?Level, null), effectiveLevel(null, ""));
+    try std.testing.expectEqual(@as(?Level, .debug), effectiveLevel(null, "/tmp/x.log"));
+    // An explicit level always wins over the implied one.
+    try std.testing.expectEqual(@as(?Level, .err), effectiveLevel(.err, "/tmp/x.log"));
+    try std.testing.expectEqual(@as(?Level, .trace), effectiveLevel(.trace, null));
+}
+
 pub fn parseLevel(raw: []const u8) ?Level {
     if (std.ascii.eqlIgnoreCase(raw, "trace")) return .trace;
     if (std.ascii.eqlIgnoreCase(raw, "debug")) return .debug;

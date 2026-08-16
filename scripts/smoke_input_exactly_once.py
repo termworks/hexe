@@ -28,7 +28,12 @@ s = s.replace('os.getenv("HOME") .. "/.config/hexe/layout.lua"', repr(lp).replac
 open(ip, "w").write(s)
 env = dict(os.environ, HEXE_INSTANCE=INST, XDG_STATE_HOME=SC + "/xostate", XDG_CONFIG_HOME=CF,
            TERM="xterm-256color", SHELL="/bin/sh", HEXE_TRUST_ALL_PROJECTS="1")
-env.pop("HEXE_SESSION", None); os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
+# A smoke run from inside a hexe pane inherits that pane's identity; the new
+# frontend then hits the nested-mux confirmation and exits rc=0 with no output,
+# which is indistinguishable from a product bug. Scrub the whole set.
+for _k in ("HEXE_SESSION", "HEXE_PANE_UUID", "HEXE_MUX_SOCKET", "HEXE_POD_SOCKET",
+           "HEXE_POD_NAME", "HEXE_FLOAT", "HEXE_FLOAT_NAME"):
+    env.pop(_k, None); os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
 SINK = WD + "/sink"
 open(SINK, "w").close()
 procs = []

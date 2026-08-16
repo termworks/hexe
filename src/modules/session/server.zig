@@ -197,7 +197,10 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(allocator),
         .deferred_destroy_ctl = .empty,
         .deferred_destroy_vt = .empty,
-        .pending_float_cli_fds = std.AutoHashMap([32]u8, PendingCliWait).init(allocator),
+        .pending_float_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(allocator),
+        .next_float_request_id = 1,
+        .pending_exit_intent_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(allocator),
+        .next_exit_intent_request_id = 1,
         .resource_monitor = core.resource_limits.ResourceMonitor.init(.{}),
         .vt_route_buf = allocator.alloc(u8, wire.MAX_PAYLOAD_LEN) catch unreachable,
     };
@@ -211,6 +214,7 @@ fn testServerWithState(allocator: std.mem.Allocator, ses_state: *state.SesState)
 
 fn deinitTestServer(server: *Server) void {
     server.pending_float_cli_fds.deinit();
+    server.pending_exit_intent_cli_fds.deinit();
     server.pending_pop_requests.deinit();
     server.ctl_watchers.deinit();
     server.pending_ctl_close_fds.deinit(server.allocator);
@@ -885,10 +889,22 @@ pub const Server = struct {
     deferred_destroy_ctl: std.ArrayList(*CtlWatcher),
     deferred_destroy_vt: std.ArrayList(*VtWatcher),
     loop_ptr: ?*xev.Loop = null,
-    // CLI fd waiting for exit_intent response.
-    pending_exit_intent_cli_fd: ?PendingCliWait = null,
+    // CLI fds waiting for an exit_intent answer, keyed by request id.
+    pending_exit_intent_cli_fds: std.AutoHashMap(u32, PendingCliWait),
+    /// Correlates an exit_intent with its exit_intent_result. `hexe com
+    /// exit-intent` runs from the shell's exit hook, so two shells exiting
+    /// together is ordinary. A single slot closed the older caller's fd, and
+    /// com.zig exits 0 on any read failure — that EOF reads as ALLOW, so a pane
+    /// exited while its confirmation popup was still on screen. Replies also
+    /// arrive out of order (the non-last-split path answers inline, the popup
+    /// path answers whenever the user does), so FIFO matching cannot work.
+    next_exit_intent_request_id: u32,
     // CLI fds waiting for float result, keyed by float pane UUID.
-    pending_float_cli_fds: std.AutoHashMap([32]u8, PendingCliWait),
+    pending_float_cli_fds: std.AutoHashMap(u32, PendingCliWait),
+    /// Correlates a float_request with its float_result. Every waiter used to
+    /// share one all-zero uuid key, so a second concurrent request closed the
+    /// first caller's fd and then received its result.
+    next_float_request_id: u32,
     current_ctl_request_fd: ?posix.fd_t = null,
     current_ctl_request_id: u32 = 0,
 
@@ -930,14 +946,19 @@ pub const Server = struct {
             .paused_pod_vt_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .deferred_destroy_ctl = .empty,
             .deferred_destroy_vt = .empty,
-            .pending_float_cli_fds = std.AutoHashMap([32]u8, PendingCliWait).init(page_alloc),
+            .pending_float_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(page_alloc),
+            .next_float_request_id = 1,
+            .pending_exit_intent_cli_fds = std.AutoHashMap(u32, PendingCliWait).init(page_alloc),
+            .next_exit_intent_request_id = 1,
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
             .vt_route_buf = try page_alloc.alloc(u8, wire.MAX_PAYLOAD_LEN),
         };
     }
 
     pub fn deinit(self: *Server) void {
-        if (self.pending_exit_intent_cli_fd) |wait| posix.close(wait.cli_fd);
+        var exit_it = self.pending_exit_intent_cli_fds.iterator();
+        while (exit_it.next()) |entry| posix.close(entry.value_ptr.cli_fd);
+        self.pending_exit_intent_cli_fds.deinit();
         var float_it = self.pending_float_cli_fds.iterator();
         while (float_it.next()) |entry| posix.close(entry.value_ptr.cli_fd);
         self.pending_float_cli_fds.deinit();
@@ -1209,19 +1230,27 @@ pub const Server = struct {
     /// an exit, so `allow = 1` is the correct verdict, and a float that will
     /// never run should report failure rather than an ambiguous EOF.
     fn releasePendingCliWaiters(self: *Server, owner_ctl_fd: posix.fd_t) void {
-        if (self.pending_exit_intent_cli_fd) |wait| {
-            if (wait.owner_ctl_fd == owner_ctl_fd) {
-                ses.debugLog("releasing exit_intent CLI waiter fd={d} (owner mux fd={d} gone)", .{ wait.cli_fd, owner_ctl_fd });
-                const allow = wire.ExitIntentResult{ .allow = 1 };
-                self.replyOrClose(wait.cli_fd, .exit_intent_result, std.mem.asBytes(&allow));
-                self.queueCtlClose(wait.cli_fd, null);
-                self.pending_exit_intent_cli_fd = null;
-            }
-        }
-
         // Collect first: replyOrClose/queueCtlClose must not run while the map
         // is being iterated.
-        var orphaned: std.ArrayList([32]u8) = .empty;
+        var orphaned_exits: std.ArrayList(u32) = .empty;
+        defer orphaned_exits.deinit(self.allocator);
+        var exit_it = self.pending_exit_intent_cli_fds.iterator();
+        while (exit_it.next()) |entry| {
+            if (entry.value_ptr.owner_ctl_fd != owner_ctl_fd) continue;
+            orphaned_exits.append(self.allocator, entry.key_ptr.*) catch |err| {
+                core.logging.logError("ses", "failed to collect orphaned exit_intent CLI waiter", err);
+                break;
+            };
+        }
+        for (orphaned_exits.items) |key| {
+            const entry = self.pending_exit_intent_cli_fds.fetchRemove(key) orelse continue;
+            ses.debugLog("releasing exit_intent CLI waiter fd={d} (owner mux fd={d} gone)", .{ entry.value.cli_fd, owner_ctl_fd });
+            const allow = wire.ExitIntentResult{ .allow = 1 };
+            self.replyOrClose(entry.value.cli_fd, .exit_intent_result, std.mem.asBytes(&allow));
+            self.queueCtlClose(entry.value.cli_fd, null);
+        }
+
+        var orphaned: std.ArrayList(u32) = .empty;
         defer orphaned.deinit(self.allocator);
         var it = self.pending_float_cli_fds.iterator();
         while (it.next()) |entry| {
@@ -1235,7 +1264,9 @@ pub const Server = struct {
             const entry = self.pending_float_cli_fds.fetchRemove(key) orelse continue;
             ses.debugLog("releasing float CLI waiter fd={d} (owner mux fd={d} gone)", .{ entry.value.cli_fd, owner_ctl_fd });
             const result = wire.FloatResult{
-                .uuid = key,
+                // The waiter is keyed by request id now; the caller only cares
+                // about the non-zero exit code here.
+                .uuid = .{0} ** 32,
                 .exit_code = 1,
                 .output_len = 0,
             };
@@ -1720,6 +1751,24 @@ pub const Server = struct {
     /// connection for close so stale fds don't accumulate.
     pub fn replyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
         _ = self.sendCtlFrame(fd, msg_type, payload, &.{}, "reply");
+    }
+
+    /// Send an UNSOLICITED push to a client, never stamped with a request id.
+    ///
+    /// `sendCtlFrame` tags every frame with `responseRequestIdForFd`, which is
+    /// the id of the request currently being serviced. That is right for a
+    /// reply and wrong for a notification: pushing `pane_exited` to a mux while
+    /// servicing a request from that same fd made the notification look like
+    /// the response, and the frontend's synchronous reader consumed it instead
+    /// of dispatching it. A blocking float then never learned its pane had
+    /// exited, so `hexe terminal float` hung forever.
+    pub fn notifyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
+        var stack: [CTL_FRAME_STACK_LEN]u8 = undefined;
+        if (buildCtlFrame(&stack, msg_type, 0, payload, &.{})) |frame| {
+            if (self.writeCtlBytes(fd, frame)) return;
+            core.logging.warnWithSource("ses", "notify failed: fd={d} type={s}", .{ fd, @tagName(msg_type) }, @src());
+            self.queueCtlClose(fd, null);
+        }
     }
 
     /// Same as replyOrClose but for messages with a trailing byte blob.
@@ -2984,7 +3033,7 @@ pub const Server = struct {
                                 const uuid = entry.key_ptr.*;
                                 ses.debugLog("pane_exited: uuid={s} pane_id={?d}", .{ uuid[0..8], pane_id });
                                 var msg = wire.PaneUuid{ .uuid = uuid };
-                                self.replyOrClose(ctl_fd, .pane_exited, std.mem.asBytes(&msg));
+                                self.notifyOrClose(ctl_fd, .pane_exited, std.mem.asBytes(&msg));
                             }
                         }
                     }
@@ -3187,10 +3236,10 @@ pub const Server = struct {
                 server_listing_handlers.handleBinaryPopResponse(self, fd, hdr.payload_len, &buf);
             },
             .exit_intent_result => {
-                server_reporting_handlers.handleBinaryExitIntentResult(self, fd, hdr.payload_len, &buf);
+                server_reporting_handlers.handleBinaryExitIntentResult(self, fd, hdr.request_id, hdr.payload_len, &buf);
             },
             .float_result => {
-                server_reporting_handlers.handleBinaryFloatResult(self, fd, hdr.payload_len, &buf);
+                server_reporting_handlers.handleBinaryFloatResult(self, fd, hdr.request_id, hdr.payload_len, &buf);
             },
             .session_add_tab => {
                 server_session_handlers.handleBinarySessionAddTab(self, fd, hdr.payload_len, &buf);
@@ -3315,7 +3364,7 @@ pub const Server = struct {
                 };
                 // Forward to MUX.
                 self.replyOrClose(mux_fd, .focus_move, std.mem.asBytes(&fm));
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .exit_intent => {
                 if (hdr.payload_len < @sizeOf(wire.ExitIntent)) {
@@ -3337,20 +3386,28 @@ pub const Server = struct {
                     self.queueCtlClose(fd, null);
                     return;
                 };
-                // Close any previous pending exit_intent CLI fd.
-                if (self.pending_exit_intent_cli_fd) |old_wait| {
-                    self.ses_state.store.noteClosedFd(old_wait.cli_fd);
-                    posix.close(old_wait.cli_fd);
-                }
-                self.pending_exit_intent_cli_fd = .{ .cli_fd = fd, .owner_ctl_fd = mux_fd };
-                // Forward to MUX.
-                wire.writeControlTimeout(mux_fd, .exit_intent, std.mem.asBytes(&ei), HANDLER_IO_TIMEOUT_MS) catch |err| {
-                    core.logging.logError("ses", "failed to forward exit_intent to mux", err);
-                    // If forward fails, allow exit.
+                // Tag the request so its answer can be matched back to THIS
+                // caller — two shells exiting together is ordinary.
+                const exit_req_id = self.next_exit_intent_request_id;
+                self.next_exit_intent_request_id +%= 1;
+                if (self.next_exit_intent_request_id == 0) self.next_exit_intent_request_id = 1;
+
+                self.pending_exit_intent_cli_fds.put(exit_req_id, .{ .cli_fd = fd, .owner_ctl_fd = mux_fd }) catch |err| {
+                    core.logging.logError("ses", "failed to track pending exit_intent CLI request", err);
                     const allow = wire.ExitIntentResult{ .allow = 1 };
                     self.replyOrClose(fd, .exit_intent_result, std.mem.asBytes(&allow));
                     self.queueCtlClose(fd, null);
-                    self.pending_exit_intent_cli_fd = null;
+                    return;
+                };
+                // Forward to MUX.
+                const ei_trails: []const []const u8 = &.{};
+                wire.writeControlMsgWithRequestIdTimeout(mux_fd, .exit_intent, exit_req_id, std.mem.asBytes(&ei), ei_trails, HANDLER_IO_TIMEOUT_MS) catch |err| {
+                    core.logging.logError("ses", "failed to forward exit_intent to mux", err);
+                    // If forward fails, allow exit.
+                    _ = self.pending_exit_intent_cli_fds.remove(exit_req_id);
+                    const allow = wire.ExitIntentResult{ .allow = 1 };
+                    self.replyOrClose(fd, .exit_intent_result, std.mem.asBytes(&allow));
+                    self.queueCtlClose(fd, null);
                 };
             },
             .float_request => {
@@ -3383,32 +3440,32 @@ pub const Server = struct {
                 const mux_fd = self.resolveFloatTargetMux(fr.source_session_id) orelse {
                     core.logging.warn("ses", "float_request target mux not found for session={s}", .{fr.source_session_id[0..8]});
                     self.sendBinaryError(fd, "no_mux");
-                    posix.close(fd);
+                    self.finishCliRequest(fd);
                     return;
                 };
                 // Forward entire float_request to MUX.
-                wire.writeControlWithTrailTimeout(mux_fd, .float_request, std.mem.asBytes(&fr), buf[0..trail_len], HANDLER_IO_TIMEOUT_MS) catch |err| {
+                // Tag the request so its result can be matched back to THIS
+                // caller. Concurrent `hexe terminal float` calls are ordinary
+                // (a picker float in two panes); without a correlation id they
+                // shared one slot.
+                const float_req_id = self.next_float_request_id;
+                self.next_float_request_id +%= 1;
+                if (self.next_float_request_id == 0) self.next_float_request_id = 1;
+
+                const trails: []const []const u8 = &.{buf[0..trail_len]};
+                wire.writeControlMsgWithRequestIdTimeout(mux_fd, .float_request, float_req_id, std.mem.asBytes(&fr), trails, HANDLER_IO_TIMEOUT_MS) catch |err| {
                     core.logging.logError("ses", "float_request forward to mux failed", err);
                     self.sendBinaryError(fd, "forward_failed");
-                    posix.close(fd);
+                    self.finishCliRequest(fd);
                     return;
                 };
-                // Store CLI fd — MUX will respond with float_created or float_result.
-                // We'll use a placeholder UUID (zeroed) until float_created gives us the real one.
-                // For now, keep the fd in a temporary spot. When MUX sends float_created,
-                // we move it to pending_float_cli_fds keyed by UUID.
-                // Use a simple approach: store as pending with zeroed UUID.
-                const zero_uuid: [32]u8 = .{0} ** 32;
-                // A second concurrent float request would overwrite (and leak)
-                // the previous waiter's fd; close the stale one first.
-                if (self.pending_float_cli_fds.fetchRemove(zero_uuid)) |stale| {
-                    self.ses_state.store.noteClosedFd(stale.value.cli_fd);
-                    posix.close(stale.value.cli_fd);
-                }
-                self.pending_float_cli_fds.put(zero_uuid, .{ .cli_fd = fd, .owner_ctl_fd = mux_fd }) catch |err| {
+                // Keyed by the request id, so concurrent waiters coexist.
+                self.pending_float_cli_fds.put(float_req_id, .{ .cli_fd = fd, .owner_ctl_fd = mux_fd }) catch |err| {
                     core.logging.logError("ses", "failed to track pending float CLI request", err);
                     self.sendBinaryError(fd, "track_failed");
-                    posix.close(fd);
+                    // sendBinaryError queues this fd on write failure, so a
+                    // direct close here would double-close a recycled number.
+                    self.queueCtlClose(fd, null);
                 };
             },
             .notify => {
@@ -3430,7 +3487,7 @@ pub const Server = struct {
                     return;
                 };
                 self.replyOrClose(mux_fd, .notify, buf[0..hdr.payload_len]);
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .send_keys => {
                 if (hdr.payload_len < @sizeOf(wire.SendKeys)) {
@@ -3462,7 +3519,7 @@ pub const Server = struct {
                 if (mux_fd) |mfd| {
                     self.replyOrClose(mfd, .send_keys, buf[0..hdr.payload_len]);
                 }
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .targeted_notify => {
                 if (hdr.payload_len < @sizeOf(wire.TargetedNotify)) {
@@ -3493,7 +3550,7 @@ pub const Server = struct {
                 if (mux_fd) |mfd| {
                     self.replyOrClose(mfd, .targeted_notify, buf[0..hdr.payload_len]);
                 }
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .broadcast_notify => {
                 if (hdr.payload_len > buf.len) {
@@ -3514,7 +3571,7 @@ pub const Server = struct {
                         self.replyOrClose(mfd, .notify, buf[0..hdr.payload_len]);
                     }
                 }
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .pop_confirm => {
                 if (hdr.payload_len < @sizeOf(wire.PopConfirm)) {
@@ -3609,7 +3666,7 @@ pub const Server = struct {
                     return;
                 };
                 server_reporting_handlers.handleBinaryPaneInfo(self, fd, pu.uuid);
-                posix.close(fd);
+                self.finishCliRequest(fd);
             },
             .status => {
                 // Payload is 1 byte: full_mode flag (0 or 1).
@@ -3651,12 +3708,20 @@ pub const Server = struct {
             .get_session_state => {
                 server_cli_layout_handlers.handleGetSessionState(self, fd, hdr.payload_len, &buf);
             },
+            // `hexe ses export` and `hexe ses stats` both open with this. It was
+            // only wired on the MUX CTL channel, so both commands failed at
+            // their first request -- silently, with a non-zero exit and no
+            // message. The handler reads no request payload, so it is
+            // channel-agnostic.
+            .list_sessions => {
+                server_listing_handlers.handleBinaryListSessions(self, fd, &buf);
+            },
             // Named MsgTypes that never arrive on the CLI-tool request channel
             // (handshake 0x04): MUX→SES binary CTL messages, responses, and POD
             // channel-④ events, all dispatched elsewhere. Enumerated explicitly
             // so a new MsgType is a compile error here until categorized
             // (PLAN.md 2.1). Behavior matches the former `else`.
-            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_name, .update_pane_shell, .get_pane_cwd, .list_sessions, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .shell_event, .bell, .exited, .shp_shell_event => {
+            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_name, .update_pane_shell, .get_pane_cwd, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .shell_event, .bell, .exited, .shp_shell_event => {
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
                 self.closeCliRequest(fd, "unsupported cli request type");
             },
@@ -3665,6 +3730,16 @@ pub const Server = struct {
                 self.closeCliRequest(fd, "unsupported cli request type");
             },
         }
+    }
+
+    /// Close a finished CLI request fd. Same note-then-close discipline as
+    /// `closeCliRequest`, without the warn — these are success paths. The note
+    /// matters because `replyOrClose`/`sendBinaryError` earlier in the arm may
+    /// already have queued this fd, and the queued entry would otherwise fire
+    /// later against whatever connection reused the number.
+    fn finishCliRequest(self: *Server, fd: posix.fd_t) void {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
     }
 
     fn closeCliRequest(self: *Server, fd: posix.fd_t, comptime context: []const u8) void {

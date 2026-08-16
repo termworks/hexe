@@ -1,39 +1,34 @@
-// SHP - Shell Prompt and Integration
-// Segment/style types are shared via core; this module provides
-// shell hooks, prompt assembly, and format parsing.
+//! Shell integration: the hooks a shell installs so it can report its state to
+//! the mux.
+//!
+//! This is the input side only. Prompt painting belongs to an external program;
+//! hexe consumes what the shell reports (cwd, exit status, duration, jobs,
+//! running command) and forwards it to whoever paints.
 
 const std = @import("std");
-const core = @import("core");
 
-pub const format = @import("format.zig");
-pub const animations = core.segments.animations;
-pub const entry = @import("main.zig");
+const bash_init = @import("shell/bash.zig");
+const zsh_init = @import("shell/zsh.zig");
+const fish_init = @import("shell/fish.zig");
+// Emits Lua rather than shell — see the note on `oslo.printInit`.
+const oslo_init = @import("shell/oslo.zig");
 
-// Re-export core types for backward compatibility
-pub const Style = core.style.Style;
-pub const Color = core.style.Color;
-pub const FormatParser = format.FormatParser;
-pub const Segment = core.segments.Segment;
-pub const Context = core.segments.Context;
+/// Print the integration snippet for `shell` on stdout. `no_comms` suppresses
+/// the shell->mux reporting hooks, leaving only command timing.
+pub fn printInit(shell: []const u8, no_comms: bool) !void {
+    const stdout = std.fs.File.stdout();
 
-// Re-export entry point types for CLI
-pub const PopArgs = entry.PopArgs;
-pub const run = entry.run;
-
-/// Render a format string with the given context
-pub fn render(allocator: std.mem.Allocator, format_str: []const u8, ctx: *Context) ![]Segment {
-    var parser = FormatParser.init(allocator, format_str);
-    return parser.render(ctx);
-}
-
-/// Render a format string to ANSI output
-pub fn renderToAnsi(allocator: std.mem.Allocator, format_str: []const u8, ctx: *Context, writer: anytype) !void {
-    const segs = try render(allocator, format_str, ctx);
-    defer allocator.free(segs);
-
-    for (segs) |seg| {
-        try seg.style.toAnsi(writer);
-        try writer.writeAll(seg.text);
+    if (std.mem.eql(u8, shell, "bash")) {
+        try bash_init.printInit(stdout, no_comms);
+    } else if (std.mem.eql(u8, shell, "zsh")) {
+        try zsh_init.printInit(stdout, no_comms);
+    } else if (std.mem.eql(u8, shell, "fish")) {
+        try fish_init.printInit(stdout, no_comms);
+    } else if (std.mem.eql(u8, shell, "oslo")) {
+        try oslo_init.printInit(stdout, no_comms);
+    } else {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Unknown shell: {s}\nSupported shells: bash, zsh, fish, oslo\n", .{shell}) catch return;
+        try stdout.writeAll(msg);
     }
-    try Style.reset(writer);
 }

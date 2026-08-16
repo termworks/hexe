@@ -7,6 +7,29 @@ const core = @import("core");
 const wire = core.wire;
 const server = @import("server.zig");
 const Server = server.Server;
+const store = @import("store.zig");
+
+/// Take the next `len` bytes of a trail, advancing `offset`. Null when the
+/// declared length runs past what was actually read.
+fn sliceTrail(buf: []const u8, offset: *usize, trail_len: usize, len: u16) ?[]const u8 {
+    if (len == 0) return "";
+    if (offset.* + len > trail_len) return null;
+    const out = buf[offset.* .. offset.* + len];
+    offset.* += len;
+    return out;
+}
+
+/// Replace an owned optional string on a store pane. An empty value clears it;
+/// a failed dupe leaves the previous value in place rather than losing both.
+fn replaceOwned(self: *Server, slot: *?[]const u8, value: []const u8, comptime what: []const u8) void {
+    if (value.len == 0) return;
+    const owned = self.allocator.dupe(u8, value) catch |err| {
+        core.logging.logError("ses", "failed to store pane " ++ what, err);
+        return;
+    };
+    if (slot.*) |old| self.allocator.free(old);
+    slot.* = owned;
+}
 
 pub fn handleBinaryUpdatePaneName(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.UpdatePaneName)) {
@@ -51,7 +74,6 @@ pub fn handleBinaryUpdatePaneName(self: *Server, fd: posix.fd_t, payload_len: u3
 }
 
 pub fn handleBinaryUpdatePaneAux(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
-    _ = buf;
     if (payload_len < @sizeOf(wire.UpdatePaneAux)) {
         self.skipPayloadRest();
         self.sendBinaryError(fd, "update_pane_aux: payload too small");
@@ -63,6 +85,40 @@ pub fn handleBinaryUpdatePaneAux(self: *Server, fd: posix.fd_t, payload_len: u32
         self.sendBinaryError(fd, "update_pane_aux: read failed");
         return;
     };
+
+    const trail_len = payload_len - @sizeOf(wire.UpdatePaneAux);
+    if (trail_len > wire.MAX_PAYLOAD_LEN or trail_len > buf.len) {
+        self.skipPayloadRest();
+        self.sendBinaryError(fd, "update_pane_aux: payload too large");
+        return;
+    }
+    if (trail_len > 0) {
+        self.readPayloadInto(buf[0..trail_len]) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
+            core.logging.logError("ses", "update_pane_aux trail read failed", err);
+            self.sendBinaryError(fd, "update_pane_aux: trail read failed");
+            return;
+        };
+    }
+
+    var offset: usize = 0;
+    const cwd = sliceTrail(buf, &offset, trail_len, upa.cwd_len) orelse {
+        self.sendBinaryError(fd, "update_pane_aux: malformed cwd trail");
+        return;
+    };
+    const fg = sliceTrail(buf, &offset, trail_len, upa.fg_len) orelse {
+        self.sendBinaryError(fd, "update_pane_aux: malformed fg trail");
+        return;
+    };
+    const layout = sliceTrail(buf, &offset, trail_len, upa.layout_len) orelse {
+        self.sendBinaryError(fd, "update_pane_aux: malformed layout trail");
+        return;
+    };
+    if (offset != trail_len) {
+        self.sendBinaryError(fd, "update_pane_aux: trailing payload length mismatch");
+        return;
+    }
+
     const client_id = self.findClientForCtlFd(fd);
 
     if (self.ses_state.store.panes.getPtr(upa.uuid)) |pane| {
@@ -73,6 +129,24 @@ pub fn handleBinaryUpdatePaneAux(self: *Server, fd: posix.fd_t, payload_len: u32
             pane.focused_from = upa.focused_from;
         }
         pane.is_focused = (upa.is_focused != 0);
+        if (upa.has_cursor != 0) {
+            pane.cursor_x = upa.cursor_x;
+            pane.cursor_y = upa.cursor_y;
+        }
+        if (upa.has_cursor_style != 0) pane.cursor_style = upa.cursor_style;
+        if (upa.has_cursor_visible != 0) pane.cursor_visible = (upa.cursor_visible != 0);
+        if (upa.has_alt_screen != 0) pane.alt_screen = (upa.alt_screen != 0);
+        if (upa.has_size != 0) {
+            pane.cols = upa.cols;
+            pane.rows = upa.rows;
+        }
+        if (upa.has_fg_pid != 0) pane.fg_pid = upa.fg_pid;
+        pane.is_float = (upa.is_floating != 0);
+        pane.pane_type = std.meta.intToEnum(store.PaneType, upa.pane_type) catch pane.pane_type;
+
+        replaceOwned(self, &pane.cwd, cwd, "cwd");
+        replaceOwned(self, &pane.fg_process, fg, "fg_process");
+        replaceOwned(self, &pane.layout_path, layout, "layout_path");
         if (client_id) |cid| {
             self.ses_state.updateClientSessionFocus(
                 cid,

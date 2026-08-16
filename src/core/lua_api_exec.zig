@@ -436,45 +436,6 @@ test "ctx.cache helper semantics" {
     try std.testing.expect(lua.typeOf(-1) == .nil);
 }
 
-test "prompt pane selector shim semantics" {
-    // TODO(tests): depends on the prompt/exec Lua shim; needs a stubbed backend.
-    try dormantSkip();
-    var lua = try Lua.init(std.testing.allocator);
-    defer lua.deinit();
-
-    try runChunk(
-        lua,
-        std.testing.allocator,
-        "__hexe_when_pane0 = { marker = 'ok' }; " ++
-            "ctx = __hexe_when_pane0; " ++
-            "ctx.panes={ [1]=__hexe_when_pane0 }; " ++
-            "ctx.pane=function(id) " ++
-            "if id==nil or id==0 then return __hexe_when_pane0 end; " ++
-            "if id==1 then return __hexe_when_pane0 end; " ++
-            "if type(id)=='string' and (id=='focused' or id=='current') then return __hexe_when_pane0 end; " ++
-            "return nil end; " ++
-            "ctx.status = ctx.pane(0);",
-    );
-
-    try runChunk(lua, std.testing.allocator, "__a = ctx.pane(0).marker; __b = ctx.pane(1).marker; __c = ctx.pane('focused').marker; __d = ctx.pane(2)");
-
-    _ = try lua.getGlobal("__a");
-    defer lua.pop(1);
-    try std.testing.expectEqualStrings("ok", lua.toString(-1) catch "");
-
-    _ = try lua.getGlobal("__b");
-    defer lua.pop(1);
-    try std.testing.expectEqualStrings("ok", lua.toString(-1) catch "");
-
-    _ = try lua.getGlobal("__c");
-    defer lua.pop(1);
-    try std.testing.expectEqualStrings("ok", lua.toString(-1) catch "");
-
-    _ = try lua.getGlobal("__d");
-    defer lua.pop(1);
-    try std.testing.expect(lua.typeOf(-1) == .nil);
-}
-
 test "hexe.exec validates option types" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.deinit();

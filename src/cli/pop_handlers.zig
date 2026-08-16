@@ -14,7 +14,7 @@ fn parseUuid32Hex(text: []const u8) ?[32]u8 {
     return out;
 }
 
-pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, message: []const u8) !void {
+pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i32, message: []const u8) !void {
     const wire = core.wire;
     const posix = std.posix;
 
@@ -27,23 +27,23 @@ pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
     if (uuid.len > 0) {
         target_uuid = parseUuid32Hex(uuid) orelse {
             print("Error: --uuid must be 32 hex chars\n", .{});
-            return;
+            std.process.exit(1);
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
             print("Error: --uuid required (or run inside hexe terminal)\n", .{});
-            return;
+            std.process.exit(1);
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
             print("Error: invalid HEXE_PANE_UUID\n", .{});
-            return;
+            std.process.exit(1);
         };
     }
 
-    const fd = cli_cmds.connectSesCliChannel(allocator) orelse return;
+    const fd = cli_cmds.connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
-    const timeout_ms: i32 = if (timeout > 0) @intCast(timeout) else 3000;
+    const timeout_ms: i32 = if (timeout > 0) timeout else 3000;
     const tn = wire.TargetedNotify{
         .uuid = target_uuid,
         .timeout_ms = timeout_ms,
@@ -54,7 +54,7 @@ pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
     };
 }
 
-pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, message: []const u8) !void {
+pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i32, message: []const u8) !void {
     const wire = core.wire;
     const posix = std.posix;
 
@@ -77,7 +77,7 @@ pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i6
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
             print("Error: --uuid required (or run inside hexe terminal)\n", .{});
-            return;
+            std.process.exit(1);
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
             print("Error: invalid HEXE_PANE_UUID\n", .{});
@@ -87,7 +87,7 @@ pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i6
 
     const fd = cli_cmds.connectSesCliChannel(allocator) orelse std.process.exit(1);
 
-    const timeout_ms: i32 = if (timeout > 0) @intCast(timeout) else 0;
+    const timeout_ms: i32 = if (timeout > 0) timeout else 0;
     const pc = wire.PopConfirm{
         .uuid = target_uuid,
         .timeout_ms = timeout_ms,
@@ -124,7 +124,7 @@ pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i6
     std.process.exit(1);
 }
 
-pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, items: []const u8, message: []const u8) !void {
+pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i32, items: []const u8, message: []const u8) !void {
     const wire = core.wire;
     const posix = std.posix;
 
@@ -142,7 +142,7 @@ pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
             print("Error: --uuid required (or run inside hexe terminal)\n", .{});
-            return;
+            std.process.exit(1);
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
             print("Error: invalid HEXE_PANE_UUID\n", .{});
@@ -170,12 +170,12 @@ pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
 
     if (item_count == 0) {
         print("Error: no valid items provided\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const fd = cli_cmds.connectSesCliChannel(allocator) orelse std.process.exit(1);
 
-    const timeout_ms: i32 = if (timeout > 0) @intCast(timeout) else 0;
+    const timeout_ms: i32 = if (timeout > 0) timeout else 0;
     const pc = wire.PopChoose{
         .uuid = target_uuid,
         .timeout_ms = timeout_ms,

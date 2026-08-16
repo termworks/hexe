@@ -43,6 +43,7 @@ pub fn applyDeferredPaneInfoResponse(state: *State) void {
         if (resp.fg_name != null or resp.fg_pid != null) {
             state.setPaneProc(resp.uuid, resp.fg_name, resp.fg_pid);
         }
+        state.setPaneSesInfo(resp.uuid, resp.shell_pid, resp.ses_state, resp.created_at);
     }
 }
 

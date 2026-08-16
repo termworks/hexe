@@ -57,7 +57,7 @@ fn readExactLogged(fd: posix.fd_t, dest: []u8, comptime context: []const u8) boo
     return true;
 }
 
-fn sendFailedFloatResult(state: *State, exit_code: i32, comptime context: []const u8) void {
+fn sendFailedFloatResult(state: *State, request_id: u32, exit_code: i32, comptime context: []const u8) void {
     const ctl_fd = state.runtime.getCtlFd() orelse {
         core.logging.warn("terminal", context ++ ": SES CTL channel is unavailable", .{});
         return;
@@ -67,7 +67,11 @@ fn sendFailedFloatResult(state: *State, exit_code: i32, comptime context: []cons
         .exit_code = exit_code,
         .output_len = 0,
     };
-    writeControlLogged(ctl_fd, .float_result, std.mem.asBytes(&result), context);
+    // Must carry the request id: these are the paths where creation FAILED and
+    // a CLI caller is blocked waiting. An unmatched result leaves it hanging.
+    wire.writeControlWithRequestId(ctl_fd, .float_result, request_id, std.mem.asBytes(&result)) catch |err| {
+        core.logging.logError("terminal", context, err);
+    };
 }
 
 /// Handle binary control messages from the SES control channel.
@@ -92,6 +96,18 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
             state.notifications.showFor("Lost connection to ses daemon — reconnecting...", 5000);
         }
     };
+}
+
+/// Drain pushes a synchronous reader swallowed while it was waiting.
+///
+/// This must run every loop turn, not only when the CTL fd is readable. A
+/// sync request (createPane, for instance) consumes any async frame that
+/// arrives mid-wait and queues it; if no FURTHER ctl traffic ever arrives,
+/// `handleSesMessage` is never entered again and the queued frame is stranded.
+/// That is how a blocking float's `pane_exited` went missing: the float's own
+/// creation request swallowed it, and nothing else was ever sent.
+pub fn drainQueuedPushes(state: *State, buffer: []u8) void {
+    replayQueuedPushes(state, buffer);
 }
 
 fn replayQueuedPushes(state: *State, buffer: []u8) void {
@@ -154,6 +170,12 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
         .shell_event => {
             handleShellEvent(state, fd, ctl_event.payload_len, buffer);
         },
+        .cwd_changed => {
+            handlePodCwdChanged(state, fd, ctl_event.payload_len, buffer);
+        },
+        .fg_changed => {
+            handlePodFgChanged(state, fd, ctl_event.payload_len, buffer);
+        },
         .send_keys => {
             handleSendKeys(state, fd, ctl_event.payload_len, buffer);
         },
@@ -161,10 +183,10 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
             handleFocusMove(state, fd, ctl_event.payload_len, buffer);
         },
         .exit_intent => {
-            handleExitIntent(state, fd, ctl_event.payload_len, buffer);
+            handleExitIntent(state, fd, ctl_event.request_id, ctl_event.payload_len, buffer);
         },
         .float_request => {
-            handleFloatRequest(state, fd, ctl_event.payload_len, buffer);
+            handleFloatRequest(state, fd, ctl_event.request_id, ctl_event.payload_len, buffer);
         },
         .pane_exited => {
             // A pane (possibly the one being searched) is about to be freed;
@@ -379,6 +401,75 @@ fn setPendingPopupTarget(state: *State, target: PopupTarget) void {
     }
 }
 
+/// A pod noticed its pane's cwd change. SES records it and now forwards it, so
+/// every pane's `cwd` is live rather than whatever was true at attach time.
+fn handlePodCwdChanged(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(core.wire.CwdChanged)) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+    const cc = core.wire.readStruct(core.wire.CwdChanged, fd) catch |err| {
+        core.logging.logError("terminal", "failed to read cwd_changed", err);
+        return;
+    };
+    const trail = payload_len - @sizeOf(core.wire.CwdChanged);
+    if (trail > buffer.len or cc.cwd_len > trail) {
+        skipPayload(fd, trail, buffer);
+        return;
+    }
+    if (trail > 0) {
+        core.wire.readExact(fd, buffer[0..trail]) catch |err| {
+            core.logging.logError("terminal", "failed to read cwd_changed path", err);
+            return;
+        };
+    }
+    if (cc.cwd_len == 0) return;
+    const cwd = buffer[0..cc.cwd_len];
+
+    state.setPaneShell(cc.uuid, null, cwd, null, null, null);
+    if (state.config._lua_runtime) |rt| {
+        lua_events.emit(state, rt, "pane_cwd_changed", &.{
+            .{ .name = "pane_uuid", .value = .{ .uuid = cc.uuid } },
+            .{ .name = "cwd", .value = .{ .str = cwd } },
+        });
+    }
+    state.needs_render = true;
+}
+
+/// A pod noticed its pane's foreground process change.
+fn handlePodFgChanged(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(core.wire.FgChanged)) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+    const fc = core.wire.readStruct(core.wire.FgChanged, fd) catch |err| {
+        core.logging.logError("terminal", "failed to read fg_changed", err);
+        return;
+    };
+    const trail = payload_len - @sizeOf(core.wire.FgChanged);
+    if (trail > buffer.len or fc.name_len > trail) {
+        skipPayload(fd, trail, buffer);
+        return;
+    }
+    if (trail > 0) {
+        core.wire.readExact(fd, buffer[0..trail]) catch |err| {
+            core.logging.logError("terminal", "failed to read fg_changed name", err);
+            return;
+        };
+    }
+    const name: ?[]const u8 = if (fc.name_len > 0) buffer[0..fc.name_len] else null;
+
+    state.setPaneProc(fc.uuid, name, if (fc.pid != 0) fc.pid else null);
+    if (state.config._lua_runtime) |rt| {
+        lua_events.emit(state, rt, "pane_process_changed", &.{
+            .{ .name = "pane_uuid", .value = .{ .uuid = fc.uuid } },
+            .{ .name = "process", .value = .{ .str = name orelse "" } },
+            .{ .name = "pid", .value = .{ .int = fc.pid } },
+        });
+    }
+    state.needs_render = true;
+}
+
 fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
     var payload = frontend_core.readShellEventPayload(state.allocator, fd, payload_len, buffer) catch |err| {
         core.logging.logError("terminal", "failed to read shell_event payload", err);
@@ -452,7 +543,7 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
                 rt.lua.setField(-2, "started_at_ms");
                 rt.lua.pushInteger(@intCast(now_ms));
                 rt.lua.setField(-2, "now_ms");
-                lua_events.emitAutocmdWithPayloadOnStack(rt, "pane_shell_running_changed");
+                lua_events.emitWithState(state, rt, "pane_shell_running_changed");
             }
         }
     } else {
@@ -495,7 +586,7 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
             }
             rt.lua.pushInteger(@intCast(now_ms));
             rt.lua.setField(-2, "now_ms");
-            lua_events.emitAutocmdWithPayloadOnStack(rt, "command_finished");
+            lua_events.emitWithState(state, rt, "command_finished");
         }
 
         if (old_running != running) {
@@ -525,7 +616,7 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
                 }
                 rt.lua.pushInteger(@intCast(now_ms));
                 rt.lua.setField(-2, "now_ms");
-                lua_events.emitAutocmdWithPayloadOnStack(rt, "pane_shell_running_changed");
+                lua_events.emitWithState(state, rt, "pane_shell_running_changed");
             }
         }
     }
@@ -618,7 +709,7 @@ fn handleFocusMove(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
     state.needs_render = true;
 }
 
-fn handleExitIntent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+fn handleExitIntent(state: *State, fd: posix.fd_t, request_id: u32, payload_len: u32, buffer: []u8) void {
     _ = frontend_core.readExitIntentPayload(fd, payload_len, buffer) catch |err| {
         core.logging.logError("terminal", "failed to read exit_intent payload", err);
         return;
@@ -626,47 +717,52 @@ fn handleExitIntent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
 
     // If no tabs, allow exit.
     if (state.view.tab_views.items.len == 0) {
-        sendExitIntentResultPub(state, true);
+        sendExitIntentResultPub(state, true, request_id);
         return;
     }
 
     const is_last_split = (state.currentLayout().splitCount() <= 1 and state.view.tab_views.items.len <= 1);
     if (!is_last_split or !state.config.confirm_on_exit) {
-        sendExitIntentResultPub(state, true);
+        sendExitIntentResultPub(state, true, request_id);
         return;
     }
 
     // Need confirmation. Only one pending request at a time.
     if (state.pending_action != null or state.popups.isBlocked() or state.pending_exit_intent) {
-        sendExitIntentResultPub(state, false);
+        sendExitIntentResultPub(state, false, request_id);
         return;
     }
 
     state.pending_action = .exit_intent;
     // Mark that we have a pending exit_intent (no longer an fd, use sentinel).
     state.pending_exit_intent = true;
+    // Held until the user answers: SES matches the answer to the waiting CLI on
+    // it, and the reply can overtake a later request that was answered inline.
+    state.pending_exit_intent_request_id = request_id;
     state.popups.showConfirm("Exit terminal session?", .{}) catch |err| {
         core.logging.logError("terminal", "failed to show exit-intent confirmation popup", err);
         state.notifications.show("Confirmation failed");
         state.pending_action = null;
         state.pending_exit_intent = false;
-        sendExitIntentResultPub(state, true);
+        sendExitIntentResultPub(state, true, request_id);
         state.needs_render = true;
         return;
     };
     state.needs_render = true;
 }
 
-pub fn sendExitIntentResultPub(state: *State, allow: bool) void {
+pub fn sendExitIntentResultPub(state: *State, allow: bool, request_id: u32) void {
     const ctl_fd = state.runtime.getCtlFd() orelse {
         core.logging.warn("terminal", "sendExitIntentResult skipped: SES CTL channel is unavailable", .{});
         return;
     };
     const result = wire.ExitIntentResult{ .allow = if (allow) 1 else 0 };
-    writeControlLogged(ctl_fd, .exit_intent_result, std.mem.asBytes(&result), "failed to send exit intent result");
+    wire.writeControlWithTrailAndRequestId(ctl_fd, .exit_intent_result, request_id, std.mem.asBytes(&result), "") catch |err| {
+        core.logging.logError("terminal", "failed to send exit intent result", err);
+    };
 }
 
-fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_len: u32, buffer: []u8) void {
     if (payload_len < @sizeOf(wire.FloatRequest)) {
         skipPayload(fd, payload_len, buffer);
         return;
@@ -889,7 +985,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         state.notifications.show("Float failed");
         state.needs_render = true;
         if (wait_for_exit) {
-            sendFailedFloatResult(state, 127, "failed to send failed float result after command allocation failure");
+            sendFailedFloatResult(state, request_id, 127, "failed to send failed float result after command allocation failure");
         }
         return;
     };
@@ -905,7 +1001,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
-            sendFailedFloatResult(state, 127, "failed to send failed float result");
+            sendFailedFloatResult(state, request_id, 127, "failed to send failed float result");
         }
         return;
     };
@@ -932,11 +1028,12 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         state.pending_float_requests.put(new_uuid, .{
             .result_path = stored_path,
             .cursor_snapshot = cursor_snapshot,
+            .ses_request_id = request_id,
         }) catch |err| {
             core.logging.logError("terminal", "failed to track pending float request", err);
             if (stored_path) |path| state.allocator.free(path);
             state.notifications.show("Float result tracking failed");
-            sendFailedFloatResult(state, 127, "failed to send failed float result after tracking failure");
+            sendFailedFloatResult(state, request_id, 127, "failed to send failed float result after tracking failure");
         };
     }
 }
@@ -999,6 +1096,9 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
     if (payload.fg_name != null or payload.fg_pid != null) {
         state.setPaneProc(payload.uuid, payload.fg_name, payload.fg_pid);
     }
+    // SES-only facts: the pane's shell pid, its lifecycle state and its birth
+    // time. None of these are computable in the frontend.
+    state.setPaneSesInfo(payload.uuid, payload.shell_pid, payload.ses_state, payload.created_at);
 }
 
 fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
@@ -1009,7 +1109,7 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
     for (state.view.float_views.items) |pane| {
         const uuid_match = std.mem.eql(u8, pane.uuid[0..], uuid[0..]);
         if (uuid_match and pane.pokemon_initialized and
-            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_content == null)
+            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_name == null)
         {
             pane.pokemon_state.loadSprite(name, false) catch |err| {
                 core.logging.logError("terminal", "failed to load float sprite after pane-name update", err);
@@ -1020,7 +1120,7 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
     var split_iter = state.currentLayout().splits.valueIterator();
     while (split_iter.next()) |pane| {
         if (std.mem.eql(u8, pane.*.uuid[0..], uuid[0..]) and pane.*.pokemon_initialized and
-            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_content == null)
+            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_name == null)
         {
             pane.*.pokemon_state.loadSprite(name, false) catch |err| {
                 core.logging.logError("terminal", "failed to load split sprite after pane-name update", err);

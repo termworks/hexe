@@ -138,6 +138,14 @@ pub fn createTab(self: anytype) !void {
     }
     self.renderer.invalidate();
     self.force_full_render = true;
+
+    if (self.config._lua_runtime) |rt| {
+        lua_events.emit(self, rt, "tab_created", &.{
+            .{ .name = "tab", .value = .{ .int = @intCast(self.activeTabIndex() + 1) } },
+            .{ .name = "tab_count", .value = .{ .int = @intCast(self.view.tab_views.items.len) } },
+            .{ .name = "pane_uuid", .value = .{ .uuid = first_pane.uuid } },
+        });
+    }
 }
 
 /// Close the current tab.
@@ -232,6 +240,13 @@ pub fn closeCurrentTab(self: anytype) bool {
     }
     self.renderer.invalidate();
     self.force_full_render = true;
+
+    if (self.config._lua_runtime) |rt| {
+        lua_events.emit(self, rt, "tab_closed", &.{
+            .{ .name = "tab", .value = .{ .int = @intCast(closing_tab + 1) } },
+            .{ .name = "tab_count", .value = .{ .int = @intCast(self.view.tab_views.items.len) } },
+        });
+    }
     return true;
 }
 
@@ -505,46 +520,14 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
 /// Switch to next tab.
 pub fn nextTab(self: anytype) void {
     if (self.view.tab_views.items.len > 1) {
-        const prev_tab = self.activeTabIndex();
         tab_switch.switchToTab(self, (self.activeTabIndex() + 1) % self.view.tab_views.items.len);
-
-        if (self.config._lua_runtime) |rt| {
-            rt.lua.createTable(0, 6);
-            _ = rt.lua.pushString("tab_changed");
-            rt.lua.setField(-2, "event");
-            rt.lua.pushInteger(@intCast(prev_tab + 1));
-            rt.lua.setField(-2, "previous_tab");
-            rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
-            rt.lua.setField(-2, "active_tab");
-            rt.lua.pushInteger(@intCast(self.view.tab_views.items.len));
-            rt.lua.setField(-2, "tab_count");
-            rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
-            rt.lua.setField(-2, "now_ms");
-            lua_events.emitAutocmdWithPayloadOnStack(rt, "tab_changed");
-        }
     }
 }
 
 /// Switch to previous tab.
 pub fn prevTab(self: anytype) void {
     if (self.view.tab_views.items.len > 1) {
-        const prev_tab = self.activeTabIndex();
         tab_switch.switchToTab(self, if (self.activeTabIndex() == 0) self.view.tab_views.items.len - 1 else self.activeTabIndex() - 1);
-
-        if (self.config._lua_runtime) |rt| {
-            rt.lua.createTable(0, 6);
-            _ = rt.lua.pushString("tab_changed");
-            rt.lua.setField(-2, "event");
-            rt.lua.pushInteger(@intCast(prev_tab + 1));
-            rt.lua.setField(-2, "previous_tab");
-            rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
-            rt.lua.setField(-2, "active_tab");
-            rt.lua.pushInteger(@intCast(self.view.tab_views.items.len));
-            rt.lua.setField(-2, "tab_count");
-            rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
-            rt.lua.setField(-2, "now_ms");
-            lua_events.emitAutocmdWithPayloadOnStack(rt, "tab_changed");
-        }
     }
 }
 

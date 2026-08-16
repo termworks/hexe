@@ -11,6 +11,7 @@ const print = std.debug.print;
 const RecordContext = struct {
     writer: *AsciicastWriter,
     capture_input: bool,
+    password_mode: bool = false,
     failed: ?anyerror = null,
 };
 
@@ -24,7 +25,7 @@ pub fn runPodRecord(
 ) !void {
     if (out_path.len == 0) {
         print("Error: --out is required\n", .{});
-        return;
+        std.process.exit(1);
     }
 
     const target_socket = try resolveTargetSocket(allocator, uuid, name, socket_path);
@@ -33,7 +34,7 @@ pub fn runPodRecord(
     var client = ipc.Client.connect(target_socket) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("pod is not running\n", .{});
-            return;
+            std.process.exit(1);
         }
         return err;
     };
@@ -41,7 +42,7 @@ pub fn runPodRecord(
 
     wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_OBSERVER) catch |err| {
         print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
-        return;
+        std.process.exit(1);
     };
     const conn = client.toConnection();
 
@@ -87,11 +88,14 @@ fn podFrameCallback(ctx_ptr: *anyopaque, frame: pod_protocol.Frame) void {
             };
         },
         .input => {
-            if (ctx.capture_input) {
+            if (ctx.capture_input and !ctx.password_mode) {
                 ctx.writer.writeInput(frame.payload) catch |err| {
                     ctx.failed = err;
                 };
             }
+        },
+        .password_mode => {
+            if (frame.payload.len >= 1) ctx.password_mode = frame.payload[0] != 0;
         },
         else => {},
     }

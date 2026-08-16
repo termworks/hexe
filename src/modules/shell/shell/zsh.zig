@@ -1,30 +1,6 @@
 const std = @import("std");
 
 pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
-    try stdout.writeAll(
-        \\# Hexe prompt initialization for Zsh
-        \\__shp_precmd() {
-        \\    local exit_status=$?
-        \\    local duration=0
-        \\    if [[ -n "$__shp_start" ]]; then
-        \\        duration=$(( $(date +%s%3N) - __shp_start ))
-        \\    fi
-        \\    PROMPT="$(hexe shp prompt --shell=zsh --status=$exit_status --duration=$duration --jobs=${(M)#jobstates}) "
-        \\    RPROMPT="$(hexe shp prompt --shell=zsh --right --status=$exit_status)"
-        \\    unset __shp_start
-        \\}
-        \\
-        \\__shp_preexec() {
-        \\    __shp_start=$(date +%s%3N)
-        \\}
-        \\
-        \\autoload -Uz add-zsh-hook
-        \\add-zsh-hook precmd __shp_precmd
-        \\add-zsh-hook preexec __shp_preexec
-        \\ZLE_RPROMPT_INDENT=0
-        \\
-    );
-
     if (no_comms) return;
 
     try stdout.writeAll(
@@ -41,7 +17,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\
         \\__hexe_exit_intent() {
         \\    [[ -n "$HEXE_MUX_SOCKET" && -n "$HEXE_PANE_UUID" ]] || return 0
-        \\    hexe shp exit-intent >/dev/null 2>/dev/null
+        \\    hexe shell exit-intent >/dev/null 2>/dev/null
         \\    return $?
         \\}
         \\
@@ -49,7 +25,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\    __hexe_last_cmd="$1"
         \\    __hexe_start=$(date +%s%3N)
         \\    __hexe_refresh_env_snapshot
-        \\    hexe shp shell-event --phase=start --running --started-at=$__hexe_start --cmd="$__hexe_last_cmd" --cwd="$PWD" --jobs=${(M)#jobstates} >/dev/null 2>/dev/null
+        \\    hexe shell shell-event --phase=start --running --started-at=$__hexe_start --cmd="$__hexe_last_cmd" --cwd="$PWD" --jobs=${(M)#jobstates} >/dev/null 2>/dev/null
         \\}
         \\
         \\__hexe_precmd_send() {
@@ -58,7 +34,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\    # OSC 7 cwd sync
         \\    printf '\033]7;file://%s%s\007' "${HOST:-localhost}" "$PWD" 2>/dev/null
         \\    __hexe_refresh_env_snapshot
-        \\    hexe shp shell-event --phase=end --cmd="$__hexe_last_cmd" --status=$exit_status --cwd="$PWD" --jobs=${(M)#jobstates} >/dev/null 2>/dev/null
+        \\    hexe shell shell-event --phase=end --cmd="$__hexe_last_cmd" --status=$exit_status --cwd="$PWD" --jobs=${(M)#jobstates} >/dev/null 2>/dev/null
         \\    unset __hexe_start
         \\}
         \\
