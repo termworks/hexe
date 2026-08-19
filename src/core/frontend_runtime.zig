@@ -424,6 +424,16 @@ pub const FrontendRuntime = struct {
         return self.client.probePaneExistence(uuid);
     }
 
+    /// Park a pane's palette colours in SES so they outlive this frontend.
+    pub fn updatePanePalette(self: *FrontendRuntime, uuid: [32]u8, blob: []const u8) void {
+        self.client.updatePanePalette(uuid, blob);
+    }
+
+    /// Ask SES for a pane's parked palette; the reply lands as a control event.
+    pub fn requestPanePalette(self: *FrontendRuntime, uuid: [32]u8) void {
+        self.client.requestPanePalette(uuid);
+    }
+
     pub fn updatePaneAux(
         self: *FrontendRuntime,
         uuid: [32]u8,

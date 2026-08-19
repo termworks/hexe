@@ -393,7 +393,10 @@ fn consumePaletteOsc(self: *Pane, seq: []const u8) void {
     const params = oscParams(seq) orelse return;
     switch (core.palette.applyOsc(&self.vt.ns_table, params, self.vt.inAltScreen())) {
         .ignore => {},
-        .changed => self.vt.invalidateRenderState(),
+        .changed => {
+            self.vt.invalidateRenderState();
+            self.palette_dirty = true;
+        },
         .have => |reply| {
             var buf: [64]u8 = undefined;
             const text = std.fmt.bufPrint(&buf, "\x1b]{d};have;{d};{d}\x1b\\", .{

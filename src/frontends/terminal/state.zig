@@ -2025,6 +2025,10 @@ pub const State = struct {
         return state_sync.syncPaneAux(self, pane, created_from);
     }
 
+    pub fn syncPalettes(self: *State) void {
+        return state_sync.syncPalettes(self);
+    }
+
     pub fn unfocusAllPanes(self: *State) void {
         return state_sync.unfocusAllPanes(self);
     }

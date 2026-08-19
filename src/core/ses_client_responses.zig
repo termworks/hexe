@@ -142,6 +142,10 @@ pub fn queuePendingPush(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeade
         // of the time, since the frontend polls pane_info every tick.
         .cwd_changed,
         .fg_changed,
+        // The parked-palette answer. Requested fire-and-forget, so no reader
+        // is waiting on it: dropped here, a reattached pane silently comes
+        // back with its colours missing.
+        .get_pane_palette,
         => true,
         else => false,
     };

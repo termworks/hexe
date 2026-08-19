@@ -218,6 +218,9 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
         .pane_info_response => {
             handlePaneInfoResponse(state, fd, ctl_event.payload_len, buffer);
         },
+        .palette_response => {
+            handlePaletteResponse(state, fd, ctl_event.payload_len, buffer);
+        },
         .error_response => {
             skipPayload(fd, ctl_event.payload_len, buffer);
         },
@@ -1081,6 +1084,46 @@ fn handleCwdResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []
 
     state.applyFrontendPaneCwd(payload.uuid, payload.cwd);
     state.setPaneShell(payload.uuid, null, payload.cwd, null, null, null);
+}
+
+/// Handle the async get_pane_palette response: a pane's colours, parked in SES
+/// across a detach, arriving after the pane was adopted (PLAN.md M4).
+///
+/// The payload is read to completion on every path, including the ones that
+/// reject it: leaving bytes on the control stream desyncs it for every message
+/// after this one.
+fn handlePaletteResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(core.wire.PanePalette)) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+    const resp = core.wire.readStruct(core.wire.PanePalette, fd) catch |err| {
+        core.logging.logError("terminal", "failed to read pane palette response", err);
+        return;
+    };
+    const trail = payload_len - @sizeOf(core.wire.PanePalette);
+    if (trail == 0 or resp.blob_len != trail or trail > core.palette.MAX_BLOB_LEN) {
+        skipPayload(fd, trail, buffer);
+        return;
+    }
+
+    const blob = state.allocator.alloc(u8, trail) catch |err| {
+        core.logging.logError("terminal", "failed to allocate pane palette blob", err);
+        skipPayload(fd, trail, buffer);
+        return;
+    };
+    defer state.allocator.free(blob);
+    core.wire.readExact(fd, blob) catch |err| {
+        core.logging.logError("terminal", "failed to read pane palette blob", err);
+        return;
+    };
+
+    const pane = state.findPaneByUuid(resp.uuid) orelse return;
+    pane.vt.ns_table.applySerialized(blob);
+    // The restore came FROM SES; syncing it straight back is pure noise.
+    pane.palette_dirty = false;
+    pane.vt.invalidateRenderState();
+    state.needs_render = true;
 }
 
 /// Handle async pane_info response (updates fg_process cache).

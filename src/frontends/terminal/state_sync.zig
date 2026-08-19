@@ -452,3 +452,43 @@ pub fn resizeFloatingPanes(self: anytype) void {
         self.setPaneBorderFrame(pane.uuid, frame.outer_x, frame.outer_y, frame.outer_w, frame.outer_h, self.paneBorderColor(pane));
     }
 }
+
+/// Park changed palettes in SES, and pull parked ones into panes that have not
+/// asked yet (PLAN.md M4).
+///
+/// Swept over every pane rather than only the focused one: `hexe palette set`
+/// with no `--pane` reaches the whole session, so any pane can be the one that
+/// changed. The dirty flag keeps this to nothing at all on a normal tick.
+pub fn syncPalettes(self: anytype) void {
+    if (!self.runtime.isConnected()) return;
+    for (self.view.tab_views.items) |*tab| {
+        var it = tab.layout.splitIterator();
+        while (it.next()) |p| syncPanePalette(self, p.*);
+    }
+    for (self.view.float_views.items) |p| syncPanePalette(self, p);
+}
+
+fn syncPanePalette(self: anytype, pane: *Pane) void {
+    if (pane.uuid[0] == 0) return;
+
+    // Ask once, and only once. A pane adopted from a detached session has
+    // colours parked in SES that its fresh VT knows nothing about; the byte
+    // ring cannot carry them, because a clear-screen empties it. The answer
+    // comes back as a control event, not inline — see requestPanePalette.
+    if (!pane.palette_restored) {
+        pane.palette_restored = true;
+        self.runtime.requestPanePalette(pane.uuid);
+        // Anything dirty now predates the answer, and the answer wins.
+        pane.palette_dirty = false;
+        return;
+    }
+
+    if (!pane.palette_dirty) return;
+    pane.palette_dirty = false;
+    const blob = pane.vt.ns_table.serialize(self.allocator) catch |err| {
+        core.logging.logError("terminal", "serialize pane palette", err);
+        return;
+    };
+    defer self.allocator.free(blob);
+    self.runtime.updatePanePalette(pane.uuid, blob);
+}

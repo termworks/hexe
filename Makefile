@@ -101,7 +101,8 @@ SMOKES := \
 	smoke_keypad.py \
 	smoke_painter_showcase.py \
 	smoke_profiles.py \
-	smoke_palette.py
+	smoke_palette.py \
+	smoke_palette_persist.py
 
 smoke: smoke-clean
 	zig build

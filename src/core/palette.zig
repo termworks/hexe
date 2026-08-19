@@ -310,7 +310,143 @@ pub const NamespaceTable = struct {
         }
         return free;
     }
+
+    /// Pack every patched colour into a blob SES can hold as opaque session
+    /// metadata (PLAN.md §2, M4).
+    ///
+    /// The pane's byte ring is NOT a store: a clear-screen empties it and a
+    /// busy pane scrolls it, either of which loses a palette across a
+    /// detach/reattach. This is what actually survives. It carries colours
+    /// only — never the stack, `current` or the overrides, which describe what
+    /// a *running* program selected and must not outlive it.
+    ///
+    /// Structured, not VT bytes: SES stores and returns it without ever
+    /// learning what it means.
+    pub fn serialize(self: *const NamespaceTable, allocator: std.mem.Allocator) ![]u8 {
+        var out = std.ArrayList(u8).empty;
+        errdefer out.deinit(allocator);
+        var w = out.writer(allocator);
+
+        try w.writeByte(BLOB_VERSION);
+        const count_at = out.items.len;
+        try w.writeByte(0); // namespace count, patched up below
+
+        var written: u8 = 0;
+        var it = self.names.iterator();
+        while (it.next()) |entry| {
+            const slot = entry.value_ptr.*;
+            const palette = self.palettes[slot] orelse continue;
+            const name = entry.key_ptr.*;
+            if (name.len == 0 or name.len > MAX_NAME_LEN) continue;
+
+            var patched: u16 = 0;
+            for (palette.patched) |p| {
+                if (p) patched += 1;
+            }
+            const has_defaults = palette.fg != null or palette.bg != null or palette.cursor != null;
+            if (patched == 0 and !has_defaults) continue;
+            if (written == std.math.maxInt(u8)) break;
+
+            try w.writeByte(@intCast(name.len));
+            try w.writeAll(name);
+            try w.writeInt(u16, patched, .big);
+            for (palette.patched, 0..) |p, idx| {
+                if (!p) continue;
+                const c = palette.entries[idx];
+                try w.writeAll(&[_]u8{ @intCast(idx), c.r, c.g, c.b });
+            }
+            try writeOptionalRgb(&w, palette.fg);
+            try writeOptionalRgb(&w, palette.bg);
+            try writeOptionalRgb(&w, palette.cursor);
+            written += 1;
+        }
+
+        out.items[count_at] = written;
+        if (written == 0) {
+            out.deinit(allocator);
+            return try allocator.alloc(u8, 0);
+        }
+        return try out.toOwnedSlice(allocator);
+    }
+
+    /// Restore a blob produced by `serialize`.
+    ///
+    /// Every field is bounds-checked against the buffer: the blob round-trips
+    /// through another process, so a truncated or garbled one must degrade to
+    /// "fewer namespaces restored", never to a crash or a wild read.
+    pub fn applySerialized(self: *NamespaceTable, blob: []const u8) void {
+        if (blob.len < 2) return;
+        if (blob[0] != BLOB_VERSION) return;
+        const count = blob[1];
+
+        var off: usize = 2;
+        var n: usize = 0;
+        while (n < count) : (n += 1) {
+            if (off >= blob.len) return;
+            const name_len = blob[off];
+            off += 1;
+            if (name_len == 0 or name_len > MAX_NAME_LEN) return;
+            if (off + name_len > blob.len) return;
+            const name = blob[off .. off + name_len];
+            off += name_len;
+
+            if (off + 2 > blob.len) return;
+            const entries = std.mem.readInt(u16, blob[off..][0..2], .big);
+            off += 2;
+            if (entries > 256) return;
+            if (off + @as(usize, entries) * 4 > blob.len) return;
+
+            // A name the blob carries but this table has never seen is created
+            // here; an exhausted table yields slot 0 and the entries are
+            // dropped, which is the same degradation as everywhere else.
+            const slot = self.slotFor(name);
+            var e: u16 = 0;
+            while (e < entries) : (e += 1) {
+                const rec = blob[off..][0..4];
+                off += 4;
+                self.setEntry(slot, rec[0], .{ .r = rec[1], .g = rec[2], .b = rec[3] });
+            }
+
+            const fg = readOptionalRgb(blob, &off) orelse return;
+            const bg = readOptionalRgb(blob, &off) orelse return;
+            const cursor = readOptionalRgb(blob, &off) orelse return;
+            if (self.palettes[slot]) |p| {
+                if (fg.present) p.fg = fg.value;
+                if (bg.present) p.bg = bg.value;
+                if (cursor.present) p.cursor = cursor.value;
+            }
+        }
+    }
 };
+
+/// Bumped whenever the blob layout changes. A reader that does not recognise
+/// the version restores nothing rather than misreading it.
+pub const BLOB_VERSION: u8 = 1;
+
+/// A serialized blob larger than this is refused rather than stored. 255
+/// namespaces of 256 colours is ~262 KB; nothing legitimate approaches it, and
+/// SES should not hold an unbounded buffer per pane on a pane's say-so.
+pub const MAX_BLOB_LEN: usize = 64 * 1024;
+
+const OptionalRgb = struct { present: bool, value: RGB };
+
+fn writeOptionalRgb(w: anytype, value: ?RGB) !void {
+    if (value) |c| {
+        try w.writeAll(&[_]u8{ 1, c.r, c.g, c.b });
+    } else {
+        try w.writeAll(&[_]u8{ 0, 0, 0, 0 });
+    }
+}
+
+fn readOptionalRgb(blob: []const u8, off: *usize) ?OptionalRgb {
+    if (off.* + 4 > blob.len) return null;
+    const rec = blob[off.*..][0..4];
+    off.* += 4;
+    return .{
+        .present = rec[0] != 0,
+        .value = .{ .r = rec[1], .g = rec[2], .b = rec[3] },
+    };
+}
 
 const StackEntry = struct {
     kind: Auto = .default,
@@ -759,4 +895,109 @@ test "an exhausted table maps use to slot 0" {
     }
     try std.testing.expectEqual(@as(u16, 0), t.freeSlots());
     try std.testing.expectEqual(@as(u8, 0), t.slotFor("overflow"));
+}
+
+test "a palette round-trips through a blob" {
+    const alloc = std.testing.allocator;
+    var a = NamespaceTable.init(alloc);
+    defer a.deinit();
+    a.setEnabled(true);
+    _ = applyOsc(&a, "set;prompt;33=#ff00aa;0=#010203;255=#0a0b0c;bg=#111213", false);
+    _ = applyOsc(&a, "set;output;7=#445566", false);
+
+    const blob = try a.serialize(alloc);
+    defer alloc.free(blob);
+    try std.testing.expect(blob.len > 0);
+
+    var b = NamespaceTable.init(alloc);
+    defer b.deinit();
+    b.setEnabled(true);
+    b.applySerialized(blob);
+
+    const p = b.slotFor("prompt");
+    try std.testing.expectEqual(@as(u8, 0xff), b.resolveIndex(p, 33).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0x03), b.resolveIndex(p, 0).rgb.b);
+    try std.testing.expectEqual(@as(u8, 0x0a), b.resolveIndex(p, 255).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0x11), b.palettes[p].?.bg.?.r);
+    try std.testing.expectEqual(@as(u8, 0x44), b.resolveIndex(b.slotFor("output"), 7).rgb.r);
+
+    // Indices nobody patched stay passthrough on the far side too, or a
+    // restore would blacken every zone it touched.
+    try std.testing.expectEqual(@as(u8, 9), b.resolveIndex(p, 9).passthrough);
+}
+
+test "an empty table serializes to nothing" {
+    const alloc = std.testing.allocator;
+    var t = NamespaceTable.init(alloc);
+    defer t.deinit();
+    t.setEnabled(true); // allocates prompt/output/alt, but patches nothing
+
+    const blob = try t.serialize(alloc);
+    defer alloc.free(blob);
+    try std.testing.expectEqual(@as(usize, 0), blob.len);
+}
+
+test "a truncated or garbled blob restores what it can and never faults" {
+    const alloc = std.testing.allocator;
+    var src = NamespaceTable.init(alloc);
+    defer src.deinit();
+    src.setEnabled(true);
+    _ = applyOsc(&src, "set;prompt;1=#ff0000;2=#00ff00", false);
+    _ = applyOsc(&src, "set;output;3=#0000ff", false);
+    const blob = try src.serialize(alloc);
+    defer alloc.free(blob);
+
+    // Every prefix of a valid blob.
+    var cut: usize = 0;
+    while (cut <= blob.len) : (cut += 1) {
+        var t = NamespaceTable.init(alloc);
+        defer t.deinit();
+        t.setEnabled(true);
+        t.applySerialized(blob[0..cut]);
+    }
+
+    // Every single-byte corruption of a valid blob.
+    const scratch = try alloc.dupe(u8, blob);
+    defer alloc.free(scratch);
+    for (0..blob.len) |i| {
+        for ([_]u8{ 0, 1, 0x7f, 0xff }) |v| {
+            @memcpy(scratch, blob);
+            scratch[i] = v;
+            var t = NamespaceTable.init(alloc);
+            defer t.deinit();
+            t.setEnabled(true);
+            t.applySerialized(scratch);
+        }
+    }
+
+    // A wrong version restores nothing rather than misreading the layout.
+    @memcpy(scratch, blob);
+    scratch[0] = BLOB_VERSION +% 1;
+    var t = NamespaceTable.init(alloc);
+    defer t.deinit();
+    t.setEnabled(true);
+    t.applySerialized(scratch);
+    try std.testing.expectEqual(@as(u8, 1), t.resolveIndex(t.slotFor("prompt"), 1).passthrough);
+}
+
+test "a blob never carries what a running program selected" {
+    const alloc = std.testing.allocator;
+    var a = NamespaceTable.init(alloc);
+    defer a.deinit();
+    a.setEnabled(true);
+    _ = applyOsc(&a, "set;nvim;1=#ff0000", false);
+    _ = applyOsc(&a, "use;nvim", true);
+
+    const blob = try a.serialize(alloc);
+    defer alloc.free(blob);
+
+    var b = NamespaceTable.init(alloc);
+    defer b.deinit();
+    b.setEnabled(true);
+    b.applySerialized(blob);
+    // The colours come back; the selection does not. An app that died holding
+    // a namespace must not have it reinstated under the shell that replaces it.
+    try std.testing.expectEqual(@as(u8, 0xff), b.resolveIndex(b.slotFor("nvim"), 1).rgb.r);
+    try std.testing.expectEqual(b.auto_slots[@intFromEnum(Auto.alt)], b.autoSlot(.alt));
+    try std.testing.expectEqual(@as(u8, 0), b.current);
 }

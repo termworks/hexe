@@ -244,3 +244,85 @@ pub fn handleBinaryUpdatePaneShell(self: *Server, fd: posix.fd_t, payload_len: u
     }
     self.replyOrClose(fd, .ok, &.{});
 }
+
+/// MUX → SES: park a pane's palette namespaces (PLAN.md M4).
+///
+/// The blob is opaque. SES stores the bytes and hands them back on request; it
+/// never parses one, which is what keeps the daemon out of the business of
+/// knowing what VT bytes mean.
+pub fn handleBinaryUpdatePanePalette(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    if (payload_len < @sizeOf(wire.UpdatePanePalette)) {
+        self.skipPayloadRest();
+        self.sendBinaryError(fd, "update_pane_palette: payload too small");
+        return;
+    }
+    const req = self.readPayloadStruct(wire.UpdatePanePalette) catch |err| {
+        self.ctlStreamDesynced(fd, "mid-message read failed");
+        core.logging.logError("ses", "update_pane_palette request read failed", err);
+        self.sendBinaryError(fd, "update_pane_palette: read failed");
+        return;
+    };
+
+    const trail_len = payload_len - @sizeOf(wire.UpdatePanePalette);
+    // Bounded on the daemon's own terms, not on the sender's word: a pane must
+    // not be able to make SES hold an arbitrary buffer.
+    if (trail_len > core.palette.MAX_BLOB_LEN or trail_len > buf.len or
+        req.blob_len != trail_len)
+    {
+        self.skipPayloadRest();
+        self.sendBinaryError(fd, "update_pane_palette: bad blob length");
+        return;
+    }
+    if (trail_len > 0) {
+        self.readPayloadInto(buf[0..trail_len]) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
+            core.logging.logError("ses", "update_pane_palette trail read failed", err);
+            self.sendBinaryError(fd, "update_pane_palette: trail read failed");
+            return;
+        };
+    }
+
+    if (self.ses_state.store.panes.getPtr(req.uuid)) |pane| {
+        // Replace rather than accumulate: the frontend always sends the whole
+        // palette, so an entry it dropped must not linger here.
+        const copy: ?[]u8 = if (trail_len == 0) null else pane.allocator.dupe(u8, buf[0..trail_len]) catch {
+            self.sendBinaryError(fd, "update_pane_palette: allocation failed");
+            return;
+        };
+        if (pane.palette_blob) |old| pane.allocator.free(old);
+        pane.palette_blob = copy;
+        self.ses_state.markDirty();
+    }
+    self.replyOrClose(fd, .ok, &.{});
+}
+
+/// MUX → SES: fetch a pane's parked palette, on attach.
+pub fn handleBinaryGetPanePalette(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    _ = buf;
+    if (payload_len < @sizeOf(wire.GetPanePalette)) {
+        self.skipPayloadRest();
+        self.sendBinaryError(fd, "get_pane_palette: payload too small");
+        return;
+    }
+    const req = self.readPayloadStruct(wire.GetPanePalette) catch |err| {
+        self.ctlStreamDesynced(fd, "mid-message read failed");
+        core.logging.logError("ses", "get_pane_palette request read failed", err);
+        self.sendBinaryError(fd, "get_pane_palette: read failed");
+        return;
+    };
+
+    // Sent UNSTAMPED, as a push rather than a reply. The requester is
+    // fire-and-forget, so nothing is waiting on this id; a stamped frame that
+    // matches no in-flight request gets parked in the by-request-id queue by
+    // whichever synchronous reader happens to see it first, and is never
+    // claimed. Same lesson as `notifyOrClose`'s comment.
+    if (self.ses_state.store.panes.getPtr(req.uuid)) |pane| {
+        if (pane.palette_blob) |blob| {
+            var resp = wire.PanePalette{ .uuid = req.uuid, .blob_len = @intCast(blob.len) };
+            self.notifyOrCloseWithTrail(fd, .get_pane_palette, std.mem.asBytes(&resp), blob);
+            return;
+        }
+    }
+    var resp = wire.PanePalette{ .uuid = req.uuid, .blob_len = 0 };
+    self.notifyOrClose(fd, .get_pane_palette, std.mem.asBytes(&resp));
+}

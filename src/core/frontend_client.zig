@@ -5,6 +5,7 @@ const liblink_transport = @import("frontend_liblink_transport.zig");
 const logging = @import("logging.zig");
 const session_model = @import("session_model.zig");
 const wire = @import("wire.zig");
+const palette_mod = @import("palette.zig");
 const responses = @import("ses_client_responses.zig");
 const commands = @import("ses_client_commands.zig");
 const reads = @import("ses_client_reads.zig");
@@ -1012,6 +1013,37 @@ pub const SesClient = struct {
         }
         @memcpy(sync_cwd_buf[0..resp.cwd.len], resp.cwd);
         return sync_cwd_buf[0..resp.cwd.len];
+    }
+
+    /// Park a pane's palette namespaces in SES (PLAN.md M4).
+    ///
+    /// The pane's byte ring is not a store — a clear-screen empties it — so
+    /// this is what carries colours across a detach. Fire-and-forget: losing
+    /// one update costs the next sync, never correctness.
+    pub fn updatePanePalette(self: *SesClient, uuid: [32]u8, blob: []const u8) void {
+        const fd = self.ctl_fd orelse return;
+        if (blob.len > palette_mod.MAX_BLOB_LEN) return;
+        var msg: wire.UpdatePanePalette = .{ .uuid = uuid, .blob_len = @intCast(blob.len) };
+        self.drainQueuedControlResponses(fd);
+        _ = self.writeControlTrailRequest(fd, .update_pane_palette, std.mem.asBytes(&msg), blob) catch |err| {
+            logging.logError("frontend-client", "failed to sync pane palette", err);
+            if (self.ctl_fd == fd) self.ctl_fd = null;
+        };
+    }
+
+    /// Ask SES for a pane's parked palette.
+    ///
+    /// Fire-and-forget: the reply arrives as an ordinary control event and is
+    /// applied there. It deliberately does NOT read the socket itself — the
+    /// event loop owns that fd, and a synchronous read racing it desynced the
+    /// control stream and stopped the frontend rendering at all.
+    pub fn requestPanePalette(self: *SesClient, uuid: [32]u8) void {
+        const fd = self.ctl_fd orelse return;
+        var msg: wire.GetPanePalette = .{ .uuid = uuid };
+        _ = self.writeControlRequest(fd, .get_pane_palette, std.mem.asBytes(&msg)) catch |err| {
+            logging.logError("frontend-client", "failed to request pane palette", err);
+            if (self.ctl_fd == fd) self.ctl_fd = null;
+        };
     }
 
     /// Ping ses to check if it's alive.

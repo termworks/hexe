@@ -114,6 +114,11 @@ pub const Pane = struct {
     osc_progress_changed: bool = false,
     /// Last observed alt-screen state, for the palette stack save/restore.
     palette_alt_screen: bool = false,
+    /// Palette colours changed and SES has not been told yet.
+    palette_dirty: bool = false,
+    /// SES has been asked for this pane's parked palette. One attempt per
+    /// pane: a miss must not turn into a per-tick request storm.
+    palette_restored: bool = false,
 
     // Pane-local DCS query capture (DECRQSS support)
     dcs_query_state: DcsQueryState = .idle,
