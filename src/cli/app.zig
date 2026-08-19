@@ -743,7 +743,13 @@ pub fn main() !void {
     try palette_drop.addArg(Arg.singleValueOption("pane", 'p', null));
     try addProfileArgs(&palette_drop);
 
-    try palette_cmd.addSubcommands(&[_]yazap.Command{ palette_list, palette_set, palette_use, palette_end, palette_drop });
+    var palette_reset = app.createCommand("reset", "Forget a namespace's colours (default: all)");
+    try palette_reset.addArg(Arg.singleValueOption("ns", null, "Namespace, or '*' for all"));
+    try palette_reset.addArg(Arg.booleanOption("all", 'a', "Every namespace (same as --ns '*')"));
+    try palette_reset.addArg(Arg.singleValueOption("pane", 'p', null));
+    try addProfileArgs(&palette_reset);
+
+    try palette_cmd.addSubcommands(&[_]yazap.Command{ palette_list, palette_set, palette_use, palette_end, palette_drop, palette_reset });
 
     try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd });
     ensureArgDescriptions(root);
@@ -811,6 +817,16 @@ pub fn main() !void {
                 sub.getSingleValue("from") orelse "",
                 sub.getSingleValue("pane") orelse "",
                 sub.getMultiValues("entries") orelse &[_][]const u8{},
+            );
+        }
+        if (m.subcommandMatches("reset")) |sub| {
+            if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+            const ns = if (sub.containsArg("all")) "*" else (sub.getSingleValue("ns") orelse "*");
+            return palette_cmds.runPaletteVerb(
+                allocator,
+                "reset",
+                ns,
+                sub.getSingleValue("pane") orelse "",
             );
         }
         inline for (.{ "use", "end", "drop" }) |verb| {

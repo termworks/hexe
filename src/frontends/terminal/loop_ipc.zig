@@ -1119,9 +1119,10 @@ fn handlePaletteResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer
     };
 
     const pane = state.findPaneByUuid(resp.uuid) orelse return;
+    // Merges rather than replaces, so a colour set while this was in flight is
+    // not clobbered. `applySerialized` does not touch the dirty flag, so there
+    // is no echo loop back to SES either.
     pane.vt.ns_table.applySerialized(blob);
-    // The restore came FROM SES; syncing it straight back is pure noise.
-    pane.palette_dirty = false;
     pane.vt.invalidateRenderState();
     state.needs_render = true;
 }

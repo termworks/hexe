@@ -478,8 +478,11 @@ fn syncPanePalette(self: anytype, pane: *Pane) void {
     if (!pane.palette_restored) {
         pane.palette_restored = true;
         self.runtime.requestPanePalette(pane.uuid);
-        // Anything dirty now predates the answer, and the answer wins.
-        pane.palette_dirty = false;
+        // The dirty flag is deliberately left alone. A colour set between this
+        // pane appearing and the answer arriving is newer than anything parked,
+        // and clearing the flag here would drop it from SES until the next
+        // change. `applySerialized` only patches indices the blob names, so the
+        // two merge rather than fight.
         return;
     }
 

@@ -41,7 +41,9 @@ hexe palette set --ns prompt --from ~/.cache/wal/colors
 hexe palette set --from ~/.cache/wal/colors         # every namespace
 hexe palette use --ns nvim                          # select, until `end`
 hexe palette end
-hexe palette drop --ns nvim
+hexe palette drop --ns nvim                         # release the binding
+hexe palette reset --ns prompt                      # forget its colours
+hexe palette reset                                  # forget all of them
 ```
 
 `--ns` takes a name matching `[a-z0-9_.-]{1,32}`, case-insensitive, or `*` for
@@ -52,7 +54,12 @@ theme hook wants.
 
 `set` is a **patch**. An index you never name keeps passing through to your
 terminal's theme, so a namespace with one entry set does not blacken the other
-255.
+255. `reset` is the undo: it forgets a namespace's colours so its cells fall
+back to your terminal's theme again. `drop` is *not* undo — it releases the
+name binding and leaves the colours where they are.
+
+Colours survive a detach: they are parked in the session daemon, not carried in
+the pane's scrollback, so a `clear` or a busy pane cannot lose them.
 
 `hexe palette list` exits non-zero outside a hexe session, which makes it the
 capability probe: see `contrib/palette_hook.sh` for a theme hook that uses it
@@ -68,7 +75,8 @@ first parameter. An application can emit it directly:
 | `OSC 1330 ; use ; <name> ST` | push `<name>` as current, creating it if new |
 | `OSC 1330 ; end ST` | pop; an empty stack is a no-op, not an error |
 | `OSC 1330 ; set ; <name> ; <i>=#rrggbb [; …] ST` | patch entries; creates, does not select |
-| `OSC 1330 ; drop ; <name> ST` | release the binding |
+| `OSC 1330 ; drop ; <name> ST` | release the binding, keeping the colours |
+| `OSC 1330 ; reset ; <name> ST` | forget the colours, keeping the namespace |
 | `OSC 1330 ; ask ST` | capability query |
 | `OSC 1330 ; have ; <osc> ; <free> ST` | the only reply hexe sends |
 
