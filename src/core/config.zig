@@ -707,6 +707,10 @@ pub const Config = struct {
     // Default float attributes (from mux.float.attributes)
     float_default_attributes: FloatAttributes = .{},
 
+    // Palette namespaces (PLAN.md). Off until a config turns them on.
+    palette_namespaces: bool = false,
+    palette_osc: u32 = 1330,
+
     // Selection color (palette index, default 240)
     selection_color: u8 = 240,
 

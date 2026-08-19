@@ -112,6 +112,8 @@ pub const Pane = struct {
     osc_notifications: std.ArrayList(pane_osc.Notification) = .empty,
     osc_progress: pane_osc.Progress = .{},
     osc_progress_changed: bool = false,
+    /// Last observed alt-screen state, for the palette stack save/restore.
+    palette_alt_screen: bool = false,
 
     // Pane-local DCS query capture (DECRQSS support)
     dcs_query_state: DcsQueryState = .idle,

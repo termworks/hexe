@@ -108,9 +108,18 @@ pub const NamespaceTable = struct {
     palettes: [MAX_NS]?*Palette = .{null} ** MAX_NS,
     names: std.StringHashMapUnmanaged(u8) = .empty,
     refs: [MAX_NS]u32 = .{0} ** MAX_NS,
-    stack: [STACK_DEPTH]u8 = .{0} ** STACK_DEPTH,
+    stack: [STACK_DEPTH]StackEntry = .{StackEntry{}} ** STACK_DEPTH,
     stack_len: u8 = 0,
     current: u8 = 0,
+    /// What an app's `use` rebinds, per auto-namespace.
+    ///
+    /// The spec puts the current namespace on the *cell*, which needs the
+    /// `ns` field on ghostty's `Style` (PLAN.md M2) and therefore a fork of an
+    /// external dependency. Until then `use` rebinds the auto-namespace the
+    /// app's own rows already fall into — the whole grid in alt-screen, the
+    /// output zone otherwise. Coarser than the spec, never wrong: the cells an
+    /// app owns are exactly the ones that change.
+    overrides: [4]u8 = .{0} ** 4,
     /// Feature flag (PLAN.md §10): when false, `current` is forced to 0 and
     /// resolution behaves exactly as it did before, with the indirection still
     /// compiled in.
@@ -118,9 +127,27 @@ pub const NamespaceTable = struct {
     /// Slots for the auto-namespaces, resolved once at enable time so the
     /// render path indexes an array instead of hashing a name per row.
     auto_slots: [4]u8 = .{0} ** 4,
+    /// Selection state parked across an alt-screen visit (PLAN.md §6).
+    saved_stack: [STACK_DEPTH]StackEntry = .{StackEntry{}} ** STACK_DEPTH,
+    saved_stack_len: u8 = 0,
+    saved_current: u8 = 0,
+    saved_overrides: [4]u8 = .{0} ** 4,
+    saved: bool = false,
+
+    /// The OSC number this pane answers on. Per-table so a config reload can
+    /// move it without disturbing panes already speaking the old number.
+    osc: u32 = DEFAULT_OSC,
 
     pub fn init(allocator: std.mem.Allocator) NamespaceTable {
-        return .{ .allocator = allocator };
+        var table: NamespaceTable = .{ .allocator = allocator, .osc = default_osc };
+        table.setEnabled(default_enabled);
+        return table;
+    }
+
+    /// Re-apply the process-wide settings after a config reload.
+    pub fn applyDefaults(self: *NamespaceTable) void {
+        self.osc = default_osc;
+        self.setEnabled(default_enabled);
     }
 
     pub fn deinit(self: *NamespaceTable) void {
@@ -153,7 +180,9 @@ pub const NamespaceTable = struct {
     /// Slot for a row's auto-namespace. A flat index; no hashing.
     pub fn autoSlot(self: *const NamespaceTable, kind: Auto) u8 {
         if (!self.enabled) return 0;
-        return self.auto_slots[@intFromEnum(kind)];
+        const i = @intFromEnum(kind);
+        if (self.overrides[i] != 0) return self.overrides[i];
+        return self.auto_slots[i];
     }
 
     /// Resolve one indexed colour.
@@ -208,12 +237,23 @@ pub const NamespaceTable = struct {
         palette.patched[idx] = true;
     }
 
-    pub fn push(self: *NamespaceTable, slot: u8) void {
-        if (self.stack_len < STACK_DEPTH) {
-            self.stack[self.stack_len] = self.current;
-            self.stack_len += 1;
-        }
+    /// Select `slot`, rebinding the auto-namespace `kind` until the matching
+    /// `end`.
+    ///
+    /// A full stack drops the push rather than selecting without a restore
+    /// point: an app that overflows would otherwise leave its colours behind
+    /// for good, and "silently maps to slot 0" is the contract.
+    pub fn push(self: *NamespaceTable, slot: u8, kind: Auto) void {
+        if (self.stack_len >= STACK_DEPTH) return;
+        const i = @intFromEnum(kind);
+        self.stack[self.stack_len] = .{
+            .kind = kind,
+            .prev_current = self.current,
+            .prev_override = self.overrides[i],
+        };
+        self.stack_len += 1;
         self.current = slot;
+        self.overrides[i] = slot;
     }
 
     /// Pop. An empty stack is a no-op, not an error (PLAN.md §6).
@@ -223,9 +263,215 @@ pub const NamespaceTable = struct {
             return;
         }
         self.stack_len -= 1;
-        self.current = self.stack[self.stack_len];
+        const entry = self.stack[self.stack_len];
+        self.current = entry.prev_current;
+        self.overrides[@intFromEnum(entry.kind)] = entry.prev_override;
+    }
+
+    /// Alt-screen entry saves the whole selection state, exit restores it
+    /// (PLAN.md §6). This is what stops an app that dies in alt-screen from
+    /// leaking its namespace into the shell underneath.
+    pub fn enterAltScreen(self: *NamespaceTable) void {
+        if (self.saved) return;
+        self.saved_stack = self.stack;
+        self.saved_stack_len = self.stack_len;
+        self.saved_current = self.current;
+        self.saved_overrides = self.overrides;
+        self.saved = true;
+        self.stack_len = 0;
+        self.current = 0;
+    }
+
+    pub fn exitAltScreen(self: *NamespaceTable) void {
+        if (!self.saved) return;
+        self.stack = self.saved_stack;
+        self.stack_len = self.saved_stack_len;
+        self.current = self.saved_current;
+        self.overrides = self.saved_overrides;
+        self.saved = false;
+    }
+
+    /// Release a namespace's name binding. The palette itself stays until the
+    /// pane dies: cells already drawn under it are still on screen and in
+    /// scrollback, and PLAN.md Decision #3 chose never-release over walking
+    /// history to bake them.
+    pub fn drop(self: *NamespaceTable, name: []const u8) void {
+        const slot = self.names.get(name) orelse return;
+        for (&self.overrides) |*o| {
+            if (o.* == slot) o.* = 0;
+        }
+        if (self.current == slot) self.current = 0;
+    }
+
+    /// How many slots a `have` reply should advertise as free.
+    pub fn freeSlots(self: *const NamespaceTable) u16 {
+        var free: u16 = 0;
+        var slot: u16 = 1;
+        while (slot < MAX_NS) : (slot += 1) {
+            if (self.palettes[slot] == null) free += 1;
+        }
+        return free;
     }
 };
+
+const StackEntry = struct {
+    kind: Auto = .default,
+    prev_current: u8 = 0,
+    prev_override: u8 = 0,
+};
+
+/// Default OSC number (PLAN.md Decision #5), adjacent to OSC 133.
+pub const DEFAULT_OSC = 1330;
+
+/// Process-wide settings from `hexe.palette` in the config.
+///
+/// A frontend process serves one session and the config is global to it, so
+/// this is a setting rather than shared mutable state: panes read it when their
+/// table is created, and a reload re-applies it to the panes that already exist.
+pub var default_enabled: bool = false;
+pub var default_osc: u32 = DEFAULT_OSC;
+/// PLAN.md §6: chunk `set` at this many entries per sequence.
+pub const SET_CHUNK = 32;
+
+/// What the caller must do after applying a sequence.
+pub const Applied = union(enum) {
+    /// Unrecognised or malformed: discard, exactly as a non-hexe terminal does.
+    ignore,
+    /// Palette state changed; the pane needs a repaint.
+    changed,
+    /// `ask` — the caller should emit `have`. Silence means unsupported, so
+    /// this is the one verb hexe answers.
+    have: struct { osc: u32, free: u16 },
+};
+
+/// Apply one OSC 1330 payload: everything after the OSC number and its `;`.
+///
+/// Applies straight to the table rather than returning a command struct — a
+/// `set` carries up to 32 entries and copying that per sequence buys nothing.
+/// Every verb is idempotent, which is what makes replay after a detach safe
+/// (PLAN.md §6, replay contract).
+pub fn applyOsc(self: *NamespaceTable, params: []const u8, alt_screen: bool) Applied {
+    var it = std.mem.splitScalar(u8, params, ';');
+    const verb = it.next() orelse return .ignore;
+
+    if (eqlFold(verb, "end")) {
+        self.pop();
+        return .changed;
+    }
+    if (eqlFold(verb, "ask")) {
+        return .{ .have = .{ .osc = self.osc, .free = self.freeSlots() } };
+    }
+
+    var name_buf: [MAX_NAME_LEN]u8 = undefined;
+    const raw_name = it.next() orelse return .ignore;
+    const name = foldName(&name_buf, raw_name) orelse return .ignore;
+
+    if (eqlFold(verb, "use")) {
+        // An unknown-but-valid name creates the namespace; an exhausted table
+        // yields slot 0, which is "behave as before" rather than an error.
+        const slot = self.slotFor(name);
+        self.push(slot, autoKind(.command, alt_screen));
+        return .changed;
+    }
+    if (eqlFold(verb, "drop")) {
+        self.drop(name);
+        return .changed;
+    }
+    if (!eqlFold(verb, "set")) return .ignore;
+
+    // `*` addresses every live namespace (PLAN.md §6).
+    const all = std.mem.eql(u8, name, "*");
+    var touched = false;
+    var count: usize = 0;
+    while (it.next()) |field| {
+        count += 1;
+        if (count > SET_CHUNK) break;
+        const eq = std.mem.indexOfScalar(u8, field, '=') orelse continue;
+        const rgb = parseHexColor(field[eq + 1 ..]) orelse continue;
+        const key = field[0..eq];
+        if (all) {
+            var slot: u16 = 1;
+            while (slot < MAX_NS) : (slot += 1) {
+                if (self.palettes[slot] != null and applyKey(self, @intCast(slot), key, rgb)) touched = true;
+            }
+        } else {
+            const slot = self.slotFor(name);
+            if (applyKey(self, slot, key, rgb)) touched = true;
+        }
+    }
+    return if (touched) .changed else .ignore;
+}
+
+/// One `<key>=#rrggbb` pair. `fg`/`bg`/`cursor` address the defaults; anything
+/// else must be a decimal index.
+fn applyKey(self: *NamespaceTable, slot: u8, key: []const u8, rgb: RGB) bool {
+    if (slot == 0) return false;
+    const palette = self.palettes[slot] orelse return false;
+    if (eqlFold(key, "fg")) {
+        palette.fg = rgb;
+        return true;
+    }
+    if (eqlFold(key, "bg")) {
+        palette.bg = rgb;
+        return true;
+    }
+    if (eqlFold(key, "cursor")) {
+        palette.cursor = rgb;
+        return true;
+    }
+    const idx = std.fmt.parseUnsigned(u16, key, 10) catch return false;
+    if (idx > 255) return false;
+    self.setEntry(slot, @intCast(idx), rgb);
+    return true;
+}
+
+/// `#rrggbb`, `rrggbb`, or the `rgb:rr/gg/bb` form OSC 4 already uses.
+pub fn parseHexColor(text: []const u8) ?RGB {
+    var body = text;
+    if (std.mem.startsWith(u8, body, "#")) body = body[1..];
+    if (eqlFold(if (body.len >= 4) body[0..4] else body, "rgb:")) {
+        body = body[4..];
+        var parts = std.mem.splitScalar(u8, body, '/');
+        const r = parseHexByte(parts.next() orelse return null) orelse return null;
+        const g = parseHexByte(parts.next() orelse return null) orelse return null;
+        const b = parseHexByte(parts.next() orelse return null) orelse return null;
+        if (parts.next() != null) return null;
+        return .{ .r = r, .g = g, .b = b };
+    }
+    if (body.len != 6) return null;
+    return .{
+        .r = parseHexByte(body[0..2]) orelse return null,
+        .g = parseHexByte(body[2..4]) orelse return null,
+        .b = parseHexByte(body[4..6]) orelse return null,
+    };
+}
+
+/// `rgb:` components may be 1-4 hex digits wide; scale to 8 bits.
+fn parseHexByte(text: []const u8) ?u8 {
+    if (text.len == 0 or text.len > 4) return null;
+    const value = std.fmt.parseUnsigned(u16, text, 16) catch return null;
+    return switch (text.len) {
+        1 => @intCast(value * 0x11),
+        2 => @intCast(value),
+        3 => @intCast(value >> 4),
+        4 => @intCast(value >> 8),
+        else => unreachable,
+    };
+}
+
+/// Lowercase a name into `buf`. Returns null if it cannot be a valid name,
+/// so a malformed one is discarded rather than silently truncated.
+pub fn foldName(buf: *[MAX_NAME_LEN]u8, name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "*")) return "*";
+    if (name.len == 0 or name.len > MAX_NAME_LEN) return null;
+    for (name, 0..) |ch, i| buf[i] = std.ascii.toLower(ch);
+    const folded = buf[0..name.len];
+    return if (validName(folded)) folded else null;
+}
+
+fn eqlFold(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(a, b);
+}
 
 test "slot 0 passes the index through untouched" {
     var t = NamespaceTable.init(std.testing.allocator);
@@ -269,8 +515,8 @@ test "the stack pushes, pops, and underflows to slot 0" {
     defer t.deinit();
     const a = t.slotFor("alpha");
     const b = t.slotFor("bravo");
-    t.push(a);
-    t.push(b);
+    t.push(a, .output);
+    t.push(b, .output);
     try std.testing.expectEqual(b, t.current);
     t.pop();
     try std.testing.expectEqual(a, t.current);
@@ -284,7 +530,7 @@ test "the feature flag forces slot 0 with the indirection compiled in" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     const slot = t.slotFor("prompt");
-    t.push(slot);
+    t.push(slot, .output);
     try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
     t.enabled = true;
     try std.testing.expectEqual(slot, t.currentSlot());
@@ -357,4 +603,162 @@ test "enabling with no palette set changes nothing on screen" {
             try std.testing.expectEqual(idx, t.resolveIndex(slot, idx).passthrough);
         }
     }
+}
+
+test "set patches entries and creates the namespace" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    try std.testing.expect(applyOsc(&t, "set;prompt;4=#331111;bg=#0a0a0a", false) == .changed);
+    const slot = t.slotFor("prompt");
+    try std.testing.expectEqual(@as(u8, 0x33), t.resolveIndex(slot, 4).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0x0a), t.palettes[slot].?.bg.?.r);
+
+    // Accumulates rather than replacing (Decision #4).
+    try std.testing.expect(applyOsc(&t, "set;prompt;5=#00ff00", false) == .changed);
+    try std.testing.expectEqual(@as(u8, 0x33), t.resolveIndex(slot, 4).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(slot, 5).rgb.g);
+}
+
+test "colour forms, and malformed payloads are discarded" {
+    try std.testing.expectEqual(@as(u8, 0x33), parseHexColor("#331111").?.r);
+    try std.testing.expectEqual(@as(u8, 0x33), parseHexColor("331111").?.r);
+    try std.testing.expectEqual(@as(u8, 0xab), parseHexColor("rgb:ab/cd/ef").?.r);
+    try std.testing.expectEqual(@as(u8, 0xff), parseHexColor("rgb:ffff/0/0").?.r);
+    try std.testing.expect(parseHexColor("#33111") == null);
+    try std.testing.expect(parseHexColor("#gg1111") == null);
+    try std.testing.expect(parseHexColor("") == null);
+
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+    try std.testing.expect(applyOsc(&t, "", false) == .ignore);
+    try std.testing.expect(applyOsc(&t, "wat;prompt;1=#000000", false) == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;prompt", false) == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;prompt;300=#000000", false) == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;prompt;1=notacolour", false) == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;" ++ "x" ** 33 ++ ";1=#000000", false) == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;Not Valid;1=#000000", false) == .ignore);
+}
+
+test "names fold case and set is idempotent across replays" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    _ = applyOsc(&t, "set;NVIM;1=#010203", false);
+    _ = applyOsc(&t, "set;nvim;1=#010203", false);
+    const slot = t.slotFor("nvim");
+    try std.testing.expectEqual(@as(u8, 0x01), t.resolveIndex(slot, 1).rgb.r);
+    // Two spellings, one namespace: replaying a stream must not burn slots.
+    try std.testing.expectEqual(@as(u16, MAX_NS - 1 - 3 - 1), t.freeSlots());
+}
+
+test "set with * reaches every live namespace but not slot 0" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    _ = applyOsc(&t, "use;alpha", false);
+    _ = applyOsc(&t, "end", false);
+    try std.testing.expect(applyOsc(&t, "set;*;2=#123456", false) == .changed);
+
+    for ([_][]const u8{ "alpha", "prompt", "output", "alt" }) |n| {
+        try std.testing.expectEqual(@as(u8, 0x12), t.resolveIndex(t.slotFor(n), 2).rgb.r);
+    }
+    try std.testing.expectEqual(@as(u8, 2), t.resolveIndex(0, 2).passthrough);
+}
+
+test "use rebinds the zone an app owns, end restores it" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    const output_default = t.autoSlot(.output);
+    const alt_default = t.autoSlot(.alt);
+
+    _ = applyOsc(&t, "set;nvim;1=#ff0000", false);
+    _ = applyOsc(&t, "use;nvim", true);
+    // In alt-screen the app owns the whole grid, so `alt` moves, not `output`.
+    try std.testing.expectEqual(t.slotFor("nvim"), t.autoSlot(.alt));
+    try std.testing.expectEqual(output_default, t.autoSlot(.output));
+
+    _ = applyOsc(&t, "end", false);
+    try std.testing.expectEqual(alt_default, t.autoSlot(.alt));
+}
+
+test "a full stack drops the push instead of losing the restore point" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+    const base = t.autoSlot(.output);
+
+    var i: usize = 0;
+    while (i < STACK_DEPTH + 4) : (i += 1) _ = applyOsc(&t, "use;deep", false);
+    try std.testing.expectEqual(@as(u8, STACK_DEPTH), t.stack_len);
+
+    i = 0;
+    while (i < STACK_DEPTH) : (i += 1) t.pop();
+    try std.testing.expectEqual(base, t.autoSlot(.output));
+    try std.testing.expectEqual(@as(u8, 0), t.current);
+}
+
+test "alt-screen save/restore stops a crashed app leaking its namespace" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    _ = applyOsc(&t, "use;shell", false);
+    const shell_slot = t.autoSlot(.output);
+    try std.testing.expectEqual(t.slotFor("shell"), shell_slot);
+
+    t.enterAltScreen();
+    _ = applyOsc(&t, "use;nvim", true);
+    try std.testing.expectEqual(t.slotFor("nvim"), t.autoSlot(.alt));
+
+    // The app dies without ever sending `end`.
+    t.exitAltScreen();
+    try std.testing.expectEqual(shell_slot, t.autoSlot(.output));
+    try std.testing.expectEqual(t.auto_slots[@intFromEnum(Auto.alt)], t.autoSlot(.alt));
+}
+
+test "ask answers have, and drop releases the binding" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    const reply = applyOsc(&t, "ask", false);
+    try std.testing.expectEqual(@as(u32, DEFAULT_OSC), reply.have.osc);
+    try std.testing.expectEqual(@as(u16, MAX_NS - 1 - 3), reply.have.free);
+
+    _ = applyOsc(&t, "use;nvim", false);
+    try std.testing.expect(t.autoSlot(.output) == t.slotFor("nvim"));
+    _ = applyOsc(&t, "drop;nvim", false);
+    try std.testing.expectEqual(t.auto_slots[@intFromEnum(Auto.output)], t.autoSlot(.output));
+}
+
+test "a truncated replay leaves an undefined namespace at passthrough" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    // The `set` that defined it scrolled out of the ring; only `use` replayed.
+    _ = applyOsc(&t, "use;nvim", true);
+    const slot = t.autoSlot(.alt);
+    try std.testing.expect(slot != 0);
+    try std.testing.expectEqual(@as(u8, 42), t.resolveIndex(slot, 42).passthrough);
+}
+
+test "an exhausted table maps use to slot 0" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+
+    var buf: [8]u8 = undefined;
+    var i: usize = 0;
+    while (i < MAX_NS) : (i += 1) {
+        _ = t.slotFor(std.fmt.bufPrint(&buf, "n{d}", .{i}) catch unreachable);
+    }
+    try std.testing.expectEqual(@as(u16, 0), t.freeSlots());
+    try std.testing.expectEqual(@as(u8, 0), t.slotFor("overflow"));
 }

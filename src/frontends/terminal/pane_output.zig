@@ -38,8 +38,19 @@ fn feedVtOutput(self: *Pane, data: []const u8) void {
             return;
         };
         processVtOutput(self, segment);
+        syncPaletteAltScreen(self);
         offset += segment_len;
     }
+}
+
+/// PLAN.md §6: an alt-screen switch saves and restores the namespace stack.
+/// Tracked by polling the mode after each feed rather than by sniffing
+/// `?1049h`, so a sequence split across two reads cannot miss the edge.
+fn syncPaletteAltScreen(self: *Pane) void {
+    const alt = self.vt.inAltScreen();
+    if (alt == self.palette_alt_screen) return;
+    self.palette_alt_screen = alt;
+    if (alt) self.vt.ns_table.enterAltScreen() else self.vt.ns_table.exitAltScreen();
 }
 
 /// Split `data` into OSC sequences and everything else, feeding the rest to the
@@ -350,6 +361,10 @@ fn finishOsc(self: *Pane) void {
         feedVtOutput(self, self.osc_buf.items);
         return;
     };
+    if (code == self.vt.ns_table.osc) {
+        consumePaletteOsc(self, self.osc_buf.items);
+        return;
+    }
     if (isConsumedOscCode(code)) {
         consumeOsc(self, self.osc_buf.items);
         return;
@@ -367,6 +382,48 @@ fn finishOsc(self: *Pane) void {
     stdout.writeAll(self.osc_buf.items) catch |err| {
         core.logging.logError("terminal", "forward OSC sequence to terminal stdout", err);
     };
+}
+
+/// OSC 1330 — palette namespaces (PLAN.md §6).
+///
+/// Handled here rather than in the Consumer because it mutates the pane's
+/// namespace table instead of producing a notification, and a `set` carries up
+/// to 32 entries that are not worth copying through an Action.
+fn consumePaletteOsc(self: *Pane, seq: []const u8) void {
+    const params = oscParams(seq) orelse return;
+    switch (core.palette.applyOsc(&self.vt.ns_table, params, self.vt.inAltScreen())) {
+        .ignore => {},
+        .changed => self.vt.invalidateRenderState(),
+        .have => |reply| {
+            var buf: [64]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "\x1b]{d};have;{d};{d}\x1b\\", .{
+                self.vt.ns_table.osc, reply.osc, reply.free,
+            }) catch return;
+            writeResponse(self, text, "OSC 1330 capability response write failed");
+        },
+    }
+}
+
+/// Everything after the OSC number and its `;`, with the introducer and the
+/// terminator stripped.
+fn oscParams(seq: []const u8) ?[]const u8 {
+    var start: usize = 0;
+    if (std.mem.startsWith(u8, seq, "\x1b]")) {
+        start = 2;
+    } else if (seq.len > 0 and seq[0] == 0x9d) {
+        start = 1;
+    } else return null;
+
+    var end = seq.len;
+    if (end > start and (seq[end - 1] == 0x07 or seq[end - 1] == 0x9c)) {
+        end -= 1;
+    } else if (end >= start + 2 and seq[end - 2] == 0x1b and seq[end - 1] == '\\') {
+        end -= 2;
+    } else return null;
+
+    const body = seq[start..end];
+    const semi = std.mem.indexOfScalar(u8, body, ';') orelse return null;
+    return body[semi + 1 ..];
 }
 
 fn consumeOsc(self: *Pane, seq: []const u8) void {

@@ -53,6 +53,8 @@ pub const MuxConfigBuilder = struct {
     confirm_on_disown: ?bool = null,
     confirm_on_close: ?bool = null,
     selection_color: ?u8 = null,
+    palette_namespaces: ?bool = null,
+    palette_osc: ?u32 = null,
     mouse_selection_override_mods: ?u8 = null,
 
     // Keybindings
@@ -173,6 +175,8 @@ pub const MuxConfigBuilder = struct {
         if (self.confirm_on_disown) |v| result.confirm_on_disown = v;
         if (self.confirm_on_close) |v| result.confirm_on_close = v;
         if (self.selection_color) |v| result.selection_color = v;
+        if (self.palette_namespaces) |v| result.palette_namespaces = v;
+        if (self.palette_osc) |v| result.palette_osc = v;
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 
         // Apply binds (deep copy to prevent use-after-free)

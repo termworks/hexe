@@ -379,6 +379,19 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
 /// are the statusbar threadlocal caches (cleared here via `deinitThreadlocals`),
 /// and no pane/float caches a pointer into `config`. On a parse error we keep
 /// the current config rather than clobber a working one with defaults.
+/// Push `hexe.palette` to every live pane. Reaching panes that already exist
+/// is the point: turning namespaces on and reloading should light up the
+/// session you are looking at, not only panes opened afterwards.
+fn applyPaletteConfig(state: *State) void {
+    core.palette.default_enabled = state.config.palette_namespaces;
+    core.palette.default_osc = state.config.palette_osc;
+    for (state.view.tab_views.items) |*tab| {
+        var it = tab.layout.splitIterator();
+        while (it.next()) |p| p.*.vt.ns_table.applyDefaults();
+    }
+    for (state.view.float_views.items) |p| p.vt.ns_table.applyDefaults();
+}
+
 fn performConfigReload(state: *State) void {
     var new_config = core.Config.load(state.allocator);
     if (new_config.status == .@"error") {
@@ -411,6 +424,7 @@ fn performConfigReload(state: *State) void {
     // every callback registered by the reloaded config is dead after a reload —
     // conditions silently stop matching and actions silently do nothing.
     if (state.config._lua_runtime) |rt| lua_api.install(rt);
+    applyPaletteConfig(state);
     state.renderer.invalidate();
     state.force_full_render = true;
     state.needs_render = true;
