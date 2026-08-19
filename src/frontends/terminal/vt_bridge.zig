@@ -61,6 +61,7 @@ pub fn drawRenderState(
         if (y >= win.height) break;
 
         const row_ns: u8 = rowNamespace(ns_table, row_pins[yi], alt_screen);
+        const row_defaults = ns_table.defaultsFor(row_ns);
 
         const cells_slice = row_cells[yi].slice();
         const raw_cells = cells_slice.items(.raw);
@@ -83,7 +84,15 @@ pub fn drawRenderState(
             const is_direct_color = (raw.content_tag == .bg_color_rgb or
                 raw.content_tag == .bg_color_palette);
             const cp = raw.codepoint();
-            if (!is_direct_color and raw.style_id == 0 and !raw.hyperlink and (cp == 0 or cp == ' ')) {
+            // Blank, unstyled cells are normally skipped rather than written.
+            // A namespace background has to paint them, or `set --ns prompt
+            // bg=…` colours the glyphs and leaves the space between them at the
+            // terminal's own background. Gated on the row actually having one,
+            // so the skip still applies everywhere else — which is everywhere,
+            // until someone sets a background.
+            if (!is_direct_color and raw.style_id == 0 and !raw.hyperlink and
+                (cp == 0 or cp == ' ') and row_defaults.bg == null)
+            {
                 col += 1;
                 continue;
             }
@@ -100,9 +109,9 @@ pub fn drawRenderState(
 
             // Resolve style
             const style = if (raw.style_id != 0)
-                convertStyle(styles_arr[col], raw, is_direct_color, ns_table, row_ns)
+                convertStyle(styles_arr[col], raw, is_direct_color, ns_table, row_ns, row_defaults)
             else
-                convertDefaultStyle(raw, is_direct_color);
+                convertDefaultStyle(raw, is_direct_color, row_defaults);
 
             const link = resolveCellLink(arena, row_pins[yi], @intCast(col), raw);
 
@@ -456,19 +465,25 @@ fn convertStyle(
     is_direct_color: bool,
     ns_table: *const NamespaceTable,
     ns: u8,
+    defaults: core.palette.Defaults,
 ) vaxis.Style {
     var style = vaxis.Style{};
 
-    // Foreground
+    // Foreground. `.none` means the cell named no colour, so it takes the
+    // namespace's default when there is one and the terminal's otherwise.
     switch (gs.fg_color) {
-        .none => {},
+        .none => if (defaults.fg) |c| {
+            style.fg = .{ .rgb = .{ c.r, c.g, c.b } };
+        },
         .palette => |idx| style.fg = resolveColor(ns_table, ns, @intCast(idx)),
         .rgb => |rgb| style.fg = .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
     }
 
     // Background
     switch (gs.bg_color) {
-        .none => {},
+        .none => if (defaults.bg) |c| {
+            style.bg = .{ .rgb = .{ c.r, c.g, c.b } };
+        },
         .palette => |idx| style.bg = resolveColor(ns_table, ns, @intCast(idx)),
         .rgb => |rgb| style.bg = .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
     }
@@ -505,8 +520,14 @@ fn convertStyle(
     return style;
 }
 
-fn convertDefaultStyle(raw: pagepkg.Cell, is_direct_color: bool) vaxis.Style {
+/// Style for a cell carrying no style of its own. It still belongs to the row's
+/// namespace, so the namespace's defaults apply — these are the majority of
+/// cells, and skipping them here would leave a background painted only under
+/// text that happened to be styled.
+fn convertDefaultStyle(raw: pagepkg.Cell, is_direct_color: bool, defaults: core.palette.Defaults) vaxis.Style {
     var style = vaxis.Style{};
+    if (defaults.fg) |c| style.fg = .{ .rgb = .{ c.r, c.g, c.b } };
+    if (defaults.bg) |c| style.bg = .{ .rgb = .{ c.r, c.g, c.b } };
     if (is_direct_color) applyDirectColor(&style, raw);
     return style;
 }

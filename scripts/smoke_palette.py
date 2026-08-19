@@ -138,6 +138,7 @@ cols = 100
 IDX33 = re.compile(rb"38[:;]5[:;]33")
 SET33 = re.compile(rb"38[:;]2[:;]{0,2}255[:;]0[:;]170")
 SET33_OUT = re.compile(rb"38[:;]2[:;]{0,2}0[:;]255[:;]0")
+BG_DEFAULT = re.compile(rb"48[:;]2[:;]{0,2}0[:;]0[:;]123")
 
 
 def repaint():
@@ -214,6 +215,20 @@ if not SET33_OUT.search(dripped):
     fail("a sequence split across writes was not reassembled: the output zone "
          "never took the colour", dripped)
 print("split: a byte-at-a-time sequence is reassembled and applied")
+
+# `bg=` sets the namespace's DEFAULT background — what a cell that names no
+# colour of its own gets. PLAN.md M4's exit criterion is exactly this command,
+# and it used to be inert: the value was parsed, stored and even persisted, but
+# the renderer's `.none` arms ignored it, so nothing on screen ever changed.
+res = hexe_cli("palette", "set", "--ns", "output", "bg=#00007b")
+if res.returncode != 0:
+    fail(f"`hexe palette set bg=` failed: {res.stderr!r}")
+time.sleep(1.5)
+after_bg = repaint()
+if not BG_DEFAULT.search(after_bg):
+    fail("a namespace default background never reached the screen: `bg=` is "
+         "parsed and stored but not rendered", after_bg)
+print("defaults: bg= paints the output zone's unstyled cells")
 
 # The frontend must survive a namespace it was never told about.
 res = hexe_cli("palette", "use", "--ns", "nosuchthing")

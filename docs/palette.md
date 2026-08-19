@@ -48,9 +48,20 @@ hexe palette reset                                  # forget all of them
 
 `--ns` takes a name matching `[a-z0-9_.-]{1,32}`, case-insensitive, or `*` for
 every live namespace; `--all` is a synonym for `*`, and omitting `--ns`
-means the same. Index keys are `0`–`255`; `fg`, `bg` and `cursor` address the
-defaults. Without `--pane`, the change goes to every live pane — which is what a
-theme hook wants.
+means the same. Without `--pane`, the change goes to every live pane — which is
+what a theme hook wants.
+
+Two kinds of key:
+
+| Key | Affects |
+|---|---|
+| `0`–`255` | cells that name that palette index |
+| `fg`, `bg` | cells that name **no** colour of their own — the zone's default |
+
+So `set --ns output 1=#ff5555` recolours only what asked for colour 1, while
+`set --ns output bg=#101018` tints the whole output zone, blank cells included.
+
+`cursor` is accepted and stored but not yet applied to the rendered cursor.
 
 `set` is a **patch**. An index you never name keeps passing through to your
 terminal's theme, so a namespace with one entry set does not blacken the other

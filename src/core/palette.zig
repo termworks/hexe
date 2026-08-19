@@ -75,6 +75,13 @@ pub const Resolved = union(enum) {
     rgb: RGB,
 };
 
+/// A namespace's default colours, for cells that name none of their own.
+/// Both null means "inherit slot 0", which is the terminal's own default.
+pub const Defaults = struct {
+    fg: ?RGB = null,
+    bg: ?RGB = null,
+};
+
 pub const Palette = struct {
     entries: [256]RGB = .{RGB{ .r = 0, .g = 0, .b = 0 }} ** 256,
     /// Which entries `set` has actually patched. Decision #4 makes `set` a
@@ -180,6 +187,17 @@ pub const NamespaceTable = struct {
             const i = @intFromEnum(kind);
             if (self.auto_slots[i] == 0) self.auto_slots[i] = self.slotFor(kind.name());
         }
+    }
+
+    /// A namespace's default fg/bg — what a cell that names no colour of its
+    /// own resolves to (PLAN.md §3.2 `fg`/`bg`, null = inherit slot 0).
+    ///
+    /// Read once per row on the render path, next to the slot lookup, so the
+    /// per-cell path stays a null check on an already-loaded struct.
+    pub fn defaultsFor(self: *const NamespaceTable, ns: u8) Defaults {
+        if (ns == 0) return .{};
+        const palette = self.palettes[ns] orelse return .{};
+        return .{ .fg = palette.fg, .bg = palette.bg };
     }
 
     /// Slot for a row's auto-namespace. A flat index; no hashing.
@@ -1167,4 +1185,28 @@ test "a table of many namespaces still serializes inside the wire cap" {
     defer alloc.free(blob);
     try std.testing.expect(blob.len > 0);
     try std.testing.expect(blob.len < MAX_BLOB_LEN);
+}
+
+test "a namespace's default fg/bg are readable for the render path" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    // Nothing set: both null, so a cell naming no colour keeps the terminal's.
+    try std.testing.expect(t.defaultsFor(t.autoSlot(.prompt)).bg == null);
+    try std.testing.expect(t.defaultsFor(0).bg == null);
+
+    _ = applyOsc(&t, "set;prompt;bg=#112233;fg=#445566", false);
+    const d = t.defaultsFor(t.autoSlot(.prompt));
+    try std.testing.expectEqual(@as(u8, 0x11), d.bg.?.r);
+    try std.testing.expectEqual(@as(u8, 0x44), d.fg.?.r);
+
+    // Slot 0 never gains defaults: it is the terminal's own palette.
+    try std.testing.expect(t.defaultsFor(0).bg == null);
+    // A namespace that was never given any keeps inheriting.
+    try std.testing.expect(t.defaultsFor(t.autoSlot(.output)).bg == null);
+
+    // reset clears them along with the indexed entries.
+    _ = applyOsc(&t, "reset;prompt", false);
+    try std.testing.expect(t.defaultsFor(t.autoSlot(.prompt)).bg == null);
 }
