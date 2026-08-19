@@ -12,6 +12,7 @@ const shell_hooks = @import("shp");
 const pop_handlers = @import("pop_handlers.zig");
 const cli_cmds = @import("commands/com.zig");
 const profile_cmds = @import("commands/profile.zig");
+const palette_cmds = @import("commands/palette.zig");
 const config_validate = @import("commands/config_validate.zig");
 const ses_export = @import("commands/ses_export.zig");
 const ses_pipe = @import("commands/ses_pipe.zig");
@@ -713,7 +714,38 @@ pub fn main() !void {
     const profile_list = app.createCommand("list", "List profiles and whether each is running");
     try profile_cmd.addSubcommands(&[_]yazap.Command{profile_list});
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd });
+    var palette_cmd = app.createCommand("palette", "Per-pane palette namespaces");
+    palette_cmd.setProperty(.help_on_empty_args);
+
+    var palette_list = app.createCommand("list", "Panes a palette change would reach");
+    try palette_list.addArg(Arg.booleanOption("json", 'j', null));
+    try addProfileArgs(&palette_list);
+
+    var palette_set = app.createCommand("set", "Patch entries: <i>=#rrggbb or fg/bg/cursor");
+    try palette_set.addArg(Arg.multiValuesPositional("entries", null, null));
+    try palette_set.addArg(Arg.singleValueOption("ns", null, "Namespace, or '*' for all"));
+    try palette_set.addArg(Arg.booleanOption("all", 'a', "Every namespace (same as --ns '*')"));
+    try palette_set.addArg(Arg.singleValueOption("from", 'f', "Read entries from a colours file"));
+    try palette_set.addArg(Arg.singleValueOption("pane", 'p', "Pane uuid (default: every live pane)"));
+    try addProfileArgs(&palette_set);
+
+    var palette_use = app.createCommand("use", "Select a namespace for what the pane draws next");
+    try palette_use.addArg(Arg.singleValueOption("ns", null, null));
+    try palette_use.addArg(Arg.singleValueOption("pane", 'p', null));
+    try addProfileArgs(&palette_use);
+
+    var palette_end = app.createCommand("end", "Pop the selected namespace");
+    try palette_end.addArg(Arg.singleValueOption("pane", 'p', null));
+    try addProfileArgs(&palette_end);
+
+    var palette_drop = app.createCommand("drop", "Release a namespace binding");
+    try palette_drop.addArg(Arg.singleValueOption("ns", null, null));
+    try palette_drop.addArg(Arg.singleValueOption("pane", 'p', null));
+    try addProfileArgs(&palette_drop);
+
+    try palette_cmd.addSubcommands(&[_]yazap.Command{ palette_list, palette_set, palette_use, palette_end, palette_drop });
+
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -764,6 +796,36 @@ pub fn main() !void {
     }
     if (matches.getSingleValue("profile")) |name| setInstanceFromCli(name);
     if (matches.getSingleValue("instance")) |name| setInstanceFromCli(name);
+
+    if (matches.subcommandMatches("palette")) |m| {
+        if (m.subcommandMatches("list")) |sub| {
+            if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+            return palette_cmds.runPaletteList(allocator, sub.containsArg("json"));
+        }
+        if (m.subcommandMatches("set")) |sub| {
+            if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+            const ns = if (sub.containsArg("all")) "*" else (sub.getSingleValue("ns") orelse "*");
+            return palette_cmds.runPaletteSet(
+                allocator,
+                ns,
+                sub.getSingleValue("from") orelse "",
+                sub.getSingleValue("pane") orelse "",
+                sub.getMultiValues("entries") orelse &[_][]const u8{},
+            );
+        }
+        inline for (.{ "use", "end", "drop" }) |verb| {
+            if (m.subcommandMatches(verb)) |sub| {
+                if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+                return palette_cmds.runPaletteVerb(
+                    allocator,
+                    verb,
+                    sub.getSingleValue("ns") orelse "",
+                    sub.getSingleValue("pane") orelse "",
+                );
+            }
+        }
+        return;
+    }
 
     if (matches.subcommandMatches("profile")) |profile_matches| {
         if (profile_matches.subcommandMatches("list")) |_| {

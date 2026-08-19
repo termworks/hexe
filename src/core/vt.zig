@@ -178,7 +178,6 @@ pub const VT = struct {
         if (!self.render_state_dirty) return &self.render_state;
 
         // Clear previous state before updating to free memory from previous large scrollback
-        self.ns_table.deinit();
         self.render_state.deinit(self.allocator);
         self.render_state = .empty;
 

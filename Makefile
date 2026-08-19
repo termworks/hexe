@@ -100,7 +100,8 @@ SMOKES := \
 	smoke_float_destroy.py \
 	smoke_keypad.py \
 	smoke_painter_showcase.py \
-	smoke_profiles.py
+	smoke_profiles.py \
+	smoke_palette.py
 
 smoke: smoke-clean
 	zig build
