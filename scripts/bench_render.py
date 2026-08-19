@@ -72,10 +72,18 @@ def main():
             fh.write(cells + "\x1b[0m\n")
     size = os.path.getsize(src)
 
+    # The marker lives in a script, never on the typed line: the pane echoes
+    # what is typed, so a marker in the command text can be seen rendered
+    # before a single payload byte is, which times the echo instead of the
+    # render. That made runs differ by 200x depending on scheduling.
     marker = b"BENCH_DONE_MARKER"
+    runner = os.path.join(WD, "run.sh")
+    with open(runner, "w") as fh:
+        fh.write(f"cat {src}\nprintf '%s\\n' {marker.decode()}\n")
+
     del seen[:]
     t0 = time.time()
-    os.write(master, f"cat {src}; echo {marker.decode()}\r".encode())
+    os.write(master, f"sh {runner}\r".encode())
     deadline = time.time() + 120
     while time.time() < deadline:
         if marker in bytes(seen):

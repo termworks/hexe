@@ -16,6 +16,7 @@ pub const ipc = @import("ipc.zig");
 pub const wire = @import("wire.zig");
 pub const style = @import("style.zig");
 pub const segment_render = @import("segment_render.zig");
+pub const palette = @import("palette.zig");
 pub const regions = @import("regions.zig");
 pub const pod_protocol = @import("pod_protocol.zig");
 pub const pod_meta = @import("pod_meta.zig");
@@ -102,6 +103,7 @@ test {
     _ = @import("strings.zig");
     _ = @import("uuid.zig");
     _ = @import("regions.zig");
+    _ = @import("palette.zig");
     _ = @import("config.zig");
     _ = @import("logging.zig");
     _ = @import("config_v2.zig");

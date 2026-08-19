@@ -6,6 +6,7 @@ const core = @import("core");
 const pagepkg = ghostty.page;
 const Style = ghostty.Style;
 const RenderState = ghostty.RenderState;
+const NamespaceTable = core.palette.NamespaceTable;
 
 /// Static ASCII lookup table -- avoids arena allocation for 95%+ of cells.
 /// Each byte position i contains the byte value i, so ascii_lut[ch..][0..1]
@@ -52,9 +53,15 @@ pub fn drawRenderState(
 
     syncKittyImages(vt, vx, stdout, arena);
 
+    const ns_table = &vt.ns_table;
+
     for (0..available_rows) |yi| {
         const y: u16 = @intCast(yi);
         if (y >= win.height) break;
+
+        // One lookup per row, not per cell. M1 pins every row to slot 0, which
+        // resolves to passthrough; M3 derives it from the row's OSC 133 zone.
+        const row_ns: u8 = rowNamespace(ns_table, row_pins[yi]);
 
         const cells_slice = row_cells[yi].slice();
         const raw_cells = cells_slice.items(.raw);
@@ -94,7 +101,7 @@ pub fn drawRenderState(
 
             // Resolve style
             const style = if (raw.style_id != 0)
-                convertStyle(styles_arr[col], raw, is_direct_color)
+                convertStyle(styles_arr[col], raw, is_direct_color, ns_table, row_ns)
             else
                 convertDefaultStyle(raw, is_direct_color);
 
@@ -413,22 +420,50 @@ fn writeImageCellPreserve(win: vaxis.Window, col: u16, row: u16, placement: vaxi
     win.writeCell(col, row, .{ .image = placement });
 }
 
+/// Namespace slot for a row.
+///
+/// M1 pins every row to slot 0 so the emitted bytes are unchanged. M3 replaces
+/// the body with the row's OSC 133 zone (`pin.rowAndCell().row.semantic_prompt`).
+fn rowNamespace(ns_table: *const NamespaceTable, pin: anytype) u8 {
+    _ = pin;
+    if (!ns_table.enabled) return 0;
+    return 0;
+}
+
+/// Indexed colour → vaxis colour, through the namespace table.
+///
+/// Slot 0 answers `passthrough`, so the index stays in the output and the host
+/// terminal resolves it against the user's theme, exactly as before namespaces
+/// existed. Only a real namespace bakes RGB into the stream.
+inline fn resolveColor(ns_table: *const NamespaceTable, ns: u8, idx: u8) vaxis.Color {
+    return switch (ns_table.resolveIndex(ns, idx)) {
+        .passthrough => |i| .{ .index = i },
+        .rgb => |c| .{ .rgb = .{ c.r, c.g, c.b } },
+    };
+}
+
 /// Convert ghostty Style to vaxis Style.
 /// (prise: server.zig:686-743)
-fn convertStyle(gs: Style, raw: pagepkg.Cell, is_direct_color: bool) vaxis.Style {
+fn convertStyle(
+    gs: Style,
+    raw: pagepkg.Cell,
+    is_direct_color: bool,
+    ns_table: *const NamespaceTable,
+    ns: u8,
+) vaxis.Style {
     var style = vaxis.Style{};
 
     // Foreground
     switch (gs.fg_color) {
         .none => {},
-        .palette => |idx| style.fg = .{ .index = @intCast(idx) },
+        .palette => |idx| style.fg = resolveColor(ns_table, ns, @intCast(idx)),
         .rgb => |rgb| style.fg = .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
     }
 
     // Background
     switch (gs.bg_color) {
         .none => {},
-        .palette => |idx| style.bg = .{ .index = @intCast(idx) },
+        .palette => |idx| style.bg = resolveColor(ns_table, ns, @intCast(idx)),
         .rgb => |rgb| style.bg = .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
     }
 

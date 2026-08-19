@@ -1,5 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const palette_mod = @import("palette.zig");
 
 // Re-export ghostty-vt - this IS our terminal emulation
 pub const ghostty = @import("ghostty-vt");
@@ -43,6 +44,11 @@ pub const VT = struct {
     // cached snapshot makes panes appear frozen — the historical bug here.
     render_state_dirty: bool = true,
 
+    /// Per-pane palette namespaces (PLAN.md M1). Slot 0 is the pane's ordinary
+    /// palette and passes indices through untouched, so this is inert until a
+    /// later milestone selects a namespace.
+    ns_table: palette_mod.NamespaceTable = undefined,
+
     /// Initialize the VT in-place.
     ///
     /// IMPORTANT: Ghostty terminal state must not be moved after initialization.
@@ -65,9 +71,11 @@ pub const VT = struct {
         self.stream = self.terminal.vtStream();
         self.render_state = .empty;
         self.kitty_image_cache = std.AutoHashMap(u32, KittyImageCache).init(allocator);
+        self.ns_table = palette_mod.NamespaceTable.init(allocator);
     }
 
     pub fn deinit(self: *VT) void {
+        self.ns_table.deinit();
         self.render_state.deinit(self.allocator);
         self.kitty_image_cache.deinit();
         self.stream.deinit();
@@ -170,6 +178,7 @@ pub const VT = struct {
         if (!self.render_state_dirty) return &self.render_state;
 
         // Clear previous state before updating to free memory from previous large scrollback
+        self.ns_table.deinit();
         self.render_state.deinit(self.allocator);
         self.render_state = .empty;
 
