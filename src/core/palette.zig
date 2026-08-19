@@ -107,7 +107,6 @@ pub const NamespaceTable = struct {
     /// holds a handful.
     palettes: [MAX_NS]?*Palette = .{null} ** MAX_NS,
     names: std.StringHashMapUnmanaged(u8) = .empty,
-    refs: [MAX_NS]u32 = .{0} ** MAX_NS,
     stack: [STACK_DEPTH]StackEntry = .{StackEntry{}} ** STACK_DEPTH,
     stack_len: u8 = 0,
     current: u8 = 0,
@@ -208,7 +207,7 @@ pub const NamespaceTable = struct {
 
         var slot: u8 = 1;
         while (slot < MAX_NS) : (slot += 1) {
-            if (self.palettes[slot] == null and self.refs[slot] == 0) break;
+            if (self.palettes[slot] == null) break;
             if (slot == MAX_NS - 1) return 0;
         }
         if (slot >= MAX_NS) return 0;
@@ -225,7 +224,6 @@ pub const NamespaceTable = struct {
             return 0;
         };
         self.palettes[slot] = palette;
-        self.refs[slot] = 1;
         return slot;
     }
 

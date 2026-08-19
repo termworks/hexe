@@ -43,13 +43,14 @@ pub fn runPaletteList(allocator: std.mem.Allocator, json_output: bool) !void {
     if (json_output) {
         var out = std.ArrayList(u8).empty;
         defer out.deinit(allocator);
+        var w = out.writer(allocator);
         try out.appendSlice(allocator, "[");
         for (records.items, 0..) |r, i| {
             if (i > 0) try out.appendSlice(allocator, ",");
-            try out.writer(allocator).print(
-                "{{\"uuid\":\"{s}\",\"name\":\"{s}\"}}",
-                .{ r.uuid[0..], r.name },
-            );
+            try w.print("{{\"uuid\":\"{s}\",\"name\":\"", .{r.uuid[0..]});
+            // A pane name comes from `-n` and can hold a quote or a backslash.
+            try core.strings.writeJsonEscaped(&w, r.name);
+            try out.appendSlice(allocator, "\"}");
         }
         try out.appendSlice(allocator, "]\n");
         try std.fs.File.stdout().writeAll(out.items);
