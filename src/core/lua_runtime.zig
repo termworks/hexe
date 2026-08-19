@@ -251,6 +251,34 @@ pub fn getConfigDir(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Get the path to a specific config file
+/// Config file for the ACTIVE profile.
+///
+/// A profile is a separate hexe -- its own daemon, sessions, sockets and state --
+/// but every profile still read the one shared init.lua, so `work` and
+/// `personal` could not differ in layout, keybinds or painter. A profile now
+/// uses `profiles/<name>.lua` when that file exists, and falls back to the
+/// shared init.lua otherwise, so nothing changes for anyone who has no such file.
+pub fn getActiveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
+    const raw = std.posix.getenv("HEXE_INSTANCE") orelse return getConfigPath(allocator, "init.lua");
+    if (raw.len == 0 or raw.len > 64) return getConfigPath(allocator, "init.lua");
+    // The name arrives from --profile, so it must never reach into the
+    // filesystem: anything but a plain name falls back to the shared config.
+    for (raw) |ch| {
+        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+            (ch >= '0' and ch <= '9') or ch == '-' or ch == '_';
+        if (!ok) return getConfigPath(allocator, "init.lua");
+    }
+
+    const dir = try getConfigDir(allocator);
+    defer allocator.free(dir);
+    const candidate = try std.fmt.allocPrint(allocator, "{s}/profiles/{s}.lua", .{ dir, raw });
+    std.fs.accessAbsolute(candidate, .{}) catch {
+        allocator.free(candidate);
+        return getConfigPath(allocator, "init.lua");
+    };
+    return candidate;
+}
+
 pub fn getConfigPath(allocator: std.mem.Allocator, filename: []const u8) ![]const u8 {
     const dir = try getConfigDir(allocator);
     defer allocator.free(dir);

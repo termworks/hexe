@@ -33,9 +33,22 @@ B = f"smk{os.getpid()}b"
 procs = []
 
 
+CF = os.path.join(WD, "cfg")
+os.makedirs(os.path.join(CF, "hexe", "profiles"), exist_ok=True)
+# The shared config every profile falls back to...
+open(os.path.join(CF, "hexe", "init.lua"), "w").write(
+    'local hexe = require("hexe")\n'
+    'return hexe.setup({ mux = { selection_color = 111 } })\n')
+# ...and one profile's own, which must win for that profile only.
+open(os.path.join(CF, "hexe", "profiles", f"{A}.lua"), "w").write(
+    'local hexe = require("hexe")\n'
+    'return hexe.setup({ mux = { selection_color = 222 } })\n')
+
+
 def base_env(profile=None):
     e = os.environ.copy()
     e.update({"XDG_STATE_HOME": os.path.join(WD, "state"),
+              "XDG_CONFIG_HOME": CF,
               "TERM": "xterm-256color", "SHELL": "/bin/sh"})
     for k in ("HEXE_SESSION", "HEXE_PANE_UUID", "HEXE_MUX_SOCKET", "HEXE_POD_SOCKET",
               "HEXE_POD_NAME", "HEXE_FLOAT", "HEXE_FLOAT_NAME", "HEXE_INSTANCE"):
@@ -140,6 +153,23 @@ rc, out = hexe(["--profile", B, "ses", "list"])
 if "bravo" not in out:
     fail(f"killing profile {A} took {B} down with it: {out.strip()[:200]}")
 print(f"isolation: killing {A}'s daemon left {B} serving its session")
+
+# Per-profile CONFIG. Profiles were separate daemons but shared one init.lua,
+# so `work` and `personal` could not differ in layout, keybinds or painter.
+rc, out = hexe(["--profile", A, "config", "validate"])
+if f"profiles/{A}.lua" not in out:
+    fail(f"profile {A} did not use its own config: {out.strip()[:200]}")
+rc, out = hexe(["--profile", B, "config", "validate"])
+if "init.lua" not in out or "profiles/" in out:
+    fail(f"profile {B} has no config of its own and must fall back to the shared "
+         f"init.lua: {out.strip()[:200]}")
+print("config: a profile uses profiles/<name>.lua, else the shared init.lua")
+
+# The profile name reaches the filesystem, so it must never escape the config dir.
+rc, out = hexe(["--profile", "../../../../tmp/evil/pwned", "config", "validate"])
+if "init.lua" not in out:
+    fail(f"a profile name escaped the config directory: {out.strip()[:200]}")
+print("config: a traversing profile name falls back instead of escaping")
 
 cleanup()
 print("SMOKE PASS: profiles are separate daemons with separate sessions")

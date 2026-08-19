@@ -79,7 +79,7 @@ pub const PopConfig = struct {
         var config = PopConfig{};
         config._allocator = allocator;
 
-        const path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
+        const path = lua_runtime.getActiveConfigPath(allocator) catch return config;
         defer allocator.free(path);
 
         var runtime = LuaRuntime.init(allocator) catch {

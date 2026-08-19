@@ -9,7 +9,7 @@ const LoadedConfig = struct {
 };
 
 fn loadConfig(allocator: std.mem.Allocator) !LoadedConfig {
-    const config_path = try core.lua_runtime.getConfigPath(allocator, "init.lua");
+    const config_path = try core.lua_runtime.getActiveConfigPath(allocator);
     errdefer allocator.free(config_path);
 
     std.fs.accessAbsolute(config_path, .{}) catch {
@@ -40,7 +40,7 @@ pub fn run() !void {
     const allocator = std.heap.page_allocator;
     var loaded = loadConfig(allocator) catch |err| {
         if (err == error.FileNotFound) {
-            const config_path = try core.lua_runtime.getConfigPath(allocator, "init.lua");
+            const config_path = try core.lua_runtime.getActiveConfigPath(allocator);
             defer allocator.free(config_path);
             print("✓ No config file found (using defaults)\n", .{});
             print("  Expected location: {s}\n", .{config_path});
@@ -206,7 +206,7 @@ pub fn runPaths() !void {
     const allocator = std.heap.page_allocator;
     const config_dir = try core.lua_runtime.getConfigDir(allocator);
     defer allocator.free(config_dir);
-    const config_path = try core.lua_runtime.getConfigPath(allocator, "init.lua");
+    const config_path = try core.lua_runtime.getActiveConfigPath(allocator);
     defer allocator.free(config_path);
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(cwd);

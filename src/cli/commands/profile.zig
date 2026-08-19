@@ -72,6 +72,16 @@ fn addOrUpdate(
     });
 }
 
+/// Whether this profile has its own config file rather than the shared one.
+fn hasOwnConfig(allocator: std.mem.Allocator, name: []const u8) bool {
+    const dir = core.lua_runtime.getConfigDir(allocator) catch return false;
+    defer allocator.free(dir);
+    const path = std.fmt.allocPrint(allocator, "{s}/profiles/{s}.lua", .{ dir, name }) catch return false;
+    defer allocator.free(path);
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}
+
 pub fn runProfileList(allocator: std.mem.Allocator) !void {
     var list: std.ArrayList(Profile) = .empty;
     defer list.deinit(allocator);
@@ -136,15 +146,17 @@ pub fn runProfileList(allocator: std.mem.Allocator) !void {
     }
 
     const current = std.posix.getenv("HEXE_INSTANCE") orelse "default";
-    print("{s:<20} {s:<9} {s}\n", .{ "PROFILE", "DAEMON", "STATE" });
+    print("{s:<20} {s:<9} {s:<10} {s}\n", .{ "PROFILE", "DAEMON", "CONFIG", "STATE" });
     for (list.items) |p| {
         const mark: []const u8 = if (std.mem.eql(u8, p.name, current)) "*" else " ";
-        print("{s}{s:<19} {s:<9} {s}\n", .{
+        print("{s}{s:<19} {s:<9} {s:<10} {s}\n", .{
             mark,
             p.name,
             if (p.running) "running" else "stopped",
+            if (hasOwnConfig(allocator, p.name)) "own" else "shared",
             p.state_dir orelse "-",
         });
     }
     print("\n* = this shell's profile. Select one with --profile NAME.\n", .{});
+    print("CONFIG 'own' = profiles/<name>.lua; 'shared' = the common init.lua.\n", .{});
 }

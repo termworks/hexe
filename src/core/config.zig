@@ -443,7 +443,7 @@ pub const SesConfig = struct {
         defer runtime.deinit();
 
         // Load global config
-        const config_path = lua_runtime.getConfigPath(allocator, "init.lua") catch |err| {
+        const config_path = lua_runtime.getActiveConfigPath(allocator) catch |err| {
             log.warn("failed to resolve ses config path: {s}", .{@errorName(err)});
             return config;
         };
@@ -729,7 +729,7 @@ pub const Config = struct {
 
         PARSE_ERROR = null;
 
-        const path = lua_runtime.getConfigPath(allocator, "init.lua") catch {
+        const path = lua_runtime.getActiveConfigPath(allocator) catch {
             return config;
         };
         defer freeSlice(allocator, path);
