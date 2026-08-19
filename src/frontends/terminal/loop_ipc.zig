@@ -74,6 +74,14 @@ fn sendFailedFloatResult(state: *State, request_id: u32, exit_code: i32, comptim
     };
 }
 
+/// Roll widgets.pokemon.shiny_chance for a freshly shown sprite.
+fn rollShiny(state: *State) bool {
+    const chance = state.pop_config.widgets.pokemon.shiny_chance;
+    if (chance <= 0) return false;
+    if (chance >= 1) return true;
+    return std.crypto.random.float(f32) < chance;
+}
+
 /// Handle binary control messages from the SES control channel.
 /// Reads all available messages (CTL fd is non-blocking).
 pub fn handleSesMessage(state: *State, buffer: []u8) void {
@@ -1111,7 +1119,7 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
         if (uuid_match and pane.pokemon_initialized and
             !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_name == null)
         {
-            pane.pokemon_state.loadSprite(name, false) catch |err| {
+            pane.pokemon_state.loadSprite(name, rollShiny(state)) catch |err| {
                 core.logging.logError("terminal", "failed to load float sprite after pane-name update", err);
             };
         }
@@ -1122,7 +1130,7 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
         if (std.mem.eql(u8, pane.*.uuid[0..], uuid[0..]) and pane.*.pokemon_initialized and
             !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_name == null)
         {
-            pane.*.pokemon_state.loadSprite(name, false) catch |err| {
+            pane.*.pokemon_state.loadSprite(name, rollShiny(state)) catch |err| {
                 core.logging.logError("terminal", "failed to load split sprite after pane-name update", err);
             };
         }

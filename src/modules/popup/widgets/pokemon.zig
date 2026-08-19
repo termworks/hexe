@@ -21,6 +21,10 @@ pub const Position = enum {
 pub const PokemonState = struct {
     show_sprite: bool = false,
     sprite_name: ?[]const u8 = null,
+    /// Rolled once per sprite load from widgets.pokemon.shiny_chance, and sent
+    /// to the painter. It used to be discarded here and hardcoded false at the
+    /// draw call, so configuring a chance did nothing.
+    is_shiny: bool = false,
     manually_toggled: bool = false,
     allocator: std.mem.Allocator,
 
@@ -38,10 +42,10 @@ pub const PokemonState = struct {
     /// a dangling pointer that the next sprite request read straight into its
     /// JSON body.
     pub fn loadSprite(self: *PokemonState, name: []const u8, shiny: bool) !void {
-        _ = shiny;
         const owned = try self.allocator.dupe(u8, name);
         if (self.sprite_name) |old_name| self.allocator.free(old_name);
         self.sprite_name = owned;
+        self.is_shiny = shiny;
         self.show_sprite = true;
     }
 

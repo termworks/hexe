@@ -107,7 +107,7 @@ fn drawPaneSprite(state: *State, renderer: anytype, pane: *Pane, stdout: std.fs.
         cache,
         &state.config.tabs.status,
         name,
-        false,
+        pane.pokemon_state.is_shiny,
         spritePositionName(state.pop_config.widgets.pokemon.position),
         pane.x,
         pane.y,

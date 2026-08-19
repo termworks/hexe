@@ -65,6 +65,14 @@ fn focusedPane(state: *State) ?*Pane {
     return state.currentLayout().getFocusedPane();
 }
 
+/// Roll widgets.pokemon.shiny_chance for a freshly shown sprite.
+fn rollShiny(state: *State) bool {
+    const chance = state.pop_config.widgets.pokemon.shiny_chance;
+    if (chance <= 0) return false;
+    if (chance >= 1) return true;
+    return std.crypto.random.float(f32) < chance;
+}
+
 pub fn dispatchAction(state: *State, action: BindAction) bool {
     const cfg = &state.config;
 
@@ -560,9 +568,9 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
                             // Get the pane's Pokemon name from pane_names cache
                             const pokemon_name = state.paneName(pane.uuid) orelse "pikachu";
 
-                            pane.pokemon_state.loadSprite(pokemon_name, false) catch {
+                            pane.pokemon_state.loadSprite(pokemon_name, rollShiny(state)) catch {
                                 // Fallback to pikachu if loading fails
-                                pane.pokemon_state.loadSprite("pikachu", false) catch |err| {
+                                pane.pokemon_state.loadSprite("pikachu", rollShiny(state)) catch |err| {
                                     core.logging.logError("terminal", "failed to load fallback sprite for focused float", err);
                                 };
                             };
@@ -578,8 +586,8 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
                         // Get the pane's Pokemon name from pane_names cache
                         const pokemon_name = state.paneName(pane.uuid) orelse "pikachu";
 
-                        pane.pokemon_state.loadSprite(pokemon_name, false) catch {
-                            pane.pokemon_state.loadSprite("pikachu", false) catch |err| {
+                        pane.pokemon_state.loadSprite(pokemon_name, rollShiny(state)) catch {
+                            pane.pokemon_state.loadSprite("pikachu", rollShiny(state)) catch |err| {
                                 core.logging.logError("terminal", "failed to load fallback sprite for focused pane", err);
                             };
                         };
