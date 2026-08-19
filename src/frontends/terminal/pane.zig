@@ -194,6 +194,13 @@ pub const Pane = struct {
     /// into a pane that never asked for them — and `palette_restored` would
     /// still read "already asked", so the new pane would never fetch its own.
     pub fn adoptIdentity(self: *Pane, new_uuid: [32]u8) void {
+        // Same pane, recycled object: keep everything. Reattach reuses Pane
+        // structs for the panes it is restoring, so this runs on the common
+        // path with an UNCHANGED uuid — resetting there threw away the live
+        // palette on every reconnect, and after a daemon restart there was no
+        // parked copy left to restore it from either.
+        if (std.mem.eql(u8, &self.uuid, &new_uuid)) return;
+
         self.uuid = new_uuid;
         self.vt.ns_table.deinit();
         self.vt.ns_table = core.palette.NamespaceTable.init(self.allocator);
