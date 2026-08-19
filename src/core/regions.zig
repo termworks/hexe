@@ -196,6 +196,9 @@ const Region = struct {
     /// on every retry.
     spawned_ms: i64 = 0,
 
+    /// The last response was a well-formed refusal (`ok:false`) rather than a
+    /// transport failure, so the painter is known to be running.
+    declined: bool = false,
     last_done_ms: i64 = 0,
     next_try_ms: i64 = 0,
     last_used_ms: i64 = 0,
@@ -564,15 +567,26 @@ pub const Registry = struct {
 
     /// A completed frame arrived: parse it and retire the connection.
     fn finish(self: *Registry, r: *Region, now: i64) void {
+        r.declined = false;
         const parsed = self.parseResponse(r, r.body.items);
         self.closeConn(r);
         if (parsed) {
             r.last_done_ms = now;
             r.fail_streak = 0;
             r.next_try_ms = 0;
-        } else {
-            self.backoff(r, now);
+            return;
         }
+        // A painter that answers `ok:false` is UP and simply does not implement
+        // this view. Backing off through the failure ladder also re-ran
+        // `command`, so a declining painter was relaunched forever (every
+        // SPAWN_COOLDOWN_MS, capped only by the retry ceiling). Retry on the
+        // ordinary cadence instead, and never spawn: nothing is missing.
+        if (r.declined) {
+            r.fail_streak = 0;
+            r.next_try_ms = now + @max(r.refresh_ms, RETRY_BASE_MS);
+            return;
+        }
+        self.backoff(r, now);
     }
 
     fn fail(self: *Registry, r: *Region, now: i64) void {
@@ -601,6 +615,27 @@ pub const Registry = struct {
         self.spawned.append(self.allocator, child) catch {
             _ = posix.waitpid(child.id, posix.W.NOHANG);
         };
+    }
+
+    /// Milliseconds until the soonest live region is due, or null when nothing
+    /// is scheduled. `next_frame_ms` was only ever a gate inside isDue(), so a
+    /// painter asking for 75ms still repainted at the loop's own cadence; the
+    /// caller uses this to arm its timer for the painter's frame instead.
+    pub fn msUntilDue(self: *Registry, now: i64) ?i64 {
+        var soonest: ?i64 = null;
+        var it = self.entries.valueIterator();
+        while (it.next()) |r| {
+            if (r.*.inFlight()) continue;
+            if (r.*.next_try_ms != 0 and now < r.*.next_try_ms) continue;
+            const interval: i64 = if (r.*.next_frame_ms) |nf|
+                @min(r.*.refresh_ms, @as(i64, @intCast(nf)))
+            else
+                r.*.refresh_ms;
+            const due = r.*.last_done_ms + @max(interval, 16);
+            const delta = @max(due - now, 0);
+            if (soonest == null or delta < soonest.?) soonest = delta;
+        }
+        return soonest;
     }
 
     fn backoff(self: *Registry, r: *Region, now: i64) void {
@@ -819,7 +854,10 @@ pub const Registry = struct {
             else => return false,
         };
         if (root.get("ok")) |ok| {
-            if (ok == .bool and !ok.bool) return false;
+            if (ok == .bool and !ok.bool) {
+                r.declined = true;
+                return false;
+            }
         }
         const output = switch (root.get("output") orelse return false) {
             .object => |o| o,

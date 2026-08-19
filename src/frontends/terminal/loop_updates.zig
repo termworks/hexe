@@ -80,6 +80,16 @@ pub fn updateSelectionAndStatus(state: *State, now_ms: i64, last_status_update: 
         state.needs_render = true;
         last_status_update.* = now_ms;
     }
+
+    // A painter drives its own frame rate through next_frame_ms. The fixed
+    // interval above quantised that to the loop's cadence, so a spinner asking
+    // for 75ms actually repainted at ~4-10fps. Render as soon as any region is
+    // due; renderIfDue's own floor still caps the rate.
+    if (core.regions.active) |registry| {
+        if (registry.msUntilDue(now_ms)) |delta| {
+            if (delta <= 0) state.needs_render = true;
+        }
+    }
 }
 
 pub fn updateOverlaysPopupsAndKeyTimers(state: *State, now_ms: i64) void {

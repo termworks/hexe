@@ -22,6 +22,17 @@ const LoopTimerContext = struct {
     heartbeat_interval: i64,
 };
 
+/// How long the loop timer may sleep. A painter's next_frame_ms is useless if
+/// nothing wakes to serve it, and the ticker was pinned at 100ms, so animation
+/// could never beat ~10fps. Never sleeps below 16ms.
+fn tickDelayMs() u64 {
+    const base: u64 = 100;
+    const registry = core.regions.active orelse return base;
+    const delta = registry.msUntilDue(std.time.milliTimestamp()) orelse return base;
+    const clamped: u64 = @intCast(@max(delta, 16));
+    return @min(base, clamped);
+}
+
 fn loopTimerCallback(
     ctx: ?*LoopTimerContext,
     loop: *xev.Loop,
@@ -31,7 +42,7 @@ fn loopTimerCallback(
     const timer_ctx = ctx orelse return .disarm;
     _ = result catch {
         // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
-        timer_ctx.ticker.run(loop, completion, 100, LoopTimerContext, timer_ctx, loopTimerCallback);
+        timer_ctx.ticker.run(loop, completion, tickDelayMs(), LoopTimerContext, timer_ctx, loopTimerCallback);
         return .disarm;
     };
 
@@ -47,7 +58,7 @@ fn loopTimerCallback(
 
     timer_ctx.last_fire = std.time.milliTimestamp();
     // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
-    timer_ctx.ticker.run(loop, completion, 100, LoopTimerContext, timer_ctx, loopTimerCallback);
+    timer_ctx.ticker.run(loop, completion, tickDelayMs(), LoopTimerContext, timer_ctx, loopTimerCallback);
     return .disarm;
 }
 
