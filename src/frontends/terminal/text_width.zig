@@ -1,6 +1,16 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 
+/// Display columns `text` occupies, counting graphemes rather than bytes.
+pub fn displayWidth(text: []const u8) u16 {
+    var used: u16 = 0;
+    var it = vaxis.unicode.graphemeIterator(text);
+    while (it.next()) |g| {
+        used +|= @intCast(vaxis.gwidth.gwidth(g.bytes(text), .unicode));
+    }
+    return used;
+}
+
 pub fn clipTextToWidth(text: []const u8, max_width: u16) []const u8 {
     if (text.len == 0 or max_width == 0) return "";
 
