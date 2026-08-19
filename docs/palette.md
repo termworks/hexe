@@ -35,7 +35,10 @@ as the screen, and survives a resize.
 ## Setting colours
 
 ```
-hexe palette list                                   # panes a change would reach
+hexe palette list                                   # panes, and what each has set
+hexe palette get                                    # every colour, every pane
+hexe palette get --ns prompt                        # one namespace
+hexe palette get --ns prompt 33                     # one index
 hexe palette set --ns prompt 33=#331111 bg=#0a0a0a
 hexe palette set --ns prompt --from ~/.cache/wal/colors
 hexe palette set --from ~/.cache/wal/colors         # every namespace
@@ -127,6 +130,7 @@ stored on the interned style inside the VT library, which hexe consumes as a
 read-only dependency. For a full-screen application, which is what the verb is
 for, the two are the same thing.
 
-Reading colours back (`hexe palette get`, and `list` showing live namespace
-contents) needs a query channel from the CLI into the frontend that does not
-exist yet.
+`hexe palette get` and `list` read from the session daemon's parked copy, which
+the frontend syncs about once a second. A colour set in the last moment before
+you ask may not be listed yet, and a pane whose frontend has never run since the
+colour was set reports nothing.

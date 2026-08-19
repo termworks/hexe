@@ -431,47 +431,104 @@ pub const NamespaceTable = struct {
     /// through another process, so a truncated or garbled one must degrade to
     /// "fewer namespaces restored", never to a crash or a wild read.
     pub fn applySerialized(self: *NamespaceTable, blob: []const u8) void {
-        if (blob.len < 2) return;
-        if (blob[0] != BLOB_VERSION) return;
-        const count = blob[1];
-
-        var off: usize = 2;
-        var n: usize = 0;
-        while (n < count) : (n += 1) {
-            if (off >= blob.len) return;
-            const name_len = blob[off];
-            off += 1;
-            if (name_len == 0 or name_len > MAX_NAME_LEN) return;
-            if (off + name_len > blob.len) return;
-            const name = blob[off .. off + name_len];
-            off += name_len;
-
-            if (off + 2 > blob.len) return;
-            const entries = std.mem.readInt(u16, blob[off..][0..2], .big);
-            off += 2;
-            if (entries > 256) return;
-            if (off + @as(usize, entries) * 4 > blob.len) return;
-
+        var reader = BlobReader.init(blob);
+        while (reader.next()) |ns| {
             // A name the blob carries but this table has never seen is created
             // here; an exhausted table yields slot 0 and the entries are
             // dropped, which is the same degradation as everywhere else.
-            const slot = self.slotFor(name);
-            var e: u16 = 0;
-            while (e < entries) : (e += 1) {
-                const rec = blob[off..][0..4];
-                off += 4;
-                self.setEntry(slot, rec[0], .{ .r = rec[1], .g = rec[2], .b = rec[3] });
+            const slot = self.slotFor(ns.name);
+            var i: usize = 0;
+            while (i < ns.count()) : (i += 1) {
+                const entry = ns.at(i);
+                self.setEntry(slot, entry.index, entry.rgb);
             }
-
-            const fg = readOptionalRgb(blob, &off) orelse return;
-            const bg = readOptionalRgb(blob, &off) orelse return;
-            const cursor = readOptionalRgb(blob, &off) orelse return;
             if (self.palettes[slot]) |p| {
-                if (fg.present) p.fg = fg.value;
-                if (bg.present) p.bg = bg.value;
-                if (cursor.present) p.cursor = cursor.value;
+                if (ns.fg) |c| p.fg = c;
+                if (ns.bg) |c| p.bg = c;
+                if (ns.cursor) |c| p.cursor = c;
             }
         }
+    }
+};
+
+/// Reads a blob produced by `serialize`, one namespace at a time.
+///
+/// The ONE parser for the format. `applySerialized` and `hexe palette get` both
+/// go through it, so a bounds check added here covers both — two hand-rolled
+/// parsers of the same byte layout is how a format grows divergent bugs.
+///
+/// Every field is checked against the buffer. A truncated or garbled blob ends
+/// the iteration early rather than reading past the end: the bytes round-trip
+/// through another process, so "fewer namespaces than expected" is the only
+/// acceptable failure.
+pub const BlobReader = struct {
+    blob: []const u8,
+    off: usize = 0,
+    remaining: usize = 0,
+
+    pub const Entry = struct { index: u8, rgb: RGB };
+
+    pub const Namespace = struct {
+        name: []const u8,
+        /// Raw 4-byte records: index, r, g, b.
+        records: []const u8,
+        fg: ?RGB = null,
+        bg: ?RGB = null,
+        cursor: ?RGB = null,
+
+        pub fn count(self: Namespace) usize {
+            return self.records.len / 4;
+        }
+
+        pub fn at(self: Namespace, i: usize) Entry {
+            const rec = self.records[i * 4 ..][0..4];
+            return .{ .index = rec[0], .rgb = .{ .r = rec[1], .g = rec[2], .b = rec[3] } };
+        }
+    };
+
+    pub fn init(blob: []const u8) BlobReader {
+        if (blob.len < 2 or blob[0] != BLOB_VERSION) return .{ .blob = blob };
+        return .{ .blob = blob, .off = 2, .remaining = blob[1] };
+    }
+
+    pub fn next(self: *BlobReader) ?Namespace {
+        if (self.remaining == 0) return null;
+        self.remaining -= 1;
+        const blob = self.blob;
+
+        if (self.off >= blob.len) return self.stop();
+        const name_len = blob[self.off];
+        self.off += 1;
+        if (name_len == 0 or name_len > MAX_NAME_LEN) return self.stop();
+        if (self.off + name_len > blob.len) return self.stop();
+        const name = blob[self.off .. self.off + name_len];
+        self.off += name_len;
+
+        if (self.off + 2 > blob.len) return self.stop();
+        const entries = std.mem.readInt(u16, blob[self.off..][0..2], .big);
+        self.off += 2;
+        if (entries > 256) return self.stop();
+        const bytes = @as(usize, entries) * 4;
+        if (self.off + bytes > blob.len) return self.stop();
+        const records = blob[self.off .. self.off + bytes];
+        self.off += bytes;
+
+        const fg = readOptionalRgb(blob, &self.off) orelse return self.stop();
+        const bg = readOptionalRgb(blob, &self.off) orelse return self.stop();
+        const cursor = readOptionalRgb(blob, &self.off) orelse return self.stop();
+
+        return .{
+            .name = name,
+            .records = records,
+            .fg = if (fg.present) fg.value else null,
+            .bg = if (bg.present) bg.value else null,
+            .cursor = if (cursor.present) cursor.value else null,
+        };
+    }
+
+    fn stop(self: *BlobReader) ?Namespace {
+        self.remaining = 0;
+        return null;
     }
 };
 
@@ -1209,4 +1266,56 @@ test "a namespace's default fg/bg are readable for the render path" {
     // reset clears them along with the indexed entries.
     _ = applyOsc(&t, "reset;prompt", false);
     try std.testing.expect(t.defaultsFor(t.autoSlot(.prompt)).bg == null);
+}
+
+test "BlobReader yields exactly what serialize wrote" {
+    const alloc = std.testing.allocator;
+    var t = NamespaceTable.init(alloc);
+    defer t.deinit();
+    t.setEnabled(true);
+    _ = applyOsc(&t, "set;prompt;0=#010203;255=#0a0b0c;bg=#111213", false);
+    _ = applyOsc(&t, "set;output;7=#445566;fg=#778899", false);
+
+    const blob = try t.serialize(alloc);
+    defer alloc.free(blob);
+
+    var seen_prompt = false;
+    var seen_output = false;
+    var reader = BlobReader.init(blob);
+    while (reader.next()) |ns| {
+        if (std.mem.eql(u8, ns.name, "prompt")) {
+            seen_prompt = true;
+            try std.testing.expectEqual(@as(usize, 2), ns.count());
+            try std.testing.expectEqual(@as(u8, 0), ns.at(0).index);
+            try std.testing.expectEqual(@as(u8, 0x03), ns.at(0).rgb.b);
+            try std.testing.expectEqual(@as(u8, 255), ns.at(1).index);
+            try std.testing.expectEqual(@as(u8, 0x11), ns.bg.?.r);
+            try std.testing.expect(ns.fg == null);
+        } else if (std.mem.eql(u8, ns.name, "output")) {
+            seen_output = true;
+            try std.testing.expectEqual(@as(usize, 1), ns.count());
+            try std.testing.expectEqual(@as(u8, 0x77), ns.fg.?.r);
+            try std.testing.expect(ns.bg == null);
+        } else {
+            return error.UnexpectedNamespace;
+        }
+    }
+    try std.testing.expect(seen_prompt and seen_output);
+    // Exhausted readers keep answering null rather than restarting.
+    try std.testing.expect(reader.next() == null);
+}
+
+test "BlobReader refuses a blob it does not understand" {
+    var empty = BlobReader.init(&.{});
+    try std.testing.expect(empty.next() == null);
+    var short = BlobReader.init(&[_]u8{BLOB_VERSION});
+    try std.testing.expect(short.next() == null);
+    // Right length, wrong version: yields nothing rather than misreading.
+    const wrong = [_]u8{ BLOB_VERSION +% 1, 1, 6 } ++ "prompt".* ++ [_]u8{ 0, 0 };
+    var r = BlobReader.init(&wrong);
+    try std.testing.expect(r.next() == null);
+    // Claims one namespace, provides no bytes for it.
+    const lying = [_]u8{ BLOB_VERSION, 1 };
+    var r2 = BlobReader.init(&lying);
+    try std.testing.expect(r2.next() == null);
 }

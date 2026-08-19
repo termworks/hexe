@@ -326,3 +326,39 @@ pub fn handleBinaryGetPanePalette(self: *Server, fd: posix.fd_t, payload_len: u3
     var resp = wire.PanePalette{ .uuid = req.uuid, .blob_len = 0 };
     self.notifyOrClose(fd, .get_pane_palette, std.mem.asBytes(&resp));
 }
+
+/// CLI → SES: read a pane's parked palette (`hexe palette get`).
+///
+/// Served straight from the daemon's copy. The frontend is the only thing that
+/// knows how to *render* a palette, but it is not the only thing that knows
+/// what one contains — and going through it would make the command fail
+/// whenever the session is detached, which is exactly when you most want to
+/// ask. Still opaque here: the blob is handed back unread.
+pub fn handleCliGetPanePalette(self: *Server, fd: posix.fd_t, payload_len: u32) void {
+    // Note-then-close, as the other CLI handlers do: an unnoted close lets a
+    // queued close fire later against whatever reused the fd number.
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
+
+    if (payload_len < @sizeOf(wire.GetPanePalette)) {
+        self.sendBinaryError(fd, "get_pane_palette: payload too small");
+        return;
+    }
+    const req = wire.readStructTimeout(wire.GetPanePalette, fd, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+        core.logging.logError("ses", "cli get_pane_palette read failed", err);
+        self.sendBinaryError(fd, "get_pane_palette: read failed");
+        return;
+    };
+
+    if (self.ses_state.store.panes.getPtr(req.uuid)) |pane| {
+        if (pane.palette_blob) |blob| {
+            var resp = wire.PanePalette{ .uuid = req.uuid, .blob_len = @intCast(blob.len) };
+            _ = self.sendCtlFrame(fd, .get_pane_palette, std.mem.asBytes(&resp), &.{blob}, "cli palette reply");
+            return;
+        }
+    }
+    var resp = wire.PanePalette{ .uuid = req.uuid, .blob_len = 0 };
+    _ = self.sendCtlFrame(fd, .get_pane_palette, std.mem.asBytes(&resp), &.{}, "cli palette reply");
+}

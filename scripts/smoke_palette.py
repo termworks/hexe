@@ -230,6 +230,26 @@ if not BG_DEFAULT.search(after_bg):
          "parsed and stored but not rendered", after_bg)
 print("defaults: bg= paints the output zone's unstyled cells")
 
+# Read it back. `get` is answered from the session daemon's parked copy, so it
+# also proves the frontend actually synced the change there — the thing a
+# detach later depends on.
+res = hexe_cli("palette", "get", "--ns", "prompt")
+if res.returncode != 0:
+    fail(f"`hexe palette get` failed: rc={res.returncode} {res.stderr!r}")
+if "33=#ff00aa" not in res.stdout:
+    fail(f"`hexe palette get` did not report the colour that was set: "
+         f"stdout={res.stdout!r} stderr={res.stderr!r}")
+print("get: the daemon reports the colour that was set")
+
+# An index filter narrows it; a namespace filter excludes the others.
+res = hexe_cli("palette", "get", "--ns", "output")
+if "33=#ff00aa" in res.stdout:
+    fail(f"`get --ns output` leaked the prompt namespace: {res.stdout!r}")
+res = hexe_cli("palette", "list")
+if "prompt=" not in res.stdout:
+    fail(f"`hexe palette list` did not report the populated namespace: {res.stdout!r}")
+print("get: filters by namespace, and list reports what is populated")
+
 # The frontend must survive a namespace it was never told about.
 res = hexe_cli("palette", "use", "--ns", "nosuchthing")
 if res.returncode != 0:

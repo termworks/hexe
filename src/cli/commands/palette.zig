@@ -25,9 +25,9 @@ pub const Error = error{
 /// `hexe palette list` — the panes a palette change would reach.
 ///
 /// Doubles as the capability probe M7's shell hook uses: a non-zero exit means
-/// "not inside hexe, fall back". It reports reachable panes rather than live
-/// namespace contents; reading state back from the frontend needs a channel
-/// that does not exist yet.
+/// "not inside hexe, fall back". Each pane is followed by the namespaces that
+/// actually carry colours and how many entries each holds; `hexe palette get`
+/// prints the colours themselves.
 pub fn runPaletteList(allocator: std.mem.Allocator, json_output: bool) !void {
     var records = std.ArrayList(pod_list.PodRecord).empty;
     defer {
@@ -63,11 +63,152 @@ pub fn runPaletteList(allocator: std.mem.Allocator, json_output: bool) !void {
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
     for (records.items) |r| {
-        try out.writer(allocator).print("pane uuid={s} name={s}\n", .{ r.uuid[0..], r.name });
+        try out.writer(allocator).print("pane uuid={s} name={s}", .{ r.uuid[0..], r.name });
+        // Which namespaces this pane actually carries colours for, and how
+        // many entries each. `default prompt output alt` always exist; saying
+        // so for every pane is noise, while saying what is *set* is the thing
+        // you asked the question to find out.
+        if (fetchPalette(allocator, r.uuid)) |blob| {
+            defer allocator.free(blob);
+            var reader = palette.BlobReader.init(blob);
+            while (reader.next()) |ns| {
+                var extras: usize = 0;
+                if (ns.fg != null) extras += 1;
+                if (ns.bg != null) extras += 1;
+                if (ns.cursor != null) extras += 1;
+                try out.writer(allocator).print(" {s}={d}", .{ ns.name, ns.count() + extras });
+            }
+        }
+        try out.appendSlice(allocator, "\n");
     }
-    // Auto-namespaces exist in every pane whether or not anything set them.
-    try out.appendSlice(allocator, "namespaces default prompt output alt\n");
     try std.fs.File.stdout().writeAll(out.items);
+}
+
+/// `hexe palette get [--ns <name>] [--pane <uuid>] [<index> …]`
+///
+/// Read back what is actually set. Answered from the session daemon's parked
+/// copy, so it works against a detached session too — which is when you most
+/// want to ask what a pane is carrying.
+pub fn runPaletteGet(
+    allocator: std.mem.Allocator,
+    ns_filter: []const u8,
+    pane: []const u8,
+    indices: []const []const u8,
+) !void {
+    var records = std.ArrayList(pod_list.PodRecord).empty;
+    defer {
+        for (records.items) |r| pod_list.freeRecord(allocator, r);
+        records.deinit(allocator);
+    }
+
+    if (pane.len > 0) {
+        if (!shared.isUuid32Hex(pane)) {
+            print("Error: --pane must be a 32-character pane uuid\n", .{});
+            return Error.BadArgument;
+        }
+    } else {
+        try collectPods(allocator, &records);
+        if (records.items.len == 0) {
+            print("Error: no live panes to address\n", .{});
+            return Error.NoPanes;
+        }
+    }
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    if (pane.len > 0) {
+        var uuid: [32]u8 = undefined;
+        @memcpy(&uuid, pane[0..32]);
+        try appendPanePalette(allocator, &out, uuid, ns_filter, indices);
+    } else {
+        for (records.items) |r| {
+            try appendPanePalette(allocator, &out, r.uuid, ns_filter, indices);
+        }
+    }
+    try std.fs.File.stdout().writeAll(out.items);
+}
+
+/// One pane's parked palette, filtered to `ns_filter` and `indices` if given.
+fn appendPanePalette(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    uuid: [32]u8,
+    ns_filter: []const u8,
+    indices: []const []const u8,
+) !void {
+    const blob = fetchPalette(allocator, uuid) orelse return;
+    defer allocator.free(blob);
+
+    var reader = palette.BlobReader.init(blob);
+    while (reader.next()) |namespace| {
+        if (ns_filter.len > 0 and !std.mem.eql(u8, ns_filter, "*") and
+            !std.ascii.eqlIgnoreCase(ns_filter, namespace.name)) continue;
+
+        var w = out.writer(allocator);
+        var i: usize = 0;
+        while (i < namespace.count()) : (i += 1) {
+            const entry = namespace.at(i);
+            if (!wantsIndex(indices, entry.index)) continue;
+            try w.print("{s} {s} {d}=#{x:0>2}{x:0>2}{x:0>2}\n", .{
+                uuid[0..8],  namespace.name, entry.index,
+                entry.rgb.r, entry.rgb.g,    entry.rgb.b,
+            });
+        }
+        // Defaults only when no explicit index filter was given: `get 3` asks
+        // about index 3, not about the namespace's background.
+        if (indices.len == 0) {
+            if (namespace.fg) |c| try w.print("{s} {s} fg=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.name, c.r, c.g, c.b });
+            if (namespace.bg) |c| try w.print("{s} {s} bg=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.name, c.r, c.g, c.b });
+            if (namespace.cursor) |c| try w.print("{s} {s} cursor=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.name, c.r, c.g, c.b });
+        }
+    }
+}
+
+fn wantsIndex(indices: []const []const u8, idx: u8) bool {
+    if (indices.len == 0) return true;
+    for (indices) |text| {
+        const want = std.fmt.parseUnsigned(u16, text, 10) catch continue;
+        if (want == idx) return true;
+    }
+    return false;
+}
+
+/// Ask SES for one pane's parked palette. Null when the daemon is unreachable
+/// or the pane has none, which are both "nothing to print" rather than errors.
+fn fetchPalette(allocator: std.mem.Allocator, uuid: [32]u8) ?[]u8 {
+    const socket_path = ipc.getSesSocketPath(allocator) catch return null;
+    defer allocator.free(socket_path);
+    var client = ipc.Client.connect(socket_path) catch return null;
+    defer client.close();
+    const fd = client.fd;
+
+    const timeout = std.posix.timeval{ .sec = 3, .usec = 0 };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+
+    // sendCliHandshake, not sendHandshake: the daemon answers the handshake
+    // with a server hello, and a client that does not consume it reads those
+    // bytes as its first control header — which is exactly as broken as it
+    // sounds, and silently, because the garbage header just looks like a bad
+    // reply.
+    wire.sendCliHandshake(fd) catch return null;
+    var req: wire.GetPanePalette = .{ .uuid = uuid };
+    wire.writeControl(fd, .get_pane_palette, std.mem.asBytes(&req)) catch return null;
+
+    const hdr = wire.readControlHeader(fd) catch return null;
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    if (msg_type != .get_pane_palette or hdr.payload_len < @sizeOf(wire.PanePalette)) return null;
+    const resp = wire.readStruct(wire.PanePalette, fd) catch return null;
+    const trail = hdr.payload_len - @sizeOf(wire.PanePalette);
+    if (trail == 0 or resp.blob_len != trail or trail > palette.MAX_BLOB_LEN) return null;
+
+    const blob = allocator.alloc(u8, trail) catch return null;
+    wire.readExact(fd, blob) catch {
+        allocator.free(blob);
+        return null;
+    };
+    return blob;
 }
 
 /// `hexe palette set --ns <name> <i>=#rrggbb …` / `--from <file>`.
