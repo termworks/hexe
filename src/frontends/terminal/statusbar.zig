@@ -226,7 +226,10 @@ pub fn draw(
     const snap = registry.snapshot(specFor(cfg, cfg.view, term_width, 1), ctx);
     if (!snap.done) return;
 
-    _ = drawRuns(renderer, 0, y, snap.runs, term_width);
+    // Content older than stale_ms means the painter stopped answering. Drawing
+    // it unchanged left a frozen clock looking live; dimming says "this is the
+    // last thing the painter said" without blanking the bar.
+    _ = drawRunsDimmed(renderer, 0, y, snap.runs, term_width, snap.stale);
 }
 
 /// Re-read the painter's last reported hit rectangles. Cheap: no fetch is
@@ -374,6 +377,10 @@ pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u
 /// Draw a painter's runs into a bounded span, clipping to `max_width`. Text is
 /// sanitized here, so nothing a painter emits can address cells outside it.
 pub fn drawRuns(renderer: *Renderer, start_x: u16, y: u16, runs: []const regions.Run, max_width: u16) u16 {
+    return drawRunsDimmed(renderer, start_x, y, runs, max_width, false);
+}
+
+pub fn drawRunsDimmed(renderer: *Renderer, start_x: u16, y: u16, runs: []const regions.Run, max_width: u16, dim: bool) u16 {
     const limit = start_x +| max_width;
     var x = start_x;
     var scratch: [512]u8 = undefined;
@@ -383,7 +390,12 @@ pub fn drawRuns(renderer: *Renderer, start_x: u16, y: u16, runs: []const regions
         if (text.len == 0) continue;
         const clipped = clipTextToWidth(text, limit -| x);
         if (clipped.len == 0) break;
-        x = drawStyledText(renderer, x, y, clipped, run.style);
+        var style = run.style;
+        if (dim) {
+            style.dim = true;
+            style.bold = false;
+        }
+        x = drawStyledText(renderer, x, y, clipped, style);
     }
     return x;
 }

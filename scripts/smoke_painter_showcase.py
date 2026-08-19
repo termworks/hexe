@@ -42,7 +42,7 @@ PLOG = os.path.join(WD, "selectors.log")
 open(os.path.join(CF, "hexe", "init.lua"), "w").write("""
 local hexe = require("hexe")
 return hexe.setup({
-  status = { enabled = true, socket = "%s", refresh_ms = 100, stale_ms = 8000,
+  status = { enabled = true, socket = "%s", refresh_ms = 100, stale_ms = 1500,
              view = "showcase.status",
              sprite_view = "showcase.sprite",
              float_title_view = "showcase.float.title",
@@ -206,8 +206,27 @@ if "showcase.sprite" not in asked:
     fail(f"status.sprite_view was not applied — hexe asked for {sorted(asked)!r}")
 print(f"config: hexe asked for the configured view names {sorted(asked)!r}")
 
+# 5. stale_ms: when the painter stops answering, its last frame must be marked
+#    stale and drawn dimmed. Without this a dead painter leaves a frozen clock
+#    that looks live, and stale_ms is inert config.
 if painter.poll() is not None:
     fail("painter died while serving hexe")
+
+painter.terminate()
+try: painter.wait(timeout=5)
+except subprocess.TimeoutExpired: painter.kill()
+del raw[:]
+deadline = time.time() + 12
+dimmed = False
+while time.time() < deadline:
+    if b"\x1b[2m" in bytes(raw):
+        dimmed = True
+        break
+    time.sleep(0.3)
+if not dimmed:
+    fail("the bar never dimmed after the painter died — stale_ms has no effect, "
+         "so a dead painter leaves a frozen bar looking live")
+print("stale: content dimmed after the painter stopped answering")
 if fe.poll() is not None:
     fail("frontend died while painting")
 
