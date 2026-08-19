@@ -200,6 +200,18 @@ pub const NamespaceTable = struct {
         return .{ .fg = palette.fg, .bg = palette.bg };
     }
 
+    /// A namespace's cursor colour, if it set one.
+    ///
+    /// Separate from `defaultsFor` because it is consumed somewhere else
+    /// entirely: cells go through the cell path, while the cursor is the real
+    /// terminal cursor and can only be recoloured by telling the host terminal
+    /// (OSC 12).
+    pub fn cursorFor(self: *const NamespaceTable, ns: u8) ?RGB {
+        if (ns == 0) return null;
+        const palette = self.palettes[ns] orelse return null;
+        return palette.cursor;
+    }
+
     /// Slot for a row's auto-namespace. A flat index; no hashing.
     pub fn autoSlot(self: *const NamespaceTable, kind: Auto) u8 {
         if (!self.enabled) return 0;

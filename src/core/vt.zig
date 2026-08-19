@@ -157,6 +157,24 @@ pub const VT = struct {
         return self.terminal.screens.active_key == .alternate;
     }
 
+    /// The palette namespace the cursor is currently sitting in.
+    ///
+    /// Read from the cursor's own row, the same OSC 133 zone the renderer uses
+    /// per row, so the cursor belongs to whatever region it is in rather than
+    /// to the pane as a whole.
+    pub fn cursorNamespace(self: *VT) u8 {
+        if (!self.ns_table.enabled) return 0;
+        const row = self.terminal.screens.active.cursor.page_pin.rowAndCell().row;
+        const zone: palette_mod.Zone = switch (row.semantic_prompt) {
+            .unknown => .unknown,
+            .prompt => .prompt,
+            .prompt_continuation => .prompt_continuation,
+            .input => .input,
+            .command => .command,
+        };
+        return self.ns_table.autoSlot(palette_mod.autoKind(zone, self.inAltScreen()));
+    }
+
     /// Get current working directory (from OSC 7)
     pub fn getPwd(self: *VT) ?[]const u8 {
         if (self.terminal.pwd.items.len == 0) return null;

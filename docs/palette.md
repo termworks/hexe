@@ -65,11 +65,20 @@ Two kinds of key:
 |---|---|
 | `0`–`255` | cells that name that palette index |
 | `fg`, `bg` | cells that name **no** colour of their own — the zone's default |
+| `cursor` | the terminal's cursor, while it is in that zone |
 
 So `set --ns output 1=#ff5555` recolours only what asked for colour 1, while
 `set --ns output bg=#101018` tints the whole output zone, blank cells included.
 
-`cursor` is accepted and stored but not yet applied to the rendered cursor.
+`cursor` colours the terminal's own cursor while it sits in that zone. hexe
+cannot paint the cursor as a cell, so it tells the host terminal with `OSC 12`
+and restores the terminal's colour when the cursor leaves — or when hexe exits.
+That sequence is global to the terminal, so it is sent only when the colour
+actually changes, not per frame.
+
+Because it follows the cursor's own row, a `cursor` colour only shows up in
+zones your shell actually marks. Without OSC 133 integration every row is
+`default`, and `default` is slot 0, which holds no colours.
 
 `set` is a **patch**. An index you never name keeps passing through to your
 terminal's theme, so a namespace with one entry set does not blacken the other

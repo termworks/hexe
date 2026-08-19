@@ -146,6 +146,41 @@ fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []co
     return pokemon;
 }
 
+/// Push a namespace's cursor colour to the host terminal, or take it back.
+///
+/// The cursor is the terminal's own, not a cell hexe paints, so OSC 12 is the
+/// only way to colour it — and OSC 12 is global, which is why this is strictly
+/// change-driven. Moving the cursor within one zone emits nothing; crossing
+/// into a zone with a different colour emits once. `OSC 112` restores the
+/// terminal's own colour when the cursor leaves a namespace that set one.
+fn applyCursorColor(state: *State, want: ?core.palette.RGB) void {
+    const same = blk: {
+        if (want == null and state.cursor_color == null) break :blk true;
+        const a_rgb = want orelse break :blk false;
+        const b_rgb = state.cursor_color orelse break :blk false;
+        break :blk a_rgb.r == b_rgb.r and a_rgb.g == b_rgb.g and a_rgb.b == b_rgb.b;
+    };
+    if (same) return;
+
+    var buf: [32]u8 = undefined;
+    const seq = if (want) |c|
+        std.fmt.bufPrint(&buf, "\x1b]12;#{x:0>2}{x:0>2}{x:0>2}\x07", .{ c.r, c.g, c.b }) catch return
+    else
+        // Nothing to undo if we never set one: a bare reset would clobber a
+        // colour the user's own terminal config chose.
+        if (!state.cursor_color_set) {
+            state.cursor_color = null;
+            return;
+        } else "\x1b]112\x07";
+
+    std.fs.File.stdout().writeAll(seq) catch |err| {
+        core.logging.logError("terminal", "failed to set cursor colour", err);
+        return;
+    };
+    state.cursor_color = want;
+    if (want != null) state.cursor_color_set = true;
+}
+
 pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
 
@@ -400,6 +435,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // Gather cursor info.
     var cursor = CursorInfo{};
+    var cursor_palette: ?core.palette.RGB = null;
 
     if (state.activeFloatingIndex()) |idx| {
         const pane = state.view.float_views.items[idx];
@@ -408,13 +444,16 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         cursor.y = pos.y;
         cursor.style = pane.getCursorStyle();
         cursor.visible = pane.isCursorVisible();
+        cursor_palette = pane.vt.ns_table.cursorFor(pane.vt.cursorNamespace());
     } else if (state.currentLayout().getFocusedPane()) |pane| {
         const pos = pane.getCursorPos();
         cursor.x = pos.x;
         cursor.y = pos.y;
         cursor.style = pane.getCursorStyle();
         cursor.visible = pane.isCursorVisible();
+        cursor_palette = pane.vt.ns_table.cursorFor(pane.vt.cursorNamespace());
     }
+    applyCursorColor(state, cursor_palette);
 
     // Explicit one-shot cursor restore (position + style + visibility) captured
     // before opening a transient CLI float.

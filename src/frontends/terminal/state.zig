@@ -313,6 +313,11 @@ pub const State = struct {
     cursor_needs_restore: bool,
     /// One-shot cursor snapshot restored after transient CLI float exits.
     cursor_restore_snapshot: ?CursorSnapshot,
+    /// Cursor colour last pushed to the HOST terminal for a palette namespace,
+    /// and whether anything was pushed at all. OSC 12 is global to the
+    /// terminal, so this is emitted only on change and undone on teardown.
+    cursor_color: ?core.palette.RGB = null,
+    cursor_color_set: bool = false,
     term_width: u16,
     term_height: u16,
     status_height: u16,

@@ -139,6 +139,8 @@ IDX33 = re.compile(rb"38[:;]5[:;]33")
 SET33 = re.compile(rb"38[:;]2[:;]{0,2}255[:;]0[:;]170")
 SET33_OUT = re.compile(rb"38[:;]2[:;]{0,2}0[:;]255[:;]0")
 BG_DEFAULT = re.compile(rb"48[:;]2[:;]{0,2}0[:;]0[:;]123")
+# OSC 12 is how a cursor colour reaches the host terminal; OSC 112 undoes it.
+OSC12 = re.compile(rb"\x1b\]12;#00ff88")
 
 
 def repaint():
@@ -249,6 +251,49 @@ res = hexe_cli("palette", "list")
 if "prompt=" not in res.stdout:
     fail(f"`hexe palette list` did not report the populated namespace: {res.stdout!r}")
 print("get: filters by namespace, and list reports what is populated")
+
+# `cursor=` colours the terminal's OWN cursor, which hexe cannot paint as a
+# cell — it has to tell the host terminal with OSC 12. So the assertion is that
+# hexe emits that sequence, and only when the cursor is in a zone that set one.
+#
+# The cursor has to actually REST in a marked zone. A script that emits the
+# marks and exits leaves the cursor on the shell's next, unmarked row — which
+# is `default`, slot 0, and slot 0 deliberately holds no colours. So mark a row
+# and block on `read`, keeping the cursor there.
+CURSOR_SH = os.path.join(WD, "cursorzone.sh")
+with open(CURSOR_SH, "w") as fh:
+    fh.write("printf '\033]133;A\007CURSORZONE '\n"
+             "read x\n")
+os.write(master, f"sh {CURSOR_SH}\r".encode())
+time.sleep(2.5)
+
+del seen[:]
+time.sleep(1.0)
+if OSC12.search(bytes(seen)):
+    fail("hexe emitted a cursor colour before any namespace asked for one")
+
+# Clear BEFORE the set: emission is change-driven and happens within a frame
+# of the OSC landing, so clearing afterwards races it away.
+del seen[:]
+res = hexe_cli("palette", "set", "--ns", "prompt", "cursor=#00ff88")
+if res.returncode != 0:
+    fail(f"`hexe palette set cursor=` failed: {res.stderr!r}")
+time.sleep(2.5)
+if not OSC12.search(bytes(seen)):
+    fail("a namespace cursor colour never reached the terminal: `cursor=` is "
+         "parsed and stored but no OSC 12 was emitted", bytes(seen))
+print("cursor: the prompt zone's cursor colour is pushed to the terminal")
+
+# And it is change-driven: sitting still in the same zone must not re-emit.
+del seen[:]
+time.sleep(2.5)
+if OSC12.search(bytes(seen)):
+    fail("hexe re-emits the cursor colour every frame instead of on change",
+         bytes(seen))
+print("cursor: not re-emitted while the cursor stays in the same zone")
+
+os.write(master, b"\r")   # unblock the `read`
+time.sleep(1.5)
 
 # The frontend must survive a namespace it was never told about.
 res = hexe_cli("palette", "use", "--ns", "nosuchthing")
