@@ -90,7 +90,9 @@ SMOKES := \
 	smoke_float_concurrent.py \
 	smoke_pod_record_input.py \
 	smoke_exit_intent_concurrent.py \
-	smoke_float_destroy.py
+	smoke_float_destroy.py \
+	smoke_keypad.py \
+	smoke_painter_showcase.py
 
 smoke: smoke-clean
 	zig build
