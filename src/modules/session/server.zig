@@ -1719,8 +1719,25 @@ pub const Server = struct {
         trails: []const []const u8,
         comptime what: []const u8,
     ) bool {
+        return self.sendCtlFrameWithId(fd, msg_type, self.responseRequestIdForFd(fd), fixed, trails, what);
+    }
+
+    /// The one place a control frame is assembled and written.
+    ///
+    /// Replies pass the id of the request being serviced; pushes pass 0. Both
+    /// need the heap fallback below: a frame too big for the stack buffer was
+    /// previously dropped in silence on the push path, which for a payload like
+    /// a parked palette meant the client simply never received it.
+    fn sendCtlFrameWithId(
+        self: *Server,
+        fd: posix.fd_t,
+        msg_type: wire.MsgType,
+        request_id: u32,
+        fixed: []const u8,
+        trails: []const []const u8,
+        comptime what: []const u8,
+    ) bool {
         var stack: [CTL_FRAME_STACK_LEN]u8 = undefined;
-        const request_id = self.responseRequestIdForFd(fd);
 
         if (buildCtlFrame(&stack, msg_type, request_id, fixed, trails)) |frame| {
             if (self.writeCtlBytes(fd, frame)) return true;
@@ -1763,12 +1780,7 @@ pub const Server = struct {
     /// of dispatching it. A blocking float then never learned its pane had
     /// exited, so `hexe terminal float` hung forever.
     pub fn notifyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
-        var stack: [CTL_FRAME_STACK_LEN]u8 = undefined;
-        if (buildCtlFrame(&stack, msg_type, 0, payload, &.{})) |frame| {
-            if (self.writeCtlBytes(fd, frame)) return;
-            core.logging.warnWithSource("ses", "notify failed: fd={d} type={s}", .{ fd, @tagName(msg_type) }, @src());
-            self.queueCtlClose(fd, null);
-        }
+        _ = self.sendCtlFrameWithId(fd, msg_type, 0, payload, &.{}, "notify");
     }
 
     /// Same as notifyOrClose, for a push carrying a trailing byte blob.
@@ -1779,12 +1791,7 @@ pub const Server = struct {
         payload: []const u8,
         trail: []const u8,
     ) void {
-        var stack: [CTL_FRAME_STACK_LEN]u8 = undefined;
-        if (buildCtlFrame(&stack, msg_type, 0, payload, &.{trail})) |frame| {
-            if (self.writeCtlBytes(fd, frame)) return;
-            core.logging.warnWithSource("ses", "notify failed: fd={d} type={s}", .{ fd, @tagName(msg_type) }, @src());
-            self.queueCtlClose(fd, null);
-        }
+        _ = self.sendCtlFrameWithId(fd, msg_type, 0, payload, &.{trail}, "notify-with-trail");
     }
 
     /// Same as replyOrClose but for messages with a trailing byte blob.

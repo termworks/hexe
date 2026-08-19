@@ -211,12 +211,14 @@ pub const NamespaceTable = struct {
         if (std.mem.eql(u8, name, "default")) return 0;
         if (self.names.get(name)) |slot| return slot;
 
-        var slot: u8 = 1;
-        while (slot < MAX_NS) : (slot += 1) {
-            if (self.palettes[slot] == null) break;
-            if (slot == MAX_NS - 1) return 0;
-        }
-        if (slot >= MAX_NS) return 0;
+        // u16, deliberately. A u8 counter is always `< MAX_NS` (256), so the
+        // loop's real bound would be an interior `== 255` guard and the
+        // increment at 255 would wrap — an infinite loop on the OSC path the
+        // moment anyone reordered the guard.
+        var free_slot: u16 = 1;
+        while (free_slot < MAX_NS and self.palettes[free_slot] != null) : (free_slot += 1) {}
+        if (free_slot >= MAX_NS) return 0;
+        const slot: u8 = @intCast(free_slot);
 
         const owned = self.allocator.dupe(u8, name) catch return 0;
         const palette = self.allocator.create(Palette) catch {

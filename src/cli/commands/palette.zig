@@ -12,6 +12,7 @@ const wire = core.wire;
 const palette = core.palette;
 const pod_protocol = core.pod_protocol;
 const pod_list = @import("pod_list.zig");
+const shared = @import("shared.zig");
 
 const print = std.debug.print;
 
@@ -93,19 +94,24 @@ pub fn runPaletteSet(
 
     // §6 caps a `set` at 32 entries per sequence; a 256-colour file is simply
     // several sequences, and `set` accumulates so the result is identical.
+    //
+    // Built as ONE payload and delivered once per pane. Injecting per chunk
+    // opened a fresh socket per chunk per pane — a 256-colour file across a
+    // twenty-pane session was 160 connections instead of 20, and a pane that
+    // died midway could take half a scheme.
+    var payload = std.ArrayList(u8).empty;
+    defer payload.deinit(allocator);
     var sent: usize = 0;
     while (sent < entries.items.len) {
         const end = @min(sent + palette.SET_CHUNK, entries.items.len);
-        var seq = std.ArrayList(u8).empty;
-        defer seq.deinit(allocator);
-        try seq.writer(allocator).print("\x1b]{d};set;{s}", .{ palette.DEFAULT_OSC, ns });
+        try payload.writer(allocator).print("\x1b]{d};set;{s}", .{ palette.DEFAULT_OSC, ns });
         for (entries.items[sent..end]) |e| {
-            try seq.writer(allocator).print(";{s}", .{e});
+            try payload.writer(allocator).print(";{s}", .{e});
         }
-        try seq.appendSlice(allocator, "\x1b\\");
-        try inject(allocator, pane, seq.items);
+        try payload.appendSlice(allocator, "\x1b\\");
         sent = end;
     }
+    try inject(allocator, pane, payload.items);
 }
 
 /// `hexe palette use|end|drop` — the selection verbs, same front door.
@@ -174,9 +180,18 @@ fn readEntriesFile(
 /// to run in.
 fn inject(allocator: std.mem.Allocator, pane: []const u8, seq: []const u8) !void {
     if (pane.len > 0) {
+        // Validated before it becomes a path. `getPodSocketPath` interpolates
+        // the string, so an unchecked `--pane` reaches the filesystem.
+        if (!shared.isUuid32Hex(pane)) {
+            print("Error: --pane must be a 32-character pane uuid\n", .{});
+            return Error.BadArgument;
+        }
         const socket = try ipc.getPodSocketPath(allocator, pane);
         defer allocator.free(socket);
-        try injectTo(socket, seq);
+        injectTo(socket, seq) catch |err| {
+            print("Error: pane {s} did not accept the palette: {s}\n", .{ pane, @errorName(err) });
+            return err;
+        };
         return;
     }
 

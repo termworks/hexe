@@ -1097,10 +1097,11 @@ fn handlePaletteResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const resp = core.wire.readStruct(core.wire.PanePalette, fd) catch |err| {
-        core.logging.logError("terminal", "failed to read pane palette response", err);
-        return;
-    };
+    // Bounded reads, like every other handler here. The untimed wire helpers
+    // carry the 10-second default, so a daemon that wrote a header and then
+    // stalled would freeze the UI for ten seconds per frame — the exact hazard
+    // the note at the top of this file describes.
+    const resp = readStructLogged(core.wire.PanePalette, fd, "failed to read pane palette response") orelse return;
     const trail = payload_len - @sizeOf(core.wire.PanePalette);
     if (trail == 0 or resp.blob_len != trail or trail > core.palette.MAX_BLOB_LEN) {
         skipPayload(fd, trail, buffer);
@@ -1113,10 +1114,7 @@ fn handlePaletteResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer
         return;
     };
     defer state.allocator.free(blob);
-    core.wire.readExact(fd, blob) catch |err| {
-        core.logging.logError("terminal", "failed to read pane palette blob", err);
-        return;
-    };
+    if (!readExactLogged(fd, blob, "failed to read pane palette blob")) return;
 
     const pane = state.findPaneByUuid(resp.uuid) orelse return;
     // Merges rather than replaces, so a colour set while this was in flight is
