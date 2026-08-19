@@ -1271,7 +1271,10 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
     @memcpy(&target_uuid, pane_uuid[0..32]);
 
     const allocator = std.heap.page_allocator;
-    const fd = cli_cmds.connectSesCliChannel(allocator) orelse return false;
+    // "Could not ask" is not "the user said no". Reporting it as a decline made
+    // `hexe mux new` exit 0 with no session and no error, which a script reads
+    // as success. Every unanswerable path below returns an error instead.
+    const fd = cli_cmds.connectSesCliChannel(allocator) orelse return error.NestedMuxConfirmUnavailable;
 
     const message = "Start nested mux session?";
     const timeout_ms: i32 = 0;
@@ -1284,23 +1287,23 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
 
     wire.writeControlWithTrail(fd, .pop_confirm, std.mem.asBytes(&pc), message) catch {
         posix.close(fd);
-        return false;
+        return error.NestedMuxConfirmUnavailable;
     };
 
     // Block UNBOUNDED: this confirm has timeout_ms=0 (waits for the user forever);
     // the 10s wire default aborted the prompt after 10s.
     const hdr = wire.readControlHeaderBlocking(fd) catch {
         posix.close(fd);
-        return false;
+        return error.NestedMuxConfirmUnavailable;
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .pop_response or hdr.payload_len < @sizeOf(wire.PopResponse)) {
         posix.close(fd);
-        return false;
+        return error.NestedMuxConfirmUnavailable;
     }
     const resp = wire.readStruct(wire.PopResponse, fd) catch {
         posix.close(fd);
-        return false;
+        return error.NestedMuxConfirmUnavailable;
     };
     posix.close(fd);
 
@@ -1381,9 +1384,17 @@ fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool, 
 fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool, remote: RemoteConnectArgs, startup_chooser: bool) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
-            if (!try showNestedMuxConfirmation(pane_uuid)) {
-                return;
-            }
+            const allowed = showNestedMuxConfirmation(pane_uuid) catch {
+                // Inherited pane identity but no daemon to ask through: usually
+                // a script that carried HEXE_PANE_UUID into a different
+                // HEXE_INSTANCE. Say so and fail, rather than exiting 0 with no
+                // session, which reads as success.
+                print("Error: cannot ask whether to start a nested mux (ses daemon unreachable).\n", .{});
+                print("       This shell claims a pane (HEXE_PANE_UUID) whose daemon is not running.\n", .{});
+                print("       Unset HEXE_PANE_UUID to start a session anyway.\n", .{});
+                return error.NestedMuxConfirmUnavailable;
+            };
+            if (!allowed) return;
         }
     }
 
