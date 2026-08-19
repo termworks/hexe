@@ -129,8 +129,12 @@ simply eight sequences.
 
 `SGR 0` does **not** reset the namespace — programs emit `\e[0m` constantly, and
 the namespace is sticky state, not an attribute. Entering alt-screen saves the
-whole stack and leaving restores it, so an app that dies full-screen cannot leak
-its colours into the shell underneath.
+whole stack and leaving restores it, so a full-screen app that dies without
+`end` cannot hand its colours to the next one.
+
+With `namespaces = false`, `ask` goes unanswered. Silence is what the protocol
+means by "unsupported", so a client falls back instead of setting colours that
+would never render.
 
 Truecolor cells are never namespaced. A cell holding `38;2;r;g;b` has its RGB
 baked in; an application that hardcodes hex has already opted out of theming.

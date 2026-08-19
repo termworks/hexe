@@ -266,14 +266,21 @@ OSC 133 whose zones it builds on.
 
 - **`SGR 0` must not reset the namespace.** Programs emit `\e[0m` constantly.
   Namespace is sticky state, not an SGR attribute.
-- **Alt-screen saves and restores the whole selection,** so an app that dies
-  full-screen cannot leak its namespace into the shell underneath.
+- **Alt-screen saves and restores the whole selection.** The leak this prevents
+  is not in the shell below — those rows are prompt or output zones and were
+  never affected. It is the *next* full-screen app, which would otherwise
+  inherit a dead app's namespace for the rest of the session.
 - **A full stack drops the push** rather than selecting without a restore point.
   Otherwise an app that overflows leaves its colours behind permanently.
 - **Chunk `set` at 32 entries per sequence** — but that is advice to *senders*,
   whose other terminals may cap an OSC payload. A receiver accepts however many
   arrive; refusing the 33rd entry of a sequence that already arrived intact
   silently loses colours.
+- **`ask` must go unanswered when the feature is switched off.** Silence is the
+  documented "unsupported" answer, and a disabled table *is* unsupported.
+  Replying `have` hands a client a false positive on the one check the protocol
+  gives it. Every other verb stays accepted — they persist, and flipping the
+  flag on later shows them.
 - **Every verb is idempotent.** Replaying `use nvim` twice yields one namespace.
   Slot numbers may differ between replays; nothing outside the terminal sees
   them.
@@ -298,7 +305,7 @@ Write a test for each row. All of them reduce to slot 0.
 | All 256 slots in use | `use` silently maps to slot 0 |
 | Client emits the wrong OSC number | Unrecognised, discarded |
 | Shell without OSC 133 integration | Every row is `default`; nothing changes |
-| Feature disabled in config | Namespace forced to 0; indirection still compiled in |
+| Feature disabled in config | Namespace forced to 0, and `ask` goes unanswered so clients see the truth |
 
 ---
 

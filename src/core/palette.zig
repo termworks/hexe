@@ -653,6 +653,13 @@ pub fn applyOsc(self: *NamespaceTable, params: []const u8, alt_screen: bool) App
         return .changed;
     }
     if (eqlFold(verb, "ask")) {
+        // Silence is the documented "unsupported" answer, and a table that is
+        // switched off IS unsupported: its colours resolve to nothing. Replying
+        // `have` here would hand a client a false positive on the single check
+        // the protocol gives it, and it would then set colours that never
+        // render. Every other verb stays accepted — they persist, and flipping
+        // the flag on later shows them.
+        if (!self.enabled) return .ignore;
         return .{ .have = .{ .osc = self.osc, .free = self.freeSlots() } };
     }
 
@@ -1415,4 +1422,29 @@ test "reserved OSC numbers cannot be claimed by the config" {
     for ([_]u32{ DEFAULT_OSC, 1331, 3, 8, 20, 49, 60, 98, 100, 120, 1000 }) |code| {
         try std.testing.expect(!isReservedOsc(code));
     }
+}
+
+test "ask is silent while the feature is off" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+
+    // Off: no reply at all. A client reads silence as "not supported" and
+    // falls back, which is the truth — colours would resolve to nothing.
+    try std.testing.expect(!t.enabled);
+    try std.testing.expect(applyOsc(&t, "ask", false) == .ignore);
+
+    // On: the capability answer, carrying the live OSC number.
+    t.setEnabled(true);
+    const reply = applyOsc(&t, "ask", false);
+    try std.testing.expectEqual(@as(u32, DEFAULT_OSC), reply.have.osc);
+
+    // Off again, mid-session: still silent, even though the namespaces and
+    // their colours are still there and would come back with the flag.
+    _ = applyOsc(&t, "set;prompt;3=#ff0000", false);
+    t.setEnabled(false);
+    try std.testing.expect(applyOsc(&t, "ask", false) == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;prompt;4=#00ff00", false) == .changed);
+    t.setEnabled(true);
+    try std.testing.expectEqual(@as(u8, 0x00), t.resolveIndex(t.slotFor("prompt"), 4).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(t.slotFor("prompt"), 4).rgb.g);
 }

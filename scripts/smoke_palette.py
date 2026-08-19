@@ -141,6 +141,7 @@ SET33_OUT = re.compile(rb"38[:;]2[:;]{0,2}0[:;]255[:;]0")
 BG_DEFAULT = re.compile(rb"48[:;]2[:;]{0,2}0[:;]0[:;]123")
 # OSC 12 is how a cursor colour reaches the host terminal; OSC 112 undoes it.
 OSC12 = re.compile(rb"\x1b\]12;#00ff88")
+ALT_BLUE = re.compile(rb"38[:;]2[:;]{0,2}0[:;]0[:;]255")
 
 
 def repaint():
@@ -188,6 +189,49 @@ if not IDX33.search(after):
     fail("cells outside the prompt zone lost their index passthrough: the palette "
          "leaked across zones", after)
 print("isolation: cells outside the zone still emit 38;5;33")
+
+# An application that claims a namespace in alt-screen and dies without `end`.
+#
+# Entering alt-screen parks the whole selection and leaving restores it. The
+# leak this guards against is NOT in the shell below — those rows are prompt or
+# output zones and were never affected. It is the NEXT full-screen app, which
+# would inherit the dead one's namespace for the rest of the session.
+def alt_script(path, body):
+    with open(path, "w") as fh:
+        fh.write("printf '\\033[?1049h'\n" + body +
+                 "printf 'ALTROW \\033[38;5;33mIN\\033[0m\\n'\n"
+                 "sleep 8\n"
+                 "printf '\\033[?1049l'\n")
+    return path
+
+
+# First app: claims `leaky`, and leaves alt-screen without ever sending `end`.
+crashed = alt_script(os.path.join(WD, "leaky.sh"),
+                     "printf '\\033]1330;set;leaky;33=#0000ff\\033\\\\'\n"
+                     "printf '\\033]1330;use;leaky\\033\\\\'\n")
+os.write(master, f"sh {crashed}\r".encode())
+time.sleep(1.5)
+
+if not ALT_BLUE.search(repaint()):
+    fail("`use` had no effect in alt-screen: the claimed namespace never resolved")
+print("alt: a full-screen app's claimed namespace applies to its grid")
+
+time.sleep(6.0)                       # it leaves alt-screen, as a crash would
+after_alt = repaint()
+if not SET33.search(after_alt):
+    fail("the prompt zone lost its own colour after an alt-screen visit", after_alt)
+
+# Second app: claims nothing. If the first one's selection was not restored on
+# exit, this innocent app renders in the dead app's colours.
+innocent = alt_script(os.path.join(WD, "innocent.sh"), "")
+os.write(master, f"sh {innocent}\r".encode())
+time.sleep(1.5)
+second = repaint()
+if ALT_BLUE.search(second):
+    fail("a namespace claimed by a crashed full-screen app leaked into the "
+         "next one: leaving alt-screen did not restore the selection", second)
+print("alt: a crashed app's namespace does not leak into the next one")
+time.sleep(6.0)                       # let it leave alt-screen before moving on
 
 # An application emitting the sequence itself, one byte at a time.
 #
