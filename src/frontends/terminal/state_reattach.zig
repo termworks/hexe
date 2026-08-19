@@ -205,7 +205,7 @@ fn destroyUnusedPaneViews(self: anytype, existing_views: *ExistingPaneViews) voi
 fn recyclePaneForSplit(self: anytype, tab: *TabView, pane: *Pane, pane_id: u16, pane_uuid: [32]u8, actual_focus_uuid: ?[32]u8) void {
     self.clearFloatUi(pane.uuid);
     pane.id = pane_id;
-    pane.uuid = pane_uuid;
+    pane.adoptIdentity(pane_uuid);
     pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &pane_uuid) else false;
     pane.backend.pod.dead = false;
     tab.layout.configurePaneNotifications(pane);
@@ -213,7 +213,7 @@ fn recyclePaneForSplit(self: anytype, tab: *TabView, pane: *Pane, pane_id: u16, 
 
 fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, actual_focus_uuid: ?[32]u8) void {
     self.clearFloatUi(pane.uuid);
-    pane.uuid = float_state.pane_uuid;
+    pane.adoptIdentity(float_state.pane_uuid);
     pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid) else false;
     _ = self.setPaneFloatUi(float_state.pane_uuid, .{
         .width_pct = float_state.width_pct,
@@ -554,7 +554,7 @@ fn restoreFloatPane(
         break :blk pane;
     };
     pane.id = @intCast(100 + self.view.float_views.items.len);
-    pane.uuid = float_state.pane_uuid;
+    pane.adoptIdentity(float_state.pane_uuid);
     recyclePaneForFloat(self, pane, float_state, actual_focus_uuid);
     const restored_sticky_pwd = hydratePaneMetadata(self, pane, float_state.pane_uuid);
     defer if (restored_sticky_pwd) |pwd| self.allocator.free(pwd);

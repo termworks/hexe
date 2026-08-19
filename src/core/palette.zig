@@ -1144,3 +1144,25 @@ test "applyOsc never faults on arbitrary bytes" {
         }
     }
 }
+
+test "a table of many namespaces still serializes inside the wire cap" {
+    const alloc = std.testing.allocator;
+    var t = NamespaceTable.init(alloc);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    // The worst case a pane can reach: every slot claimed, each with one
+    // colour. The cap exists so SES never holds an unbounded buffer on a
+    // pane's say-so; this pins that a realistic table stays well under it.
+    var buf: [16]u8 = undefined;
+    for (0..MAX_NS - 1) |i| {
+        const name = std.fmt.bufPrint(&buf, "ns{d}", .{i}) catch unreachable;
+        const slot = t.slotFor(name);
+        if (slot == 0) break;
+        t.setEntry(slot, @intCast(i % 256), .{ .r = 1, .g = 2, .b = 3 });
+    }
+    const blob = try t.serialize(alloc);
+    defer alloc.free(blob);
+    try std.testing.expect(blob.len > 0);
+    try std.testing.expect(blob.len < MAX_BLOB_LEN);
+}

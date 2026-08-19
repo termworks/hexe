@@ -1022,7 +1022,12 @@ pub const SesClient = struct {
     /// one update costs the next sync, never correctness.
     pub fn updatePanePalette(self: *SesClient, uuid: [32]u8, blob: []const u8) void {
         const fd = self.ctl_fd orelse return;
-        if (blob.len > palette_mod.MAX_BLOB_LEN) return;
+        if (blob.len > palette_mod.MAX_BLOB_LEN) {
+            // Reachable only by a pane that claimed a great many namespaces.
+            // Say so rather than quietly ceasing to persist its colours.
+            logging.warn("frontend-client", "pane palette too large to park ({d} > {d} bytes); colours will not survive a detach", .{ blob.len, palette_mod.MAX_BLOB_LEN });
+            return;
+        }
         var msg: wire.UpdatePanePalette = .{ .uuid = uuid, .blob_len = @intCast(blob.len) };
         self.drainQueuedControlResponses(fd);
         _ = self.writeControlTrailRequest(fd, .update_pane_palette, std.mem.asBytes(&msg), blob) catch |err| {

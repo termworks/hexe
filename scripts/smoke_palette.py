@@ -137,6 +137,7 @@ cols = 100
 # so both count.
 IDX33 = re.compile(rb"38[:;]5[:;]33")
 SET33 = re.compile(rb"38[:;]2[:;]{0,2}255[:;]0[:;]170")
+SET33_OUT = re.compile(rb"38[:;]2[:;]{0,2}0[:;]255[:;]0")
 
 
 def repaint():
@@ -185,6 +186,35 @@ if not IDX33.search(after):
          "leaked across zones", after)
 print("isolation: cells outside the zone still emit 38;5;33")
 
+# An application emitting the sequence itself, one byte at a time.
+#
+# The OSC sniffer buffers across reads, and a palette sequence is long enough
+# that it WILL arrive split in practice. Emitting it a byte per write is the
+# harshest version of the same thing.
+SEQ_BIN = os.path.join(WD, "seq.bin")
+with open(SEQ_BIN, "wb") as fh:
+    # Real bytes from here, not shell escapes: `\033` inside a single-quoted
+    # sh variable is four literal characters, so a script that "emits" it that
+    # way tests nothing.
+    fh.write(b"\x1b]1330;set;output;33=#00ff00\x1b\\")
+DRIP = os.path.join(WD, "drip.sh")
+with open(DRIP, "w") as fh:
+    fh.write(
+        f"size=$(wc -c < {SEQ_BIN})\n"
+        "i=0\n"
+        "while [ $i -lt $size ]; do\n"
+        f"  dd if={SEQ_BIN} bs=1 skip=$i count=1 2>/dev/null\n"
+        "  i=$((i+1))\n"
+        "done\n"
+    )
+os.write(master, f"sh {DRIP}\r".encode())
+time.sleep(3.0)
+dripped = repaint()
+if not SET33_OUT.search(dripped):
+    fail("a sequence split across writes was not reassembled: the output zone "
+         "never took the colour", dripped)
+print("split: a byte-at-a-time sequence is reassembled and applied")
+
 # The frontend must survive a namespace it was never told about.
 res = hexe_cli("palette", "use", "--ns", "nosuchthing")
 if res.returncode != 0:
@@ -193,6 +223,21 @@ time.sleep(1.0)
 if fe.poll() is not None:
     fail("frontend died applying palette commands")
 print("degradation: an undefined namespace is accepted and changes nothing")
+
+# `reset` is the only undo the protocol has: `set` patches and `drop` releases
+# the binding, so without this a mistyped colour is permanent.
+res = hexe_cli("palette", "reset", "--ns", "prompt")
+if res.returncode != 0:
+    fail(f"`hexe palette reset` failed: {res.stderr!r}")
+time.sleep(1.5)
+after_reset = repaint()
+if SET33.search(after_reset):
+    fail("reset did not forget the colour: the prompt zone is still recoloured",
+         after_reset)
+if not IDX33.search(after_reset):
+    fail("after reset the prompt zone should be back to index passthrough",
+         after_reset)
+print("reset: the prompt zone falls back to the terminal's own theme")
 
 cleanup()
 print("PASS: palette namespaces recolour one zone and leave the rest alone")

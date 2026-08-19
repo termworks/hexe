@@ -187,6 +187,21 @@ pub const Pane = struct {
         self.sendResizeToPod(width, height);
     }
 
+    /// Rebind this pane object to a different pane.
+    ///
+    /// Reattach recycles Pane structs rather than reallocating them, so the
+    /// namespace table would otherwise carry the previous occupant's colours
+    /// into a pane that never asked for them — and `palette_restored` would
+    /// still read "already asked", so the new pane would never fetch its own.
+    pub fn adoptIdentity(self: *Pane, new_uuid: [32]u8) void {
+        self.uuid = new_uuid;
+        self.vt.ns_table.deinit();
+        self.vt.ns_table = core.palette.NamespaceTable.init(self.allocator);
+        self.palette_restored = false;
+        self.palette_dirty = false;
+        self.palette_alt_screen = self.vt.inAltScreen();
+    }
+
     pub fn deinit(self: *Pane) void {
         self.vt.deinit();
         self.osc_buf.deinit(self.allocator);
