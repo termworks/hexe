@@ -14,6 +14,11 @@ palette = {
 },
 ```
 
+`osc` refuses numbers hexe already forwards or consumes — 0–2, 4, 5, 7, 9,
+10–19, 50–59, 99, 104, 105, 110–119, 133 and 777. Claiming one would make the
+palette dispatch swallow it: `osc = 4` in particular would stop the base
+palette reaching your terminal at all.
+
 ## What is namespaced, automatically
 
 hexe assigns namespaces from signals it already parses. Nothing opts in:

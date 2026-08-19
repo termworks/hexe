@@ -274,5 +274,14 @@ if not IDX33.search(after_reset):
          after_reset)
 print("reset: the prompt zone falls back to the terminal's own theme")
 
+# Clearing has to reach the daemon too. A `reset` that repaints the screen but
+# leaves the parked copy behind would resurrect the old colours on reattach —
+# the serialized blob goes from "one entry" to empty, and SES has to store that
+# emptiness rather than keep the last non-empty version.
+res = hexe_cli("palette", "get", "--ns", "prompt")
+if "33=#ff00aa" in res.stdout:
+    fail(f"reset did not reach the daemon's parked copy: {res.stdout!r}")
+print("reset: the daemon's parked copy is cleared too")
+
 cleanup()
 print("PASS: palette namespaces recolour one zone and leave the rest alone")

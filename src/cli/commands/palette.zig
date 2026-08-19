@@ -176,10 +176,23 @@ fn wantsIndex(indices: []const []const u8, idx: u8) bool {
 
 /// Ask SES for one pane's parked palette. Null when the daemon is unreachable
 /// or the pane has none, which are both "nothing to print" rather than errors.
+/// Set once the daemon has failed to answer, so a sweep over many panes stops
+/// asking. `list` is the capability probe a theme hook runs on every change,
+/// and one connection per pane at a 3s timeout turns a wedged daemon into a
+/// multi-minute hang on a session with a lot of panes.
+var ses_unreachable = false;
+
 fn fetchPalette(allocator: std.mem.Allocator, uuid: [32]u8) ?[]u8 {
-    const socket_path = ipc.getSesSocketPath(allocator) catch return null;
+    if (ses_unreachable) return null;
+    const socket_path = ipc.getSesSocketPath(allocator) catch {
+        ses_unreachable = true;
+        return null;
+    };
     defer allocator.free(socket_path);
-    var client = ipc.Client.connect(socket_path) catch return null;
+    var client = ipc.Client.connect(socket_path) catch {
+        ses_unreachable = true;
+        return null;
+    };
     defer client.close();
     const fd = client.fd;
 
@@ -192,11 +205,20 @@ fn fetchPalette(allocator: std.mem.Allocator, uuid: [32]u8) ?[]u8 {
     // bytes as its first control header — which is exactly as broken as it
     // sounds, and silently, because the garbage header just looks like a bad
     // reply.
-    wire.sendCliHandshake(fd) catch return null;
+    wire.sendCliHandshake(fd) catch {
+        ses_unreachable = true;
+        return null;
+    };
     var req: wire.GetPanePalette = .{ .uuid = uuid };
-    wire.writeControl(fd, .get_pane_palette, std.mem.asBytes(&req)) catch return null;
+    wire.writeControl(fd, .get_pane_palette, std.mem.asBytes(&req)) catch {
+        ses_unreachable = true;
+        return null;
+    };
 
-    const hdr = wire.readControlHeader(fd) catch return null;
+    const hdr = wire.readControlHeader(fd) catch {
+        ses_unreachable = true;
+        return null;
+    };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .get_pane_palette or hdr.payload_len < @sizeOf(wire.PanePalette)) return null;
     const resp = wire.readStruct(wire.PanePalette, fd) catch return null;

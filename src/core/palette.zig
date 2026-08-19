@@ -403,6 +403,16 @@ pub const NamespaceTable = struct {
             if (patched == 0 and !has_defaults) continue;
             if (written == std.math.maxInt(u8)) break;
 
+            // Stop before the wire cap rather than sailing past it. A blob over
+            // MAX_BLOB_LEN is refused wholesale by the receiver, so an
+            // unbounded writer here means a pane with many populated
+            // namespaces persists NOTHING — losing every colour on detach
+            // instead of the excess. Unreachable for a realistic pane (a
+            // handful of namespaces is a few KB); this is the bound that keeps
+            // the failure proportional if one ever gets there.
+            const record_len = 1 + name.len + 2 + @as(usize, patched) * 4 + 12;
+            if (out.items.len + record_len > MAX_BLOB_LEN) break;
+
             try w.writeByte(@intCast(name.len));
             try w.writeAll(name);
             try w.writeInt(u16, patched, .big);
@@ -570,6 +580,28 @@ const StackEntry = struct {
 
 /// Default OSC number (PLAN.md Decision #5), adjacent to OSC 133.
 pub const DEFAULT_OSC = 1330;
+
+/// OSC numbers hexe already forwards or consumes, and which `palette.osc`
+/// must therefore not claim.
+///
+/// The dispatch checks the configured number BEFORE the ordinary families, so
+/// `palette.osc = 4` would quietly stop OSC 4 reaching the terminal — the very
+/// sequence that sets the base palette this feature layers on top of. A config
+/// that breaks colour handling to enable colour handling is worth refusing.
+///
+/// Mirrors `pane_output.isPassthroughOscCode` / `isConsumedOscCode`; the two
+/// lists are small, stable and deliberately duplicated rather than coupling
+/// core to a frontend file.
+pub fn isReservedOsc(code: u32) bool {
+    return switch (code) {
+        0, 1, 2, 7 => true, // title / icon / cwd
+        4, 5, 104, 105 => true, // palette control and resets
+        9, 99, 777 => true, // progress and notifications
+        10...19, 50...59, 110...119 => true, // dynamic colour and font families
+        133 => true, // semantic prompt marks, which the zones are read from
+        else => false,
+    };
+}
 
 /// Process-wide settings from `hexe.palette` in the config.
 ///
@@ -1318,4 +1350,57 @@ test "BlobReader refuses a blob it does not understand" {
     const lying = [_]u8{ BLOB_VERSION, 1 };
     var r2 = BlobReader.init(&lying);
     try std.testing.expect(r2.next() == null);
+}
+
+test "serialize stops at the wire cap instead of overflowing it" {
+    const alloc = std.testing.allocator;
+    var t = NamespaceTable.init(alloc);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    // Every slot claimed, every one fully populated: far past MAX_BLOB_LEN if
+    // the writer were unbounded (255 x ~1KB).
+    var buf: [16]u8 = undefined;
+    for (0..MAX_NS - 1) |i| {
+        const name = std.fmt.bufPrint(&buf, "n{d}", .{i}) catch unreachable;
+        const slot = t.slotFor(name);
+        if (slot == 0) break;
+        var idx: u16 = 0;
+        while (idx < 256) : (idx += 1) {
+            t.setEntry(slot, @intCast(idx), .{ .r = 1, .g = 2, .b = 3 });
+        }
+    }
+
+    const blob = try t.serialize(alloc);
+    defer alloc.free(blob);
+    try std.testing.expect(blob.len <= MAX_BLOB_LEN);
+    try std.testing.expect(blob.len > 0);
+
+    // What it did write is still a coherent blob, not a truncated one: every
+    // namespace in it round-trips.
+    var restored = NamespaceTable.init(alloc);
+    defer restored.deinit();
+    restored.setEnabled(true);
+    restored.applySerialized(blob);
+
+    var reader = BlobReader.init(blob);
+    var count: usize = 0;
+    while (reader.next()) |ns| {
+        count += 1;
+        try std.testing.expectEqual(@as(usize, 256), ns.count());
+        try std.testing.expectEqual(@as(u8, 1), restored.resolveIndex(restored.slotFor(ns.name), 7).rgb.r);
+    }
+    try std.testing.expect(count > 0);
+}
+
+test "reserved OSC numbers cannot be claimed by the config" {
+    // Everything hexe forwards or consumes. Claiming one would make the
+    // palette dispatch swallow it before it reached its real handler.
+    for ([_]u32{ 0, 1, 2, 4, 5, 7, 9, 10, 12, 19, 50, 59, 99, 104, 105, 110, 119, 133, 777 }) |code| {
+        try std.testing.expect(isReservedOsc(code));
+    }
+    // The default and its neighbours are free, or the feature could not ship.
+    for ([_]u32{ DEFAULT_OSC, 1331, 3, 8, 20, 49, 60, 98, 100, 120, 1000 }) |code| {
+        try std.testing.expect(!isReservedOsc(code));
+    }
 }
