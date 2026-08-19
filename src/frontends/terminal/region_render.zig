@@ -161,12 +161,18 @@ pub fn drawPaneSprite(
     const registry = core.regions.active orelse return;
     if (w == 0 or h == 0) return;
 
-    var extra_buf: [256]u8 = undefined;
-    const extra = std.fmt.bufPrint(
-        &extra_buf,
-        "\"sprite_name\":\"{s}\",\"sprite_shiny\":{s},\"sprite_position\":\"{s}\"",
-        .{ name, if (shiny) "true" else "false", position },
-    ) catch return;
+    // The pane name is user-settable (rename), so it must be escaped: a name
+    // holding a quote or backslash used to be spliced raw into the request and
+    // broke the JSON frame, which the painter then rejected -- killing that
+    // pane's sprite with no error anywhere.
+    var extra_buf: [512]u8 = undefined;
+    var extra_stream = std.io.fixedBufferStream(&extra_buf);
+    const ew = extra_stream.writer();
+    ew.writeAll("\"sprite_name\":") catch return;
+    core.regions.writeJsonString(ew, name) catch return;
+    ew.print(",\"sprite_shiny\":{s},\"sprite_position\":", .{if (shiny) "true" else "false"}) catch return;
+    core.regions.writeJsonString(ew, position) catch return;
+    const extra = extra_stream.getWritten();
 
     const snap = registry.snapshot(.{
         .selector = cfg.sprite_view,

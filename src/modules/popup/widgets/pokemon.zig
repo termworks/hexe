@@ -29,12 +29,19 @@ pub const PokemonState = struct {
     }
 
     pub fn deinit(self: *PokemonState) void {
+        if (self.sprite_name) |n| self.allocator.free(n);
         self.* = .{ .allocator = self.allocator };
     }
 
+    /// Own the name. Callers pass a slice out of the pane-name cache, which is
+    /// freed on rename and when the pane goes away, so storing it borrowed left
+    /// a dangling pointer that the next sprite request read straight into its
+    /// JSON body.
     pub fn loadSprite(self: *PokemonState, name: []const u8, shiny: bool) !void {
         _ = shiny;
-        self.sprite_name = name;
+        const owned = try self.allocator.dupe(u8, name);
+        if (self.sprite_name) |old_name| self.allocator.free(old_name);
+        self.sprite_name = owned;
         self.show_sprite = true;
     }
 
