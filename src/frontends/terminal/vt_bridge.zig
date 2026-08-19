@@ -54,14 +54,13 @@ pub fn drawRenderState(
     syncKittyImages(vt, vx, stdout, arena);
 
     const ns_table = &vt.ns_table;
+    const alt_screen = vt.inAltScreen();
 
     for (0..available_rows) |yi| {
         const y: u16 = @intCast(yi);
         if (y >= win.height) break;
 
-        // One lookup per row, not per cell. M1 pins every row to slot 0, which
-        // resolves to passthrough; M3 derives it from the row's OSC 133 zone.
-        const row_ns: u8 = rowNamespace(ns_table, row_pins[yi]);
+        const row_ns: u8 = rowNamespace(ns_table, row_pins[yi], alt_screen);
 
         const cells_slice = row_cells[yi].slice();
         const raw_cells = cells_slice.items(.raw);
@@ -420,14 +419,21 @@ fn writeImageCellPreserve(win: vaxis.Window, col: u16, row: u16, placement: vaxi
     win.writeCell(col, row, .{ .image = placement });
 }
 
-/// Namespace slot for a row.
+/// Namespace slot for a row, from the OSC 133 zone ghostty already stores on it
+/// (PLAN.md M3). Read once per row, not per cell.
 ///
-/// M1 pins every row to slot 0 so the emitted bytes are unchanged. M3 replaces
-/// the body with the row's OSC 133 zone (`pin.rowAndCell().row.semantic_prompt`).
-fn rowNamespace(ns_table: *const NamespaceTable, pin: anytype) u8 {
-    _ = pin;
+/// Row zones survive scrollback and reflow, which is what lets a repaint reach
+/// history as well as the screen without hexe storing anything per cell.
+fn rowNamespace(ns_table: *const NamespaceTable, pin: ghostty.PageList.Pin, alt_screen: bool) u8 {
     if (!ns_table.enabled) return 0;
-    return 0;
+    const zone: core.palette.Zone = switch (pin.rowAndCell().row.semantic_prompt) {
+        .unknown => .unknown,
+        .prompt => .prompt,
+        .prompt_continuation => .prompt_continuation,
+        .input => .input,
+        .command => .command,
+    };
+    return ns_table.autoSlot(core.palette.autoKind(zone, alt_screen));
 }
 
 /// Indexed colour → vaxis colour, through the namespace table.
