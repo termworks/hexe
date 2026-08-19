@@ -21,6 +21,35 @@ See [architecture](docs/architecture.md) for the full picture.
 
 ---
 
+## Palette namespaces
+
+Every region of a pane has its own 256-colour table. Recolour the prompt and the
+command output above it stays exactly as it was — on screen and in scrollback,
+with no redraw from the application.
+
+```sh
+hexe palette set --ns prompt 33=#ff00aa bg=#1a1020
+hexe palette set --ns output 1=#ff5555
+hexe palette get                                    # what is actually set
+```
+
+An application can drive it directly, with nothing to negotiate first:
+
+```sh
+printf '\033]1330;set;prompt;33=#ff00aa\033\\'
+```
+
+The zones come from OSC 133 shell integration, so nothing has to opt in: the
+prompt, command output and full-screen apps are separated already. Anything hexe
+does not recognise — an unknown name, a shell without integration, another
+terminal entirely — falls back to your own palette, so a default install looks
+exactly as it did before.
+
+See [palette namespaces](docs/palette.md) to use it, or the
+[implementation spec](docs/palette-spec.md) to build it somewhere else.
+
+---
+
 ## Docs
 
 One document per feature in [`docs/`](docs/README.md), each opening with a recording of it running:
@@ -41,6 +70,8 @@ hexe itself — see [recording](docs/recording.md).
 | [Overlays and popups](docs/overlays.md) | notifications, questions, pickers, keycast, pane labels |
 | [Painting](docs/regions.md) | the bar, titles, sprites and popups are drawn by an external painter |
 | [Shell integration](docs/prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
+| [Palette namespaces](docs/palette.md) | every region of a pane gets its own 256-colour table |
+| [Palette spec](docs/palette-spec.md) | the mechanism, wire protocol and traps, for reimplementing it |
 | [Configuration](docs/config.md) | one Lua file, a schema that refuses typos, reload without losing panes |
 | [Project sessions](docs/session-manager.md) | `.hexe.lua`, freezing a session, and the trust ledger |
 | [Isolation](docs/isolation.md) | namespaces and cgroups per pane — and what it needs from the kernel |
