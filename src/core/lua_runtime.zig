@@ -629,6 +629,14 @@ pub const LuaRuntime = struct {
         if (self.getInt(u64, -1, "refresh_ms")) |v| {
             if (v > 0) mux.tabs_config.status_refresh_ms = v;
         }
+        // Validated and documented, but previously never applied: renaming a
+        // painter view or widening the stale window silently did nothing.
+        if (self.getInt(u64, -1, "stale_ms")) |v| {
+            if (v > 0) mux.tabs_config.status_stale_ms = v;
+        }
+        if (self.getStringAlloc(-1, "float_title_view")) |v| mux.tabs_config.status_float_title_view = v;
+        if (self.getStringAlloc(-1, "container_title_view")) |v| mux.tabs_config.status_container_title_view = v;
+        if (self.getStringAlloc(-1, "sprite_view")) |v| mux.tabs_config.status_sprite_view = v;
     }
 
     fn applyPopConfigV2(self: *Self) !void {
@@ -1096,7 +1104,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "validate_theme('theme', cfg.theme); " ++
         "validate_keybindings('keys', cfg.keys); " ++
         "local mux=expect_table('mux', cfg.mux, true); if mux then reject_unknown_fields('mux', mux, { confirm=true, mouse=true, splits=true, floats=true, selection_color=true, float=true, keybindings=true, keymaps=true, config=true, options=true, tabs=true }); local confirm=expect_table('mux.confirm', mux.confirm, true); if confirm then reject_unknown_fields('mux.confirm', confirm, { exit=true, detach=true, disown=true, close=true }) end; local mouse=expect_table('mux.mouse', mux.mouse, true); if mouse then reject_unknown_fields('mux.mouse', mouse, { selection_override=true }); if mouse.selection_override~=nil then mod_mask('mux.mouse.selection_override', mouse.selection_override) end end; local mfloats=expect_table('mux.floats', mux.floats, true); if mfloats then reject_unknown_fields('mux.floats', mfloats, { defaults=true, adhoc=true, match=true }); validate_float_preset('mux.floats.defaults', mfloats.defaults); validate_float_preset('mux.floats.adhoc', mfloats.adhoc) end; local msplits=expect_table('mux.splits', mux.splits, true); if msplits then reject_unknown_fields('mux.splits', msplits, { color=true, chars=true }); local scolor=expect_table('mux.splits.color', msplits.color, true); if scolor then reject_unknown_fields('mux.splits.color', scolor, { active=true, passive=true }) end; local schars=expect_table('mux.splits.chars', msplits.chars, true); if schars then reject_unknown_fields('mux.splits.chars', schars, { vertical=true, horizontal=true }) end end; if mux.selection_color~=nil and type(mux.selection_color)~='number' then type_error('mux.selection_color','number',type(mux.selection_color)) end; if mux.float~=nil then error('config error: mux.float is removed; use mux.floats',2) end; if mux.keybindings~=nil then error('config error: mux.keybindings is removed; use top-level keys',2) end; if mux.keymaps~=nil then error('config error: mux.keymaps is removed; use top-level keys',2) end; if mux.config~=nil then error('config error: mux.config is removed; use canonical mux fields',2) end; if mux.options~=nil then error('config error: mux.options is removed; use canonical mux fields',2) end; if mux.tabs~=nil then error('config error: mux.tabs is removed; use top-level status',2) end end; " ++
-        "expect_table('status', cfg.status, true); " ++
+        "local status=expect_table('status', cfg.status, true); if status then reject_unknown_fields('status', status, { enabled=true, view=true, socket=true, command=true, refresh_ms=true, stale_ms=true, float_title_view=true, container_title_view=true, sprite_view=true }) end; " ++
         "local pop=expect_table('pop', cfg.pop, true); if pop then local notify=expect_table('pop.notify', pop.notify, true); if notify and notify.carrier~=nil then error('config error: pop.notify.carrier is removed; use pop.notify.mux',2) end; local confirm=expect_table('pop.confirm', pop.confirm, true); if confirm and confirm.carrier~=nil then error('config error: pop.confirm.carrier is removed; use pop.confirm.mux',2) end; local choose=expect_table('pop.choose', pop.choose, true); if choose and choose.carrier~=nil then error('config error: pop.choose.carrier is removed; use pop.choose.mux',2) end; expect_table('pop.widgets', pop.widgets, true) end; " ++
         "local ses=expect_table('ses', cfg.ses, true); if ses then expect_table('ses.isolation', ses.isolation, true); local layouts=expect_array('ses.layouts', ses.layouts, true); if layouts then for i,layout in ipairs(layouts) do validate_layout('ses.layouts['..i..']',layout) end end end; " ++
         "return cfg end; " ++

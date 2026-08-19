@@ -103,6 +103,10 @@ pub const MuxConfigBuilder = struct {
         status_socket: ?[]const u8 = null,
         status_command: ?[]const u8 = null,
         status_refresh_ms: ?u64 = null,
+        status_stale_ms: ?u64 = null,
+        status_float_title_view: ?[]const u8 = null,
+        status_container_title_view: ?[]const u8 = null,
+        status_sprite_view: ?[]const u8 = null,
     };
 
     const SplitsConfig = struct {
@@ -223,6 +227,10 @@ pub const MuxConfigBuilder = struct {
         if (self.tabs_config.status_socket) |v| result.tabs.status.socket = try self.allocator.dupe(u8, v);
         if (self.tabs_config.status_command) |v| result.tabs.status.command = try self.allocator.dupe(u8, v);
         if (self.tabs_config.status_refresh_ms) |v| result.tabs.status.refresh_ms = v;
+        if (self.tabs_config.status_stale_ms) |v| result.tabs.status.stale_ms = v;
+        if (self.tabs_config.status_float_title_view) |v| result.tabs.status.float_title_view = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_container_title_view) |v| result.tabs.status.container_title_view = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_sprite_view) |v| result.tabs.status.sprite_view = try self.allocator.dupe(u8, v);
         // Apply splits config
         if (self.splits_config.color) |v| result.splits.color = v;
         if (self.splits_config.separator_v) |v| result.splits.separator_v = v;
