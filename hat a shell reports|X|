@@ -1,0 +1,104 @@
+ [Shell integration](prompt.md) # Documentation
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) One document per feature: what it is, how it works, what it cannot do, and where it lives in the
+ [Shell integration](prompt.md) tree. Each says how the thing is built and why it is built that way, and carries the settings that
+ [Shell integration](prompt.md) belong to it, so there is one page per subject rather than a shallow one and a deep one.
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) Every claim in here was checked against the source or against a running build. Where a design was
+ [Shell integration](prompt.md) forced by a measurement or by a bug, the document says so, because those are the sentences worth
+ [Shell integration](prompt.md) reading twice.
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) ## The shape of the thing
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) | | |
+ [Shell integration](prompt.md) |---|---|
+ [Shell integration](prompt.md) | [Four processes](architecture.md) | frontend, runtime, SES, pod — and why only one of them is disposable |
+ [Shell integration](prompt.md) | [Sessions](sessions.md) | detach, reattach, replay, adoption, and what is written down |
+ [Shell integration](prompt.md) | [Pods](pods.md) | one daemon per pane: the PTY, the backlog ring, exactly-once input |
+ [Shell integration](prompt.md) | [Instances](instances.md) | two whole stacks on one machine that cannot see each other |
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) ## Using it
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) | | |
+ [Shell integration](prompt.md) |---|---|
+ [Shell integration](prompt.md) | [Panes and tabs](panes-and-tabs.md) | the split tree, geometric focus, zoom, broadcast, select-and-swap |
+ [Shell integration](prompt.md) | [Floats](floats.md) | overlay panes with lifetimes: per-directory, sticky, exclusive, sandboxed |
+ [Shell integration](prompt.md) | [Keybindings](keybindings.md) | no prefix: chords, conditions, and what happens to the key afterwards |
+ [Shell integration](prompt.md) | [Reading what already happened](copy-and-search.md) | scrollback search, copy-mode, OSC 133 prompt marks |
+ [Shell integration](prompt.md) | [Overlays and popups](overlays.md) | notifications, questions, pickers, keycast, pane labels |
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) ## Appearance
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) | | |
+ [Shell integration](prompt.md) |---|---|
+ [Shell integration](prompt.md) | [Painting](regions.md) | the bar, titles, sprites and popups are drawn by an external painter |
+ [Shell integration](prompt.md) | [Shell integration](prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) ## Configuring it
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) | | |
+ [Shell integration](prompt.md) |---|---|
+ [Shell integration](prompt.md) | [Configuration](config.md) | one Lua file, a schema that refuses typos, reload without losing panes |
+ [Shell integration](prompt.md) | [Project sessions](session-manager.md) | `.hexe.lua`, freezing a session, and the trust ledger |
+ [Shell integration](prompt.md) | [Isolation](isolation.md) | namespaces and cgroups per pane — and what it needs from the kernel |
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) ## From outside
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) | | |
+ [Shell integration](prompt.md) |---|---|
+ [Shell integration](prompt.md) | [The command line](cli.md) | addressing sessions, panes and pods from a script |
+ [Shell integration](prompt.md) | [Recording](recording.md) | hexe writes asciicasts of itself; every film below was made that way |
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) ## The recordings
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) Each document opens with a recording of the feature actually running. They are not screencasts
+ [Shell integration](prompt.md) somebody performed: every one is a script in [`scripts/demo`](../scripts/demo/), driven into a
+ [Shell integration](prompt.md) real frontend by [`record.py`](../scripts/demo/record.py), so any of them can be made again
+ [Shell integration](prompt.md) after the code changes — and a film that stops matching hexe is a bug in one or the other.
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) ```sh
+ [Shell integration](prompt.md) make demo-fixture                      # build the deterministic world under /tmp
+ [Shell integration](prompt.md) make demo-record DEMO=floats           # re-record one
+ [Shell integration](prompt.md) make demo-record                       # all of them
+ [Shell integration](prompt.md) make demo-publish                      # upload, remember the ids in casts.tsv
+ [Shell integration](prompt.md) make demo-embed                        # put the players back in the documents
+ [Shell integration](prompt.md) ```
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) They are filmed **with the author's own configuration and the author's own shell**: `fixture.sh`
+ [Shell integration](prompt.md) copies `~/.config/hexe` and `~/.config/oslo` in as they are, so the prompt, the status bar, the
+ [Shell integration](prompt.md) float borders and every key a film presses are the ones in daily use. Two things are changed on the
+ [Shell integration](prompt.md) way in and both are marked in the fixture: the four agent floats get local, offline commands — a
+ [Shell integration](prompt.md) recording must not open a paid agent or touch a network — and a small block of extra bindings is
+ [Shell integration](prompt.md) appended for the actions the config does not bind but the documents describe.
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) The recorder is not tmux driving hexe, the way a shell's demos are usually made: hexe *is* the
+ [Shell integration](prompt.md) thing under the recorder, and the chords these demos press are exactly the ones an outer
+ [Shell integration](prompt.md) multiplexer would want for itself. Instead `record.py` opens a pty, starts a real frontend on it,
+ [Shell integration](prompt.md) answers the terminal queries a TUI asks at startup — including the kitty keyboard one, without
+ [Shell integration](prompt.md) which `Ctrl+Alt+.` cannot be sent at all — types, and writes what comes back as an asciicast.
+ [Shell integration](prompt.md) Nothing in a film is synthesised: if a feature fails on the machine doing the recording, the film
+ [Shell integration](prompt.md) shows it failing, which is what [isolation](isolation.md) is a recording of.
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) Every demo runs at 240×60 under its own instance, its own copy of the configuration, its own `HOME`
+ [Shell integration](prompt.md) and its own state directories, so a recording can neither see nor disturb a real session or a real
+ [Shell integration](prompt.md) history.
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) ## Reading these
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) Each document has the same shape:
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) ```
+ [Shell integration](prompt.md) How it works          the mechanism, with a diagram
+ [Shell integration](prompt.md) What makes it         the contrast with tmux, screen or zellij — stated only where it
+ [Shell integration](prompt.md)   different             could be checked
+ [Shell integration](prompt.md) Configuration         spellings verified against the code that reads them
+ [Shell integration](prompt.md) Measurements          real numbers only; the section is absent when there are none
+ [Shell integration](prompt.md) What it cannot do     required, and never empty
+ [Shell integration](prompt.md) Where it lives        paths, and the types or functions that matter
+ [Shell integration](prompt.md) Reference             the older reference material for that subject, where it still
+ [Shell integration](prompt.md)                         holds — profiles, schemas, tables; absent from most pages
+ [Shell integration](prompt.md) ```
+ [Shell integration](prompt.md) 
+ [Shell integration](prompt.md) The **What it cannot do** section is the one to read first if you are deciding whether to rely on
+ [Shell integration](prompt.md) something. It is required in every document precisely because a feature list that only lists wins
+ [Shell integration](prompt.md) is not documentation.

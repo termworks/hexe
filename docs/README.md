@@ -33,6 +33,7 @@ reading twice.
 |---|---|
 | [Painting](regions.md) | the bar, titles, sprites and popups are drawn by an external painter |
 | [Shell integration](prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
+| [Palette namespaces](palette.md) | give the prompt, output and full-screen apps their own colour tables |
 
 ## Configuring it
 
