@@ -395,6 +395,16 @@ pub fn build(b: *std.Build) void {
     });
     const run_float_geometry_tests = b.addRunArtifact(float_geometry_tests);
 
+    // A keypad key has three wire forms; two of them never reached a pane.
+    const keypad_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/frontends/terminal/keypad.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_keypad_tests = b.addRunArtifact(keypad_tests);
+
     const prompt_navigation_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/frontends/terminal/prompt_navigation.zig"),
@@ -555,6 +565,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pane_osc_tests.step);
     test_step.dependOn(&run_lua_events_tests.step);
     test_step.dependOn(&run_float_geometry_tests.step);
+    test_step.dependOn(&run_keypad_tests.step);
     test_step.dependOn(&run_prompt_navigation_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);
     test_step.dependOn(&run_pane_search_tests.step);
