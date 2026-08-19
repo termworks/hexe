@@ -11,6 +11,7 @@ const pod = @import("pod");
 const shell_hooks = @import("shp");
 const pop_handlers = @import("pop_handlers.zig");
 const cli_cmds = @import("commands/com.zig");
+const profile_cmds = @import("commands/profile.zig");
 const config_validate = @import("commands/config_validate.zig");
 const ses_export = @import("commands/ses_export.zig");
 const ses_pipe = @import("commands/ses_pipe.zig");
@@ -684,7 +685,18 @@ pub fn main() !void {
     var allow_cmd = app.createCommand("allow", "Trust a project .hexe.lua so its on_start/on_stop hooks may run");
     try allow_cmd.addArg(Arg.positional("path", null, null));
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd });
+    // A profile is a wholly separate daemon with its own sessions, sockets and
+    // state. It was reachable only through HEXE_INSTANCE or a subcommand flag,
+    // so the command a user actually types -- bare `hexe` -- could not pick one.
+    try root.addArg(Arg.singleValueOption("profile", 'P', "Use a named profile (separate daemon and sessions)"));
+    try root.addArg(Arg.singleValueOption("instance", 'I', "Alias for --profile"));
+
+    var profile_cmd = app.createCommand("profile", "Profiles: separate daemons and sessions");
+    profile_cmd.setProperty(.help_on_empty_args);
+    const profile_list = app.createCommand("list", "List profiles and whether each is running");
+    try profile_cmd.addSubcommands(&[_]yazap.Command{profile_list});
+
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -699,8 +711,23 @@ pub fn main() !void {
         owned_alias_args.deinit(allocator);
     }
 
-    for (raw_args[1..], 0..) |arg, idx| {
-        const mapped = if (idx == 0) normalizeTopLevelCommand(arg) else arg;
+    // Alias normalisation applies to the first non-flag token, not literally
+    // argv[1]: with a root flag in front (`hexe --profile work ses list`) the
+    // subcommand moves, and `ses`/`mux`/`pop` stopped being recognised.
+    var normalized_command = false;
+    var skip_flag_value = false;
+    for (raw_args[1..]) |arg| {
+        const is_flag = arg.len > 0 and arg[0] == '-';
+        const takes_value = is_flag and !std.mem.containsAtLeast(u8, arg, 1, "=") and
+            (std.mem.eql(u8, arg, "--profile") or std.mem.eql(u8, arg, "-P") or
+                std.mem.eql(u8, arg, "--instance") or std.mem.eql(u8, arg, "-I"));
+        const consume_as_value = skip_flag_value;
+        skip_flag_value = takes_value;
+
+        const mapped = if (!normalized_command and !is_flag and !consume_as_value) blk: {
+            normalized_command = true;
+            break :blk normalizeTopLevelCommand(arg);
+        } else arg;
         if (!std.mem.eql(u8, mapped, arg)) {
             const duped = try allocator.dupeZ(u8, mapped);
             try owned_alias_args.append(allocator, duped);
@@ -711,6 +738,19 @@ pub fn main() !void {
     }
 
     const matches = try app.parseFrom(normalized_args.items);
+
+    // Must run before any path is resolved: every socket/state/log path is
+    // derived from HEXE_INSTANCE.
+    if (matches.getSingleValue("profile")) |name| setInstanceFromCli(name);
+    if (matches.getSingleValue("instance")) |name| setInstanceFromCli(name);
+
+    if (matches.subcommandMatches("profile")) |profile_matches| {
+        if (profile_matches.subcommandMatches("list")) |_| {
+            try profile_cmds.runProfileList(allocator);
+            return;
+        }
+        return;
+    }
 
     if (!matches.containsArgs()) {
         // Bare `hexe`: the frontend asks — in a popup, once it owns the screen —

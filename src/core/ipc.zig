@@ -468,7 +468,7 @@ test "sanitizeInstanceName rejects dot-only names but keeps dots elsewhere" {
 /// refuses any directory we do not own. `/tmp` pre-created or symlinked by
 /// another user therefore fails closed already; this just stops us reaching for
 /// `/tmp` at all when a private runtime dir is right there.
-fn fallbackRuntimeDir(buf: []u8) []const u8 {
+pub fn fallbackRuntimeDir(buf: []u8) []const u8 {
     const candidate = std.fmt.bufPrint(buf, "/run/user/{d}", .{linux.getuid()}) catch return "/tmp";
     var dir = std.fs.cwd().openDir(candidate, .{}) catch return "/tmp";
     defer dir.close();
