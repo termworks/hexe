@@ -33,8 +33,15 @@ test:
 # untouched develop with 39 leaked processes present, and passed once they
 # were cleared, with no code change in between.
 smoke-clean:
-	@# Bracket the first char so the pattern cannot match this shell itself.
-	-@pkill -9 -f '[z]ig-out/bin/hexe' 2>/dev/null || true
+	@# ONLY smoke processes. The old blanket `pkill -f zig-out/bin/hexe` killed
+	@# the developer's OWN running hexe too, since a dev runs the same binary
+	@# from this tree -- `make smoke` silently destroyed live sessions. Every
+	@# smoke tags its processes with HEXE_INSTANCE=smk<pid>, so match on that.
+	-@for p in $$(pgrep -f '[z]ig-out/bin/hexe' 2>/dev/null); do \
+	    if tr '\0' '\n' < /proc/$$p/environ 2>/dev/null | grep -qx 'HEXE_INSTANCE=smk[0-9]*'; then \
+	      kill -9 $$p 2>/dev/null || true; \
+	    fi; \
+	  done
 	-rm -rf "$${HEXE_SMOKE_TMP:-/tmp/hexe-smoke}" 2>/dev/null || true
 	-rm -rf "$${XDG_RUNTIME_DIR:-/tmp}"/hexe/smk* 2>/dev/null || true
 
