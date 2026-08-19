@@ -183,5 +183,24 @@ for spelling in (["--profile", B, "ses", "list"],
         fail(f"`hexe {' '.join(spelling)}` did not select the profile: {out.strip()[:160]}")
 print("spelling: --profile and --instance are accepted in every position")
 
+# ...and on every OTHER surface too, or they are not really the same thing.
+rc, out = hexe(["ses", "list"], profile=B)                      # HEXE_INSTANCE
+if "bravo" not in out:
+    fail(f"HEXE_INSTANCE did not select the profile: {out.strip()[:160]}")
+e = base_env(); e["HEXE_PROFILE"] = B                            # HEXE_PROFILE
+r = subprocess.run([HEXE, "ses", "list"], capture_output=True, text=True, env=e, cwd=WD, timeout=20)
+if "bravo" not in (r.stdout + r.stderr):
+    fail(f"HEXE_PROFILE is not accepted as the same variable: {(r.stdout + r.stderr).strip()[:160]}")
+rc, out = hexe(["instance", "list"])                             # command spelling
+if rc != 0 or "PROFILE" not in out:
+    fail(f"`hexe instance list` is not the same command as `profile list`: {out.strip()[:160]}")
+# A flag must beat the environment, or the two spellings fight.
+e = base_env(); e["HEXE_PROFILE"] = A
+r = subprocess.run([HEXE, "--profile", B, "ses", "list"], capture_output=True, text=True,
+                   env=e, cwd=WD, timeout=20)
+if "bravo" not in (r.stdout + r.stderr):
+    fail("a --profile flag did not override HEXE_PROFILE")
+print("spelling: env HEXE_PROFILE/HEXE_INSTANCE and `instance`/`profile` agree")
+
 cleanup()
 print("SMOKE PASS: profiles are separate daemons with separate sessions")

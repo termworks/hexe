@@ -318,6 +318,7 @@ fn profileArg(m: anytype) []const u8 {
 }
 
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
+    if (std.mem.eql(u8, command, "instance")) return "profile";
     if (std.mem.eql(u8, command, "ses")) return "session";
     if (std.mem.eql(u8, command, "lay")) return "layout";
     if (std.mem.eql(u8, command, "mux")) return "terminal";
@@ -756,7 +757,11 @@ pub fn main() !void {
     const matches = try app.parseFrom(normalized_args.items);
 
     // Must run before any path is resolved: every socket/state/log path is
-    // derived from HEXE_INSTANCE.
+    // derived from HEXE_INSTANCE. A flag beats the environment; HEXE_PROFILE is
+    // simply the other spelling of HEXE_INSTANCE.
+    if (!hasInstanceEnv()) {
+        if (std.posix.getenv("HEXE_PROFILE")) |name| setInstanceFromCli(name);
+    }
     if (matches.getSingleValue("profile")) |name| setInstanceFromCli(name);
     if (matches.getSingleValue("instance")) |name| setInstanceFromCli(name);
 
