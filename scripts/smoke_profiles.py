@@ -171,5 +171,17 @@ if "init.lua" not in out:
     fail(f"a profile name escaped the config directory: {out.strip()[:200]}")
 print("config: a traversing profile name falls back instead of escaping")
 
+# One concept, two spellings. --profile used to exist only on the root command,
+# so `hexe ses list --profile X` failed while --instance worked.
+for spelling in (["--profile", B, "ses", "list"],
+                 ["--instance", B, "ses", "list"],
+                 ["ses", "list", "--profile", B],
+                 ["ses", "list", "--instance", B],
+                 ["ses", "list", "-P", B]):
+    rc, out = hexe(spelling)
+    if "unrecognized" in out or "bravo" not in out:
+        fail(f"`hexe {' '.join(spelling)}` did not select the profile: {out.strip()[:160]}")
+print("spelling: --profile and --instance are accepted in every position")
+
 cleanup()
 print("SMOKE PASS: profiles are separate daemons with separate sessions")

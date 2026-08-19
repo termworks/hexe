@@ -301,6 +301,22 @@ fn runSyslinkServe(allocator: std.mem.Allocator, socket_path: []const u8, no_aut
     );
 }
 
+/// A profile and an instance are the SAME thing: one separate daemon with its
+/// own sessions, sockets, state and config. `--instance` is the original
+/// spelling (and what the tests use); `--profile` is the name users think in.
+/// Both are accepted wherever either was.
+fn addProfileArgs(command: *yazap.Command) !void {
+    try command.addArg(Arg.singleValueOption("instance", 'I', "Profile to act on (alias of --profile)"));
+    try command.addArg(Arg.singleValueOption("profile", 'P', "Profile to act on: a separate daemon and sessions"));
+}
+
+/// The profile named on a subcommand, under either spelling.
+fn profileArg(m: anytype) []const u8 {
+    if (m.getSingleValue("profile")) |v| return v;
+    if (m.getSingleValue("instance")) |v| return v;
+    return "";
+}
+
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
     if (std.mem.eql(u8, command, "ses")) return "session";
     if (std.mem.eql(u8, command, "lay")) return "layout";
@@ -373,34 +389,34 @@ pub fn main() !void {
     try ses_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
     try ses_daemon.addArg(Arg.singleValueOption("log", null, null));
     try ses_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try ses_daemon.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_daemon);
     try ses_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
 
     var ses_status_cmd = app.createCommand("status", "Show daemon info");
-    try ses_status_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_status_cmd);
 
     var ses_list = app.createCommand("list", "List sessions and panes (optionally filtered to a directory)");
     try ses_list.addArg(Arg.positional("dir", null, null));
     try ses_list.addArg(Arg.booleanOption("details", 'd', null));
-    try ses_list.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_list);
     try ses_list.addArg(Arg.booleanOption("json", 'j', null));
 
     var ses_kill = app.createCommand("kill", "Kill a detached session");
     try ses_kill.addArg(Arg.positional("target", null, null));
-    try ses_kill.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_kill);
 
     var ses_clear = app.createCommand("clear", "Kill all detached sessions (--orphans: orphaned/sticky panes instead)");
-    try ses_clear.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_clear);
     try ses_clear.addArg(Arg.booleanOption("force", 'f', null));
     try ses_clear.addArg(Arg.booleanOption("orphans", null, null));
 
     var ses_export_cmd = app.createCommand("export", "Export detached session to JSON");
     try ses_export_cmd.addArg(Arg.positional("session", null, null));
     try ses_export_cmd.addArg(Arg.singleValueOption("output", 'o', null));
-    try ses_export_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_export_cmd);
 
     var ses_stats_cmd = app.createCommand("stats", "Show resource usage statistics");
-    try ses_stats_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_stats_cmd);
 
     var ses_pipe_cmd = app.createCommand("pipe", "Internal SES byte-stream bridge");
     try ses_pipe_cmd.addArg(Arg.singleValueOption("ses-socket", null, null));
@@ -423,10 +439,10 @@ pub fn main() !void {
     try layout_open.addArg(Arg.positional("target", null, null));
     try layout_open.addArg(Arg.singleValueOption("log", null, null));
     try layout_open.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try layout_open.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&layout_open);
 
     var layout_save = app.createCommand("save", "Save current session as .hexe.lua");
-    try layout_save.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&layout_save);
     try layout_save.addArg(Arg.singleValueOption("scope", null, null));
 
     try layout_cmd.addSubcommands(&[_]yazap.Command{ layout_list, layout_open, layout_save });
@@ -445,7 +461,7 @@ pub fn main() !void {
     try pod_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
     try pod_daemon.addArg(Arg.singleValueOption("log", null, null));
     try pod_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try pod_daemon.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&pod_daemon);
     try pod_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
 
     var pod_list = app.createCommand("list", "List discoverable pods (from .meta)");
@@ -462,7 +478,7 @@ pub fn main() !void {
     try pod_new.addArg(Arg.booleanOption("alias", null, null));
     try pod_new.addArg(Arg.singleValueOption("log", null, null));
     try pod_new.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try pod_new.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&pod_new);
     try pod_new.addArg(Arg.booleanOption("test-only", 'T', null));
 
     var pod_send = app.createCommand("send", "Send input to a pod (by uuid/name/socket)");
@@ -506,7 +522,7 @@ pub fn main() !void {
     try mux_new.addArg(Arg.singleValueOption("logfile", 'L', null));
     try mux_new.addArg(Arg.singleValueOption("ses-socket", null, null));
     try mux_new.addArg(Arg.booleanOption("no-autostart-ses", null, null));
-    try mux_new.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_new);
     try mux_new.addArg(Arg.booleanOption("test-only", 'T', null));
     try mux_new.addArg(Arg.singleValueOption("remote", null, null));
     try mux_new.addArg(Arg.singleValueOption("user", 'u', null));
@@ -518,24 +534,24 @@ pub fn main() !void {
     try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', null));
     try mux_attach.addArg(Arg.singleValueOption("ses-socket", null, null));
     try mux_attach.addArg(Arg.booleanOption("no-autostart-ses", null, null));
-    try mux_attach.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_attach);
     try mux_attach.addArg(Arg.singleValueOption("remote", null, null));
     try mux_attach.addArg(Arg.singleValueOption("user", 'u', null));
     try mux_attach.addArg(Arg.singleValueOption("identity", 'i', null));
 
     var mux_kill = app.createCommand("kill", "Kill a session (attached or detached) or a single pane/float by name or uuid prefix");
     try mux_kill.addArg(Arg.positional("id", null, null));
-    try mux_kill.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_kill);
 
     var mux_close = app.createCommand("close", "Alias of kill");
     try mux_close.addArg(Arg.positional("id", null, null));
-    try mux_close.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_close);
 
     var mux_record = app.createCommand("record", "Attach to a session and record it as asciicast");
     try mux_record.addArg(Arg.positional("session", null, null));
     try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
     try mux_record.addArg(Arg.booleanOption("capture-input", null, null));
-    try mux_record.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_record);
 
     var mux_float = app.createCommand("float", "Spawn a transient float pane");
     try mux_float.addArg(Arg.singleValueOption("command", 'c', null));
@@ -548,7 +564,7 @@ pub fn main() !void {
     try mux_float.addArg(Arg.singleValueOption("isolation", null, null));
     try mux_float.addArg(Arg.singleValueOption("size", null, null));
     try mux_float.addArg(Arg.singleValueOption("key", null, null));
-    try mux_float.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_float);
 
     var mux_notify = app.createCommand("notify", "Send notification");
     try mux_notify.addArg(Arg.singleValueOption("uuid", 'u', null));
@@ -556,7 +572,7 @@ pub fn main() !void {
     try mux_notify.addArg(Arg.booleanOption("last", 'l', null));
     try mux_notify.addArg(Arg.booleanOption("broadcast", 'b', null));
     try mux_notify.addArg(Arg.positional("message", null, null));
-    try mux_notify.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_notify);
 
     var mux_send = app.createCommand("send", "Send keystrokes to pane");
     try mux_send.addArg(Arg.singleValueOption("uuid", 'u', null));
@@ -566,13 +582,13 @@ pub fn main() !void {
     try mux_send.addArg(Arg.booleanOption("enter", 'e', null));
     try mux_send.addArg(Arg.singleValueOption("ctrl", 'C', null));
     try mux_send.addArg(Arg.positional("text", null, null));
-    try mux_send.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_send);
 
     var mux_info = app.createCommand("info", "Show information about a pane");
     try mux_info.addArg(Arg.singleValueOption("uuid", 'u', null));
     try mux_info.addArg(Arg.booleanOption("creator", 'c', null));
     try mux_info.addArg(Arg.booleanOption("last", 'l', null));
-    try mux_info.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_info);
 
     var mux_layout = app.createCommand("layout", "Save and restore layouts");
     mux_layout.setProperty(.help_on_empty_args);
@@ -763,7 +779,7 @@ pub fn main() !void {
 
     if (matches.subcommandMatches("session")) |ses_matches| {
         if (ses_matches.subcommandMatches("daemon")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             if (m.containsArg("test-only")) {
                 setTestOnlyEnv();
@@ -777,25 +793,25 @@ pub fn main() !void {
             return;
         }
         if (ses_matches.subcommandMatches("status")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try runSesStatus(allocator);
             return;
         }
         if (ses_matches.subcommandMatches("list")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runList(allocator, m.containsArg("details"), m.containsArg("json"), m.getSingleValue("dir") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("kill")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runSesKill(allocator, m.getSingleValue("target") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("clear")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             if (m.containsArg("orphans")) {
                 try cli_cmds.runSesClearOrphans(allocator, m.containsArg("force"));
@@ -805,13 +821,13 @@ pub fn main() !void {
             return;
         }
         if (ses_matches.subcommandMatches("export")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try ses_export.run(allocator, m.getSingleValue("session") orelse "", m.getSingleValue("output") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("stats")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try ses_stats.run(allocator);
             return;
@@ -828,7 +844,7 @@ pub fn main() !void {
             return;
         }
         if (layout_matches.subcommandMatches("open")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try cli_cmds.runSesOpen(
@@ -841,7 +857,7 @@ pub fn main() !void {
             return;
         }
         if (layout_matches.subcommandMatches("save")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const scope_raw = m.getSingleValue("scope") orelse "both";
             const scope = std.meta.stringToEnum(cli_cmds.LayoutSaveScope, scope_raw) orelse {
@@ -853,7 +869,7 @@ pub fn main() !void {
         }
     } else if (matches.subcommandMatches("pod")) |pod_matches| {
         if (pod_matches.subcommandMatches("daemon")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             if (m.containsArg("test-only")) {
                 setTestOnlyEnv();
@@ -886,7 +902,7 @@ pub fn main() !void {
             return;
         }
         if (pod_matches.subcommandMatches("new")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             if (m.containsArg("test-only")) {
                 setTestOnlyEnv();
@@ -964,7 +980,7 @@ pub fn main() !void {
         }
     } else if (matches.subcommandMatches("terminal")) |mux_matches| {
         if (mux_matches.subcommandMatches("new")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) {
                 setInstanceFromCli(instance);
                 if (m.containsArg("test-only")) setTestOnlyEnv();
@@ -989,19 +1005,19 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("kill")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runTerminalKill(allocator, m.getSingleValue("id") orelse "");
             return;
         }
         if (mux_matches.subcommandMatches("close")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runTerminalKill(allocator, m.getSingleValue("id") orelse "");
             return;
         }
         if (mux_matches.subcommandMatches("attach")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try runTerminalAttach(
@@ -1019,7 +1035,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("record")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const out = m.getSingleValue("out") orelse "";
             if (out.len == 0) {
@@ -1035,7 +1051,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("float")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const exit_key = m.getSingleValue("key") orelse "Esc";
             try cli_cmds.runMuxFloat(
@@ -1054,7 +1070,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("notify")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runNotify(
                 allocator,
@@ -1067,7 +1083,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("send")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runSend(
                 allocator,
@@ -1100,7 +1116,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("info")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runInfo(allocator, m.getSingleValue("uuid") orelse "", m.containsArg("creator"), m.containsArg("last"));
             return;
