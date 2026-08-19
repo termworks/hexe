@@ -124,9 +124,11 @@ def view_status(req):
     right, rec_off = [], None
     # OSC 9;4 from the focused pane. `hexe` parses the sequence and forwards the
     # state; rendering it is the painter's call.
-    pstate = ctx.get("progress_state") or "inactive"
+    # progress lives under context.values, alongside session/tabs -- reading it
+    # from `ctx` returned None forever, so this whole segment was dead.
+    pstate = vals.get("progress_state") or "inactive"
     if pstate != "inactive":
-        pct = ctx.get("progress_pct")
+        pct = vals.get("progress_pct")
         if pstate == "indeterminate" or pct is None:
             ptext = "progress ..."
         elif pstate == "error":
