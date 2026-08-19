@@ -378,7 +378,7 @@ pub fn drawFloatingBorder(
         const inner_w = floatTitleInnerWidth(w);
         if (inner_w == 0) return;
 
-        const runs = statusbar.titleRuns(state, name, inner_w, true);
+        const runs = statusbar.titleRuns(state, name, inner_w, true, active);
         const runs_len = @min(statusbar.runsWidth(runs), inner_w);
         if (runs_len > 0) {
             const place = floatTitlePlacement(x, y, w, h, pos, runs_len);

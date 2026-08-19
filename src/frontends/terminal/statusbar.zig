@@ -307,7 +307,7 @@ pub fn noteHover(state: *State, config: *const core.Config, term_width: u16, ter
 }
 
 /// Ask the painter for a pane or float title. Empty until the first response.
-pub fn titleRuns(state: *const State, title: []const u8, width: u16, is_float: bool) []const regions.Run {
+pub fn titleRuns(state: *const State, title: []const u8, width: u16, is_float: bool, active: bool) []const regions.Run {
     const registry = regions.active orelse return &.{};
     const cfg = &state.config.tabs.status;
     const view = if (is_float) cfg.float_title_view else cfg.container_title_view;
@@ -319,7 +319,9 @@ pub fn titleRuns(state: *const State, title: []const u8, width: u16, is_float: b
         .now_ms = @intCast(std.time.milliTimestamp()),
         .home = std.posix.getenv("HOME"),
         .title = title,
-        .active = is_float,
+        // The focused float and a background one must be distinguishable by the
+        // painter; this used to report is_float, i.e. always true for floats.
+        .active = active,
     });
     return snap.runs;
 }

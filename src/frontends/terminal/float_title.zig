@@ -62,7 +62,11 @@ pub fn getTitleRect(state: *const State, pane: *const Pane) ?TitleRect {
     // whenever no painter is listening (the default: `status.command` is unset),
     // which made total_len 0 -- so dragging a float and double-clicking to
     // rename it were dead out of the box, on a float whose title is drawn.
-    const runs = statusbar.titleRuns(state, title, inner_w, true);
+    const is_active = blk: {
+        const active_uuid = state.runtime.activeFloatUuid() orelse break :blk false;
+        break :blk std.mem.eql(u8, &active_uuid, &pane.uuid);
+    };
+    const runs = statusbar.titleRuns(state, title, inner_w, true, is_active);
     const painted: usize = statusbar.runsWidth(runs);
     const measured: usize = if (painted > 0) painted else text_width.displayWidth(title);
     const total_len: u16 = @intCast(@min(@as(usize, inner_w), measured));
