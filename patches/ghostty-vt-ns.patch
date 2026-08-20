@@ -1,0 +1,31 @@
+From: hexe
+Subject: [PATCH] terminal: opaque namespace tag in Style's spare flag bits
+
+hexe records which palette namespace was current when each cell was written, so
+it can resolve indexed colours per namespace and recolour one program's output
+without touching anything else on screen.
+
+The tag is never interpreted by ghostty. It occupies bits that were already
+padding inside Flags, so Style keeps its size and its page layout unchanged --
+adding a separate u8 field instead grew Style from 14 to 16 bytes and cost ~19MB
+of resident memory per frontend. Sitting in Flags also means it joins equality
+and hashing with no further changes, and a tag of 0 behaves exactly as before.
+---
+--- a/src/terminal/style.zig
++++ b/src/terminal/style.zig
+@@ -37,7 +37,14 @@
+         strikethrough: bool = false,
+         overline: bool = false,
+         underline: sgr.Attribute.Underline = .none,
+-        _padding: u5 = 0,
++
++        /// Opaque namespace tag owned by the embedder, never interpreted here.
++        ///
++        /// Lives in bits that were already padding, so Style keeps its size and
++        /// its page layout. Because it sits in Flags it joins equality and
++        /// hashing for free: cells written under different tags keep distinct
++        /// interned styles, and a tag of 0 is byte-identical to before.
++        ns: u5 = 0,
+     };
+ 
+     /// The color for an SGR attribute. A color can come from multiple

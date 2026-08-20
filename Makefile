@@ -1,5 +1,6 @@
 .PHONY: build build-gnu test smoke smoke-protocol smoke-clean smoke-heavy install release \
-        demos demo-fixture demo-record demo-publish demo-embed demo-clean
+        demos demo-fixture demo-record demo-publish demo-embed demo-clean \
+        ghostty ghostty-check
 
 # Static musl by default. Zig links its bundled musl STATICALLY for any
 # *-linux-musl target, so this needs no extra linkage flag — the result has no
@@ -10,7 +11,32 @@
 # at runtime anyway, so baseline costs nothing that matters here.
 TARGET ?= x86_64-linux-musl
 
-build:
+# ghostty-vt, patched.
+#
+# hexe needs one field ghostty does not have: an opaque per-cell tag recording
+# which palette namespace wrote each cell. Rather than maintain a fork, the
+# upstream revision is pinned here and the diff lives in patches/ as a file, so
+# following ghostty is: bump GHOSTTY_REV, re-run `make ghostty`, fix the patch
+# if it drifted. vendor/ is generated and not committed, so a fresh clone runs
+# this once before building.
+GHOSTTY_REV ?= 4e17eee5dea3d67aa9b0fec56be7f461c496ffe4
+GHOSTTY_URL ?= https://github.com/ghostty-org/ghostty
+GHOSTTY_DIR := vendor/ghostty
+
+ghostty:
+	@rm -rf $(GHOSTTY_DIR)
+	@mkdir -p $(GHOSTTY_DIR)
+	@cd $(GHOSTTY_DIR) && git init -q . && git remote add origin $(GHOSTTY_URL) && \
+	  git fetch -q --depth 1 origin $(GHOSTTY_REV) && git checkout -q FETCH_HEAD
+	@cd $(GHOSTTY_DIR) && git apply --whitespace=nowarn $(CURDIR)/patches/ghostty-vt-ns.patch
+	@echo "ghostty $(GHOSTTY_REV) + patches/ghostty-vt-ns.patch -> $(GHOSTTY_DIR)"
+
+# Fail with an instruction rather than a compile error a reader cannot place.
+ghostty-check:
+	@test -f $(GHOSTTY_DIR)/src/terminal/style.zig || { \
+	  echo "$(GHOSTTY_DIR) is missing. Run: make ghostty"; exit 1; }
+
+build: ghostty-check
 	zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=$(TARGET)
 
 # Escape hatch: link against the host's glibc instead.
@@ -102,7 +128,10 @@ SMOKES := \
 	smoke_painter_showcase.py \
 	smoke_profiles.py \
 	smoke_palette.py \
-	smoke_palette_persist.py
+	smoke_palette_persist.py \
+	smoke_palette_fuzz.py \
+	smoke_palette_cells.py \
+	smoke_status_zones.py
 
 smoke: smoke-clean
 	zig build
