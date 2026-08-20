@@ -467,7 +467,12 @@ pub const State = struct {
         const cfg = core.Config.load(allocator);
         // Before any pane exists: every NamespaceTable seeds itself from these.
         core.palette.default_enabled = cfg.palette_namespaces;
-        core.palette.default_osc = cfg.palette_osc;
+        core.palette.default_osc = if (core.palette.isReservedOsc(cfg.palette_osc)) blk: {
+            core.logging.warn("palette", "palette.osc {d} is reserved; using {d}", .{
+                cfg.palette_osc, core.palette.DEFAULT_OSC,
+            });
+            break :blk core.palette.DEFAULT_OSC;
+        } else cfg.palette_osc;
         // Bind the live query API onto the `hexe` table the config already
         // built. Done after load so callbacks registered during load can call
         // it, and once per runtime rather than per evaluation.

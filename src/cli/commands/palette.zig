@@ -233,6 +233,43 @@ fn fetchPalette(allocator: std.mem.Allocator, uuid: [32]u8) ?[]u8 {
     return blob;
 }
 
+/// The payload built below is an escape sequence delivered to every targeted
+/// pane, so anything interpolated into it must be checked here first. A theme
+/// file carrying `0=#000000\x1b]0;pwned\x07\x1b[2J` would otherwise retitle and
+/// clear every pane in the session, and the CLI would exit 0.
+///
+/// Checking here also turns the pane's silent `.ignore` into a diagnostic: a
+/// misspelled key or colour used to be accepted by the CLI, injected, dropped
+/// inside the pane, and reported as success.
+fn validEntry(entry: []const u8) bool {
+    const eq = std.mem.indexOfScalar(u8, entry, '=') orelse return false;
+    const key = entry[0..eq];
+    const value = entry[eq + 1 ..];
+    if (key.len == 0) return false;
+    if (palette.parseHexColor(value) == null) return false;
+
+    if (std.ascii.eqlIgnoreCase(key, "fg")) return true;
+    if (std.ascii.eqlIgnoreCase(key, "bg")) return true;
+    if (std.ascii.eqlIgnoreCase(key, "cursor")) return true;
+    const idx = std.fmt.parseUnsigned(u16, key, 10) catch return false;
+    return idx <= 255;
+}
+
+/// The OSC number this session listens on.
+///
+/// The pane dispatches on its own configured number, so a CLI that always wrote
+/// the default would build sequences nothing consumes — and exit 0 having done
+/// nothing. The frontend exports the live value into every pane it spawns.
+fn effectiveOsc() u32 {
+    const raw = std.posix.getenv("HEXE_PALETTE_OSC") orelse return palette.DEFAULT_OSC;
+    return std.fmt.parseUnsigned(u32, raw, 10) catch palette.DEFAULT_OSC;
+}
+
+/// `*` is the documented wildcard; every other target must be a real name.
+fn validNsArg(ns: []const u8) bool {
+    return std.mem.eql(u8, ns, "*") or palette.validName(ns);
+}
+
 /// `hexe palette set --ns <name> <i>=#rrggbb …` / `--from <file>`.
 pub fn runPaletteSet(
     allocator: std.mem.Allocator,
@@ -255,6 +292,17 @@ pub fn runPaletteSet(
         return Error.NoEntries;
     }
 
+    if (!validNsArg(ns)) {
+        print("Error: invalid namespace {s}: expected * or a name of up to {d} " ++
+            "characters from a-z 0-9 . _ -\n", .{ ns, palette.MAX_NAME_LEN });
+        return Error.BadArgument;
+    }
+    for (entries.items) |e| {
+        if (validEntry(e)) continue;
+        print("Error: invalid entry {s}: expected <0-255|fg|bg|cursor>=#rrggbb\n", .{e});
+        return Error.BadArgument;
+    }
+
     // §6 caps a `set` at 32 entries per sequence; a 256-colour file is simply
     // several sequences, and `set` accumulates so the result is identical.
     //
@@ -267,7 +315,7 @@ pub fn runPaletteSet(
     var sent: usize = 0;
     while (sent < entries.items.len) {
         const end = @min(sent + palette.SET_CHUNK, entries.items.len);
-        try payload.writer(allocator).print("\x1b]{d};set;{s}", .{ palette.DEFAULT_OSC, ns });
+        try payload.writer(allocator).print("\x1b]{d};set;{s}", .{ effectiveOsc(), ns });
         for (entries.items[sent..end]) |e| {
             try payload.writer(allocator).print(";{s}", .{e});
         }
@@ -284,16 +332,22 @@ pub fn runPaletteVerb(
     ns: []const u8,
     pane: []const u8,
 ) !void {
+    if (!std.mem.eql(u8, verb, "end") and !validNsArg(ns)) {
+        print("Error: invalid namespace {s}: expected * or a name of up to {d} " ++
+            "characters from a-z 0-9 . _ -\n", .{ ns, palette.MAX_NAME_LEN });
+        return Error.BadArgument;
+    }
+
     var seq = std.ArrayList(u8).empty;
     defer seq.deinit(allocator);
     if (std.mem.eql(u8, verb, "end")) {
-        try seq.writer(allocator).print("\x1b]{d};end\x1b\\", .{palette.DEFAULT_OSC});
+        try seq.writer(allocator).print("\x1b]{d};end\x1b\\", .{effectiveOsc()});
     } else {
         if (ns.len == 0) {
             print("Error: {s} requires --ns NAME\n", .{verb});
             return Error.BadArgument;
         }
-        try seq.writer(allocator).print("\x1b]{d};{s};{s}\x1b\\", .{ palette.DEFAULT_OSC, verb, ns });
+        try seq.writer(allocator).print("\x1b]{d};{s};{s}\x1b\\", .{ effectiveOsc(), verb, ns });
     }
     try inject(allocator, pane, seq.items);
 }

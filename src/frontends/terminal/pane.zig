@@ -113,7 +113,6 @@ pub const Pane = struct {
     osc_progress: pane_osc.Progress = .{},
     osc_progress_changed: bool = false,
     /// Last observed alt-screen state, for the palette stack save/restore.
-    palette_alt_screen: bool = false,
     /// Palette colours changed and SES has not been told yet.
     palette_dirty: bool = false,
     /// SES has been asked for this pane's parked palette. One attempt per
@@ -206,7 +205,6 @@ pub const Pane = struct {
         self.vt.ns_table = core.palette.NamespaceTable.init(self.allocator);
         self.palette_restored = false;
         self.palette_dirty = false;
-        self.palette_alt_screen = self.vt.inAltScreen();
     }
 
     pub fn deinit(self: *Pane) void {
@@ -242,6 +240,14 @@ pub const Pane = struct {
         self.osc_prev_esc = false;
         self.osc_discarding = false;
         self.osc_buf.clearRetainingCapacity();
+        // The VT was just rebuilt, taking the namespace table with it. Without
+        // clearing these the pane believes it already has its colours and syncs
+        // the empty table back over the copy SES parked for it.
+        self.palette_restored = false;
+        self.palette_dirty = false;
+        // Edge detector for the alt-screen save/restore. Left stale it never
+        // sees the next transition, so a full-screen app's namespace is neither
+        // parked on entry nor restored on exit.
         self.osc_consumer.reset();
         self.osc_notifications.clearRetainingCapacity();
         self.osc_progress = .{};

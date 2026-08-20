@@ -19,7 +19,11 @@
 const std = @import("std");
 
 /// Slot numbers fit a u8; 0 is reserved for the pane's ordinary palette.
-pub const MAX_NS = 256;
+/// Slots must fit the tag carried on each cell, which is 5 bits of ghostty's
+/// style flags (patches/ghostty-vt-ns.patch). Widening it to a byte grew the
+/// style struct and cost ~19MB resident per frontend, which is not worth 224
+/// more namespaces than any pane uses.
+pub const MAX_NS = 32;
 /// PLAN.md §3.2: the spec floor is 8.
 pub const STACK_DEPTH = 16;
 /// Names are `[a-z0-9_.-]{1,32}`, case-insensitive (PLAN.md §6).
@@ -27,49 +31,6 @@ pub const MAX_NAME_LEN = 32;
 
 pub const RGB = struct { r: u8, g: u8, b: u8 };
 
-/// The namespaces hexe assigns on its own, from signals it already parses
-/// (PLAN.md M3). An application never names these; it gets them for free.
-pub const Auto = enum(u2) {
-    default = 0,
-    prompt,
-    output,
-    alt,
-
-    pub fn name(self: Auto) []const u8 {
-        return switch (self) {
-            .default => "default",
-            .prompt => "prompt",
-            .output => "output",
-            .alt => "alt",
-        };
-    }
-};
-
-/// A row's OSC 133 zone, mirrored from ghostty's `Row.semantic_prompt` so the
-/// mapping below is testable without a terminal.
-pub const Zone = enum { unknown, prompt, prompt_continuation, input, command };
-
-/// Which auto-namespace a row belongs to.
-///
-/// `input` — the line you type on — joins `prompt` rather than standing alone:
-/// PLAN.md M3 names only two zones, and recolouring the prompt while leaving
-/// the command typed on it untouched splits one visual line in half.
-///
-/// Alt-screen wins over the zone. A full-screen app owns the whole grid, and
-/// any OSC 133 marks under it belong to the shell it covered.
-pub fn autoKind(zone: Zone, alt_screen: bool) Auto {
-    if (alt_screen) return .alt;
-    return switch (zone) {
-        .prompt, .prompt_continuation, .input => .prompt,
-        .command => .output,
-        .unknown => .default,
-    };
-}
-
-/// What the renderer should do with a colour.
-///
-/// `passthrough` keeps the index in the output so the host terminal resolves
-/// it, which is the pre-namespace behaviour.
 pub const Resolved = union(enum) {
     passthrough: u8,
     rgb: RGB,
@@ -117,34 +78,10 @@ pub const NamespaceTable = struct {
     stack: [STACK_DEPTH]StackEntry = .{StackEntry{}} ** STACK_DEPTH,
     stack_len: u8 = 0,
     current: u8 = 0,
-    /// What an app's `use` rebinds, per auto-namespace.
-    ///
-    /// The spec puts the current namespace on the *cell*, which needs the
-    /// `ns` field on ghostty's `Style` (PLAN.md M2) and therefore a fork of an
-    /// external dependency. Until then `use` rebinds the auto-namespace the
-    /// app's own rows already fall into — the whole grid in alt-screen, the
-    /// output zone otherwise. Coarser than the spec, never wrong: the cells an
-    /// app owns are exactly the ones that change.
-    overrides: [4]u8 = .{0} ** 4,
-    /// Whether `overrides[k]` is meaningful. Slot 0 cannot double as "unset":
-    /// `use default` is a legitimate selection meaning "the pane's ordinary
-    /// palette", and without this flag it was indistinguishable from "no
-    /// override", which silently fell back to the zone's auto namespace.
-    override_set: [4]bool = .{false} ** 4,
     /// Feature flag (PLAN.md §10): when false, `current` is forced to 0 and
     /// resolution behaves exactly as it did before, with the indirection still
     /// compiled in.
     enabled: bool = false,
-    /// Slots for the auto-namespaces, resolved once at enable time so the
-    /// render path indexes an array instead of hashing a name per row.
-    auto_slots: [4]u8 = .{0} ** 4,
-    /// Selection state parked across an alt-screen visit (PLAN.md §6).
-    saved_stack: [STACK_DEPTH]StackEntry = .{StackEntry{}} ** STACK_DEPTH,
-    saved_stack_len: u8 = 0,
-    saved_current: u8 = 0,
-    saved_overrides: [4]u8 = .{0} ** 4,
-    saved_override_set: [4]bool = .{false} ** 4,
-    saved: bool = false,
 
     /// The OSC number this pane answers on. Per-table so a config reload can
     /// move it without disturbing panes already speaking the old number.
@@ -177,16 +114,10 @@ pub const NamespaceTable = struct {
         return if (self.enabled) self.current else 0;
     }
 
-    /// Turn the feature on or off. Enabling reserves the auto-namespace slots
-    /// up front; disabling leaves them allocated so a re-enable is free and
-    /// palettes set while off are not lost.
+    /// Turn the feature on or off. Palettes set while off are kept, so a
+    /// re-enable shows them again.
     pub fn setEnabled(self: *NamespaceTable, on: bool) void {
         self.enabled = on;
-        if (!on) return;
-        inline for (.{ Auto.prompt, Auto.output, Auto.alt }) |kind| {
-            const i = @intFromEnum(kind);
-            if (self.auto_slots[i] == 0) self.auto_slots[i] = self.slotFor(kind.name());
-        }
     }
 
     /// A namespace's default fg/bg — what a cell that names no colour of its
@@ -196,6 +127,7 @@ pub const NamespaceTable = struct {
     /// per-cell path stays a null check on an already-loaded struct.
     pub fn defaultsFor(self: *const NamespaceTable, ns: u8) Defaults {
         if (ns == 0) return .{};
+        if (ns >= MAX_NS) return .{};
         const palette = self.palettes[ns] orelse return .{};
         return .{ .fg = palette.fg, .bg = palette.bg };
     }
@@ -208,18 +140,12 @@ pub const NamespaceTable = struct {
     /// (OSC 12).
     pub fn cursorFor(self: *const NamespaceTable, ns: u8) ?RGB {
         if (ns == 0) return null;
+        if (ns >= MAX_NS) return null;
         const palette = self.palettes[ns] orelse return null;
         return palette.cursor;
     }
 
     /// Slot for a row's auto-namespace. A flat index; no hashing.
-    pub fn autoSlot(self: *const NamespaceTable, kind: Auto) u8 {
-        if (!self.enabled) return 0;
-        const i = @intFromEnum(kind);
-        if (self.override_set[i]) return self.overrides[i];
-        return self.auto_slots[i];
-    }
-
     /// Resolve one indexed colour.
     ///
     /// The only per-cell-per-frame addition on the render path, so it stays a
@@ -227,6 +153,7 @@ pub const NamespaceTable = struct {
     /// common case (slot 0) returns before touching the table at all.
     pub inline fn resolveIndex(self: *const NamespaceTable, ns: u8, idx: u8) Resolved {
         if (ns == 0) return .{ .passthrough = idx };
+        if (ns >= MAX_NS) return .{ .passthrough = idx };
         const palette = self.palettes[ns] orelse return .{ .passthrough = idx };
         if (!palette.patched[idx]) return .{ .passthrough = idx };
         return .{ .rgb = palette.entries[idx] };
@@ -268,6 +195,7 @@ pub const NamespaceTable = struct {
     /// Patch entries in a namespace. Creating it if needed; never selects it.
     pub fn setEntry(self: *NamespaceTable, slot: u8, idx: u8, value: RGB) void {
         if (slot == 0) return;
+        if (slot >= MAX_NS) return;
         const palette = self.palettes[slot] orelse return;
         palette.entries[idx] = value;
         palette.patched[idx] = true;
@@ -279,19 +207,11 @@ pub const NamespaceTable = struct {
     /// A full stack drops the push rather than selecting without a restore
     /// point: an app that overflows would otherwise leave its colours behind
     /// for good, and "silently maps to slot 0" is the contract.
-    pub fn push(self: *NamespaceTable, slot: u8, kind: Auto) void {
+    pub fn push(self: *NamespaceTable, slot: u8) void {
         if (self.stack_len >= STACK_DEPTH) return;
-        const i = @intFromEnum(kind);
-        self.stack[self.stack_len] = .{
-            .kind = kind,
-            .prev_current = self.current,
-            .prev_override = self.overrides[i],
-            .prev_override_set = self.override_set[i],
-        };
+        self.stack[self.stack_len] = .{ .prev_current = self.current };
         self.stack_len += 1;
         self.current = slot;
-        self.overrides[i] = slot;
-        self.override_set[i] = true;
     }
 
     /// Pop. An empty stack is a no-op, not an error (PLAN.md §6).
@@ -301,48 +221,18 @@ pub const NamespaceTable = struct {
             return;
         }
         self.stack_len -= 1;
-        const entry = self.stack[self.stack_len];
-        self.current = entry.prev_current;
-        self.overrides[@intFromEnum(entry.kind)] = entry.prev_override;
-        self.override_set[@intFromEnum(entry.kind)] = entry.prev_override_set;
+        self.current = self.stack[self.stack_len].prev_current;
     }
 
-    /// Alt-screen entry saves the whole selection state, exit restores it
-    /// (PLAN.md §6). This is what stops an app that dies in alt-screen from
-    /// leaking its namespace into the shell underneath.
-    pub fn enterAltScreen(self: *NamespaceTable) void {
-        if (self.saved) return;
-        self.saved_stack = self.stack;
-        self.saved_stack_len = self.stack_len;
-        self.saved_current = self.current;
-        self.saved_overrides = self.overrides;
-        self.saved_override_set = self.override_set;
-        self.saved = true;
-        self.stack_len = 0;
-        self.current = 0;
-    }
-
-    pub fn exitAltScreen(self: *NamespaceTable) void {
-        if (!self.saved) return;
-        self.stack = self.saved_stack;
-        self.stack_len = self.saved_stack_len;
-        self.current = self.saved_current;
-        self.overrides = self.saved_overrides;
-        self.override_set = self.saved_override_set;
-        self.saved = false;
-    }
-
-    /// Release a namespace's name binding. The palette itself stays until the
-    /// pane dies: cells already drawn under it are still on screen and in
-    /// scrollback, and PLAN.md Decision #3 chose never-release over walking
-    /// history to bake them.
+    /// Stop applying a namespace: deselect it if it is current.
+    ///
+    /// The name stays bound to its slot and the colours stay with it. Cells
+    /// already drawn reference the slot, so unbinding the name would let a
+    /// later namespace take that slot and recolour history — PLAN.md Decision
+    /// #3 chose never-release over walking scrollback to bake them. `use` on
+    /// the same name therefore restores it exactly.
     pub fn drop(self: *NamespaceTable, name: []const u8) void {
         const slot = self.names.get(name) orelse return;
-        for (&self.overrides, 0..) |*o, i| {
-            if (o.* != slot) continue;
-            o.* = 0;
-            self.override_set[i] = false;
-        }
         if (self.current == slot) self.current = 0;
     }
 
@@ -364,6 +254,7 @@ pub const NamespaceTable = struct {
             return any;
         }
         const slot = self.names.get(name) orelse return false;
+        if (slot >= MAX_NS) return false;
         const p = self.palettes[slot] orelse return false;
         p.* = .{};
         return true;
@@ -561,7 +452,15 @@ pub const BLOB_VERSION: u8 = 1;
 /// A serialized blob larger than this is refused rather than stored. 255
 /// namespaces of 256 colours is ~262 KB; nothing legitimate approaches it, and
 /// SES should not hold an unbounded buffer per pane on a pane's say-so.
-pub const MAX_BLOB_LEN: usize = 64 * 1024;
+/// Upper bound on a serialized table.
+///
+/// Sized to stay under the frontend client's queued-push payload cap once the
+/// wire header is added (`ses_client_responses.MAX_QUEUED_PUSH_PAYLOAD`, which
+/// exists so a replay pipe write cannot block). A blob larger than that cap is
+/// dropped when the parked-palette answer races a synchronous request, and the
+/// request is fire-and-forget, so nothing retries: the pane reattaches with no
+/// colours. A compile-time check in that file keeps the two from drifting.
+pub const MAX_BLOB_LEN: usize = 56 * 1024;
 
 const OptionalRgb = struct { present: bool, value: RGB };
 
@@ -584,10 +483,7 @@ fn readOptionalRgb(blob: []const u8, off: *usize) ?OptionalRgb {
 }
 
 const StackEntry = struct {
-    kind: Auto = .default,
     prev_current: u8 = 0,
-    prev_override: u8 = 0,
-    prev_override_set: bool = false,
 };
 
 /// Default OSC number (PLAN.md Decision #5), adjacent to OSC 133.
@@ -644,7 +540,7 @@ pub const Applied = union(enum) {
 /// `set` carries up to 32 entries and copying that per sequence buys nothing.
 /// Every verb is idempotent, which is what makes replay after a detach safe
 /// (PLAN.md §6, replay contract).
-pub fn applyOsc(self: *NamespaceTable, params: []const u8, alt_screen: bool) Applied {
+pub fn applyOsc(self: *NamespaceTable, params: []const u8) Applied {
     var it = std.mem.splitScalar(u8, params, ';');
     const verb = it.next() orelse return .ignore;
 
@@ -670,8 +566,7 @@ pub fn applyOsc(self: *NamespaceTable, params: []const u8, alt_screen: bool) App
     if (eqlFold(verb, "use")) {
         // An unknown-but-valid name creates the namespace; an exhausted table
         // yields slot 0, which is "behave as before" rather than an error.
-        const slot = self.slotFor(name);
-        self.push(slot, autoKind(.command, alt_screen));
+        self.push(self.slotFor(name));
         return .changed;
     }
     if (eqlFold(verb, "drop")) {
@@ -820,8 +715,8 @@ test "the stack pushes, pops, and underflows to slot 0" {
     defer t.deinit();
     const a = t.slotFor("alpha");
     const b = t.slotFor("bravo");
-    t.push(a, .output);
-    t.push(b, .output);
+    t.push(a);
+    t.push(b);
     try std.testing.expectEqual(b, t.current);
     t.pop();
     try std.testing.expectEqual(a, t.current);
@@ -835,79 +730,10 @@ test "the feature flag forces slot 0 with the indirection compiled in" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     const slot = t.slotFor("prompt");
-    t.push(slot, .output);
+    t.push(slot);
     try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
     t.enabled = true;
     try std.testing.expectEqual(slot, t.currentSlot());
-}
-
-test "row zones map to the auto namespaces" {
-    try std.testing.expectEqual(Auto.prompt, autoKind(.prompt, false));
-    try std.testing.expectEqual(Auto.prompt, autoKind(.prompt_continuation, false));
-    try std.testing.expectEqual(Auto.prompt, autoKind(.input, false));
-    try std.testing.expectEqual(Auto.output, autoKind(.command, false));
-    try std.testing.expectEqual(Auto.default, autoKind(.unknown, false));
-}
-
-test "alt-screen overrides the row zone" {
-    for ([_]Zone{ .unknown, .prompt, .prompt_continuation, .input, .command }) |z| {
-        try std.testing.expectEqual(Auto.alt, autoKind(z, true));
-    }
-}
-
-test "auto slots are distinct, stable, and inert while disabled" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-
-    try std.testing.expectEqual(@as(u8, 0), t.autoSlot(.prompt));
-
-    t.setEnabled(true);
-    const p = t.autoSlot(.prompt);
-    const o = t.autoSlot(.output);
-    const a = t.autoSlot(.alt);
-    try std.testing.expect(p != 0 and o != 0 and a != 0);
-    try std.testing.expect(p != o and o != a and p != a);
-    // `default` is slot 0 and never gets one of its own.
-    try std.testing.expectEqual(@as(u8, 0), t.autoSlot(.default));
-
-    // Re-enabling must not renumber, or a palette set earlier lands elsewhere.
-    t.setEnabled(false);
-    t.setEnabled(true);
-    try std.testing.expectEqual(p, t.autoSlot(.prompt));
-
-    // Disabled, every row resolves as passthrough again.
-    t.setEnabled(false);
-    try std.testing.expectEqual(@as(u8, 0), t.autoSlot(.prompt));
-}
-
-test "repainting one namespace leaves the others alone" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    const p = t.autoSlot(.prompt);
-    const o = t.autoSlot(.output);
-    t.setEntry(p, 4, .{ .r = 0x77, .g = 0, .b = 0 });
-
-    try std.testing.expectEqual(@as(u8, 0x77), t.resolveIndex(p, 4).rgb.r);
-    try std.testing.expectEqual(@as(u8, 4), t.resolveIndex(o, 4).passthrough);
-    try std.testing.expectEqual(@as(u8, 4), t.resolveIndex(0, 4).passthrough);
-}
-
-test "enabling with no palette set changes nothing on screen" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-    // Every auto namespace, every index: still passthrough until someone
-    // patches an entry. This is the whole safety property of M3.
-    for ([_]Auto{ .default, .prompt, .output, .alt }) |kind| {
-        const slot = t.autoSlot(kind);
-        var i: u16 = 0;
-        while (i < 256) : (i += 1) {
-            const idx: u8 = @intCast(i);
-            try std.testing.expectEqual(idx, t.resolveIndex(slot, idx).passthrough);
-        }
-    }
 }
 
 test "set patches entries and creates the namespace" {
@@ -915,13 +741,13 @@ test "set patches entries and creates the namespace" {
     defer t.deinit();
     t.setEnabled(true);
 
-    try std.testing.expect(applyOsc(&t, "set;prompt;4=#331111;bg=#0a0a0a", false) == .changed);
+    try std.testing.expect(applyOsc(&t, "set;prompt;4=#331111;bg=#0a0a0a") == .changed);
     const slot = t.slotFor("prompt");
     try std.testing.expectEqual(@as(u8, 0x33), t.resolveIndex(slot, 4).rgb.r);
     try std.testing.expectEqual(@as(u8, 0x0a), t.palettes[slot].?.bg.?.r);
 
     // Accumulates rather than replacing (Decision #4).
-    try std.testing.expect(applyOsc(&t, "set;prompt;5=#00ff00", false) == .changed);
+    try std.testing.expect(applyOsc(&t, "set;prompt;5=#00ff00") == .changed);
     try std.testing.expectEqual(@as(u8, 0x33), t.resolveIndex(slot, 4).rgb.r);
     try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(slot, 5).rgb.g);
 }
@@ -938,13 +764,13 @@ test "colour forms, and malformed payloads are discarded" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     t.setEnabled(true);
-    try std.testing.expect(applyOsc(&t, "", false) == .ignore);
-    try std.testing.expect(applyOsc(&t, "wat;prompt;1=#000000", false) == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;prompt", false) == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;prompt;300=#000000", false) == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;prompt;1=notacolour", false) == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;" ++ "x" ** 33 ++ ";1=#000000", false) == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;Not Valid;1=#000000", false) == .ignore);
+    try std.testing.expect(applyOsc(&t, "") == .ignore);
+    try std.testing.expect(applyOsc(&t, "wat;prompt;1=#000000") == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;prompt") == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;prompt;300=#000000") == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;prompt;1=notacolour") == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;" ++ "x" ** 33 ++ ";1=#000000") == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;Not Valid;1=#000000") == .ignore);
 }
 
 test "names fold case and set is idempotent across replays" {
@@ -952,12 +778,13 @@ test "names fold case and set is idempotent across replays" {
     defer t.deinit();
     t.setEnabled(true);
 
-    _ = applyOsc(&t, "set;NVIM;1=#010203", false);
-    _ = applyOsc(&t, "set;nvim;1=#010203", false);
+    _ = applyOsc(&t, "set;NVIM;1=#010203");
+    _ = applyOsc(&t, "set;nvim;1=#010203");
     const slot = t.slotFor("nvim");
     try std.testing.expectEqual(@as(u8, 0x01), t.resolveIndex(slot, 1).rgb.r);
     // Two spellings, one namespace: replaying a stream must not burn slots.
-    try std.testing.expectEqual(@as(u16, MAX_NS - 1 - 3 - 1), t.freeSlots());
+    // One slot gone for `nvim`, and slot 0 is never handed out.
+    try std.testing.expectEqual(@as(u16, MAX_NS - 1 - 1), t.freeSlots());
 }
 
 test "set with * reaches every live namespace but not slot 0" {
@@ -965,94 +792,15 @@ test "set with * reaches every live namespace but not slot 0" {
     defer t.deinit();
     t.setEnabled(true);
 
-    _ = applyOsc(&t, "use;alpha", false);
-    _ = applyOsc(&t, "end", false);
-    try std.testing.expect(applyOsc(&t, "set;*;2=#123456", false) == .changed);
+    _ = applyOsc(&t, "use;alpha");
+    _ = applyOsc(&t, "end");
+    _ = applyOsc(&t, "set;beta;1=#000000");
+    try std.testing.expect(applyOsc(&t, "set;*;2=#123456") == .changed);
 
-    for ([_][]const u8{ "alpha", "prompt", "output", "alt" }) |n| {
+    for ([_][]const u8{ "alpha", "beta" }) |n| {
         try std.testing.expectEqual(@as(u8, 0x12), t.resolveIndex(t.slotFor(n), 2).rgb.r);
     }
     try std.testing.expectEqual(@as(u8, 2), t.resolveIndex(0, 2).passthrough);
-}
-
-test "use rebinds the zone an app owns, end restores it" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    const output_default = t.autoSlot(.output);
-    const alt_default = t.autoSlot(.alt);
-
-    _ = applyOsc(&t, "set;nvim;1=#ff0000", false);
-    _ = applyOsc(&t, "use;nvim", true);
-    // In alt-screen the app owns the whole grid, so `alt` moves, not `output`.
-    try std.testing.expectEqual(t.slotFor("nvim"), t.autoSlot(.alt));
-    try std.testing.expectEqual(output_default, t.autoSlot(.output));
-
-    _ = applyOsc(&t, "end", false);
-    try std.testing.expectEqual(alt_default, t.autoSlot(.alt));
-}
-
-test "a full stack drops the push instead of losing the restore point" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-    const base = t.autoSlot(.output);
-
-    var i: usize = 0;
-    while (i < STACK_DEPTH + 4) : (i += 1) _ = applyOsc(&t, "use;deep", false);
-    try std.testing.expectEqual(@as(u8, STACK_DEPTH), t.stack_len);
-
-    i = 0;
-    while (i < STACK_DEPTH) : (i += 1) t.pop();
-    try std.testing.expectEqual(base, t.autoSlot(.output));
-    try std.testing.expectEqual(@as(u8, 0), t.current);
-}
-
-test "alt-screen save/restore stops a crashed app leaking its namespace" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    _ = applyOsc(&t, "use;shell", false);
-    const shell_slot = t.autoSlot(.output);
-    try std.testing.expectEqual(t.slotFor("shell"), shell_slot);
-
-    t.enterAltScreen();
-    _ = applyOsc(&t, "use;nvim", true);
-    try std.testing.expectEqual(t.slotFor("nvim"), t.autoSlot(.alt));
-
-    // The app dies without ever sending `end`.
-    t.exitAltScreen();
-    try std.testing.expectEqual(shell_slot, t.autoSlot(.output));
-    try std.testing.expectEqual(t.auto_slots[@intFromEnum(Auto.alt)], t.autoSlot(.alt));
-}
-
-test "ask answers have, and drop releases the binding" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    const reply = applyOsc(&t, "ask", false);
-    try std.testing.expectEqual(@as(u32, DEFAULT_OSC), reply.have.osc);
-    try std.testing.expectEqual(@as(u16, MAX_NS - 1 - 3), reply.have.free);
-
-    _ = applyOsc(&t, "use;nvim", false);
-    try std.testing.expect(t.autoSlot(.output) == t.slotFor("nvim"));
-    _ = applyOsc(&t, "drop;nvim", false);
-    try std.testing.expectEqual(t.auto_slots[@intFromEnum(Auto.output)], t.autoSlot(.output));
-}
-
-test "a truncated replay leaves an undefined namespace at passthrough" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    // The `set` that defined it scrolled out of the ring; only `use` replayed.
-    _ = applyOsc(&t, "use;nvim", true);
-    const slot = t.autoSlot(.alt);
-    try std.testing.expect(slot != 0);
-    try std.testing.expectEqual(@as(u8, 42), t.resolveIndex(slot, 42).passthrough);
 }
 
 test "an exhausted table maps use to slot 0" {
@@ -1073,8 +821,8 @@ test "a palette round-trips through a blob" {
     var a = NamespaceTable.init(alloc);
     defer a.deinit();
     a.setEnabled(true);
-    _ = applyOsc(&a, "set;prompt;33=#ff00aa;0=#010203;255=#0a0b0c;bg=#111213", false);
-    _ = applyOsc(&a, "set;output;7=#445566", false);
+    _ = applyOsc(&a, "set;prompt;33=#ff00aa;0=#010203;255=#0a0b0c;bg=#111213");
+    _ = applyOsc(&a, "set;output;7=#445566");
 
     const blob = try a.serialize(alloc);
     defer alloc.free(blob);
@@ -1113,8 +861,8 @@ test "a truncated or garbled blob restores what it can and never faults" {
     var src = NamespaceTable.init(alloc);
     defer src.deinit();
     src.setEnabled(true);
-    _ = applyOsc(&src, "set;prompt;1=#ff0000;2=#00ff00", false);
-    _ = applyOsc(&src, "set;output;3=#0000ff", false);
+    _ = applyOsc(&src, "set;prompt;1=#ff0000;2=#00ff00");
+    _ = applyOsc(&src, "set;output;3=#0000ff");
     const blob = try src.serialize(alloc);
     defer alloc.free(blob);
 
@@ -1151,74 +899,23 @@ test "a truncated or garbled blob restores what it can and never faults" {
     try std.testing.expectEqual(@as(u8, 1), t.resolveIndex(t.slotFor("prompt"), 1).passthrough);
 }
 
-test "a blob never carries what a running program selected" {
-    const alloc = std.testing.allocator;
-    var a = NamespaceTable.init(alloc);
-    defer a.deinit();
-    a.setEnabled(true);
-    _ = applyOsc(&a, "set;nvim;1=#ff0000", false);
-    _ = applyOsc(&a, "use;nvim", true);
-
-    const blob = try a.serialize(alloc);
-    defer alloc.free(blob);
-
-    var b = NamespaceTable.init(alloc);
-    defer b.deinit();
-    b.setEnabled(true);
-    b.applySerialized(blob);
-    // The colours come back; the selection does not. An app that died holding
-    // a namespace must not have it reinstated under the shell that replaces it.
-    try std.testing.expectEqual(@as(u8, 0xff), b.resolveIndex(b.slotFor("nvim"), 1).rgb.r);
-    try std.testing.expectEqual(b.auto_slots[@intFromEnum(Auto.alt)], b.autoSlot(.alt));
-    try std.testing.expectEqual(@as(u8, 0), b.current);
-}
-
 test "reset forgets colours so cells fall back to the terminal theme" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     t.setEnabled(true);
 
-    _ = applyOsc(&t, "set;prompt;33=#ff00aa;bg=#111111", false);
+    _ = applyOsc(&t, "set;prompt;33=#ff00aa;bg=#111111");
     const p = t.slotFor("prompt");
     try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(p, 33).rgb.r);
 
-    try std.testing.expect(applyOsc(&t, "reset;prompt", false) == .changed);
+    try std.testing.expect(applyOsc(&t, "reset;prompt") == .changed);
     try std.testing.expectEqual(@as(u8, 33), t.resolveIndex(p, 33).passthrough);
     try std.testing.expect(t.palettes[p].?.bg == null);
 
     // The namespace itself survives, so a later `set` lands in the same slot.
     try std.testing.expectEqual(p, t.slotFor("prompt"));
     // Resetting one that was never coloured is a no-op, not an error.
-    try std.testing.expect(applyOsc(&t, "reset;never-used", false) == .ignore);
-}
-
-test "reset with * clears every namespace" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-    _ = applyOsc(&t, "set;*;7=#010203", false);
-    try std.testing.expectEqual(@as(u8, 0x01), t.resolveIndex(t.autoSlot(.prompt), 7).rgb.r);
-
-    try std.testing.expect(applyOsc(&t, "reset;*", false) == .changed);
-    for ([_]Auto{ .prompt, .output, .alt }) |kind| {
-        try std.testing.expectEqual(@as(u8, 7), t.resolveIndex(t.autoSlot(kind), 7).passthrough);
-    }
-}
-
-test "use default selects the ordinary palette, not the zone's namespace" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-    _ = applyOsc(&t, "set;alt;5=#ff0000", false);
-
-    // Without an explicit "an override is set" flag, slot 0 was
-    // indistinguishable from "no override" and this fell back to `alt`.
-    _ = applyOsc(&t, "use;default", true);
-    try std.testing.expectEqual(@as(u8, 0), t.autoSlot(.alt));
-    try std.testing.expectEqual(@as(u8, 5), t.resolveIndex(t.autoSlot(.alt), 5).passthrough);
-
-    _ = applyOsc(&t, "end", false);
-    try std.testing.expectEqual(t.auto_slots[@intFromEnum(Auto.alt)], t.autoSlot(.alt));
+    try std.testing.expect(applyOsc(&t, "reset;never-used") == .ignore);
 }
 
 test "a set larger than the sender chunk is accepted whole" {
@@ -1235,7 +932,7 @@ test "a set larger than the sender chunk is accepted whole" {
     for (0..200) |i| {
         try payload.writer(alloc).print(";{d}=#0000{x:0>2}", .{ i, i });
     }
-    try std.testing.expect(applyOsc(&t, payload.items, false) == .changed);
+    try std.testing.expect(applyOsc(&t, payload.items) == .changed);
 
     const p = t.slotFor("prompt");
     try std.testing.expectEqual(@as(u8, 199), t.resolveIndex(p, 199).rgb.b);
@@ -1263,8 +960,8 @@ test "applyOsc never faults on arbitrary bytes" {
             t.setEnabled(true);
             const payload = try std.mem.concat(alloc, u8, &.{ v, tail });
             defer alloc.free(payload);
-            _ = applyOsc(&t, payload, false);
-            _ = applyOsc(&t, payload, true);
+            _ = applyOsc(&t, payload);
+            _ = applyOsc(&t, payload);
             // Whatever happened, the table is still coherent and slot 0 still
             // passes through — the property every failure mode reduces to.
             try std.testing.expectEqual(@as(u8, 77), t.resolveIndex(0, 77).passthrough);
@@ -1295,37 +992,13 @@ test "a table of many namespaces still serializes inside the wire cap" {
     try std.testing.expect(blob.len < MAX_BLOB_LEN);
 }
 
-test "a namespace's default fg/bg are readable for the render path" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    // Nothing set: both null, so a cell naming no colour keeps the terminal's.
-    try std.testing.expect(t.defaultsFor(t.autoSlot(.prompt)).bg == null);
-    try std.testing.expect(t.defaultsFor(0).bg == null);
-
-    _ = applyOsc(&t, "set;prompt;bg=#112233;fg=#445566", false);
-    const d = t.defaultsFor(t.autoSlot(.prompt));
-    try std.testing.expectEqual(@as(u8, 0x11), d.bg.?.r);
-    try std.testing.expectEqual(@as(u8, 0x44), d.fg.?.r);
-
-    // Slot 0 never gains defaults: it is the terminal's own palette.
-    try std.testing.expect(t.defaultsFor(0).bg == null);
-    // A namespace that was never given any keeps inheriting.
-    try std.testing.expect(t.defaultsFor(t.autoSlot(.output)).bg == null);
-
-    // reset clears them along with the indexed entries.
-    _ = applyOsc(&t, "reset;prompt", false);
-    try std.testing.expect(t.defaultsFor(t.autoSlot(.prompt)).bg == null);
-}
-
 test "BlobReader yields exactly what serialize wrote" {
     const alloc = std.testing.allocator;
     var t = NamespaceTable.init(alloc);
     defer t.deinit();
     t.setEnabled(true);
-    _ = applyOsc(&t, "set;prompt;0=#010203;255=#0a0b0c;bg=#111213", false);
-    _ = applyOsc(&t, "set;output;7=#445566;fg=#778899", false);
+    _ = applyOsc(&t, "set;prompt;0=#010203;255=#0a0b0c;bg=#111213");
+    _ = applyOsc(&t, "set;output;7=#445566;fg=#778899");
 
     const blob = try t.serialize(alloc);
     defer alloc.free(blob);
@@ -1431,20 +1104,114 @@ test "ask is silent while the feature is off" {
     // Off: no reply at all. A client reads silence as "not supported" and
     // falls back, which is the truth — colours would resolve to nothing.
     try std.testing.expect(!t.enabled);
-    try std.testing.expect(applyOsc(&t, "ask", false) == .ignore);
+    try std.testing.expect(applyOsc(&t, "ask") == .ignore);
 
     // On: the capability answer, carrying the live OSC number.
     t.setEnabled(true);
-    const reply = applyOsc(&t, "ask", false);
+    const reply = applyOsc(&t, "ask");
     try std.testing.expectEqual(@as(u32, DEFAULT_OSC), reply.have.osc);
 
     // Off again, mid-session: still silent, even though the namespaces and
     // their colours are still there and would come back with the flag.
-    _ = applyOsc(&t, "set;prompt;3=#ff0000", false);
+    _ = applyOsc(&t, "set;prompt;3=#ff0000");
     t.setEnabled(false);
-    try std.testing.expect(applyOsc(&t, "ask", false) == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;prompt;4=#00ff00", false) == .changed);
+    try std.testing.expect(applyOsc(&t, "ask") == .ignore);
+    try std.testing.expect(applyOsc(&t, "set;prompt;4=#00ff00") == .changed);
     t.setEnabled(true);
     try std.testing.expectEqual(@as(u8, 0x00), t.resolveIndex(t.slotFor("prompt"), 4).rgb.r);
     try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(t.slotFor("prompt"), 4).rgb.g);
+}
+
+test "the stack drops a push past its depth instead of losing a restore point" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    const first = t.slotFor("first");
+    t.push(first);
+    var i: usize = 0;
+    while (i < STACK_DEPTH + 4) : (i += 1) {
+        var buf: [8]u8 = undefined;
+        t.push(t.slotFor(std.fmt.bufPrint(&buf, "n{d}", .{i}) catch unreachable));
+    }
+    // Unwinding must still reach the namespace pushed before the overflow.
+    i = 0;
+    while (i < STACK_DEPTH + 8) : (i += 1) t.pop();
+    try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
+}
+
+test "ask answers have while the feature is on" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    const reply = applyOsc(&t, "ask");
+    try std.testing.expect(reply == .have);
+    try std.testing.expectEqual(t.osc, reply.have.osc);
+    try std.testing.expect(reply.have.free > 0);
+}
+
+test "drop deselects the namespace but keeps its colours addressable" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    _ = applyOsc(&t, "set;work;3=#ff0000");
+    _ = applyOsc(&t, "use;work");
+    const slot = t.currentSlot();
+    try std.testing.expect(slot != 0);
+
+    _ = applyOsc(&t, "drop;work");
+    try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
+    // The colours stayed with the slot: cells already drawn under it are still
+    // on screen, so `use` must bring the same palette back.
+    _ = applyOsc(&t, "use;work");
+    try std.testing.expectEqual(slot, t.currentSlot());
+    try std.testing.expectEqual(RGB{ .r = 255, .g = 0, .b = 0 }, t.resolveIndex(slot, 3).rgb);
+}
+
+test "a blob carries colours but never what a program had selected" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+    _ = applyOsc(&t, "set;a;1=#010203");
+    _ = applyOsc(&t, "use;a");
+
+    const blob = try t.serialize(std.testing.allocator);
+    defer std.testing.allocator.free(blob);
+
+    var restored = NamespaceTable.init(std.testing.allocator);
+    defer restored.deinit();
+    restored.setEnabled(true);
+    restored.applySerialized(blob);
+
+    // Selection belongs to the running program, not to the parked state.
+    try std.testing.expectEqual(@as(u8, 0), restored.currentSlot());
+    const slot = restored.slotFor("a");
+    try std.testing.expectEqual(RGB{ .r = 1, .g = 2, .b = 3 }, restored.resolveIndex(slot, 1).rgb);
+}
+
+test "reset with * clears every namespace" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+    _ = applyOsc(&t, "set;a;1=#010203");
+    _ = applyOsc(&t, "set;b;1=#040506");
+
+    _ = applyOsc(&t, "reset;*");
+    try std.testing.expect(t.resolveIndex(t.slotFor("a"), 1) == .passthrough);
+    try std.testing.expect(t.resolveIndex(t.slotFor("b"), 1) == .passthrough);
+}
+
+test "a namespace's default fg and bg are readable for the render path" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+    _ = applyOsc(&t, "set;a;fg=#112233;bg=#445566");
+
+    const d = t.defaultsFor(t.slotFor("a"));
+    try std.testing.expectEqual(RGB{ .r = 0x11, .g = 0x22, .b = 0x33 }, d.fg.?);
+    try std.testing.expectEqual(RGB{ .r = 0x44, .g = 0x55, .b = 0x66 }, d.bg.?);
+    // Slot 0 has no defaults of its own: it is the terminal's own theme.
+    try std.testing.expect(t.defaultsFor(0).fg == null);
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const palette_mod = @import("palette.zig");
+const logging = @import("logging.zig");
 
 // Re-export ghostty-vt - this IS our terminal emulation
 pub const ghostty = @import("ghostty-vt");
@@ -157,22 +158,29 @@ pub const VT = struct {
         return self.terminal.screens.active_key == .alternate;
     }
 
-    /// The palette namespace the cursor is currently sitting in.
+    /// Stamp the pane's current namespace onto the cursor's style.
     ///
-    /// Read from the cursor's own row, the same OSC 133 zone the renderer uses
-    /// per row, so the cursor belongs to whatever region it is in rather than
-    /// to the pane as a whole.
-    pub fn cursorNamespace(self: *VT) u8 {
-        if (!self.ns_table.enabled) return 0;
-        const row = self.terminal.screens.active.cursor.page_pin.rowAndCell().row;
-        const zone: palette_mod.Zone = switch (row.semantic_prompt) {
-            .unknown => .unknown,
-            .prompt => .prompt,
-            .prompt_continuation => .prompt_continuation,
-            .input => .input,
-            .command => .command,
+    /// From here on every cell the program writes records which namespace was
+    /// selected when it was written, so recolouring one namespace repaints
+    /// exactly its own cells and leaves the rest of the screen alone. The tag
+    /// is opaque to the terminal engine (patches/ghostty-vt-ns.patch); it only
+    /// keeps styles distinct.
+    pub fn syncNamespaceStyle(self: *VT) void {
+        const screen = self.terminal.screens.active;
+        const ns = self.ns_table.currentSlot();
+        if (screen.cursor.style.flags.ns == ns) return;
+        screen.cursor.style.flags.ns = @truncate(ns);
+        screen.manualStyleUpdate() catch |err| {
+            logging.logError("vt", "failed to apply palette namespace to cursor style", err);
         };
-        return self.ns_table.autoSlot(palette_mod.autoKind(zone, self.inAltScreen()));
+    }
+
+    /// The palette namespace the cursor sits in.
+    ///
+    /// The pane's current selection: hexe does not decide where a namespace
+    /// applies, the program does, by selecting one and releasing it.
+    pub fn cursorNamespace(self: *VT) u8 {
+        return self.ns_table.currentSlot();
     }
 
     /// Get current working directory (from OSC 7)

@@ -118,8 +118,11 @@ def hexe_cli(*args):
 # the command line get asserted on without a cell ever being coloured.
 PAINT = os.path.join(WD, "paint.sh")
 with open(PAINT, "w") as fh:
-    fh.write("printf '\\033]133;A\\007'\n"
-             "printf 'PROMPTROW \\033[38;5;33mIN\\033[0m\\n'\n")
+    # The pane declares its own region: cells written between `use` and `end`
+    # carry the namespace, which is what has to survive the round trip.
+    fh.write("printf '\\033]1330;use;keep\\033\\\\'\n"
+             "printf 'NSROW \\033[38;5;33mIN\\033[0m\\n'\n"
+             "printf '\\033]1330;end\\033\\\\'\n")
 
 a = Term([HEXE, "mux", "new", "-n", "palp"], "fe-a")
 time.sleep(4.0)
@@ -129,15 +132,15 @@ if a.proc.poll() is not None:
 a.write(f"sh {PAINT}\r".encode())
 time.sleep(3.0)
 if not IDX33.search(a.repaint()):
-    fail("setup: the prompt row never rendered its indexed colour")
+    fail("setup: the namespaced row never rendered its indexed colour")
 
-res = hexe_cli("palette", "set", "--ns", "prompt", "33=#ff0000")
+res = hexe_cli("palette", "set", "--ns", "keep", "33=#ff0000")
 if res.returncode != 0:
     fail(f"palette set failed: {res.stderr!r}")
 time.sleep(1.5)
 if not RED.search(a.repaint()):
     fail("setup: the palette never applied in the first place")
-print("setup: prompt zone recoloured")
+print("setup: the namespace applied to the cells written under it")
 
 # --- 1. a clear-screen empties the pod's backlog -------------------------
 a.write(b"clear\r")
@@ -165,7 +168,7 @@ b.write(f"sh {PAINT}\r".encode())
 time.sleep(3.0)
 after_reattach = b.repaint()
 if not IDX33.search(after_reattach) and not RED.search(after_reattach):
-    fail("reattach: the prompt row is not on screen at all", after_reattach)
+    fail("reattach: the namespaced row is not on screen at all", after_reattach)
 if not RED.search(after_reattach):
     fail("the palette did not survive detach/reattach: replay is not carrying "
          "the definition", after_reattach)

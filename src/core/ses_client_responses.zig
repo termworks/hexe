@@ -12,6 +12,7 @@ const std = @import("std");
 const posix = std.posix;
 const logging = @import("logging.zig");
 const wire = @import("wire.zig");
+const palette_mod = @import("palette.zig");
 const frontend_client = @import("frontend_client.zig");
 
 const SesClient = frontend_client.SesClient;
@@ -122,6 +123,16 @@ pub fn drainPendingSessionStolen(self: *SesClient) bool {
 /// buffer).
 pub const MAX_QUEUED_PUSHES: usize = 64;
 pub const MAX_QUEUED_PUSH_PAYLOAD: usize = 60 * 1024;
+
+comptime {
+    // A parked palette is the largest replayable push, and it is requested
+    // fire-and-forget: if it does not fit here it is dropped and never asked
+    // for again. Keep the serialize bound below the transport bound.
+    const palette_frame = palette_mod.MAX_BLOB_LEN + @sizeOf(wire.PanePalette);
+    if (palette_frame > MAX_QUEUED_PUSH_PAYLOAD) {
+        @compileError("palette.MAX_BLOB_LEN + PanePalette exceeds MAX_QUEUED_PUSH_PAYLOAD");
+    }
+}
 
 pub fn queuePendingPush(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) void {
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);

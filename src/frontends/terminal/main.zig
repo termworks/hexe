@@ -418,6 +418,15 @@ pub fn run(terminal_args: TerminalArgs) !void {
     // Keep the legacy env var for shell integrations.
     _ = c.setenv("HEXE_MUX_SOCKET", "1", 1);
 
+    // Panes inherit this, so anything running in one — the CLI included — can
+    // build palette sequences on the number this session actually listens on
+    // rather than guessing the default.
+    {
+        var osc_buf: [16]u8 = undefined;
+        const osc_z = std.fmt.bufPrintZ(&osc_buf, "{d}", .{core.palette.default_osc}) catch "1330";
+        _ = c.setenv("HEXE_PALETTE_OSC", osc_z.ptr, 1);
+    }
+
     // Connect to ses daemon FIRST (start it if needed).
     var startup_attach = state.runtime.attachFrontend() catch |e| {
         debugLog("ses connect failed: {s}", .{@errorName(e)});

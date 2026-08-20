@@ -38,19 +38,8 @@ fn feedVtOutput(self: *Pane, data: []const u8) void {
             return;
         };
         processVtOutput(self, segment);
-        syncPaletteAltScreen(self);
         offset += segment_len;
     }
-}
-
-/// PLAN.md §6: an alt-screen switch saves and restores the namespace stack.
-/// Tracked by polling the mode after each feed rather than by sniffing
-/// `?1049h`, so a sequence split across two reads cannot miss the edge.
-fn syncPaletteAltScreen(self: *Pane) void {
-    const alt = self.vt.inAltScreen();
-    if (alt == self.palette_alt_screen) return;
-    self.palette_alt_screen = alt;
-    if (alt) self.vt.ns_table.enterAltScreen() else self.vt.ns_table.exitAltScreen();
 }
 
 /// Split `data` into OSC sequences and everything else, feeding the rest to the
@@ -326,7 +315,37 @@ fn beginOsc(self: *Pane, c1: bool) void {
     }
 }
 
+/// Controls that cannot occur inside an OSC string. Their arrival means the
+/// emitter never finished the sequence — a program that died mid-write, or a
+/// `printf` missing its terminator.
+fn abortsOsc(b: u8) bool {
+    return switch (b) {
+        0x18, 0x1a, 0x0a, 0x0d => true,
+        else => false,
+    };
+}
+
+/// Leave capture without interpreting what was collected.
+///
+/// Capture diverts every byte away from the VT, so staying in it after a
+/// sequence that can no longer terminate blinds the pane for the rest of its
+/// life: the prompt, all output, everything. Real terminals abandon the OSC
+/// instead, and so does this.
+fn abandonOsc(self: *Pane) void {
+    self.osc_in_progress = false;
+    self.osc_pending_esc = false;
+    self.osc_prev_esc = false;
+    self.osc_discarding = false;
+    self.osc_buf.clearRetainingCapacity();
+}
+
 fn appendOscByte(self: *Pane, b: u8) void {
+    if (abortsOsc(b)) {
+        abandonOsc(self);
+        feedVtOutput(self, &[_]u8{b});
+        return;
+    }
+
     // BEL or ESC \ only. 0x9c (C1 ST) is a UTF-8 continuation byte — accepting
     // it truncates any OSC whose payload carries non-ASCII text, such as a
     // title or a hyperlink URI containing U+2700..U+273F.
@@ -339,6 +358,9 @@ fn appendOscByte(self: *Pane, b: u8) void {
             self.osc_buf.clearRetainingCapacity();
         };
         if (self.osc_buf.items.len > core.constants.Sizes.max_clipboard_osc_bytes) {
+            // Keep consuming, without keeping. Leaving capture here would spill
+            // the rest of the payload onto the screen as text; the abort rule
+            // above is what guarantees this cannot last forever.
             self.osc_discarding = true;
             self.osc_buf.clearRetainingCapacity();
         }
@@ -391,9 +413,11 @@ fn finishOsc(self: *Pane) void {
 /// to 32 entries that are not worth copying through an Action.
 fn consumePaletteOsc(self: *Pane, seq: []const u8) void {
     const params = oscParams(seq) orelse return;
-    switch (core.palette.applyOsc(&self.vt.ns_table, params, self.vt.inAltScreen())) {
+    switch (core.palette.applyOsc(&self.vt.ns_table, params)) {
         .ignore => {},
         .changed => {
+            // Selection changed: from here on, cells carry the new namespace.
+            self.vt.syncNamespaceStyle();
             self.vt.invalidateRenderState();
             self.palette_dirty = true;
         },

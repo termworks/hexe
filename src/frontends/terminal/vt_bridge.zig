@@ -54,14 +54,10 @@ pub fn drawRenderState(
     syncKittyImages(vt, vx, stdout, arena);
 
     const ns_table = &vt.ns_table;
-    const alt_screen = vt.inAltScreen();
 
     for (0..available_rows) |yi| {
         const y: u16 = @intCast(yi);
         if (y >= win.height) break;
-
-        const row_ns: u8 = rowNamespace(ns_table, row_pins[yi], alt_screen);
-        const row_defaults = ns_table.defaultsFor(row_ns);
 
         const cells_slice = row_cells[yi].slice();
         const raw_cells = cells_slice.items(.raw);
@@ -74,6 +70,12 @@ pub fn drawRenderState(
             if (x >= win.width) break;
 
             const raw = raw_cells[col];
+
+            // The namespace is carried by the cell itself, stamped when it was
+            // written. hexe never infers it from what is on screen: a program
+            // selects a namespace, and the cells it writes remember it.
+            const cell_ns: u8 = if (raw.style_id != 0) styles_arr[col].flags.ns else 0;
+            const cell_defaults = ns_table.defaultsFor(cell_ns);
 
             // Skip spacer tails (prise: server.zig:930-933)
             if (raw.wide == .spacer_tail) {
@@ -91,7 +93,7 @@ pub fn drawRenderState(
             // so the skip still applies everywhere else — which is everywhere,
             // until someone sets a background.
             if (!is_direct_color and raw.style_id == 0 and !raw.hyperlink and
-                (cp == 0 or cp == ' ') and row_defaults.bg == null)
+                (cp == 0 or cp == ' ') and cell_defaults.bg == null)
             {
                 col += 1;
                 continue;
@@ -109,9 +111,9 @@ pub fn drawRenderState(
 
             // Resolve style
             const style = if (raw.style_id != 0)
-                convertStyle(styles_arr[col], raw, is_direct_color, ns_table, row_ns, row_defaults)
+                convertStyle(styles_arr[col], raw, is_direct_color, ns_table, cell_ns, cell_defaults)
             else
-                convertDefaultStyle(raw, is_direct_color, row_defaults);
+                convertDefaultStyle(raw, is_direct_color, cell_defaults);
 
             const link = resolveCellLink(arena, row_pins[yi], @intCast(col), raw);
 
@@ -428,21 +430,15 @@ fn writeImageCellPreserve(win: vaxis.Window, col: u16, row: u16, placement: vaxi
     win.writeCell(col, row, .{ .image = placement });
 }
 
-/// Namespace slot for a row, from the OSC 133 zone ghostty already stores on it
-/// (PLAN.md M3). Read once per row, not per cell.
-///
-/// Row zones survive scrollback and reflow, which is what lets a repaint reach
-/// history as well as the screen without hexe storing anything per cell.
-fn rowNamespace(ns_table: *const NamespaceTable, pin: ghostty.PageList.Pin, alt_screen: bool) u8 {
-    if (!ns_table.enabled) return 0;
-    const zone: core.palette.Zone = switch (pin.rowAndCell().row.semantic_prompt) {
-        .unknown => .unknown,
+/// The OSC 133 zone a row carries a mark for, or null when it carries none.
+fn rowZone(pin: ghostty.PageList.Pin) ?core.palette.Zone {
+    return switch (pin.rowAndCell().row.semantic_prompt) {
+        .unknown => null,
         .prompt => .prompt,
         .prompt_continuation => .prompt_continuation,
         .input => .input,
         .command => .command,
     };
-    return ns_table.autoSlot(core.palette.autoKind(zone, alt_screen));
 }
 
 /// Indexed colour → vaxis colour, through the namespace table.
