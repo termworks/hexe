@@ -164,6 +164,34 @@ anchor = "  status = {\n    enabled = true,\n"
 if anchor not in init:
     print("SKIP: could not find the statusbar config to point at the painter")
     raise SystemExit(0)
+def strip_status_zones(text):
+    """Remove a `zones = { ... }` block and its `shrink` from the status table.
+
+    The bar is pointed at the fake painter by injecting `view`, and `view` and
+    `zones` are mutually exclusive - a config carrying both is a hard error, so
+    a real config that has moved to zones would otherwise fail to load and the
+    bar would never come up at all.
+    """
+    i = text.find("zones = {")
+    if i >= 0:
+        depth, j = 0, text.index("{", i)
+        while j < len(text):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    j += 1
+                    break
+            j += 1
+        while j < len(text) and text[j] in ",\r\n \t":
+            j += 1
+        text = text[:i] + text[j:]
+    return re.sub(r"^\s*shrink\s*=\s*\{[^}]*\}\s*,?.*$", "", text, flags=re.M)
+
+
+init = strip_status_zones(init)
+
 init = init.replace(
     anchor,
     anchor + '''    view = "smoke",
