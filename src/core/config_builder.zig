@@ -55,6 +55,13 @@ pub const MuxConfigBuilder = struct {
     selection_color: ?u8 = null,
     palette_namespaces: ?bool = null,
     palette_osc: ?u32 = null,
+
+    // Name dictionaries. Owned here and handed to the built Config, which
+    // outlives the builder.
+    names_session: ?[][]const u8 = null,
+    names_pane: ?[][]const u8 = null,
+    names_order: ?config.names_mod.Order = null,
+    names_suffix: ?[]const u8 = null,
     mouse_selection_override_mods: ?u8 = null,
 
     // Keybindings
@@ -181,6 +188,10 @@ pub const MuxConfigBuilder = struct {
         if (self.selection_color) |v| result.selection_color = v;
         if (self.palette_namespaces) |v| result.palette_namespaces = v;
         if (self.palette_osc) |v| result.palette_osc = v;
+        if (self.names_session) |v| result.names.session = v;
+        if (self.names_pane) |v| result.names.pane = v;
+        if (self.names_order) |v| result.names.order = v;
+        if (self.names_suffix) |v| result.names.suffix = try self.allocator.dupe(u8, v);
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 
         // Apply binds (deep copy to prevent use-after-free)

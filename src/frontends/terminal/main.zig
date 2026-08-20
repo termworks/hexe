@@ -436,6 +436,11 @@ pub fn run(terminal_args: TerminalArgs) !void {
     defer startup_attach.deinit(allocator);
     debugLog("ses connected (started={})", .{startup_attach.started_daemon});
 
+    // Before any pane exists. SES names panes and never reads the config, so a
+    // dictionary that arrives on the first timer tick arrives one pane too late
+    // and the session's opening pane is named from the built-in pool instead.
+    state.syncNamePool();
+
     // If server resolved to a different name (collision avoidance), update state.
     if (startup_attach.name_change) |*change| {
         debugLog("session name resolved from '{s}' to '{s}'", .{ change.previous_name, change.resolved_name });

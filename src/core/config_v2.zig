@@ -219,6 +219,7 @@ const ROOT_FIELDS = [_]Field{
     .{ .name = "status", .kind = .table },
     .{ .name = "pop", .kind = .table },
     .{ .name = "ses", .kind = .table },
+    .{ .name = "names", .kind = .table },
     // Written by hexe.setup itself, not by the user.
     .{ .name = "__hexe_type", .kind = .any },
 };

@@ -131,6 +131,7 @@ SMOKES := \
 	smoke_palette_persist.py \
 	smoke_palette_fuzz.py \
 	smoke_palette_cells.py \
+	smoke_names.py \
 	smoke_status_zones.py
 
 smoke: smoke-clean

@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const names_mod = @import("names.zig");
 const posix = std.posix;
 const lua_runtime = @import("lua_runtime.zig");
 const LuaRuntime = lua_runtime.LuaRuntime;
@@ -527,6 +528,15 @@ pub const SesConfig = struct {
     }
 };
 
+pub const NamesConfig = struct {
+    /// Null means "use the built-in pool for this surface".
+    session: ?[]const []const u8 = null,
+    pane: ?[]const []const u8 = null,
+    order: names_mod.Order = .random,
+    /// Appended, with `%d` substituted, once every entry is taken.
+    suffix: []const u8 = "-%d",
+};
+
 pub const Config = struct {
     pub const KeyMod = enum {
         alt,
@@ -726,6 +736,11 @@ pub const Config = struct {
     // baseline with it enabled.
     palette_namespaces: bool = true,
     palette_osc: u32 = 1330,
+
+    /// Where names come from. Absent dictionaries mean the built-in pools:
+    /// Greek for sessions, NATO for panes. Anything richer is produced by a
+    /// command at config load, by whoever can also draw it.
+    names: NamesConfig = .{},
 
     // Selection color (palette index, default 240)
     selection_color: u8 = 240,
