@@ -580,7 +580,7 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
                             pane.pokemon_state.hide();
                         } else {
                             // Get the pane's Pokemon name from pane_names cache
-                            const pokemon_name = state.paneName(pane.uuid) orelse "pikachu";
+                            const pokemon_name = pane.pokemon_state.sprite_name orelse state.paneName(pane.uuid) orelse "pikachu";
 
                             pane.pokemon_state.loadSprite(pokemon_name, rollShiny(state)) catch {
                                 // Fallback to pikachu if loading fails
@@ -598,7 +598,7 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
                         pane.pokemon_state.hide();
                     } else {
                         // Get the pane's Pokemon name from pane_names cache
-                        const pokemon_name = state.paneName(pane.uuid) orelse "pikachu";
+                        const pokemon_name = pane.pokemon_state.sprite_name orelse state.paneName(pane.uuid) orelse "pikachu";
 
                         pane.pokemon_state.loadSprite(pokemon_name, rollShiny(state)) catch {
                             pane.pokemon_state.loadSprite("pikachu", rollShiny(state)) catch |err| {

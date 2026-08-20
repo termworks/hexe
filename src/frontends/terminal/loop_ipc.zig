@@ -1152,6 +1152,12 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
 }
 
 fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
+    // The sprite id is the name the pane was born with, recorded here on the
+    // first name it is given and never afterwards. Renaming a pane changes what
+    // it is called, not what it shows. Recorded even when the widget is off,
+    // because the painter asks for the same id (region_render.zig).
+    recordPaneSprite(state, uuid, name);
+
     if (!state.pop_config.widgets.pokemon.enabled) return;
 
     // If pokemon widget is enabled by default, load the sprite only if not
@@ -1159,9 +1165,10 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
     for (state.view.float_views.items) |pane| {
         const uuid_match = std.mem.eql(u8, pane.uuid[0..], uuid[0..]);
         if (uuid_match and pane.pokemon_initialized and
-            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_name == null)
+            !pane.pokemon_state.manually_toggled and !pane.pokemon_state.show_sprite)
         {
-            pane.pokemon_state.loadSprite(name, rollShiny(state)) catch |err| {
+            const id = pane.pokemon_state.sprite_name orelse name;
+            pane.pokemon_state.loadSprite(id, rollShiny(state)) catch |err| {
                 core.logging.logError("terminal", "failed to load float sprite after pane-name update", err);
             };
         }
@@ -1170,14 +1177,31 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
     var split_iter = state.currentLayout().splits.valueIterator();
     while (split_iter.next()) |pane| {
         if (std.mem.eql(u8, pane.*.uuid[0..], uuid[0..]) and pane.*.pokemon_initialized and
-            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_name == null)
+            !pane.*.pokemon_state.manually_toggled and !pane.*.pokemon_state.show_sprite)
         {
-            pane.*.pokemon_state.loadSprite(name, rollShiny(state)) catch |err| {
+            const id = pane.*.pokemon_state.sprite_name orelse name;
+            pane.*.pokemon_state.loadSprite(id, rollShiny(state)) catch |err| {
                 core.logging.logError("terminal", "failed to load split sprite after pane-name update", err);
             };
         }
     }
     state.needs_render = true;
+}
+
+fn recordPaneSprite(state: *State, uuid: [32]u8, name: []const u8) void {
+    for (state.view.float_views.items) |pane| {
+        if (!std.mem.eql(u8, pane.uuid[0..], uuid[0..])) continue;
+        pane.pokemon_state.recordSprite(name) catch |err| {
+            core.logging.logError("terminal", "failed to record float sprite id", err);
+        };
+    }
+    var it = state.currentLayout().splits.valueIterator();
+    while (it.next()) |pane| {
+        if (!std.mem.eql(u8, pane.*.uuid[0..], uuid[0..])) continue;
+        pane.*.pokemon_state.recordSprite(name) catch |err| {
+            core.logging.logError("terminal", "failed to record split sprite id", err);
+        };
+    }
 }
 
 fn skipPayload(fd: posix.fd_t, len: u32, buffer: []u8) void {

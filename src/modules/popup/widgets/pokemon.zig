@@ -49,6 +49,17 @@ pub const PokemonState = struct {
         self.show_sprite = true;
     }
 
+    /// Record which sprite this pane shows, without making it visible.
+    ///
+    /// Called once with the name the pane was created under. The sprite is a
+    /// property of the pane's birth, not of what it is currently called, so a
+    /// later rename must not move the picture. Never overwrites: the first
+    /// name wins for the life of the pane.
+    pub fn recordSprite(self: *PokemonState, name: []const u8) !void {
+        if (self.sprite_name != null) return;
+        self.sprite_name = try self.allocator.dupe(u8, name);
+    }
+
     pub fn toggle(self: *PokemonState) void {
         self.show_sprite = !self.show_sprite;
         self.manually_toggled = true;
