@@ -33,6 +33,7 @@ reading twice.
 |---|---|
 | [Painting](regions.md) | the bar, titles, sprites and popups are drawn by an external painter |
 | [Shell integration](prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
+| [Names](names.md) | where session and pane names come from, and how to bring your own |
 | [Palette protocol](palette.md) | a program claims its own 256-colour table for the output it writes |
 
 ## Configuring it

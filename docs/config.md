@@ -132,6 +132,7 @@ The sections `hexe.setup` accepts:
 | `theme` | `hexe.theme({ colors = …, styles = …, chars = … })`; `hexe.style("name")` resolves one |
 | `keys` | a list of `hexe.key(...)` — see [keybindings](keybindings.md) |
 | `mux` | frontend behaviour: `confirm`, `mouse`, `floats`, `splits`, `selection_color` |
+| `names` | `session` / `pane` dictionaries, `order`, `suffix` — see [names](names.md) |
 | `status` | `view` or `zones` / `shrink` / `socket` / `refresh_ms` — see [painting](regions.md) |
 | `pop` | notification, confirm and chooser styling, and the overlay widgets |
 | `ses` | `layouts`, the shape a session starts with — see [sessions](sessions.md) |
