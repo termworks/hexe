@@ -187,25 +187,30 @@ if fe.poll() is not None:
 
 
 def responsive(tag, timeout=8.0, clear=False):
-    """Round-trip a command through the pane's shell.
+    """Did the pane's shell actually run a command?
+
+    Asserted through a file the shell creates, not through the screen. The
+    rendered frame interleaves and re-wraps, so a marker can arrive split across
+    cells ("FUZZB6ASE") and a scan of the raw bytes then reports a working pane
+    as dead. The filesystem has no such ambiguity.
 
     `clear` first sends an interrupt and a bare newline. Some of the corpus is
-    made of capability queries, and a query gets an answer: hexe writes it into
-    the pane's INPUT, exactly as any terminal answers DSR or OSC 4. Two hundred
-    queries means two hundred answers sitting in the shell's line buffer, so the
-    next command line is garbage — through no fault of the parser. Clearing it
-    is what a user does, and what the property under test actually needs: that
-    the pane RECOVERS, rather than being blinded for good.
+    capability queries, and a query gets an answer: hexe writes it into the
+    pane's INPUT, exactly as any terminal answers DSR or OSC 4. Those answers sit
+    in the shell's line buffer, so the next command line is garbage through no
+    fault of the parser. Clearing is what a user does, and what the property
+    under test needs: that the pane RECOVERS rather than being blinded for good.
     """
+    marker = os.path.join(WD, f"alive-{tag}")
+    if os.path.exists(marker):
+        os.unlink(marker)
     if clear:
         os.write(master, b"\x03\n")
         time.sleep(1.5)
-    del seen[:]
-    os.write(master, f"echo {tag}\n".encode())
+    os.write(master, f"touch {marker}\n".encode())
     deadline = time.time() + timeout
     while time.time() < deadline:
-        # Twice: once echoed as it is typed, once printed by the shell that ran it.
-        if bytes(seen).count(tag.encode()) >= 2:
+        if os.path.exists(marker):
             return True
         time.sleep(0.2)
     return False
