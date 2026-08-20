@@ -22,8 +22,9 @@ import sys
 # which number is an agreement between programs, not something hexe arbitrates.
 #
 # Slot 0 is what cells that selected nothing resolve against, so it is left
-# alone here and used as the control.
-BANDS = [(1, "slot 1"), (2, "slot 2"), (3, "slot 3")]
+# alone here and used as the control. Slot 1 is hexe's own chrome and cannot be
+# claimed by a program, so applications start at 2.
+BANDS = [(2, "slot 2"), (3, "slot 3"), (4, "slot 4")]
 
 # Which colour indexes each band prints. The same set every time, so a band that
 # changes colour changed because of its namespace and nothing else.

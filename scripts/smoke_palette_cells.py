@@ -32,7 +32,15 @@ os.makedirs(os.path.join(CF, "hexe"), exist_ok=True)
 with open(os.path.join(CF, "hexe", "init.lua"), "w") as fh:
     fh.write(
         "local hexe = require('hexe')\n"
-        "return hexe.setup({ palette = { namespaces = true } })\n"
+        "return hexe.setup({\n"
+        "  palette = { namespaces = true },\n"
+        # A split draws borders, which is chrome hexe paints itself. Bound here
+        # so the test does not depend on whichever defaults are configured.
+        "  keys = {\n"
+        "    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.s },\n"
+        "             hexe.action.split.vertical()),\n"
+        "  },\n"
+        "})\n"
     )
 
 env = os.environ.copy()
@@ -203,6 +211,45 @@ if i < 0 or not RECOLOURED.search(frame[i:i + 60]):
 if styling_of(frame, b"AFTER") != "indexed":
     fail("recolouring one namespace changed cells that never belonged to it", frame)
 print("cells: recolouring a namespace repaints exactly its own cells")
+
+# Slot 1 is hexe's own chrome, not a pane namespace. Setting it must recolour
+# what HEXE draws -- the status bar, borders, float titles -- and nothing a
+# program wrote. `use;1` from a pane must be refused, or an application could
+# tag its output as chrome and be dragged along by a theme change.
+CHROME = os.path.join(WD, "chrome.sh")
+with open(CHROME, "w") as fh:
+    fh.write(
+        # An application trying to claim the chrome slot, then printing.
+        "printf '\033]1330;use;1\033\\'\n"
+        "printf 'CLAIMED \033[38;5;33mC\033[0m\n'\n"
+        "printf '\033]1330;end\033\\'\n"
+    )
+os.write(master, f"sh {CHROME}\r".encode())
+time.sleep(3.0)
+frame = repaint()
+if b"CLAIMED" not in frame:
+    fail("CLAIMED never reached the screen", frame)
+if styling_of(frame, b"CLAIMED") != "indexed":
+    fail("a pane claimed hexe's reserved slot: its output resolved through the "
+         "chrome namespace, so theming the chrome would drag it along", frame)
+print("chrome: a pane cannot claim hexe's reserved slot")
+
+# Split so hexe has borders to draw, then theme the index they use. Passive
+# borders are palette 237 by default (config.zig BorderColor), so a truecolor
+# emission of that value means chrome resolved through the reserved slot.
+os.write(master, b"\x1b\x13")
+time.sleep(2.5)
+r = subprocess.run([HEXE, "palette", "set", "--ns", "1", "237=#123456"],
+                   env=env, cwd=WD, capture_output=True, text=True)
+if r.returncode != 0:
+    fail(f"`palette set --ns 1` failed: rc={r.returncode} {(r.stderr or r.stdout)[:200]}")
+time.sleep(2.0)
+frame = repaint()
+CHROME_RGB = re.compile(rb"[34]8[:;]2[:;]{0,2}18[:;]52[:;]86")
+if not CHROME_RGB.search(frame):
+    fail("theming hexe's slot changed nothing on screen: chrome is not resolving "
+         "through the reserved namespace", frame)
+print("chrome: theming slot 1 recolours what hexe draws")
 
 if fe.poll() is not None:
     fail("frontend died during the checks")

@@ -44,6 +44,9 @@ Three consequences worth internalising before you write a client:
   using the protocol at all. Unlike the others it is not yours to claim: setting
   it recolours the ordinary indexed palette for the whole pane, which is a
   legitimate thing to want and a rude thing to do by accident.
+- **Slot 1 belongs to the terminal.** `use;1` is refused, so you cannot tag your
+  output as chrome; `set;1` is accepted, because that is how the chrome gets
+  themed. Your slots start at **2**.
 
 Colour indexes are unchanged: all 256 stay available in every namespace, and
 nothing is reserved.
@@ -93,7 +96,7 @@ One OSC number, verb first. Default **1330**.
 
 | Element | Rule |
 |---|---|
-| **Slot** | decimal `0`–`31`. `*` in `set`/`reset` addresses every slot already in use, slot 0 included |
+| **Slot** | decimal `0`–`31`. `0` is the ordinary palette, `1` is the terminal's own chrome, `2`–`31` are yours. `*` in `set`/`reset` addresses every slot already in use except `1` |
 | **Key** | decimal `0`–`255`, or `fg`, `bg`, `cursor` |
 | **Colour** | `#rrggbb`, `rrggbb`, or `rgb:rr/gg/bb` (1–4 hex digits per component, scaled to 8 bits) |
 | **Terminator** | `ST` (`ESC \`) or `BEL` (`\a`) |
@@ -122,7 +125,8 @@ otherwise an overflowing app leaves its colours behind permanently.
 
 **A slot outside 0–31 selects nothing** and is ignored. It must never be folded
 onto a live slot: `use 40` quietly becoming `use 8` would paint your cells with
-whatever slot 8 belongs to.
+whatever slot 8 belongs to. `use 1` is ignored for the same reason — it is the
+terminal's.
 
 **`end`** on an empty stack is a no-op, not an error. Send it freely.
 
@@ -145,7 +149,7 @@ whatever slot 8 belongs to.
 
 | Limit | Value | Why |
 |---|---|---|
-| Slots per pane | **0–31** | hexe stores the tag in bits that were already padding in the cell's style, so it costs no memory and keeps the patch to one line; see [the patch](../patches/ghostty-vt-ns.patch) |
+| Slots you may claim | **2–31** | hexe stores the tag in bits that were already padding in the cell's style, so it costs no memory and keeps the patch to one line; see [the patch](../patches/ghostty-vt-ns.patch) |
 | Stack depth | 16 (spec floor 8) | |
 | Entries per `set` | 32 recommended | sender-side advice, not a receiver limit |
 
@@ -153,6 +157,20 @@ There is nothing to exhaust: slots are addressed, not allocated. Two programs
 that pick the same number share it — that is the cost of dropping names, and it
 is a coordination problem between those programs, not something the terminal can
 resolve for them.
+
+### Slot 1 — the terminal's own chrome
+
+hexe draws borders, the status bar, float titles, popups, overlays,
+notifications and selection itself, and resolves all of it through slot 1. So:
+
+```sh
+hexe palette set --ns 1 237=#123456     # recolour hexe's own furniture
+```
+
+It is not a per-pane namespace. hexe draws its chrome once, across every pane,
+so slot 1 lives process-wide: setting it from any pane themes all of it, and it
+is not carried in a pane's parked palette. `set;*` skips it deliberately — a
+program theming "everything" means its own colours, not the terminal's.
 
 ---
 

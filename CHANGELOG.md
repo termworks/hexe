@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.4.1] - 2026-08-20
+
+### <!-- 0 -->⛰️  Features
+
+- Reserve slot 1 for hexe's own chrome
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Issue n cleanup
+
+### <!-- 3 -->📚 Documentation
+
+- Slot 0 default, 1 hexe, 2+ apps
+
+### <!-- 6 -->🧪 Testing
+
+- Check liveness by file, not by frame
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Drop the fmt+test workflow
+- Vendor patched ghostty before building
+
+### Build
+
+- Refuse a vendored ghostty with no git of its own
+
 ## [0.4.0] - 2026-08-20
 
 ### <!-- 0 -->⛰️  Features
