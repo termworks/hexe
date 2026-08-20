@@ -18,16 +18,24 @@
 
 const std = @import("std");
 
-/// Slot numbers fit a u8; 0 is reserved for the pane's ordinary palette.
-/// Slots must fit the tag carried on each cell, which is 5 bits of ghostty's
-/// style flags (patches/ghostty-vt-ns.patch). Widening it to a byte grew the
-/// style struct and cost ~19MB resident per frontend, which is not worth 224
-/// more namespaces than any pane uses.
+/// Namespaces are addressed by number, 0..MAX_NS-1.
+///
+/// The number IS the address: it is exactly what each cell records, so there is
+/// no name-to-slot mapping that can be lost, rebuilt in a different order, or
+/// exhausted — any of which would silently repoint existing cells at another
+/// program's colours. Callers agree among themselves on what a number means;
+/// hexe assigns meaning to none of them.
+///
+/// Slot 0 is what a cell that selected nothing resolves against. Setting it
+/// recolours the ordinary indexed palette for this pane.
+///
+/// The bound is the tag carried on each cell: 5 bits of ghostty's style flags
+/// (patches/ghostty-vt-ns.patch), which are bits that were already padding.
+/// Widening it to a byte would grow the style struct from 14 to 16 and needs
+/// explicit equality and hashing changes, for 224 more slots than a pane uses.
 pub const MAX_NS = 32;
 /// PLAN.md §3.2: the spec floor is 8.
 pub const STACK_DEPTH = 16;
-/// Names are `[a-z0-9_.-]{1,32}`, case-insensitive (PLAN.md §6).
-pub const MAX_NAME_LEN = 32;
 
 pub const RGB = struct { r: u8, g: u8, b: u8 };
 
@@ -59,22 +67,11 @@ pub const Palette = struct {
 
 /// A name is valid if it matches `[a-z0-9_.-]{1,32}`. Case is folded by the
 /// caller; `default` is reserved for slot 0.
-pub fn validName(name: []const u8) bool {
-    if (name.len == 0 or name.len > MAX_NAME_LEN) return false;
-    for (name) |ch| {
-        const ok = (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or
-            ch == '_' or ch == '.' or ch == '-';
-        if (!ok) return false;
-    }
-    return true;
-}
-
 pub const NamespaceTable = struct {
     allocator: std.mem.Allocator,
     /// Lazily allocated: a populated namespace is 256*3 B, and a typical pane
     /// holds a handful.
     palettes: [MAX_NS]?*Palette = .{null} ** MAX_NS,
-    names: std.StringHashMapUnmanaged(u8) = .empty,
     stack: [STACK_DEPTH]StackEntry = .{StackEntry{}} ** STACK_DEPTH,
     stack_len: u8 = 0,
     current: u8 = 0,
@@ -103,10 +100,28 @@ pub const NamespaceTable = struct {
         for (self.palettes) |maybe| {
             if (maybe) |p| self.allocator.destroy(p);
         }
-        var it = self.names.iterator();
-        while (it.next()) |entry| self.allocator.free(entry.key_ptr.*);
-        self.names.deinit(self.allocator);
         self.* = .{ .allocator = self.allocator };
+    }
+
+    /// Parse a slot from the wire, or null if it is not one.
+    pub fn parseSlot(text: []const u8) ?u8 {
+        if (text.len == 0 or text.len > 2) return null;
+        const n = std.fmt.parseUnsigned(u16, text, 10) catch return null;
+        if (n >= MAX_NS) return null;
+        return @intCast(n);
+    }
+
+    /// The palette for `slot`, allocating on first use.
+    ///
+    /// Slot 0 allocates like any other: setting it is how a caller recolours
+    /// the ordinary indexed palette for everything that selected nothing.
+    fn ensure(self: *NamespaceTable, slot: u8) ?*Palette {
+        if (slot >= MAX_NS) return null;
+        if (self.palettes[slot]) |p| return p;
+        const p = self.allocator.create(Palette) catch return null;
+        p.* = .{};
+        self.palettes[slot] = p;
+        return p;
     }
 
     /// The namespace a cell drawn right now belongs to.
@@ -126,7 +141,6 @@ pub const NamespaceTable = struct {
     /// Read once per row on the render path, next to the slot lookup, so the
     /// per-cell path stays a null check on an already-loaded struct.
     pub fn defaultsFor(self: *const NamespaceTable, ns: u8) Defaults {
-        if (ns == 0) return .{};
         if (ns >= MAX_NS) return .{};
         const palette = self.palettes[ns] orelse return .{};
         return .{ .fg = palette.fg, .bg = palette.bg };
@@ -152,51 +166,14 @@ pub const NamespaceTable = struct {
     /// compare plus a flat array index: no hash lookup, no allocation, and the
     /// common case (slot 0) returns before touching the table at all.
     pub inline fn resolveIndex(self: *const NamespaceTable, ns: u8, idx: u8) Resolved {
-        if (ns == 0) return .{ .passthrough = idx };
         if (ns >= MAX_NS) return .{ .passthrough = idx };
         const palette = self.palettes[ns] orelse return .{ .passthrough = idx };
         if (!palette.patched[idx]) return .{ .passthrough = idx };
         return .{ .rgb = palette.entries[idx] };
     }
 
-    /// Slot for `name`, allocating one if this is the first use.
-    ///
-    /// Returns 0 when the table is full or the name is invalid, which is the
-    /// silent-degradation contract: `use` maps to slot 0 rather than failing.
-    pub fn slotFor(self: *NamespaceTable, name: []const u8) u8 {
-        if (!validName(name)) return 0;
-        if (std.mem.eql(u8, name, "default")) return 0;
-        if (self.names.get(name)) |slot| return slot;
-
-        // u16, deliberately. A u8 counter is always `< MAX_NS` (256), so the
-        // loop's real bound would be an interior `== 255` guard and the
-        // increment at 255 would wrap — an infinite loop on the OSC path the
-        // moment anyone reordered the guard.
-        var free_slot: u16 = 1;
-        while (free_slot < MAX_NS and self.palettes[free_slot] != null) : (free_slot += 1) {}
-        if (free_slot >= MAX_NS) return 0;
-        const slot: u8 = @intCast(free_slot);
-
-        const owned = self.allocator.dupe(u8, name) catch return 0;
-        const palette = self.allocator.create(Palette) catch {
-            self.allocator.free(owned);
-            return 0;
-        };
-        palette.* = .{};
-        self.names.put(self.allocator, owned, slot) catch {
-            self.allocator.free(owned);
-            self.allocator.destroy(palette);
-            return 0;
-        };
-        self.palettes[slot] = palette;
-        return slot;
-    }
-
-    /// Patch entries in a namespace. Creating it if needed; never selects it.
     pub fn setEntry(self: *NamespaceTable, slot: u8, idx: u8, value: RGB) void {
-        if (slot == 0) return;
-        if (slot >= MAX_NS) return;
-        const palette = self.palettes[slot] orelse return;
+        const palette = self.ensure(slot) orelse return;
         palette.entries[idx] = value;
         palette.patched[idx] = true;
     }
@@ -224,27 +201,10 @@ pub const NamespaceTable = struct {
         self.current = self.stack[self.stack_len].prev_current;
     }
 
-    /// Stop applying a namespace: deselect it if it is current.
-    ///
-    /// The name stays bound to its slot and the colours stay with it. Cells
-    /// already drawn reference the slot, so unbinding the name would let a
-    /// later namespace take that slot and recolour history — PLAN.md Decision
-    /// #3 chose never-release over walking scrollback to bake them. `use` on
-    /// the same name therefore restores it exactly.
-    pub fn drop(self: *NamespaceTable, name: []const u8) void {
-        const slot = self.names.get(name) orelse return;
-        if (self.current == slot) self.current = 0;
-    }
-
-    /// Forget every colour a namespace was given, returning its cells to the
-    /// terminal's own theme.
-    ///
-    /// Not in PLAN.md §6, and it should have been: `set` is a patch and `drop`
-    /// releases the *binding*, so before this there was no way to undo a
-    /// colour at all — a mistyped hex code was permanent for the life of the
-    /// pane. `*` resets every live namespace.
-    pub fn reset(self: *NamespaceTable, name: []const u8) bool {
-        if (std.mem.eql(u8, name, "*")) {
+    /// Forget every colour a slot was given, returning its cells to the
+    /// terminal's own theme. `*` resets every slot, slot 0 included.
+    pub fn reset(self: *NamespaceTable, slot_text: []const u8) bool {
+        if (std.mem.eql(u8, slot_text, "*")) {
             var any = false;
             for (self.palettes) |maybe| {
                 const p = maybe orelse continue;
@@ -253,21 +213,19 @@ pub const NamespaceTable = struct {
             }
             return any;
         }
-        const slot = self.names.get(name) orelse return false;
-        if (slot >= MAX_NS) return false;
+        const slot = parseSlot(slot_text) orelse return false;
         const p = self.palettes[slot] orelse return false;
         p.* = .{};
         return true;
     }
 
-    /// How many slots a `have` reply should advertise as free.
-    pub fn freeSlots(self: *const NamespaceTable) u16 {
-        var free: u16 = 0;
-        var slot: u16 = 1;
-        while (slot < MAX_NS) : (slot += 1) {
-            if (self.palettes[slot] == null) free += 1;
-        }
-        return free;
+    /// The highest slot a caller may address, for the `have` reply.
+    ///
+    /// Not a count of free slots: nothing is allocated on a caller's behalf any
+    /// more, so there is nothing to run out of. A client needs the ceiling.
+    pub fn maxSlot(self: *const NamespaceTable) u16 {
+        _ = self;
+        return MAX_NS - 1;
     }
 
     /// Pack every patched colour into a blob SES can hold as opaque session
@@ -291,12 +249,8 @@ pub const NamespaceTable = struct {
         try w.writeByte(0); // namespace count, patched up below
 
         var written: u8 = 0;
-        var it = self.names.iterator();
-        while (it.next()) |entry| {
-            const slot = entry.value_ptr.*;
-            const palette = self.palettes[slot] orelse continue;
-            const name = entry.key_ptr.*;
-            if (name.len == 0 or name.len > MAX_NAME_LEN) continue;
+        for (self.palettes, 0..) |maybe, slot| {
+            const palette = maybe orelse continue;
 
             var patched: u16 = 0;
             for (palette.patched) |p| {
@@ -313,11 +267,13 @@ pub const NamespaceTable = struct {
             // instead of the excess. Unreachable for a realistic pane (a
             // handful of namespaces is a few KB); this is the bound that keeps
             // the failure proportional if one ever gets there.
-            const record_len = 1 + name.len + 2 + @as(usize, patched) * 4 + 12;
+            const record_len = 1 + 2 + @as(usize, patched) * 4 + 12;
             if (out.items.len + record_len > MAX_BLOB_LEN) break;
 
-            try w.writeByte(@intCast(name.len));
-            try w.writeAll(name);
+            // The slot IS the identity. Nothing to re-derive on the way back in,
+            // so a restored blob cannot land a colour on a different namespace
+            // than the one that set it.
+            try w.writeByte(@intCast(slot));
             try w.writeInt(u16, patched, .big);
             for (palette.patched, 0..) |p, idx| {
                 if (!p) continue;
@@ -349,7 +305,7 @@ pub const NamespaceTable = struct {
             // A name the blob carries but this table has never seen is created
             // here; an exhausted table yields slot 0 and the entries are
             // dropped, which is the same degradation as everywhere else.
-            const slot = self.slotFor(ns.name);
+            const slot = ns.slot;
             var i: usize = 0;
             while (i < ns.count()) : (i += 1) {
                 const entry = ns.at(i);
@@ -382,7 +338,7 @@ pub const BlobReader = struct {
     pub const Entry = struct { index: u8, rgb: RGB };
 
     pub const Namespace = struct {
-        name: []const u8,
+        slot: u8,
         /// Raw 4-byte records: index, r, g, b.
         records: []const u8,
         fg: ?RGB = null,
@@ -410,12 +366,9 @@ pub const BlobReader = struct {
         const blob = self.blob;
 
         if (self.off >= blob.len) return self.stop();
-        const name_len = blob[self.off];
+        const slot = blob[self.off];
         self.off += 1;
-        if (name_len == 0 or name_len > MAX_NAME_LEN) return self.stop();
-        if (self.off + name_len > blob.len) return self.stop();
-        const name = blob[self.off .. self.off + name_len];
-        self.off += name_len;
+        if (slot >= MAX_NS) return self.stop();
 
         if (self.off + 2 > blob.len) return self.stop();
         const entries = std.mem.readInt(u16, blob[self.off..][0..2], .big);
@@ -431,7 +384,7 @@ pub const BlobReader = struct {
         const cursor = readOptionalRgb(blob, &self.off) orelse return self.stop();
 
         return .{
-            .name = name,
+            .slot = slot,
             .records = records,
             .fg = if (fg.present) fg.value else null,
             .bg = if (bg.present) bg.value else null,
@@ -556,30 +509,26 @@ pub fn applyOsc(self: *NamespaceTable, params: []const u8) Applied {
         // render. Every other verb stays accepted — they persist, and flipping
         // the flag on later shows them.
         if (!self.enabled) return .ignore;
-        return .{ .have = .{ .osc = self.osc, .free = self.freeSlots() } };
+        return .{ .have = .{ .osc = self.osc, .free = self.maxSlot() } };
     }
 
-    var name_buf: [MAX_NAME_LEN]u8 = undefined;
-    const raw_name = it.next() orelse return .ignore;
-    const name = foldName(&name_buf, raw_name) orelse return .ignore;
+    const target = it.next() orelse return .ignore;
 
     if (eqlFold(verb, "use")) {
-        // An unknown-but-valid name creates the namespace; an exhausted table
-        // yields slot 0, which is "behave as before" rather than an error.
-        self.push(self.slotFor(name));
-        return .changed;
-    }
-    if (eqlFold(verb, "drop")) {
-        self.drop(name);
+        // Out of range selects nothing rather than guessing: silently folding
+        // slot 40 onto slot 8 would paint cells with another caller's colours.
+        const slot = NamespaceTable.parseSlot(target) orelse return .ignore;
+        self.push(slot);
         return .changed;
     }
     if (eqlFold(verb, "reset")) {
-        return if (self.reset(name)) .changed else .ignore;
+        return if (self.reset(target)) .changed else .ignore;
     }
     if (!eqlFold(verb, "set")) return .ignore;
 
-    // `*` addresses every live namespace (PLAN.md §6).
-    const all = std.mem.eql(u8, name, "*");
+    // `*` addresses every slot, 0 included.
+    const all = std.mem.eql(u8, target, "*");
+    const one: ?u8 = if (all) null else (NamespaceTable.parseSlot(target) orelse return .ignore);
     var touched = false;
     // No cap on entries accepted. SET_CHUNK is advice to SENDERS, whose other
     // terminals may cap an OSC payload; refusing the 33rd entry of a sequence
@@ -590,13 +539,14 @@ pub fn applyOsc(self: *NamespaceTable, params: []const u8) Applied {
         const rgb = parseHexColor(field[eq + 1 ..]) orelse continue;
         const key = field[0..eq];
         if (all) {
-            var slot: u16 = 1;
+            // Only slots something has already touched: `*` means "everything
+            // in use", not "allocate all 32".
+            var slot: u16 = 0;
             while (slot < MAX_NS) : (slot += 1) {
                 if (self.palettes[slot] != null and applyKey(self, @intCast(slot), key, rgb)) touched = true;
             }
-        } else {
-            const slot = self.slotFor(name);
-            if (applyKey(self, slot, key, rgb)) touched = true;
+        } else if (applyKey(self, one.?, key, rgb)) {
+            touched = true;
         }
     }
     return if (touched) .changed else .ignore;
@@ -605,8 +555,7 @@ pub fn applyOsc(self: *NamespaceTable, params: []const u8) Applied {
 /// One `<key>=#rrggbb` pair. `fg`/`bg`/`cursor` address the defaults; anything
 /// else must be a decimal index.
 fn applyKey(self: *NamespaceTable, slot: u8, key: []const u8, rgb: RGB) bool {
-    if (slot == 0) return false;
-    const palette = self.palettes[slot] orelse return false;
+    const palette = self.ensure(slot) orelse return false;
     if (eqlFold(key, "fg")) {
         palette.fg = rgb;
         return true;
@@ -659,523 +608,147 @@ fn parseHexByte(text: []const u8) ?u8 {
     };
 }
 
-/// Lowercase a name into `buf`. Returns null if it cannot be a valid name,
-/// so a malformed one is discarded rather than silently truncated.
-pub fn foldName(buf: *[MAX_NAME_LEN]u8, name: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, name, "*")) return "*";
-    if (name.len == 0 or name.len > MAX_NAME_LEN) return null;
-    for (name, 0..) |ch, i| buf[i] = std.ascii.toLower(ch);
-    const folded = buf[0..name.len];
-    return if (validName(folded)) folded else null;
-}
-
 fn eqlFold(a: []const u8, b: []const u8) bool {
     return std.ascii.eqlIgnoreCase(a, b);
 }
 
-test "slot 0 passes the index through untouched" {
+test "slot 0 is what an unselected cell resolves against" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
+    t.setEnabled(true);
+
+    // Untouched: the index passes through and the terminal's own theme wins.
     try std.testing.expectEqual(@as(u8, 7), t.resolveIndex(0, 7).passthrough);
+
+    // Set it, and every cell that selected nothing follows — this is how a
+    // caller recolours the ordinary indexed palette for the pane.
+    _ = applyOsc(&t, "set;0;7=#123456");
+    try std.testing.expectEqual(RGB{ .r = 0x12, .g = 0x34, .b = 0x56 }, t.resolveIndex(0, 7).rgb);
+    // Indices nobody set still pass through: `set` is a patch, not a replace.
+    try std.testing.expectEqual(@as(u8, 8), t.resolveIndex(0, 8).passthrough);
 }
 
-test "a populated namespace resolves to its own rgb" {
+test "a slot number is the address, with no mapping to lose" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
-    const slot = t.slotFor("prompt");
-    try std.testing.expect(slot != 0);
-    t.setEntry(slot, 3, .{ .r = 0x33, .g = 0x11, .b = 0x11 });
-    const got = t.resolveIndex(slot, 3).rgb;
-    try std.testing.expectEqual(@as(u8, 0x33), got.r);
-    // An index the patch did not name still passes through, so a namespace
-    // with one entry set does not blacken the other 255.
-    try std.testing.expectEqual(@as(u8, 4), t.resolveIndex(slot, 4).passthrough);
+    t.setEnabled(true);
+
+    _ = applyOsc(&t, "set;3;1=#ff0000");
+    _ = applyOsc(&t, "set;9;1=#00ff00");
+
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(3, 1).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(9, 1).rgb.g);
+    // Slots nobody set are untouched, whatever order they were addressed in.
+    try std.testing.expect(t.resolveIndex(4, 1) == .passthrough);
 }
 
-test "an unallocated slot falls back to slot 0" {
+test "use selects a slot and end restores the previous one" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
-    try std.testing.expectEqual(@as(u8, 9), t.resolveIndex(200, 9).passthrough);
+    t.setEnabled(true);
+
+    try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
+    _ = applyOsc(&t, "use;5");
+    try std.testing.expectEqual(@as(u8, 5), t.currentSlot());
+    _ = applyOsc(&t, "use;6");
+    try std.testing.expectEqual(@as(u8, 6), t.currentSlot());
+    _ = applyOsc(&t, "end");
+    try std.testing.expectEqual(@as(u8, 5), t.currentSlot());
+    _ = applyOsc(&t, "end");
+    try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
+    // Underflow is a no-op, not an error.
+    _ = applyOsc(&t, "end");
+    try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
 }
 
-test "names are stable and reserved names map to slot 0" {
+test "a slot outside the range selects nothing rather than folding onto one" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
-    const a = t.slotFor("prompt");
-    const b = t.slotFor("prompt");
-    try std.testing.expectEqual(a, b);
-    try std.testing.expectEqual(@as(u8, 0), t.slotFor("default"));
-    try std.testing.expectEqual(@as(u8, 0), t.slotFor("Not Valid"));
-    try std.testing.expectEqual(@as(u8, 0), t.slotFor(""));
-    try std.testing.expectEqual(@as(u8, 0), t.slotFor("x" ** 33));
-}
+    t.setEnabled(true);
+    _ = applyOsc(&t, "use;7");
 
-test "the stack pushes, pops, and underflows to slot 0" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    const a = t.slotFor("alpha");
-    const b = t.slotFor("bravo");
-    t.push(a);
-    t.push(b);
-    try std.testing.expectEqual(b, t.current);
-    t.pop();
-    try std.testing.expectEqual(a, t.current);
-    t.pop();
-    try std.testing.expectEqual(@as(u8, 0), t.current);
-    t.pop(); // underflow is a no-op
-    try std.testing.expectEqual(@as(u8, 0), t.current);
+    // 32, 40 and 255 must not wrap onto 0, 8 or 31 — that would paint cells
+    // with another caller's colours.
+    for ([_][]const u8{ "use;32", "use;40", "use;255", "use;-1", "use;x", "use;" }) |seq| {
+        try std.testing.expect(applyOsc(&t, seq) == .ignore);
+        try std.testing.expectEqual(@as(u8, 7), t.currentSlot());
+    }
+    try std.testing.expect(NamespaceTable.parseSlot("31") != null);
+    try std.testing.expect(NamespaceTable.parseSlot("32") == null);
 }
 
 test "the feature flag forces slot 0 with the indirection compiled in" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
-    const slot = t.slotFor("prompt");
-    t.push(slot);
+    t.setEnabled(true);
+    _ = applyOsc(&t, "set;2;1=#ff0000");
+    _ = applyOsc(&t, "use;2");
+    try std.testing.expectEqual(@as(u8, 2), t.currentSlot());
+
+    t.setEnabled(false);
     try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
-    t.enabled = true;
-    try std.testing.expectEqual(slot, t.currentSlot());
+    // Colours set while off are kept, so re-enabling shows them again.
+    t.setEnabled(true);
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(2, 1).rgb.r);
 }
 
-test "set patches entries and creates the namespace" {
+test "set patches entries, defaults, and every slot with *" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     t.setEnabled(true);
 
-    try std.testing.expect(applyOsc(&t, "set;prompt;4=#331111;bg=#0a0a0a") == .changed);
-    const slot = t.slotFor("prompt");
-    try std.testing.expectEqual(@as(u8, 0x33), t.resolveIndex(slot, 4).rgb.r);
-    try std.testing.expectEqual(@as(u8, 0x0a), t.palettes[slot].?.bg.?.r);
+    _ = applyOsc(&t, "set;1;1=#010203;fg=#040506;bg=#070809;cursor=#0a0b0c");
+    try std.testing.expectEqual(RGB{ .r = 1, .g = 2, .b = 3 }, t.resolveIndex(1, 1).rgb);
+    try std.testing.expectEqual(RGB{ .r = 4, .g = 5, .b = 6 }, t.defaultsFor(1).fg.?);
+    try std.testing.expectEqual(RGB{ .r = 7, .g = 8, .b = 9 }, t.defaultsFor(1).bg.?);
+    try std.testing.expectEqual(RGB{ .r = 10, .g = 11, .b = 12 }, t.cursorFor(1).?);
 
-    // Accumulates rather than replacing (Decision #4).
-    try std.testing.expect(applyOsc(&t, "set;prompt;5=#00ff00") == .changed);
-    try std.testing.expectEqual(@as(u8, 0x33), t.resolveIndex(slot, 4).rgb.r);
-    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(slot, 5).rgb.g);
+    _ = applyOsc(&t, "set;2;1=#000000");
+    try std.testing.expect(applyOsc(&t, "set;*;5=#ffffff") == .changed);
+    // Every slot already in use, slot 0 included once it has been touched.
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(1, 5).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(2, 5).rgb.r);
+    // A slot nobody has touched is not conjured into existence by `*`.
+    try std.testing.expect(t.resolveIndex(30, 5) == .passthrough);
 }
 
-test "colour forms, and malformed payloads are discarded" {
-    try std.testing.expectEqual(@as(u8, 0x33), parseHexColor("#331111").?.r);
-    try std.testing.expectEqual(@as(u8, 0x33), parseHexColor("331111").?.r);
-    try std.testing.expectEqual(@as(u8, 0xab), parseHexColor("rgb:ab/cd/ef").?.r);
-    try std.testing.expectEqual(@as(u8, 0xff), parseHexColor("rgb:ffff/0/0").?.r);
-    try std.testing.expect(parseHexColor("#33111") == null);
-    try std.testing.expect(parseHexColor("#gg1111") == null);
-    try std.testing.expect(parseHexColor("") == null);
-
+test "reset forgets a slot's colours, and * forgets all of them" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     t.setEnabled(true);
-    try std.testing.expect(applyOsc(&t, "") == .ignore);
-    try std.testing.expect(applyOsc(&t, "wat;prompt;1=#000000") == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;prompt") == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;prompt;300=#000000") == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;prompt;1=notacolour") == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;" ++ "x" ** 33 ++ ";1=#000000") == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;Not Valid;1=#000000") == .ignore);
+    _ = applyOsc(&t, "set;1;1=#ff0000");
+    _ = applyOsc(&t, "set;2;1=#00ff00");
+
+    try std.testing.expect(applyOsc(&t, "reset;1") == .changed);
+    try std.testing.expect(t.resolveIndex(1, 1) == .passthrough);
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(2, 1).rgb.g);
+
+    _ = applyOsc(&t, "reset;*");
+    try std.testing.expect(t.resolveIndex(2, 1) == .passthrough);
 }
 
-test "names fold case and set is idempotent across replays" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    _ = applyOsc(&t, "set;NVIM;1=#010203");
-    _ = applyOsc(&t, "set;nvim;1=#010203");
-    const slot = t.slotFor("nvim");
-    try std.testing.expectEqual(@as(u8, 0x01), t.resolveIndex(slot, 1).rgb.r);
-    // Two spellings, one namespace: replaying a stream must not burn slots.
-    // One slot gone for `nvim`, and slot 0 is never handed out.
-    try std.testing.expectEqual(@as(u16, MAX_NS - 1 - 1), t.freeSlots());
-}
-
-test "set with * reaches every live namespace but not slot 0" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    _ = applyOsc(&t, "use;alpha");
-    _ = applyOsc(&t, "end");
-    _ = applyOsc(&t, "set;beta;1=#000000");
-    try std.testing.expect(applyOsc(&t, "set;*;2=#123456") == .changed);
-
-    for ([_][]const u8{ "alpha", "beta" }) |n| {
-        try std.testing.expectEqual(@as(u8, 0x12), t.resolveIndex(t.slotFor(n), 2).rgb.r);
-    }
-    try std.testing.expectEqual(@as(u8, 2), t.resolveIndex(0, 2).passthrough);
-}
-
-test "an exhausted table maps use to slot 0" {
+test "ask answers have with the addressable ceiling, and is silent when off" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
 
-    var buf: [8]u8 = undefined;
-    var i: usize = 0;
-    while (i < MAX_NS) : (i += 1) {
-        _ = t.slotFor(std.fmt.bufPrint(&buf, "n{d}", .{i}) catch unreachable);
-    }
-    try std.testing.expectEqual(@as(u16, 0), t.freeSlots());
-    try std.testing.expectEqual(@as(u8, 0), t.slotFor("overflow"));
-}
-
-test "a palette round-trips through a blob" {
-    const alloc = std.testing.allocator;
-    var a = NamespaceTable.init(alloc);
-    defer a.deinit();
-    a.setEnabled(true);
-    _ = applyOsc(&a, "set;prompt;33=#ff00aa;0=#010203;255=#0a0b0c;bg=#111213");
-    _ = applyOsc(&a, "set;output;7=#445566");
-
-    const blob = try a.serialize(alloc);
-    defer alloc.free(blob);
-    try std.testing.expect(blob.len > 0);
-
-    var b = NamespaceTable.init(alloc);
-    defer b.deinit();
-    b.setEnabled(true);
-    b.applySerialized(blob);
-
-    const p = b.slotFor("prompt");
-    try std.testing.expectEqual(@as(u8, 0xff), b.resolveIndex(p, 33).rgb.r);
-    try std.testing.expectEqual(@as(u8, 0x03), b.resolveIndex(p, 0).rgb.b);
-    try std.testing.expectEqual(@as(u8, 0x0a), b.resolveIndex(p, 255).rgb.r);
-    try std.testing.expectEqual(@as(u8, 0x11), b.palettes[p].?.bg.?.r);
-    try std.testing.expectEqual(@as(u8, 0x44), b.resolveIndex(b.slotFor("output"), 7).rgb.r);
-
-    // Indices nobody patched stay passthrough on the far side too, or a
-    // restore would blacken every zone it touched.
-    try std.testing.expectEqual(@as(u8, 9), b.resolveIndex(p, 9).passthrough);
-}
-
-test "an empty table serializes to nothing" {
-    const alloc = std.testing.allocator;
-    var t = NamespaceTable.init(alloc);
-    defer t.deinit();
-    t.setEnabled(true); // allocates prompt/output/alt, but patches nothing
-
-    const blob = try t.serialize(alloc);
-    defer alloc.free(blob);
-    try std.testing.expectEqual(@as(usize, 0), blob.len);
-}
-
-test "a truncated or garbled blob restores what it can and never faults" {
-    const alloc = std.testing.allocator;
-    var src = NamespaceTable.init(alloc);
-    defer src.deinit();
-    src.setEnabled(true);
-    _ = applyOsc(&src, "set;prompt;1=#ff0000;2=#00ff00");
-    _ = applyOsc(&src, "set;output;3=#0000ff");
-    const blob = try src.serialize(alloc);
-    defer alloc.free(blob);
-
-    // Every prefix of a valid blob.
-    var cut: usize = 0;
-    while (cut <= blob.len) : (cut += 1) {
-        var t = NamespaceTable.init(alloc);
-        defer t.deinit();
-        t.setEnabled(true);
-        t.applySerialized(blob[0..cut]);
-    }
-
-    // Every single-byte corruption of a valid blob.
-    const scratch = try alloc.dupe(u8, blob);
-    defer alloc.free(scratch);
-    for (0..blob.len) |i| {
-        for ([_]u8{ 0, 1, 0x7f, 0xff }) |v| {
-            @memcpy(scratch, blob);
-            scratch[i] = v;
-            var t = NamespaceTable.init(alloc);
-            defer t.deinit();
-            t.setEnabled(true);
-            t.applySerialized(scratch);
-        }
-    }
-
-    // A wrong version restores nothing rather than misreading the layout.
-    @memcpy(scratch, blob);
-    scratch[0] = BLOB_VERSION +% 1;
-    var t = NamespaceTable.init(alloc);
-    defer t.deinit();
-    t.setEnabled(true);
-    t.applySerialized(scratch);
-    try std.testing.expectEqual(@as(u8, 1), t.resolveIndex(t.slotFor("prompt"), 1).passthrough);
-}
-
-test "reset forgets colours so cells fall back to the terminal theme" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    _ = applyOsc(&t, "set;prompt;33=#ff00aa;bg=#111111");
-    const p = t.slotFor("prompt");
-    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(p, 33).rgb.r);
-
-    try std.testing.expect(applyOsc(&t, "reset;prompt") == .changed);
-    try std.testing.expectEqual(@as(u8, 33), t.resolveIndex(p, 33).passthrough);
-    try std.testing.expect(t.palettes[p].?.bg == null);
-
-    // The namespace itself survives, so a later `set` lands in the same slot.
-    try std.testing.expectEqual(p, t.slotFor("prompt"));
-    // Resetting one that was never coloured is a no-op, not an error.
-    try std.testing.expect(applyOsc(&t, "reset;never-used") == .ignore);
-}
-
-test "a set larger than the sender chunk is accepted whole" {
-    const alloc = std.testing.allocator;
-    var t = NamespaceTable.init(alloc);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    // 200 entries in one sequence. SET_CHUNK is advice to senders; dropping
-    // the tail of a sequence that arrived intact would lose colours silently.
-    var payload = std.ArrayList(u8).empty;
-    defer payload.deinit(alloc);
-    try payload.appendSlice(alloc, "set;prompt");
-    for (0..200) |i| {
-        try payload.writer(alloc).print(";{d}=#0000{x:0>2}", .{ i, i });
-    }
-    try std.testing.expect(applyOsc(&t, payload.items) == .changed);
-
-    const p = t.slotFor("prompt");
-    try std.testing.expectEqual(@as(u8, 199), t.resolveIndex(p, 199).rgb.b);
-    try std.testing.expectEqual(@as(u8, 200), t.resolveIndex(p, 200).passthrough);
-}
-
-test "applyOsc never faults on arbitrary bytes" {
-    const alloc = std.testing.allocator;
-    // A cheap deterministic fuzz over the shapes a hostile or buggy program
-    // can put in an OSC payload: every verb prefix crossed with junk, control
-    // bytes, huge numbers, unterminated fields and very long names.
-    const verbs = [_][]const u8{ "set", "use", "end", "drop", "reset", "ask", "", "SET", "sett", ";;;" };
-    const tails = [_][]const u8{
-        "",                   ";",                     ";;",                      ";prompt",
-        ";prompt;",           ";prompt;=",             ";prompt;=#",              ";prompt;999999999999=#ff0000",
-        ";prompt;-1=#ff0000", ";prompt;1=#gggggg",     ";prompt;1=#ff00",         ";prompt;1=rgb:",
-        ";prompt;1=rgb:1/2",  ";prompt;1=rgb:1/2/3/4", ";*;1=#ff0000",            ";" ++ "n" ** 40,
-        ";prompt;\x00=\x01",  ";\xff\xfe;1=#ff0000",   ";prompt;fg=;bg=;cursor=", ";default;1=#ff0000",
-    };
-
-    for (verbs) |v| {
-        for (tails) |tail| {
-            var t = NamespaceTable.init(alloc);
-            defer t.deinit();
-            t.setEnabled(true);
-            const payload = try std.mem.concat(alloc, u8, &.{ v, tail });
-            defer alloc.free(payload);
-            _ = applyOsc(&t, payload);
-            _ = applyOsc(&t, payload);
-            // Whatever happened, the table is still coherent and slot 0 still
-            // passes through — the property every failure mode reduces to.
-            try std.testing.expectEqual(@as(u8, 77), t.resolveIndex(0, 77).passthrough);
-            try std.testing.expect(t.stack_len <= STACK_DEPTH);
-        }
-    }
-}
-
-test "a table of many namespaces still serializes inside the wire cap" {
-    const alloc = std.testing.allocator;
-    var t = NamespaceTable.init(alloc);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    // The worst case a pane can reach: every slot claimed, each with one
-    // colour. The cap exists so SES never holds an unbounded buffer on a
-    // pane's say-so; this pins that a realistic table stays well under it.
-    var buf: [16]u8 = undefined;
-    for (0..MAX_NS - 1) |i| {
-        const name = std.fmt.bufPrint(&buf, "ns{d}", .{i}) catch unreachable;
-        const slot = t.slotFor(name);
-        if (slot == 0) break;
-        t.setEntry(slot, @intCast(i % 256), .{ .r = 1, .g = 2, .b = 3 });
-    }
-    const blob = try t.serialize(alloc);
-    defer alloc.free(blob);
-    try std.testing.expect(blob.len > 0);
-    try std.testing.expect(blob.len < MAX_BLOB_LEN);
-}
-
-test "BlobReader yields exactly what serialize wrote" {
-    const alloc = std.testing.allocator;
-    var t = NamespaceTable.init(alloc);
-    defer t.deinit();
-    t.setEnabled(true);
-    _ = applyOsc(&t, "set;prompt;0=#010203;255=#0a0b0c;bg=#111213");
-    _ = applyOsc(&t, "set;output;7=#445566;fg=#778899");
-
-    const blob = try t.serialize(alloc);
-    defer alloc.free(blob);
-
-    var seen_prompt = false;
-    var seen_output = false;
-    var reader = BlobReader.init(blob);
-    while (reader.next()) |ns| {
-        if (std.mem.eql(u8, ns.name, "prompt")) {
-            seen_prompt = true;
-            try std.testing.expectEqual(@as(usize, 2), ns.count());
-            try std.testing.expectEqual(@as(u8, 0), ns.at(0).index);
-            try std.testing.expectEqual(@as(u8, 0x03), ns.at(0).rgb.b);
-            try std.testing.expectEqual(@as(u8, 255), ns.at(1).index);
-            try std.testing.expectEqual(@as(u8, 0x11), ns.bg.?.r);
-            try std.testing.expect(ns.fg == null);
-        } else if (std.mem.eql(u8, ns.name, "output")) {
-            seen_output = true;
-            try std.testing.expectEqual(@as(usize, 1), ns.count());
-            try std.testing.expectEqual(@as(u8, 0x77), ns.fg.?.r);
-            try std.testing.expect(ns.bg == null);
-        } else {
-            return error.UnexpectedNamespace;
-        }
-    }
-    try std.testing.expect(seen_prompt and seen_output);
-    // Exhausted readers keep answering null rather than restarting.
-    try std.testing.expect(reader.next() == null);
-}
-
-test "BlobReader refuses a blob it does not understand" {
-    var empty = BlobReader.init(&.{});
-    try std.testing.expect(empty.next() == null);
-    var short = BlobReader.init(&[_]u8{BLOB_VERSION});
-    try std.testing.expect(short.next() == null);
-    // Right length, wrong version: yields nothing rather than misreading.
-    const wrong = [_]u8{ BLOB_VERSION +% 1, 1, 6 } ++ "prompt".* ++ [_]u8{ 0, 0 };
-    var r = BlobReader.init(&wrong);
-    try std.testing.expect(r.next() == null);
-    // Claims one namespace, provides no bytes for it.
-    const lying = [_]u8{ BLOB_VERSION, 1 };
-    var r2 = BlobReader.init(&lying);
-    try std.testing.expect(r2.next() == null);
-}
-
-test "serialize stops at the wire cap instead of overflowing it" {
-    const alloc = std.testing.allocator;
-    var t = NamespaceTable.init(alloc);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    // Every slot claimed, every one fully populated: far past MAX_BLOB_LEN if
-    // the writer were unbounded (255 x ~1KB).
-    var buf: [16]u8 = undefined;
-    for (0..MAX_NS - 1) |i| {
-        const name = std.fmt.bufPrint(&buf, "n{d}", .{i}) catch unreachable;
-        const slot = t.slotFor(name);
-        if (slot == 0) break;
-        var idx: u16 = 0;
-        while (idx < 256) : (idx += 1) {
-            t.setEntry(slot, @intCast(idx), .{ .r = 1, .g = 2, .b = 3 });
-        }
-    }
-
-    const blob = try t.serialize(alloc);
-    defer alloc.free(blob);
-    try std.testing.expect(blob.len <= MAX_BLOB_LEN);
-    try std.testing.expect(blob.len > 0);
-
-    // What it did write is still a coherent blob, not a truncated one: every
-    // namespace in it round-trips.
-    var restored = NamespaceTable.init(alloc);
-    defer restored.deinit();
-    restored.setEnabled(true);
-    restored.applySerialized(blob);
-
-    var reader = BlobReader.init(blob);
-    var count: usize = 0;
-    while (reader.next()) |ns| {
-        count += 1;
-        try std.testing.expectEqual(@as(usize, 256), ns.count());
-        try std.testing.expectEqual(@as(u8, 1), restored.resolveIndex(restored.slotFor(ns.name), 7).rgb.r);
-    }
-    try std.testing.expect(count > 0);
-}
-
-test "reserved OSC numbers cannot be claimed by the config" {
-    // Everything hexe forwards or consumes. Claiming one would make the
-    // palette dispatch swallow it before it reached its real handler.
-    for ([_]u32{ 0, 1, 2, 4, 5, 7, 9, 10, 12, 19, 50, 59, 99, 104, 105, 110, 119, 133, 777 }) |code| {
-        try std.testing.expect(isReservedOsc(code));
-    }
-    // The default and its neighbours are free, or the feature could not ship.
-    for ([_]u32{ DEFAULT_OSC, 1331, 3, 8, 20, 49, 60, 98, 100, 120, 1000 }) |code| {
-        try std.testing.expect(!isReservedOsc(code));
-    }
-}
-
-test "ask is silent while the feature is off" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-
-    // Off: no reply at all. A client reads silence as "not supported" and
-    // falls back, which is the truth — colours would resolve to nothing.
-    try std.testing.expect(!t.enabled);
-    try std.testing.expect(applyOsc(&t, "ask") == .ignore);
-
-    // On: the capability answer, carrying the live OSC number.
-    t.setEnabled(true);
-    const reply = applyOsc(&t, "ask");
-    try std.testing.expectEqual(@as(u32, DEFAULT_OSC), reply.have.osc);
-
-    // Off again, mid-session: still silent, even though the namespaces and
-    // their colours are still there and would come back with the flag.
-    _ = applyOsc(&t, "set;prompt;3=#ff0000");
     t.setEnabled(false);
     try std.testing.expect(applyOsc(&t, "ask") == .ignore);
-    try std.testing.expect(applyOsc(&t, "set;prompt;4=#00ff00") == .changed);
+
     t.setEnabled(true);
-    try std.testing.expectEqual(@as(u8, 0x00), t.resolveIndex(t.slotFor("prompt"), 4).rgb.r);
-    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(t.slotFor("prompt"), 4).rgb.g);
-}
-
-test "the stack drops a push past its depth instead of losing a restore point" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
-    const first = t.slotFor("first");
-    t.push(first);
-    var i: usize = 0;
-    while (i < STACK_DEPTH + 4) : (i += 1) {
-        var buf: [8]u8 = undefined;
-        t.push(t.slotFor(std.fmt.bufPrint(&buf, "n{d}", .{i}) catch unreachable));
-    }
-    // Unwinding must still reach the namespace pushed before the overflow.
-    i = 0;
-    while (i < STACK_DEPTH + 8) : (i += 1) t.pop();
-    try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
-}
-
-test "ask answers have while the feature is on" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-
     const reply = applyOsc(&t, "ask");
     try std.testing.expect(reply == .have);
     try std.testing.expectEqual(t.osc, reply.have.osc);
-    try std.testing.expect(reply.have.free > 0);
+    try std.testing.expectEqual(@as(u16, MAX_NS - 1), reply.have.free);
 }
 
-test "drop deselects the namespace but keeps its colours addressable" {
+test "a blob round-trips by slot, so a colour cannot land on another namespace" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     t.setEnabled(true);
-
-    _ = applyOsc(&t, "set;work;3=#ff0000");
-    _ = applyOsc(&t, "use;work");
-    const slot = t.currentSlot();
-    try std.testing.expect(slot != 0);
-
-    _ = applyOsc(&t, "drop;work");
-    try std.testing.expectEqual(@as(u8, 0), t.currentSlot());
-    // The colours stayed with the slot: cells already drawn under it are still
-    // on screen, so `use` must bring the same palette back.
-    _ = applyOsc(&t, "use;work");
-    try std.testing.expectEqual(slot, t.currentSlot());
-    try std.testing.expectEqual(RGB{ .r = 255, .g = 0, .b = 0 }, t.resolveIndex(slot, 3).rgb);
-}
-
-test "a blob carries colours but never what a program had selected" {
-    var t = NamespaceTable.init(std.testing.allocator);
-    defer t.deinit();
-    t.setEnabled(true);
-    _ = applyOsc(&t, "set;a;1=#010203");
-    _ = applyOsc(&t, "use;a");
+    _ = applyOsc(&t, "set;0;1=#111111");
+    _ = applyOsc(&t, "set;4;7=#ff0000;bg=#222222");
+    _ = applyOsc(&t, "set;31;7=#00ff00");
+    _ = applyOsc(&t, "use;4");
 
     const blob = try t.serialize(std.testing.allocator);
     defer std.testing.allocator.free(blob);
@@ -1185,33 +758,79 @@ test "a blob carries colours but never what a program had selected" {
     restored.setEnabled(true);
     restored.applySerialized(blob);
 
-    // Selection belongs to the running program, not to the parked state.
+    // Same numbers on the way back, with nothing re-derived in between.
+    try std.testing.expectEqual(@as(u8, 0x11), restored.resolveIndex(0, 1).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0xff), restored.resolveIndex(4, 7).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0xff), restored.resolveIndex(31, 7).rgb.g);
+    try std.testing.expectEqual(RGB{ .r = 0x22, .g = 0x22, .b = 0x22 }, restored.defaultsFor(4).bg.?);
+    // Selection belongs to the running program, never to the parked state.
     try std.testing.expectEqual(@as(u8, 0), restored.currentSlot());
-    const slot = restored.slotFor("a");
-    try std.testing.expectEqual(RGB{ .r = 1, .g = 2, .b = 3 }, restored.resolveIndex(slot, 1).rgb);
 }
 
-test "reset with * clears every namespace" {
+test "a truncated or garbled blob restores what it can and never faults" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     t.setEnabled(true);
-    _ = applyOsc(&t, "set;a;1=#010203");
-    _ = applyOsc(&t, "set;b;1=#040506");
+    _ = applyOsc(&t, "set;1;1=#010203");
+    _ = applyOsc(&t, "set;2;1=#040506");
+    const blob = try t.serialize(std.testing.allocator);
+    defer std.testing.allocator.free(blob);
 
-    _ = applyOsc(&t, "reset;*");
-    try std.testing.expect(t.resolveIndex(t.slotFor("a"), 1) == .passthrough);
-    try std.testing.expect(t.resolveIndex(t.slotFor("b"), 1) == .passthrough);
+    var cut: usize = 0;
+    while (cut <= blob.len) : (cut += 1) {
+        var r = NamespaceTable.init(std.testing.allocator);
+        defer r.deinit();
+        r.setEnabled(true);
+        r.applySerialized(blob[0..cut]);
+    }
+
+    // A slot byte past the ceiling ends the read rather than indexing out.
+    var forged = try std.testing.allocator.dupe(u8, blob);
+    defer std.testing.allocator.free(forged);
+    if (forged.len > 2) forged[2] = 200;
+    var r2 = NamespaceTable.init(std.testing.allocator);
+    defer r2.deinit();
+    r2.setEnabled(true);
+    r2.applySerialized(forged);
 }
 
-test "a namespace's default fg and bg are readable for the render path" {
+test "applyOsc never faults on arbitrary bytes" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     t.setEnabled(true);
-    _ = applyOsc(&t, "set;a;fg=#112233;bg=#445566");
 
-    const d = t.defaultsFor(t.slotFor("a"));
-    try std.testing.expectEqual(RGB{ .r = 0x11, .g = 0x22, .b = 0x33 }, d.fg.?);
-    try std.testing.expectEqual(RGB{ .r = 0x44, .g = 0x55, .b = 0x66 }, d.bg.?);
-    // Slot 0 has no defaults of its own: it is the terminal's own theme.
-    try std.testing.expect(t.defaultsFor(0).fg == null);
+    const verbs = [_][]const u8{ "set", "use", "end", "reset", "ask", "", "SET", "sett", ";;;", "drop" };
+    const targets = [_][]const u8{ "0", "31", "32", "999", "-1", "*", "", "x", "1.5", "\x00" };
+    const pairs = [_][]const u8{ "1=#ff0000", "1=", "=#ff0000", "1=#gg0000", "noequals", "999=#ffffff", "" };
+    for (verbs) |v| {
+        for (targets) |n| {
+            for (pairs) |pair| {
+                var buf: [64]u8 = undefined;
+                const seq = std.fmt.bufPrint(&buf, "{s};{s};{s}", .{ v, n, pair }) catch continue;
+                _ = applyOsc(&t, seq);
+            }
+        }
+    }
+}
+
+test "colour forms, and malformed payloads are discarded" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+
+    _ = applyOsc(&t, "set;1;1=#ff8000;2=ff8000;3=rgb:ff/80/00");
+    for ([_]u8{ 1, 2, 3 }) |idx| {
+        try std.testing.expectEqual(RGB{ .r = 0xff, .g = 0x80, .b = 0x00 }, t.resolveIndex(1, idx).rgb);
+    }
+    // Nothing usable: the slot keeps what it had.
+    try std.testing.expect(applyOsc(&t, "set;1;4=#gg0000") == .ignore);
+    try std.testing.expect(t.resolveIndex(1, 4) == .passthrough);
+}
+
+test "reserved OSC numbers cannot be claimed by the config" {
+    try std.testing.expect(isReservedOsc(4));
+    try std.testing.expect(isReservedOsc(133));
+    try std.testing.expect(isReservedOsc(52));
+    try std.testing.expect(!isReservedOsc(DEFAULT_OSC));
+    try std.testing.expect(!isReservedOsc(1331));
 }

@@ -1,132 +1,97 @@
 #!/usr/bin/env python3
-"""Palette namespaces, live. Run it inside a hexe pane.
+"""Palette namespaces. Run it inside a hexe pane; it paints and exits.
 
-It paints three bands of indexed colour — one in the prompt zone, one in the
-output zone, one in neither — and then waits. Every key below repaints a
-namespace *without redrawing a single cell*: the characters already on screen
-change colour where they belong to that namespace, and nowhere else. The
-DEFAULT band is the control; nothing you press should ever move it.
+It prints several bands of the SAME indexed colours, each written while a
+different namespace was selected, plus one written with none. Then it exits.
+
+Exiting is the point. The process is gone, nothing is redrawing anything, and
+the bands are just characters sitting in the pane's scrollback. Recolour a
+namespace from outside — `hexe palette set`, or a printf from any other pane —
+and those characters change where they sit, because each cell recorded the
+namespace that wrote it. The UNCLAIMED band is the control: nothing anyone does
+to a namespace should ever move it.
 
     python3 contrib/palette_demo.py
-
-Edit SCHEMES to change what a key does. That table is the whole configuration.
 """
 import os
 import sys
-import termios
-import tty
 
-# ==========================================================================
-# EDIT ME. key -> (namespace, {palette index or 'fg'/'bg'/'cursor': colour})
+# The slots this script claims, and what this script calls them. Slots are
+# numbers 0..31 and hexe assigns meaning to none of them — the number IS the
+# address a cell records, so there is no mapping to lose. Which program owns
+# which number is an agreement between programs, not something hexe arbitrates.
 #
-# Namespaces: 'prompt'  the prompt line and what you type on it
-#             'output'  command output
-#             'alt'     full-screen apps
-#             '*'       every live namespace at once
-#
-# A namespace only overrides the indices you name here. Anything you leave out
-# keeps falling through to your terminal's own theme, which is why the bands
-# below stay partly untouched.
-# ==========================================================================
-SCHEMES = {
-    "1": ("prompt", {33: "#ff00aa", 208: "#ff5f00", 2: "#00d7af"}),
-    "2": ("prompt", {33: "#5fafff", 208: "#87d7ff", 2: "#005f87"}),
-    "3": ("output", {33: "#ffd700", 208: "#ffaf00", 2: "#875f00"}),
-    "4": ("output", {33: "#8787ff", 208: "#af87ff", 2: "#5f5f87"}),
-    "5": ("*", {33: "#666666", 208: "#888888", 2: "#aaaaaa"}),
-}
+# Slot 0 is what cells that selected nothing resolve against, so it is left
+# alone here and used as the control.
+BANDS = [(1, "slot 1"), (2, "slot 2"), (3, "slot 3")]
 
-# The indices the bands are painted with. Anything in SCHEMES that is not here
-# simply will not be visible — nothing on screen is using it.
-RAMP = [1, 2, 3, 4, 5, 6, 33, 208]
+# Which colour indexes each band prints. The same set every time, so a band that
+# changes colour changed because of its namespace and nothing else.
+INDEXES = [1, 2, 3, 4, 5, 6]
 
 OSC = 1330
 
 
-def seq(*params):
-    """One OSC 1330 sequence. This is exactly what `hexe palette` sends."""
-    return f"\033]{OSC};" + ";".join(str(p) for p in params) + "\033\\"
-
-
-def emit(s):
-    sys.stdout.write(s)
+def osc(*parts):
+    """Emit one OSC 1330 sequence."""
+    sys.stdout.write(f"\033]{OSC};" + ";".join(parts) + "\033\\")
     sys.stdout.flush()
 
 
-def band(label, mark):
-    """Paint one row of indexed cells, inside the OSC 133 zone `mark`.
+def band(slot, label):
+    """Print one row of indexed swatches, tagged with `slot`.
 
-    The zone is what decides the namespace: hexe reads it off the row, which is
-    also why this keeps working after the row scrolls into history.
+    `use` then `end` around the printing is the whole protocol: every cell
+    written between them records the slot number, and keeps it for as long as
+    the cell lives.
     """
-    if mark:
-        emit(f"\033]133;{mark}\007")
-    # One index per cell, as the BACKGROUND, and the digits on it say which.
-    # An earlier version put index i in the foreground and i+4 behind it, so
-    # "change colour 6" moved a cell labelled 2 and the thin digits of cell 6 —
-    # the label lied about what you were looking at.
-    #
-    # The label is truecolor on purpose: `38;2;r;g;b` is never namespaced, so
-    # the digits stay legible no matter what a scheme does to the palette.
-    cells = "".join(
-        f"\033[48;5;{i}m\033[38;2;255;255;255m{i:>4} \033[0m" for i in RAMP
-    )
-    emit(f"  {label:<14}{cells}\033[0m\n")
-
-
-def paint():
-    emit("\033[2J\033[H")
-    emit("\033[1m  hexe palette namespaces\033[0m\n\n")
-    band("PROMPT zone", "A")
-    band("OUTPUT zone", "C")
-    band("DEFAULT zone", "D")   # OSC 133 D closes the zone: back to slot 0
-    emit("\n")
-    for key, (ns, colours) in SCHEMES.items():
-        names = " ".join(f"{k}={v}" for k, v in colours.items())
-        emit(f"   \033[1m{key}\033[0m  {ns:<8} {names}\n")
-    emit("   \033[1ma\033[0m  ask — is hexe listening?\n")
-    emit("   \033[1mp\033[0m  repaint the bands\n")
-    emit("   \033[1mq\033[0m  quit\n\n")
-    emit("  The DEFAULT band is the control. If it ever moves, that is a bug.\n")
-
-
-def apply(key):
-    ns, colours = SCHEMES[key]
-    # `set` is a patch and accumulates, so this only moves the indices named.
-    # Chunked at 32 per sequence, which is the documented cap.
-    items = [f"{k}={v}" for k, v in colours.items()]
-    for i in range(0, len(items), 32):
-        emit(seq("set", ns, *items[i:i + 32]))
+    if slot is not None:
+        osc("use", str(slot))
+    swatches = "".join(f"\033[48;5;{i}m\033[38;5;15m {i:^3} \033[0m" for i in INDEXES)
+    sys.stdout.write(f"  {label:<12}{swatches}\n")
+    sys.stdout.flush()
+    if slot is not None:
+        osc("end")
 
 
 def main():
-    if not os.environ.get("HEXE_PANE_UUID"):
-        print("Not inside a hexe pane — the sequences would be discarded.")
-        print("Open hexe first, then run this there.")
-        return 1
+    # Give each band a starting palette so there is something to change. `set`
+    # creates the namespace and patches entries; it does NOT select it.
+    for slot, _ in BANDS:
+        osc("set", str(slot), *[f"{i}=#444444" for i in INDEXES])
 
-    paint()
-    fd = sys.stdin.fileno()
-    saved = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        while True:
-            ch = sys.stdin.read(1)
-            if ch in ("q", "\x03", "\x04"):
-                break
-            if ch in SCHEMES:
-                apply(ch)
-            elif ch == "a":
-                # hexe replies OSC 1330;have;<osc>;<free> on stdin. Nothing is
-                # required to ask; silence just means "not hexe".
-                emit(seq("ask"))
-            elif ch == "p":
-                paint()
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-        emit("\033[0m\n")
-    return 0
+    sys.stdout.write("\n\033[1m  palette namespaces — same indexes, different namespaces\033[0m\n\n")
+    for slot, label in BANDS:
+        band(slot, label)
+    band(None, "unclaimed")
+    sys.stdout.write("\n")
+
+    uuid = os.environ.get("HEXE_PANE_UUID", "")
+    # The CLI wants the full 32-char uuid, not a prefix.
+    pane = f" --pane {uuid}" if uuid else ""
+    print("  This process has exited. The bands above are just cells now.")
+    print("  Recolour a band from anywhere and watch them change in place:\n")
+    for slot, _ in BANDS:
+        print(f"    hexe palette set --ns {slot} 1=#ff5555 2=#50fa7b{pane}")
+    print(f"\n    hexe palette set --ns {BANDS[0][0]} bg=#221111{pane}       # the band's blanks too")
+    print(f"    hexe palette reset --ns {BANDS[0][0]}{pane}                  # back to your theme")
+    print(f"    hexe palette get --ns {BANDS[0][0]}{pane}                    # what is actually set")
+    print("\n  Or straight from a shell, no hexe CLI involved:\n")
+    print(f"    printf '\\033]{OSC};set;{BANDS[0][0]};1=#ff00aa\\033\\\\'")
+    print(f"\n    hexe palette set --ns 0 1=#ff0000{pane}   # slot 0 = the ordinary palette")
+    print("\n  The `unclaimed` row is the control — until you set slot 0, which is")
+    print("  exactly what it resolves against.")
+    print("  Scroll them off-screen and back, or detach and reattach, then")
+    print("  recolour again — the tag rides on the cell, not on this process.")
+    if uuid:
+        print(f"\n  pane {uuid[:8]}")
+    print()
+
+    # Release before exiting. hexe deliberately does not guess when a region
+    # ended, so a namespace left selected would be inherited by your shell
+    # prompt and everything you type next.
+    osc("end")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

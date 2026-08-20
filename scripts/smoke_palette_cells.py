@@ -80,12 +80,26 @@ def fail(msg, capture=None):
 PAINT = os.path.join(WD, "paint.sh")
 with open(PAINT, "w") as fh:
     fh.write(
-        "printf '\\033]1330;set;mine;33=#ff00aa\\033\\\\'\n"
+        "printf '\\033]1330;set;2;33=#ff00aa\\033\\\\'\n"
         "printf 'BEFORE \\033[38;5;33mB\\033[0m\\n'\n"
-        "printf '\\033]1330;use;mine\\033\\\\'\n"
+        "printf '\\033]1330;use;2\\033\\\\'\n"
         "printf 'INSIDE \\033[38;5;33mI\\033[0m\\n'\n"
+        # Still inside the namespace, but AFTER an SGR reset. The tag is
+        # embedder state, not an SGR attribute; a terminal that clears it here
+        # drops the namespace on every cell after the first `\\e[0m` a program
+        # emits, which is all of them in practice.
+        "printf 'PASTRESET \\033[38;5;33mP\\033[0m\\n'\n"
         "printf '\\033]1330;end\\033\\\\'\n"
         "printf 'AFTER \\033[38;5;33mA\\033[0m\\n'\n"
+        # A full-screen app's shape: select, enter the alternate screen, release
+        # while inside it, leave. Leaving restores the primary cursor, and the
+        # restore must NOT resurrect the released selection — otherwise the
+        # shell's own output afterwards is stamped with the app's namespace.
+        "printf '\\033]1330;use;2\\033\\\\'\n"
+        "printf '\\033[?1049h'\n"
+        "printf '\\033]1330;end\\033\\\\'\n"
+        "printf '\\033[?1049l'\n"
+        "printf 'POSTALT \\033[38;5;33mZ\\033[0m\\n'\n"
     )
 
 IDX33 = re.compile(rb"38[:;]5[:;]33")
@@ -133,7 +147,7 @@ os.write(master, f"sh {PAINT}\r".encode())
 time.sleep(3.0)
 frame = repaint()
 
-for label in (b"BEFORE", b"INSIDE", b"AFTER"):
+for label in (b"BEFORE", b"INSIDE", b"PASTRESET", b"AFTER", b"POSTALT"):
     if label not in frame:
         fail(f"{label.decode()} never reached the screen", frame)
 
@@ -148,11 +162,22 @@ def styling_of(frame, label):
         return "indexed"
     return "unstyled"
 
-kinds = {l.decode(): styling_of(frame, l) for l in (b"BEFORE", b"INSIDE", b"AFTER")}
+kinds = {l.decode(): styling_of(frame, l)
+         for l in (b"BEFORE", b"INSIDE", b"PASTRESET", b"AFTER", b"POSTALT")}
+
+if kinds["PASTRESET"] != "namespaced":
+    fail(f"an SGR reset inside a selected namespace dropped the tag "
+         f"(PASTRESET is {kinds['PASTRESET']}) — programs emit \\e[0m constantly, "
+         f"so this loses the namespace on nearly every cell", frame)
 
 if kinds["INSIDE"] != "namespaced":
     fail(f"the selected namespace never reached the cells written under it "
          f"(INSIDE is {kinds['INSIDE']}) — the per-cell tag is not being stamped", frame)
+
+if kinds["POSTALT"] != "indexed":
+    fail(f"a namespace released inside the alternate screen came back when the "
+         f"app left it (POSTALT is {kinds['POSTALT']}) — the shell's own output "
+         f"is being stamped with a released namespace", frame)
 
 leaked = [k for k in ("BEFORE", "AFTER") if kinds[k] != "indexed"]
 if leaked:
@@ -163,7 +188,7 @@ if leaked:
 print(f"cells: {kinds} — the tag rides on the cell, not the pane")
 
 # Recolouring the namespace afterwards must repaint its cells and only its cells.
-r = subprocess.run([HEXE, "palette", "set", "--ns", "mine", "33=#00ff88"],
+r = subprocess.run([HEXE, "palette", "set", "--ns", "2", "33=#00ff88"],
                    env=env, cwd=WD, capture_output=True, text=True)
 if r.returncode != 0:
     fail(f"`hexe palette set` failed: rc={r.returncode} {(r.stderr or r.stdout)[:200]}")

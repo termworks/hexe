@@ -125,7 +125,7 @@ print("probe: `hexe palette list` reports the live pane")
 PAINT = os.path.join(WD, "paint.sh")
 with open(PAINT, "w") as fh:
     fh.write(
-        "printf '\\033]1330;use;zone\\033\\\\'\n"
+        "printf '\\033]1330;use;3\\033\\\\'\n"
         "printf 'INZONE \\033[38;5;33mIN\\033[0m\\n'\n"
         "printf '\\033]1330;end\\033\\\\'\n"
         "printf 'OUTZONE \\033[38;5;33mOUT\\033[0m\\n'\n"
@@ -172,7 +172,7 @@ if not IDX33.search(before):
 print("baseline: indexed cells are emitted as 38;5;N, untouched")
 
 # Recolour ONLY the namespace the pane selected.
-res = hexe_cli("palette", "set", "--ns", "zone", "33=#ff00aa")
+res = hexe_cli("palette", "set", "--ns", "3", "33=#ff00aa")
 if res.returncode != 0:
     fail(f"`hexe palette set` failed: rc={res.returncode} {res.stdout!r} {res.stderr!r}")
 time.sleep(1.5)
@@ -200,7 +200,7 @@ with open(SEQ_BIN, "wb") as fh:
     # Real bytes from here, not shell escapes: `\033` inside a single-quoted
     # sh variable is four literal characters, so a script that "emits" it that
     # way tests nothing.
-    fh.write(b"\x1b]1330;set;zone;33=#00ff00\x1b\\")
+    fh.write(b"\x1b]1330;set;3;33=#00ff00\x1b\\")
 DRIP = os.path.join(WD, "drip.sh")
 with open(DRIP, "w") as fh:
     fh.write(
@@ -220,7 +220,7 @@ if not SET33_OUT.search(dripped):
 print("split: a byte-at-a-time sequence is reassembled and applied")
 
 
-res = hexe_cli("palette", "set", "--ns", "zone", "bg=#00007b")
+res = hexe_cli("palette", "set", "--ns", "3", "bg=#00007b")
 if res.returncode != 0:
     fail(f"`hexe palette set bg=` failed: {res.stderr!r}")
 time.sleep(1.5)
@@ -233,7 +233,7 @@ print("defaults: bg= paints the namespace's unstyled cells")
 # Read it back. `get` is answered from the session daemon's parked copy, so it
 # also proves the frontend actually synced the change there — the thing a
 # detach later depends on.
-res = hexe_cli("palette", "get", "--ns", "zone")
+res = hexe_cli("palette", "get", "--ns", "3")
 if res.returncode != 0:
     fail(f"`hexe palette get` failed: rc={res.returncode} {res.stderr!r}")
 if "33=#00ff00" not in res.stdout:
@@ -242,11 +242,11 @@ if "33=#00ff00" not in res.stdout:
 print("get: the daemon reports the colour that was set")
 
 # An index filter narrows it; a namespace filter excludes the others.
-res = hexe_cli("palette", "get", "--ns", "other")
+res = hexe_cli("palette", "get", "--ns", "9")
 if "33=#ff00aa" in res.stdout:
     fail(f"`get --ns other` leaked another namespace: {res.stdout!r}")
 res = hexe_cli("palette", "list")
-if "zone=" not in res.stdout:
+if "3=" not in res.stdout:
     fail(f"`hexe palette list` did not report the populated namespace: {res.stdout!r}")
 print("get: filters by namespace, and list reports what is populated")
 
@@ -260,7 +260,7 @@ print("get: filters by namespace, and list reports what is populated")
 # on `read` to hold it there deterministically.
 CURSOR_SH = os.path.join(WD, "cursorns.sh")
 with open(CURSOR_SH, "w") as fh:
-    fh.write("printf '\033]1330;use;curns\033\\\\CURSORNS '\n"
+    fh.write("printf '\033]1330;use;5\033\\\\CURSORNS '\n"
              "read x\n")
 os.write(master, f"sh {CURSOR_SH}\r".encode())
 time.sleep(2.5)
@@ -273,7 +273,7 @@ if OSC12.search(bytes(seen)):
 # Clear BEFORE the set: emission is change-driven and happens within a frame
 # of the OSC landing, so clearing afterwards races it away.
 del seen[:]
-res = hexe_cli("palette", "set", "--ns", "curns", "cursor=#00ff88")
+res = hexe_cli("palette", "set", "--ns", "5", "cursor=#00ff88")
 if res.returncode != 0:
     fail(f"`hexe palette set cursor=` failed: {res.stderr!r}")
 time.sleep(2.5)
@@ -293,18 +293,26 @@ print("cursor: not re-emitted while the selection is unchanged")
 os.write(master, b"\r")   # unblock the `read`
 time.sleep(1.5)
 
-# The frontend must survive a namespace it was never told about.
-res = hexe_cli("palette", "use", "--ns", "nosuchthing")
+# A slot nobody has set is a legitimate selection that simply resolves to
+# nothing — every index still passes through to the terminal's own theme.
+res = hexe_cli("palette", "use", "--ns", "20")
 if res.returncode != 0:
-    fail(f"`hexe palette use` on an undefined namespace failed: {res.stderr!r}")
+    fail(f"`hexe palette use` on an unset slot failed: {res.stderr!r}")
 time.sleep(1.0)
 if fe.poll() is not None:
     fail("frontend died applying palette commands")
-print("degradation: an undefined namespace is accepted and changes nothing")
+
+# A slot outside the range is refused rather than folded onto a live one, which
+# would paint cells with another caller's colours.
+res = hexe_cli("palette", "use", "--ns", "99")
+if res.returncode == 0:
+    fail("`hexe palette use --ns 99` was accepted; an out-of-range slot must be "
+         "refused, not wrapped onto a live namespace")
+print("degradation: an unset slot changes nothing, an out-of-range slot is refused")
 
 # `reset` is the only undo the protocol has: `set` patches and `drop` releases
 # the binding, so without this a mistyped colour is permanent.
-res = hexe_cli("palette", "reset", "--ns", "zone")
+res = hexe_cli("palette", "reset", "--ns", "3")
 if res.returncode != 0:
     fail(f"`hexe palette reset` failed: {res.stderr!r}")
 time.sleep(1.5)
@@ -321,7 +329,7 @@ print("reset: the namespace falls back to the terminal's own theme")
 # leaves the parked copy behind would resurrect the old colours on reattach —
 # the serialized blob goes from "one entry" to empty, and SES has to store that
 # emptiness rather than keep the last non-empty version.
-res = hexe_cli("palette", "get", "--ns", "zone")
+res = hexe_cli("palette", "get", "--ns", "3")
 if "33=#ff00aa" in res.stdout:
     fail(f"reset did not reach the daemon's parked copy: {res.stdout!r}")
 print("reset: the daemon's parked copy is cleared too")

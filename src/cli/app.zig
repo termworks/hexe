@@ -809,6 +809,18 @@ pub fn main() !void {
     if (matches.getSingleValue("profile")) |name| setInstanceFromCli(name);
     if (matches.getSingleValue("instance")) |name| setInstanceFromCli(name);
 
+    // yazap turns a repeated flag into a multi-value, and getSingleValue then
+    // answers null — which `orelse "*"` quietly widened into "every namespace in
+    // every pane". Repeating a flag is a mistake, not a request to broadcast.
+    const repeated = struct {
+        fn check(sub: anytype, flag: []const u8) bool {
+            const vals = sub.getMultiValues(flag) orelse return false;
+            if (vals.len <= 1) return false;
+            std.debug.print("Error: --{s} given more than once\n", .{flag});
+            return true;
+        }
+    }.check;
+
     if (matches.subcommandMatches("palette")) |m| {
         if (m.subcommandMatches("list")) |sub| {
             if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
@@ -816,6 +828,7 @@ pub fn main() !void {
         }
         if (m.subcommandMatches("set")) |sub| {
             if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+            if (repeated(sub, "ns") or repeated(sub, "pane")) return error.BadArgument;
             const ns = if (sub.containsArg("all")) "*" else (sub.getSingleValue("ns") orelse "*");
             return palette_cmds.runPaletteSet(
                 allocator,

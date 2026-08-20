@@ -76,7 +76,7 @@ pub fn runPaletteList(allocator: std.mem.Allocator, json_output: bool) !void {
                 if (ns.fg != null) extras += 1;
                 if (ns.bg != null) extras += 1;
                 if (ns.cursor != null) extras += 1;
-                try out.writer(allocator).print(" {s}={d}", .{ ns.name, ns.count() + extras });
+                try out.writer(allocator).print(" {d}={d}", .{ ns.slot, ns.count() + extras });
             }
         }
         try out.appendSlice(allocator, "\n");
@@ -142,25 +142,27 @@ fn appendPanePalette(
 
     var reader = palette.BlobReader.init(blob);
     while (reader.next()) |namespace| {
-        if (ns_filter.len > 0 and !std.mem.eql(u8, ns_filter, "*") and
-            !std.ascii.eqlIgnoreCase(ns_filter, namespace.name)) continue;
+        if (ns_filter.len > 0 and !std.mem.eql(u8, ns_filter, "*")) {
+            const want = palette.NamespaceTable.parseSlot(ns_filter) orelse continue;
+            if (want != namespace.slot) continue;
+        }
 
         var w = out.writer(allocator);
         var i: usize = 0;
         while (i < namespace.count()) : (i += 1) {
             const entry = namespace.at(i);
             if (!wantsIndex(indices, entry.index)) continue;
-            try w.print("{s} {s} {d}=#{x:0>2}{x:0>2}{x:0>2}\n", .{
-                uuid[0..8],  namespace.name, entry.index,
+            try w.print("{s} {d} {d}=#{x:0>2}{x:0>2}{x:0>2}\n", .{
+                uuid[0..8],  namespace.slot, entry.index,
                 entry.rgb.r, entry.rgb.g,    entry.rgb.b,
             });
         }
         // Defaults only when no explicit index filter was given: `get 3` asks
         // about index 3, not about the namespace's background.
         if (indices.len == 0) {
-            if (namespace.fg) |c| try w.print("{s} {s} fg=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.name, c.r, c.g, c.b });
-            if (namespace.bg) |c| try w.print("{s} {s} bg=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.name, c.r, c.g, c.b });
-            if (namespace.cursor) |c| try w.print("{s} {s} cursor=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.name, c.r, c.g, c.b });
+            if (namespace.fg) |c| try w.print("{s} {d} fg=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.slot, c.r, c.g, c.b });
+            if (namespace.bg) |c| try w.print("{s} {d} bg=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.slot, c.r, c.g, c.b });
+            if (namespace.cursor) |c| try w.print("{s} {d} cursor=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.slot, c.r, c.g, c.b });
         }
     }
 }
@@ -265,9 +267,9 @@ fn effectiveOsc() u32 {
     return std.fmt.parseUnsigned(u32, raw, 10) catch palette.DEFAULT_OSC;
 }
 
-/// `*` is the documented wildcard; every other target must be a real name.
+/// `*` is the documented wildcard; every other target must be a slot number.
 fn validNsArg(ns: []const u8) bool {
-    return std.mem.eql(u8, ns, "*") or palette.validName(ns);
+    return std.mem.eql(u8, ns, "*") or palette.NamespaceTable.parseSlot(ns) != null;
 }
 
 /// `hexe palette set --ns <name> <i>=#rrggbb …` / `--from <file>`.
@@ -293,8 +295,7 @@ pub fn runPaletteSet(
     }
 
     if (!validNsArg(ns)) {
-        print("Error: invalid namespace {s}: expected * or a name of up to {d} " ++
-            "characters from a-z 0-9 . _ -\n", .{ ns, palette.MAX_NAME_LEN });
+        print("Error: invalid namespace {s}: expected * or a slot number 0..{d}\n", .{ ns, palette.MAX_NS - 1 });
         return Error.BadArgument;
     }
     for (entries.items) |e| {
@@ -333,8 +334,7 @@ pub fn runPaletteVerb(
     pane: []const u8,
 ) !void {
     if (!std.mem.eql(u8, verb, "end") and !validNsArg(ns)) {
-        print("Error: invalid namespace {s}: expected * or a name of up to {d} " ++
-            "characters from a-z 0-9 . _ -\n", .{ ns, palette.MAX_NAME_LEN });
+        print("Error: invalid namespace {s}: expected * or a slot number 0..{d}\n", .{ ns, palette.MAX_NS - 1 });
         return Error.BadArgument;
     }
 

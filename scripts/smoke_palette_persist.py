@@ -120,7 +120,7 @@ PAINT = os.path.join(WD, "paint.sh")
 with open(PAINT, "w") as fh:
     # The pane declares its own region: cells written between `use` and `end`
     # carry the namespace, which is what has to survive the round trip.
-    fh.write("printf '\\033]1330;use;keep\\033\\\\'\n"
+    fh.write("printf '\\033]1330;use;4\\033\\\\'\n"
              "printf 'NSROW \\033[38;5;33mIN\\033[0m\\n'\n"
              "printf '\\033]1330;end\\033\\\\'\n")
 
@@ -134,7 +134,7 @@ time.sleep(3.0)
 if not IDX33.search(a.repaint()):
     fail("setup: the namespaced row never rendered its indexed colour")
 
-res = hexe_cli("palette", "set", "--ns", "keep", "33=#ff0000")
+res = hexe_cli("palette", "set", "--ns", "4", "33=#ff0000")
 if res.returncode != 0:
     fail(f"palette set failed: {res.stderr!r}")
 time.sleep(1.5)
