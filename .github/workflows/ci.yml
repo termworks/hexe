@@ -33,6 +33,14 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Vendor patched ghostty-vt
+        # build.zig.zon points at vendor/ghostty, which is generated rather than
+        # committed: it is upstream ghostty at a pinned revision plus
+        # patches/ghostty-vt-ns.patch. Without this the build has no dependency
+        # to resolve. `make ghostty` also gives it its own .git, which keeps
+        # ghostty's version detection from walking up and finding OUR tags.
+        run: make ghostty
+
       - name: Check formatting
         run: zig fmt --check src build.zig
 
