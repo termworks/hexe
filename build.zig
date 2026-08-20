@@ -406,6 +406,15 @@ pub fn build(b: *std.Build) void {
     const palette_cli_tests = b.addTest(.{ .root_module = palette_cli_test_module });
     const run_palette_cli_tests = b.addRunArtifact(palette_cli_tests);
 
+    const statusbar_layout_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/frontends/terminal/statusbar_layout.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_statusbar_layout_tests = b.addRunArtifact(statusbar_layout_tests);
+
     const keypad_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/frontends/terminal/keypad.zig"),
@@ -576,6 +585,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lua_events_tests.step);
     test_step.dependOn(&run_float_geometry_tests.step);
     test_step.dependOn(&run_keypad_tests.step);
+    test_step.dependOn(&run_statusbar_layout_tests.step);
     test_step.dependOn(&run_palette_cli_tests.step);
     test_step.dependOn(&run_prompt_navigation_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);

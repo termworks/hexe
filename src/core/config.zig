@@ -81,6 +81,19 @@ pub const StatusBarConfig = struct {
     float_title_view: []const u8 = "float.title",
     sprite_view: []const u8 = "overlay.sprite",
     container_title_view: []const u8 = "container.title",
+
+    /// Independently addressed bar zones. When any is set the bar is composed
+    /// from three placements instead of one full-width `view`.
+    zone_left: ?[]const u8 = null,
+    zone_center: ?[]const u8 = null,
+    zone_right: ?[]const u8 = null,
+    /// Order in which zones give up width when the bar is too narrow, as zone
+    /// indices: 0 left, 1 center, 2 right. The last entry is kept longest.
+    shrink: [3]u8 = .{ 1, 2, 0 },
+
+    pub fn zonesEnabled(self: *const StatusBarConfig) bool {
+        return self.zone_left != null or self.zone_center != null or self.zone_right != null;
+    }
 };
 
 pub const FloatStylePosition = enum {

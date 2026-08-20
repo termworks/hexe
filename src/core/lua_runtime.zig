@@ -666,6 +666,41 @@ pub const LuaRuntime = struct {
         if (self.getStringAlloc(-1, "float_title_view")) |v| mux.tabs_config.status_float_title_view = v;
         if (self.getStringAlloc(-1, "container_title_view")) |v| mux.tabs_config.status_container_title_view = v;
         if (self.getStringAlloc(-1, "sprite_view")) |v| mux.tabs_config.status_sprite_view = v;
+
+        if (self.pushTable(-1, "zones")) {
+            defer self.pop();
+            inline for (.{ "left", "center", "right" }) |name| {
+                if (self.pushTable(-1, name)) {
+                    defer self.pop();
+                    if (self.getStringAlloc(-1, "view")) |v| {
+                        @field(mux.tabs_config, "status_zone_" ++ name) = v;
+                    }
+                }
+            }
+        }
+
+        if (self.pushTable(-1, "shrink")) {
+            defer self.pop();
+            var order: [3]u8 = .{ 1, 2, 0 };
+            var seen: usize = 0;
+            var i: usize = 1;
+            while (i <= 3 and self.pushArrayElement(-1, i)) : (i += 1) {
+                defer self.pop();
+                const name = self.lua.toString(-1) catch continue;
+                order[seen] = zoneIndexFromName(name) orelse continue;
+                seen += 1;
+            }
+            if (seen == 3) mux.tabs_config.status_shrink = order;
+        }
+    }
+
+    /// Zone name to the index `StatusBarConfig.shrink` stores: 0 left, 1
+    /// center, 2 right.
+    fn zoneIndexFromName(name: []const u8) ?u8 {
+        if (std.mem.eql(u8, name, "left")) return 0;
+        if (std.mem.eql(u8, name, "center")) return 1;
+        if (std.mem.eql(u8, name, "right")) return 2;
+        return null;
     }
 
     fn applyPaletteConfigV2(self: *Self) !void {
@@ -1142,7 +1177,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "validate_theme('theme', cfg.theme); " ++
         "validate_keybindings('keys', cfg.keys); " ++
         "local mux=expect_table('mux', cfg.mux, true); if mux then reject_unknown_fields('mux', mux, { confirm=true, mouse=true, splits=true, floats=true, selection_color=true, float=true, keybindings=true, keymaps=true, config=true, options=true, tabs=true }); local confirm=expect_table('mux.confirm', mux.confirm, true); if confirm then reject_unknown_fields('mux.confirm', confirm, { exit=true, detach=true, disown=true, close=true }) end; local mouse=expect_table('mux.mouse', mux.mouse, true); if mouse then reject_unknown_fields('mux.mouse', mouse, { selection_override=true }); if mouse.selection_override~=nil then mod_mask('mux.mouse.selection_override', mouse.selection_override) end end; local mfloats=expect_table('mux.floats', mux.floats, true); if mfloats then reject_unknown_fields('mux.floats', mfloats, { defaults=true, adhoc=true, match=true }); validate_float_preset('mux.floats.defaults', mfloats.defaults); validate_float_preset('mux.floats.adhoc', mfloats.adhoc) end; local msplits=expect_table('mux.splits', mux.splits, true); if msplits then reject_unknown_fields('mux.splits', msplits, { color=true, chars=true }); local scolor=expect_table('mux.splits.color', msplits.color, true); if scolor then reject_unknown_fields('mux.splits.color', scolor, { active=true, passive=true }) end; local schars=expect_table('mux.splits.chars', msplits.chars, true); if schars then reject_unknown_fields('mux.splits.chars', schars, { vertical=true, horizontal=true }) end end; if mux.selection_color~=nil and type(mux.selection_color)~='number' then type_error('mux.selection_color','number',type(mux.selection_color)) end; if mux.float~=nil then error('config error: mux.float is removed; use mux.floats',2) end; if mux.keybindings~=nil then error('config error: mux.keybindings is removed; use top-level keys',2) end; if mux.keymaps~=nil then error('config error: mux.keymaps is removed; use top-level keys',2) end; if mux.config~=nil then error('config error: mux.config is removed; use canonical mux fields',2) end; if mux.options~=nil then error('config error: mux.options is removed; use canonical mux fields',2) end; if mux.tabs~=nil then error('config error: mux.tabs is removed; use top-level status',2) end end; " ++
-        "local status=expect_table('status', cfg.status, true); if status then reject_unknown_fields('status', status, { enabled=true, view=true, socket=true, command=true, refresh_ms=true, stale_ms=true, float_title_view=true, container_title_view=true, sprite_view=true }) end; " ++
+        "local status=expect_table('status', cfg.status, true); if status then reject_unknown_fields('status', status, { enabled=true, view=true, socket=true, command=true, refresh_ms=true, stale_ms=true, float_title_view=true, container_title_view=true, sprite_view=true, zones=true, shrink=true }); local zones=expect_table('status.zones', status.zones, true); if zones then if status.view~=nil then error('config error: status.view and status.zones are mutually exclusive; a bar is either one full-width view or three zones',2) end; reject_unknown_fields('status.zones', zones, { left=true, center=true, right=true }); local any=false; for _,k in ipairs({'left','center','right'}) do local z=expect_table('status.zones.'..k, zones[k], true); if z then reject_unknown_fields('status.zones.'..k, z, { view=true }); if type(z.view)~='string' or #z.view==0 then type_error('status.zones.'..k..'.view','non-empty string',type(z.view)) end; any=true end end; if not any then error('config error: status.zones names no zone; give at least one of left, center, right',2) end end; if status.shrink~=nil then if type(status.shrink)~='table' or #status.shrink~=3 then error('config error: status.shrink must list all three zones, e.g. { \"center\", \"right\", \"left\" }',2) end; local sawz={} for _,v in ipairs(status.shrink) do if v~='left' and v~='center' and v~='right' then error('config error: status.shrink entries must be left, center or right',2) end; if sawz[v] then error('config error: status.shrink lists '..v..' twice',2) end; sawz[v]=true end end end; " ++
         "local palette=expect_table('palette', cfg.palette, true); if palette then reject_unknown_fields('palette', palette, { namespaces=true, osc=true }); if palette.namespaces~=nil and type(palette.namespaces)~='boolean' then type_error('palette.namespaces','boolean',type(palette.namespaces)) end; if palette.osc~=nil then if type(palette.osc)~='number' then type_error('palette.osc','number',type(palette.osc)) end; if palette.osc<1 or palette.osc>10000 or palette.osc%1~=0 then error('config error: palette.osc must be integer 1..10000',2) end; local reserved={[0]=true,[1]=true,[2]=true,[4]=true,[5]=true,[7]=true,[9]=true,[99]=true,[104]=true,[105]=true,[133]=true,[777]=true}; if reserved[palette.osc] or (palette.osc>=10 and palette.osc<=19) or (palette.osc>=50 and palette.osc<=59) or (palette.osc>=110 and palette.osc<=119) then error('config error: palette.osc '..palette.osc..' is reserved; hexe already forwards or consumes that OSC',2) end end end; " ++
         "local pop=expect_table('pop', cfg.pop, true); if pop then local notify=expect_table('pop.notify', pop.notify, true); if notify and notify.carrier~=nil then error('config error: pop.notify.carrier is removed; use pop.notify.mux',2) end; local confirm=expect_table('pop.confirm', pop.confirm, true); if confirm and confirm.carrier~=nil then error('config error: pop.confirm.carrier is removed; use pop.confirm.mux',2) end; local choose=expect_table('pop.choose', pop.choose, true); if choose and choose.carrier~=nil then error('config error: pop.choose.carrier is removed; use pop.choose.mux',2) end; expect_table('pop.widgets', pop.widgets, true) end; " ++
         "local ses=expect_table('ses', cfg.ses, true); if ses then expect_table('ses.isolation', ses.isolation, true); local layouts=expect_array('ses.layouts', ses.layouts, true); if layouts then for i,layout in ipairs(layouts) do validate_layout('ses.layouts['..i..']',layout) end end end; " ++

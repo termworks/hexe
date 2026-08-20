@@ -18,6 +18,63 @@ status = {
 },
 ```
 
+## Zones
+
+The bar can be one region or three, addressed independently:
+
+```lua
+status = {
+  enabled = true,
+  zones = {
+    left   = { view = "status.left" },
+    center = { view = "status.center" },
+    right  = { view = "status.right" },
+  },
+  shrink = { "center", "right", "left" },  -- who gives up width first
+},
+```
+
+`view` and `zones` are mutually exclusive — `view` keeps meaning one region
+spanning the whole bar. Every zone is optional: name only `left` and `right` and
+nothing is asked for the middle.
+
+Nothing about the protocol changes. Each zone is an ordinary request for its own
+selector, tagged with the zone name so the three never share a cache entry. A
+painter needs no new capability — only three selectors instead of one.
+
+Each zone is asked at the **full bar width** and composes freely; hexe places
+what comes back. Left sits flush at column 0, right flush against the far edge,
+center as near the middle as it can get without overlapping either. When the
+three do not fit, zones are dropped in `shrink` order — the last name in the
+list is the one kept longest — and a single zone still too wide is clipped
+rather than dropped.
+
+That costs a little painter work at narrow widths, in exchange for one round of
+requests per frame. The alternative — measure, then re-request with real
+budgets — would let a painter prune itself to fit, at the price of a stale
+frame; hexe does not do this.
+
+What zones buy over one flat response:
+
+- **No padding arithmetic.** Alignment stops being something the painter fakes
+  with spacers it computed from the bar width.
+- **Independent pruning.** `shrink` says which cluster loses first, instead of
+  the painter guessing blind from a single flat list.
+- **Independent staleness.** A zone whose painter goes quiet dims on its own
+  while the others stay live. With one region, one silence dimmed the whole bar.
+
+Interaction is unchanged, including the coordinates: a zone reports its
+rectangles relative to **its own** left edge, starting at x=0, and hexe offsets
+them by where it drew that zone. `hover_region`, `press_region` and
+`press_button` go to all three zones as they are — ids belong to the painter, so
+a painter that reuses one across zones is describing two things by one name.
+
+A zone answering `ok:false` contributes nothing and takes no width; that is how
+a painter opts out of a view it does not implement. If *no* zone answers, the
+bar is blank and hexe logs the three selectors it asked for — the config that
+introduces zones is the same one that has to point them at names the painter
+actually serves.
+
 ## Finding the painter
 
 In order:
@@ -38,12 +95,14 @@ a service unit, a shell rc line, whatever you like.
 | View | Mode | Drawn as |
 |---|---|---|
 | `status` | run | the whole bar, including tabs |
+| `status.left` / `.center` / `.right` | run | one zone each, when `zones` is set |
 | `float.title` | run | float border titles |
 | `container.title` | run | pane border titles |
 | `overlay.sprite` | surface | per-pane overlay art |
 
 Rename any of them with `view`, `float_title_view`, `container_title_view`,
-`sprite_view`.
+`sprite_view`, or per zone with `zones.<zone>.view`. The names above are only
+defaults — hexe asks for whatever the config says.
 
 Dialogs are deliberately **not** on this list. Confirmations, choosers and
 notifications block the UI and take keyboard input, so hexe draws them itself.
