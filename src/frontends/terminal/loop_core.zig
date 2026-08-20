@@ -50,6 +50,7 @@ fn loopTimerCallback(
     if (now - timer_ctx.last_pane_sync >= timer_ctx.pane_sync_interval) {
         timer_ctx.last_pane_sync = now;
         timer_ctx.state.syncFocusedPaneInfo();
+        timer_ctx.state.syncNamePool();
         timer_ctx.state.syncPalettes();
     }
     if (now - timer_ctx.last_heartbeat >= timer_ctx.heartbeat_interval) {

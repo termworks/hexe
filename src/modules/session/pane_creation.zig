@@ -28,6 +28,14 @@ pub const InFlightPane = struct {
     spawn: pane_spawn.PendingPodSpawn,
 };
 
+/// The next free pane name, from the dictionary a frontend supplied or the
+/// built-in pool when it supplied none.
+fn pickPaneName(self: anytype) ![]const u8 {
+    const pool = self.name_pool orelse ipc.builtinPaneNames();
+    const suffix = self.name_suffix orelse "-%d";
+    return pane_spawn.pickPaneName(self.allocator, &self.store, pool, self.name_order, suffix);
+}
+
 pub fn beginCreatePane(
     self: anytype,
     client_id: usize,
@@ -42,8 +50,7 @@ pub fn beginCreatePane(
     _ = self.getClient(client_id) orelse return error.ClientNotFound;
 
     const uuid = ipc.generateUuid();
-    const base_name = ipc.generatePaneName();
-    const name = try pane_spawn.generateUniquePaneName(self.allocator, &self.store, base_name);
+    const name = try pickPaneName(self);
     errdefer self.allocator.free(name);
     const pod_socket_path = try ipc.getPodSocketPath(self.allocator, &uuid);
     errdefer self.allocator.free(pod_socket_path);
@@ -147,8 +154,7 @@ pub fn createPane(
 
     var pane_inserted = false;
     const uuid = ipc.generateUuid();
-    const base_name = ipc.generatePaneName();
-    const name = try pane_spawn.generateUniquePaneName(self.allocator, &self.store, base_name);
+    const name = try pickPaneName(self);
     ses.debugLog("createPane: generated name='{s}'", .{name});
     errdefer if (!pane_inserted) self.allocator.free(name);
     const pod_socket_path = try ipc.getPodSocketPath(self.allocator, &uuid);

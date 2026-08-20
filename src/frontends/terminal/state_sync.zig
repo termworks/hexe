@@ -459,6 +459,27 @@ pub fn resizeFloatingPanes(self: anytype) void {
 /// Swept over every pane rather than only the focused one: `hexe palette set`
 /// with no `--pane` reaches the whole session, so any pane can be the one that
 /// changed. The dirty flag keeps this to nothing at all on a normal tick.
+/// Hand SES the pane-name dictionary, once per connection.
+///
+/// SES creates panes and never reads the config, so a dictionary the config
+/// produced has to be sent. Done from the sync tick rather than at attach
+/// because that is where the connection is known to be up, and re-sent after a
+/// reconnect for the same reason.
+pub fn syncNamePool(self: anytype) void {
+    if (!self.runtime.isConnected()) {
+        self.name_pool_sent = false;
+        return;
+    }
+    if (self.name_pool_sent) return;
+    const pool = self.config.names.pane orelse {
+        // No dictionary configured: SES's built-in pool is already the answer.
+        self.name_pool_sent = true;
+        return;
+    };
+    self.runtime.setNamePool(pool, self.config.names.order, self.config.names.suffix);
+    self.name_pool_sent = true;
+}
+
 pub fn syncPalettes(self: anytype) void {
     if (!self.runtime.isConnected()) return;
     for (self.view.tab_views.items) |*tab| {

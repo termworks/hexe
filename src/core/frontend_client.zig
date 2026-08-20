@@ -6,6 +6,7 @@ const logging = @import("logging.zig");
 const session_model = @import("session_model.zig");
 const wire = @import("wire.zig");
 const palette_mod = @import("palette.zig");
+const names_mod = @import("names.zig");
 const responses = @import("ses_client_responses.zig");
 const commands = @import("ses_client_commands.zig");
 const reads = @import("ses_client_reads.zig");
@@ -1013,6 +1014,48 @@ pub const SesClient = struct {
         }
         @memcpy(sync_cwd_buf[0..resp.cwd.len], resp.cwd);
         return sync_cwd_buf[0..resp.cwd.len];
+    }
+
+    /// Hand SES the vocabulary panes are named from.
+    ///
+    /// SES creates panes but never reads the config, so a dictionary produced
+    /// there has to be sent. Fire-and-forget and idempotent: SES keeps the last
+    /// pool it was given, and without one it uses its built-in pool — which is
+    /// exactly what a default config wants anyway.
+    pub fn setNamePool(
+        self: *SesClient,
+        entries: []const []const u8,
+        order: names_mod.Order,
+        suffix: []const u8,
+    ) void {
+        const fd = self.ctl_fd orelse return;
+        if (entries.len == 0 or entries.len > names_mod.MAX_ENTRIES) return;
+
+        var trail: std.ArrayList(u8) = .empty;
+        defer trail.deinit(self.allocator);
+        const sfx = suffix[0..@min(suffix.len, 255)];
+        trail.appendSlice(self.allocator, sfx) catch return;
+        var sent: u16 = 0;
+        for (entries) |e| {
+            if (e.len > names_mod.MAX_ENTRY_LEN) continue;
+            var len_buf: [2]u8 = undefined;
+            std.mem.writeInt(u16, &len_buf, @intCast(e.len), .little);
+            trail.appendSlice(self.allocator, &len_buf) catch return;
+            trail.appendSlice(self.allocator, e) catch return;
+            sent += 1;
+        }
+        if (sent == 0) return;
+
+        var msg: wire.SetNamePool = .{
+            .order = if (order == .sequential) 1 else 0,
+            .suffix_len = @intCast(sfx.len),
+            .count = sent,
+        };
+        self.drainQueuedControlResponses(fd);
+        _ = self.writeControlTrailRequest(fd, .set_name_pool, std.mem.asBytes(&msg), trail.items) catch |err| {
+            logging.logError("frontend-client", "failed to send the name pool", err);
+            if (self.ctl_fd == fd) self.ctl_fd = null;
+        };
     }
 
     /// Park a pane's palette namespaces in SES (PLAN.md M4).

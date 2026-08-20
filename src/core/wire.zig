@@ -142,6 +142,7 @@ pub const MsgType = enum(u16) {
     kill_target = 0x0142, // CLI → SES: kill a session (detached or attached) or a single pane/float by name/uuid prefix
     update_pane_palette = 0x0143, // MUX → SES: park a pane's palette namespaces as session metadata
     get_pane_palette = 0x0144, // MUX → SES: fetch them back when attaching
+    set_name_pool = 0x0145, // MUX → SES: the vocabulary panes are named from
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -562,6 +563,21 @@ pub const UpdatePaneShell = extern struct {
 /// GetPaneCwd: request CWD for a pane.
 pub const GetPaneCwd = extern struct {
     uuid: [32]u8 align(1),
+};
+
+/// SetNamePool: MUX → SES — the dictionary panes are named from.
+///
+/// SES creates panes but never reads the config, so the vocabulary has to
+/// arrive from the frontend that did. Sent once after attaching; SES keeps the
+/// last pool it was given and falls back to its built-in pool without one.
+///
+/// Followed by: suffix bytes (suffix_len), then `count` entries, each a u16
+/// length followed by that many bytes.
+pub const SetNamePool = extern struct {
+    /// 0 = random, 1 = sequential.
+    order: u8 align(1),
+    suffix_len: u8 align(1),
+    count: u16 align(1),
 };
 
 /// UpdatePanePalette: MUX → SES — park a pane's palette colours.

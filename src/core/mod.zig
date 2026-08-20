@@ -12,6 +12,7 @@ pub const pty = @import("pty.zig");
 pub const vt = @import("vt.zig");
 pub const config = @import("config.zig");
 pub const config_v2 = @import("config_v2.zig");
+pub const names = @import("names.zig");
 pub const ipc = @import("ipc.zig");
 pub const wire = @import("wire.zig");
 pub const style = @import("style.zig");
@@ -107,6 +108,7 @@ test {
     _ = @import("config.zig");
     _ = @import("logging.zig");
     _ = @import("config_v2.zig");
+    _ = @import("names.zig");
     _ = @import("session_config.zig");
     _ = @import("lua_runtime.zig");
     _ = @import("lua_api_exec.zig");

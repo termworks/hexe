@@ -362,3 +362,92 @@ pub fn handleCliGetPanePalette(self: *Server, fd: posix.fd_t, payload_len: u32) 
     var resp = wire.PanePalette{ .uuid = req.uuid, .blob_len = 0 };
     _ = self.sendCtlFrame(fd, .get_pane_palette, std.mem.asBytes(&resp), &.{}, "cli palette reply");
 }
+
+/// MUX → SES: the vocabulary panes are named from.
+///
+/// SES creates panes but never reads the config, so the dictionary arrives from
+/// the frontend that did. Kept until replaced; without one, naming falls back to
+/// the built-in pool, which is what a frontend on a default config sends nothing
+/// for anyway.
+pub fn handleBinarySetNamePool(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    if (payload_len < @sizeOf(wire.SetNamePool)) {
+        self.skipPayloadRest();
+        self.sendBinaryError(fd, "set_name_pool: payload too small");
+        return;
+    }
+    const req = self.readPayloadStruct(wire.SetNamePool) catch |err| {
+        self.ctlStreamDesynced(fd, "mid-message read failed");
+        core.logging.logError("ses", "set_name_pool request read failed", err);
+        return;
+    };
+
+    const trail_len = payload_len - @sizeOf(wire.SetNamePool);
+    if (trail_len > buf.len or req.count > core.names.MAX_ENTRIES) {
+        self.skipPayloadRest();
+        self.sendBinaryError(fd, "set_name_pool: pool too large");
+        return;
+    }
+    if (trail_len > 0) {
+        self.readPayloadInto(buf[0..trail_len]) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
+            core.logging.logError("ses", "set_name_pool trail read failed", err);
+            return;
+        };
+    }
+
+    // Parsed into fresh storage first: a malformed pool must leave the previous
+    // one intact rather than half-replace it.
+    var entries: std.ArrayList([]const u8) = .empty;
+    var ok = true;
+    var off: usize = @min(req.suffix_len, trail_len);
+    const suffix_bytes = buf[0..off];
+    var i: usize = 0;
+    while (i < req.count) : (i += 1) {
+        if (off + 2 > trail_len) {
+            ok = false;
+            break;
+        }
+        const len = std.mem.readInt(u16, buf[off..][0..2], .little);
+        off += 2;
+        if (off + len > trail_len) {
+            ok = false;
+            break;
+        }
+        const entry = buf[off .. off + len];
+        off += len;
+        if (!core.names.validEntry(entry)) continue;
+        const owned = self.allocator.dupe(u8, entry) catch {
+            ok = false;
+            break;
+        };
+        entries.append(self.allocator, owned) catch {
+            self.allocator.free(owned);
+            ok = false;
+            break;
+        };
+    }
+
+    if (!ok or entries.items.len == 0) {
+        for (entries.items) |e| self.allocator.free(e);
+        entries.deinit(self.allocator);
+        if (!ok) self.sendBinaryError(fd, "set_name_pool: malformed pool");
+        return;
+    }
+
+    const suffix = self.allocator.dupe(u8, suffix_bytes) catch {
+        for (entries.items) |e| self.allocator.free(e);
+        entries.deinit(self.allocator);
+        return;
+    };
+    const owned_entries = entries.toOwnedSlice(self.allocator) catch {
+        self.allocator.free(suffix);
+        return;
+    };
+
+    self.clearNamePool();
+    const st = self.ses_state;
+    st.name_pool = owned_entries;
+    st.name_suffix = suffix;
+    st.name_order = if (req.order == 1) .sequential else .random;
+    core.logging.info("ses", "name pool set: {d} entries, order={s}", .{ owned_entries.len, @tagName(st.name_order) });
+}

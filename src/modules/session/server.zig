@@ -915,6 +915,18 @@ pub const Server = struct {
 
     /// Allocator is ignored — see `SesState.init`, which records the measured
     /// reason this cannot simply be switched to a GeneralPurposeAllocator.
+    /// Release the dictionary a previous frontend supplied.
+    pub fn clearNamePool(self: *Server) void {
+        const st = self.ses_state;
+        if (st.name_pool) |pool| {
+            for (pool) |e| self.allocator.free(e);
+            self.allocator.free(pool);
+        }
+        if (st.name_suffix) |sfx| self.allocator.free(sfx);
+        st.name_pool = null;
+        st.name_suffix = null;
+    }
+
     pub fn init(_: std.mem.Allocator, ses_state: *state.SesState) !Server {
         const page_alloc = std.heap.page_allocator;
         const socket_path = try ipc.getSesSocketPath(page_alloc);
@@ -3258,6 +3270,9 @@ pub const Server = struct {
             .update_pane_palette => {
                 server_pane_meta_handlers.handleBinaryUpdatePanePalette(self, fd, hdr.payload_len, &buf);
             },
+            .set_name_pool => {
+                server_pane_meta_handlers.handleBinarySetNamePool(self, fd, hdr.payload_len, &buf);
+            },
             .get_pane_palette => {
                 server_pane_meta_handlers.handleBinaryGetPanePalette(self, fd, hdr.payload_len, &buf);
             },
@@ -3756,7 +3771,7 @@ pub const Server = struct {
             // channel-④ events, all dispatched elsewhere. Enumerated explicitly
             // so a new MsgType is a compile error here until categorized
             // (PLAN.md 2.1). Behavior matches the former `else`.
-            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_palette, .update_pane_name, .update_pane_shell, .get_pane_cwd, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .shell_event, .bell, .exited, .shp_shell_event => {
+            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_palette, .set_name_pool, .update_pane_name, .update_pane_shell, .get_pane_cwd, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .shell_event, .bell, .exited, .shp_shell_event => {
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
                 self.closeCliRequest(fd, "unsupported cli request type");
             },

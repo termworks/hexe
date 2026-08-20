@@ -347,54 +347,19 @@ const greek_alphabet_names = [_][]const u8{
     "phi",    "chi",  "psi",   "omega",
 };
 
-// Pokemon names for pane naming (inspired by krabby - https://github.com/yannjor/krabby)
-// Gen 1-5 selection for variety
-const pokemon_names = [_][]const u8{
-    "bulbasaur",  "ivysaur",    "venusaur",   "charmander", "charmeleon",
-    "charizard",  "squirtle",   "wartortle",  "blastoise",  "caterpie",
-    "metapod",    "butterfree", "weedle",     "kakuna",     "beedrill",
-    "pidgey",     "pidgeotto",  "pidgeot",    "rattata",    "raticate",
-    "spearow",    "fearow",     "ekans",      "arbok",      "pikachu",
-    "raichu",     "sandshrew",  "sandslash",  "nidoran-f",  "nidorina",
-    "nidoqueen",  "nidoran-m",  "nidorino",   "nidoking",   "clefairy",
-    "clefable",   "vulpix",     "ninetales",  "jigglypuff", "wigglytuff",
-    "zubat",      "golbat",     "oddish",     "gloom",      "vileplume",
-    "paras",      "parasect",   "venonat",    "venomoth",   "diglett",
-    "dugtrio",    "meowth",     "persian",    "psyduck",    "golduck",
-    "mankey",     "primeape",   "growlithe",  "arcanine",   "poliwag",
-    "poliwhirl",  "poliwrath",  "abra",       "kadabra",    "alakazam",
-    "machop",     "machoke",    "machamp",    "bellsprout", "weepinbell",
-    "victreebel", "tentacool",  "tentacruel", "geodude",    "graveler",
-    "golem",      "ponyta",     "rapidash",   "slowpoke",   "slowbro",
-    "magnemite",  "magneton",   "farfetchd",  "doduo",      "dodrio",
-    "seel",       "dewgong",    "grimer",     "muk",        "shellder",
-    "cloyster",   "gastly",     "haunter",    "gengar",     "onix",
-    "drowzee",    "hypno",      "krabby",     "kingler",    "voltorb",
-    "electrode",  "exeggcute",  "exeggutor",  "cubone",     "marowak",
-    "hitmonlee",  "hitmonchan", "lickitung",  "koffing",    "weezing",
-    "rhyhorn",    "rhydon",     "chansey",    "tangela",    "kangaskhan",
-    "horsea",     "seadra",     "goldeen",    "seaking",    "staryu",
-    "starmie",    "mrmime",     "scyther",    "jynx",       "electabuzz",
-    "magmar",     "pinsir",     "tauros",     "magikarp",   "gyarados",
-    "lapras",     "ditto",      "eevee",      "vaporeon",   "jolteon",
-    "flareon",    "porygon",    "omanyte",    "omastar",    "kabuto",
-    "kabutops",   "aerodactyl", "snorlax",    "articuno",   "zapdos",
-    "moltres",    "dratini",    "dragonair",  "dragonite",  "mewtwo",
-    "mew",        "chikorita",  "bayleef",    "meganium",   "cyndaquil",
-    "quilava",    "typhlosion", "totodile",   "croconaw",   "feraligatr",
-    "sentret",    "furret",     "hoothoot",   "noctowl",    "ledyba",
-    "ledian",     "spinarak",   "ariados",    "crobat",     "chinchou",
-    "lanturn",    "pichu",      "cleffa",     "igglybuff",  "togepi",
-    "togetic",    "natu",       "xatu",       "mareep",     "flaaffy",
-    "ampharos",   "bellossom",  "marill",     "azumarill",  "sudowoodo",
-    "politoed",   "hoppip",     "skiploom",   "jumpluff",   "aipom",
-    "sunkern",    "sunflora",   "yanma",      "wooper",     "quagsire",
-    "espeon",     "umbreon",    "murkrow",    "slowking",   "misdreavus",
-    "unown",      "wobbuffet",  "girafarig",  "pineco",     "forretress",
-    "dunsparce",  "gligar",     "steelix",    "snubbull",   "granbull",
-    "qwilfish",   "scizor",     "shuckle",    "heracross",  "sneasel",
-    "teddiursa",  "ursaring",   "slugma",     "magcargo",   "swinub",
-    "piloswine",  "corsola",    "remoraid",   "octillery",  "delibird",
+/// NATO alphabet names for pane and pod naming.
+///
+/// Deliberately not a themed vocabulary. A pane name is also a CLI argument and
+/// the socket filename `pod@<name>.sock`, so the built-in pool stays short,
+/// ASCII and filename-safe. A richer vocabulary comes from whoever can also
+/// draw it — see docs/names.md.
+const nato_alphabet_names = [_][]const u8{
+    "alfa",    "bravo",  "charlie", "delta",    "echo",
+    "foxtrot", "golf",   "hotel",   "india",    "juliett",
+    "kilo",    "lima",   "mike",    "november", "oscar",
+    "papa",    "quebec", "romeo",   "sierra",   "tango",
+    "uniform", "victor", "whiskey", "xray",     "yankee",
+    "zulu",
 };
 
 /// Generate a random Greek alphabet name for session naming
@@ -405,12 +370,22 @@ pub fn generateSessionName() []const u8 {
     return greek_alphabet_names[index];
 }
 
-/// Generate a random Pokemon name for pane naming.
+/// Fallback pane name when no dictionary is configured.
 pub fn generatePaneName() []const u8 {
     var rand_byte: [1]u8 = undefined;
     std.crypto.random.bytes(&rand_byte);
-    const index = rand_byte[0] % pokemon_names.len;
-    return pokemon_names[index];
+    const index = rand_byte[0] % nato_alphabet_names.len;
+    return nato_alphabet_names[index];
+}
+
+/// The built-in pools, for a caller that wants to walk one in order rather
+/// than take a random entry.
+pub fn builtinSessionNames() []const []const u8 {
+    return &greek_alphabet_names;
+}
+
+pub fn builtinPaneNames() []const []const u8 {
+    return &nato_alphabet_names;
 }
 
 /// Generate tab name in format "session-N" (e.g. "alpha-1", "beta-2")
