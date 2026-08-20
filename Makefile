@@ -32,9 +32,19 @@ ghostty:
 	@echo "ghostty $(GHOSTTY_REV) + patches/ghostty-vt-ns.patch -> $(GHOSTTY_DIR)"
 
 # Fail with an instruction rather than a compile error a reader cannot place.
+#
+# The .git check is not cosmetic. ghostty's build derives its version from git,
+# and $(GHOSTTY_DIR) lives inside this repo -- without a repo of its own, git
+# walks up and finds OUR tags. That is fine until this repo is tagged, and then
+# ghostty's build panics with "tagged releases must be in vX.Y.Z format",
+# forty lines deep in a build runner and nowhere near the cause.
 ghostty-check:
 	@test -f $(GHOSTTY_DIR)/src/terminal/style.zig || { \
 	  echo "$(GHOSTTY_DIR) is missing. Run: make ghostty"; exit 1; }
+	@test -d $(GHOSTTY_DIR)/.git || { \
+	  echo "$(GHOSTTY_DIR) has no .git, so ghostty's build will read THIS repo's"; \
+	  echo "tags and panic. Run: make ghostty   (or: git -C $(GHOSTTY_DIR) init)"; \
+	  exit 1; }
 
 build: ghostty-check
 	zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=$(TARGET)
