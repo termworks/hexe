@@ -44,11 +44,14 @@ printf 'this line resolves colour 33 through slot 4\n'
 printf '\033]1330;end\033\\'
 ```
 
+Slot 0 is what unclaimed output resolves against, slot 1 is hexe's own chrome —
+borders, status bar, float titles — and slots 2–31 are yours.
+
 hexe holds the colours and resolves the indexes; it never decides which cells
 belong to which slot. Every cell records the slot that was current when it was
 written — the number itself, so there is no mapping to lose — and two slots are
-correct on screen at once, with a repaint reaching scrollback. Slot 0 is what
-unclaimed output resolves against, so setting it recolours the ordinary palette. Anything hexe does not recognise — an unknown name, a program that
+correct on screen at once, with a repaint reaching scrollback. Setting slot 0 recolours the ordinary
+palette; setting slot 1 recolours hexe's own furniture. Anything hexe does not recognise — an unknown name, a program that
 claims nothing, another terminal entirely — falls back to your own palette, so a
 default install looks exactly as it did before.
 

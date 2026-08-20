@@ -1,5 +1,6 @@
 #!/bin/sh
-# Run a program with its own palette slot.
+# Run a program with its own palette slot (2-31; 0 is the ordinary
+# palette and 1 is the terminal's own chrome).
 #
 #     contrib/palette_run.sh 4 nvim -u NONE somefile
 #     contrib/palette_run.sh 5 make
@@ -16,7 +17,7 @@
 set -eu
 
 if [ $# -lt 2 ]; then
-    echo "usage: $0 <slot 0-31> <command> [args...]" >&2
+    echo "usage: $0 <slot 2-31> <command> [args...]" >&2
     exit 2
 fi
 
