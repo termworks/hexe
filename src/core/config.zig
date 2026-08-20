@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const names_mod = @import("names.zig");
 const posix = std.posix;
 const lua_runtime = @import("lua_runtime.zig");
 const LuaRuntime = lua_runtime.LuaRuntime;
@@ -81,6 +82,19 @@ pub const StatusBarConfig = struct {
     float_title_view: []const u8 = "float.title",
     sprite_view: []const u8 = "overlay.sprite",
     container_title_view: []const u8 = "container.title",
+
+    /// Independently addressed bar zones. When any is set the bar is composed
+    /// from three placements instead of one full-width `view`.
+    zone_left: ?[]const u8 = null,
+    zone_center: ?[]const u8 = null,
+    zone_right: ?[]const u8 = null,
+    /// Order in which zones give up width when the bar is too narrow, as zone
+    /// indices: 0 left, 1 center, 2 right. The last entry is kept longest.
+    shrink: [3]u8 = .{ 1, 2, 0 },
+
+    pub fn zonesEnabled(self: *const StatusBarConfig) bool {
+        return self.zone_left != null or self.zone_center != null or self.zone_right != null;
+    }
 };
 
 pub const FloatStylePosition = enum {
@@ -443,7 +457,7 @@ pub const SesConfig = struct {
         defer runtime.deinit();
 
         // Load global config
-        const config_path = lua_runtime.getConfigPath(allocator, "init.lua") catch |err| {
+        const config_path = lua_runtime.getActiveConfigPath(allocator) catch |err| {
             log.warn("failed to resolve ses config path: {s}", .{@errorName(err)});
             return config;
         };
@@ -512,6 +526,15 @@ pub const SesConfig = struct {
 
         return config;
     }
+};
+
+pub const NamesConfig = struct {
+    /// Null means "use the built-in pool for this surface".
+    session: ?[]const []const u8 = null,
+    pane: ?[]const []const u8 = null,
+    order: names_mod.Order = .random,
+    /// Appended, with `%d` substituted, once every entry is taken.
+    suffix: []const u8 = "-%d",
 };
 
 pub const Config = struct {
@@ -707,6 +730,18 @@ pub const Config = struct {
     // Default float attributes (from mux.float.attributes)
     float_default_attributes: FloatAttributes = .{},
 
+    // Palette namespaces (PLAN.md M7). On by default: a namespace resolves
+    // nothing until something patches an entry, so this is inert until a
+    // palette is actually set, and the render path measured inside the M0
+    // baseline with it enabled.
+    palette_namespaces: bool = true,
+    palette_osc: u32 = 1330,
+
+    /// Where names come from. Absent dictionaries mean the built-in pools:
+    /// Greek for sessions, NATO for panes. Anything richer is produced by a
+    /// command at config load, by whoever can also draw it.
+    names: NamesConfig = .{},
+
     // Selection color (palette index, default 240)
     selection_color: u8 = 240,
 
@@ -729,7 +764,7 @@ pub const Config = struct {
 
         PARSE_ERROR = null;
 
-        const path = lua_runtime.getConfigPath(allocator, "init.lua") catch {
+        const path = lua_runtime.getActiveConfigPath(allocator) catch {
             return config;
         };
         defer freeSlice(allocator, path);

@@ -33,6 +33,11 @@ pub const SesState = struct {
     persistence: Persistence,
     polling: PollingState,
     locks: SessionLocks,
+    /// The vocabulary panes are named from, sent by a frontend that read the
+    /// config. Null means the built-in pool.
+    name_pool: ?[][]const u8 = null,
+    name_suffix: ?[]const u8 = null,
+    name_order: core.names.Order = .random,
 
     /// The allocator argument is ignored: everything here runs on
     /// `page_allocator`.

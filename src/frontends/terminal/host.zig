@@ -316,6 +316,15 @@ pub const TerminalHost = struct {
             core.logging.logError("terminal", "failed to disable in-band resize mode on restore", err);
         };
         loop_mouse.resetShape(self.state);
+        // A namespace cursor colour is set on the HOST terminal (OSC 12), so
+        // it outlives hexe unless we put it back. Only sent if we ever changed
+        // it, so a session that never used one writes nothing.
+        if (self.state.cursor_color_set) {
+            tty_restore.interface.writeAll("\x1b]112\x07") catch |err| {
+                core.logging.logError("terminal", "failed to reset cursor colour on restore", err);
+            };
+            self.state.cursor_color_set = false;
+        }
         self.state.renderer.vx.resetState(&tty_restore.interface) catch |err| {
             core.logging.logError("terminal", "failed to reset terminal renderer state", err);
         };

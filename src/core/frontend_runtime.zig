@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const ipc = @import("ipc.zig");
+const names_mod = @import("names.zig");
 const frontend_attach = @import("frontend_attach.zig");
 const FrontendAttachState = @import("frontend_attach_state.zig").FrontendAttachState;
 const FrontendClient = @import("frontend_client.zig").SesClient;
@@ -422,6 +423,26 @@ pub const FrontendRuntime = struct {
 
     pub fn probePaneExistence(self: *FrontendRuntime, uuid: [32]u8) FrontendClient.PaneExistenceProbe {
         return self.client.probePaneExistence(uuid);
+    }
+
+    /// Park a pane's palette colours in SES so they outlive this frontend.
+    pub fn updatePanePalette(self: *FrontendRuntime, uuid: [32]u8, blob: []const u8) void {
+        self.client.updatePanePalette(uuid, blob);
+    }
+
+    /// Hand SES the pane-name dictionary this config produced.
+    pub fn setNamePool(
+        self: *FrontendRuntime,
+        entries: []const []const u8,
+        order: names_mod.Order,
+        suffix: []const u8,
+    ) void {
+        self.client.setNamePool(entries, order, suffix);
+    }
+
+    /// Ask SES for a pane's parked palette; the reply lands as a control event.
+    pub fn requestPanePalette(self: *FrontendRuntime, uuid: [32]u8) void {
+        self.client.requestPanePalette(uuid);
     }
 
     pub fn updatePaneAux(

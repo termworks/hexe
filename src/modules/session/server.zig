@@ -915,6 +915,18 @@ pub const Server = struct {
 
     /// Allocator is ignored — see `SesState.init`, which records the measured
     /// reason this cannot simply be switched to a GeneralPurposeAllocator.
+    /// Release the dictionary a previous frontend supplied.
+    pub fn clearNamePool(self: *Server) void {
+        const st = self.ses_state;
+        if (st.name_pool) |pool| {
+            for (pool) |e| self.allocator.free(e);
+            self.allocator.free(pool);
+        }
+        if (st.name_suffix) |sfx| self.allocator.free(sfx);
+        st.name_pool = null;
+        st.name_suffix = null;
+    }
+
     pub fn init(_: std.mem.Allocator, ses_state: *state.SesState) !Server {
         const page_alloc = std.heap.page_allocator;
         const socket_path = try ipc.getSesSocketPath(page_alloc);
@@ -1719,8 +1731,25 @@ pub const Server = struct {
         trails: []const []const u8,
         comptime what: []const u8,
     ) bool {
+        return self.sendCtlFrameWithId(fd, msg_type, self.responseRequestIdForFd(fd), fixed, trails, what);
+    }
+
+    /// The one place a control frame is assembled and written.
+    ///
+    /// Replies pass the id of the request being serviced; pushes pass 0. Both
+    /// need the heap fallback below: a frame too big for the stack buffer was
+    /// previously dropped in silence on the push path, which for a payload like
+    /// a parked palette meant the client simply never received it.
+    fn sendCtlFrameWithId(
+        self: *Server,
+        fd: posix.fd_t,
+        msg_type: wire.MsgType,
+        request_id: u32,
+        fixed: []const u8,
+        trails: []const []const u8,
+        comptime what: []const u8,
+    ) bool {
         var stack: [CTL_FRAME_STACK_LEN]u8 = undefined;
-        const request_id = self.responseRequestIdForFd(fd);
 
         if (buildCtlFrame(&stack, msg_type, request_id, fixed, trails)) |frame| {
             if (self.writeCtlBytes(fd, frame)) return true;
@@ -1763,12 +1792,18 @@ pub const Server = struct {
     /// of dispatching it. A blocking float then never learned its pane had
     /// exited, so `hexe terminal float` hung forever.
     pub fn notifyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
-        var stack: [CTL_FRAME_STACK_LEN]u8 = undefined;
-        if (buildCtlFrame(&stack, msg_type, 0, payload, &.{})) |frame| {
-            if (self.writeCtlBytes(fd, frame)) return;
-            core.logging.warnWithSource("ses", "notify failed: fd={d} type={s}", .{ fd, @tagName(msg_type) }, @src());
-            self.queueCtlClose(fd, null);
-        }
+        _ = self.sendCtlFrameWithId(fd, msg_type, 0, payload, &.{}, "notify");
+    }
+
+    /// Same as notifyOrClose, for a push carrying a trailing byte blob.
+    pub fn notifyOrCloseWithTrail(
+        self: *Server,
+        fd: posix.fd_t,
+        msg_type: wire.MsgType,
+        payload: []const u8,
+        trail: []const u8,
+    ) void {
+        _ = self.sendCtlFrameWithId(fd, msg_type, 0, payload, &.{trail}, "notify-with-trail");
     }
 
     /// Same as replyOrClose but for messages with a trailing byte blob.
@@ -3232,6 +3267,15 @@ pub const Server = struct {
             .update_pane_aux => {
                 server_pane_meta_handlers.handleBinaryUpdatePaneAux(self, fd, hdr.payload_len, &buf);
             },
+            .update_pane_palette => {
+                server_pane_meta_handlers.handleBinaryUpdatePanePalette(self, fd, hdr.payload_len, &buf);
+            },
+            .set_name_pool => {
+                server_pane_meta_handlers.handleBinarySetNamePool(self, fd, hdr.payload_len, &buf);
+            },
+            .get_pane_palette => {
+                server_pane_meta_handlers.handleBinaryGetPanePalette(self, fd, hdr.payload_len, &buf);
+            },
             .pop_response => {
                 server_listing_handlers.handleBinaryPopResponse(self, fd, hdr.payload_len, &buf);
             },
@@ -3702,6 +3746,12 @@ pub const Server = struct {
             .get_layout => {
                 server_cli_layout_handlers.handleGetLayout(self, fd, hdr.payload_len, &buf);
             },
+            // Also reachable from the CLI: SES already holds every pane's
+            // parked palette, so `hexe palette get` reads it here rather than
+            // round-tripping through a frontend that may not be attached.
+            .get_pane_palette => {
+                server_pane_meta_handlers.handleCliGetPanePalette(self, fd, hdr.payload_len);
+            },
             .apply_layout => {
                 server_cli_layout_handlers.handleApplyLayout(self, fd, hdr.payload_len, &buf);
             },
@@ -3721,7 +3771,7 @@ pub const Server = struct {
             // channel-④ events, all dispatched elsewhere. Enumerated explicitly
             // so a new MsgType is a compile error here until categorized
             // (PLAN.md 2.1). Behavior matches the former `else`.
-            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_name, .update_pane_shell, .get_pane_cwd, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .shell_event, .bell, .exited, .shp_shell_event => {
+            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_palette, .set_name_pool, .update_pane_name, .update_pane_shell, .get_pane_cwd, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .shell_event, .bell, .exited, .shp_shell_event => {
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
                 self.closeCliRequest(fd, "unsupported cli request type");
             },

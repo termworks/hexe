@@ -6,6 +6,7 @@ const core = @import("core");
 const pagepkg = ghostty.page;
 const Style = ghostty.Style;
 const RenderState = ghostty.RenderState;
+const NamespaceTable = core.palette.NamespaceTable;
 
 /// Static ASCII lookup table -- avoids arena allocation for 95%+ of cells.
 /// Each byte position i contains the byte value i, so ascii_lut[ch..][0..1]
@@ -52,6 +53,8 @@ pub fn drawRenderState(
 
     syncKittyImages(vt, vx, stdout, arena);
 
+    const ns_table = &vt.ns_table;
+
     for (0..available_rows) |yi| {
         const y: u16 = @intCast(yi);
         if (y >= win.height) break;
@@ -68,6 +71,12 @@ pub fn drawRenderState(
 
             const raw = raw_cells[col];
 
+            // The namespace is carried by the cell itself, stamped when it was
+            // written. hexe never infers it from what is on screen: a program
+            // selects a namespace, and the cells it writes remember it.
+            const cell_ns: u8 = if (raw.style_id != 0) styles_arr[col].flags.ns else 0;
+            const cell_defaults = ns_table.defaultsFor(cell_ns);
+
             // Skip spacer tails (prise: server.zig:930-933)
             if (raw.wide == .spacer_tail) {
                 col += 1;
@@ -77,7 +86,15 @@ pub fn drawRenderState(
             const is_direct_color = (raw.content_tag == .bg_color_rgb or
                 raw.content_tag == .bg_color_palette);
             const cp = raw.codepoint();
-            if (!is_direct_color and raw.style_id == 0 and !raw.hyperlink and (cp == 0 or cp == ' ')) {
+            // Blank, unstyled cells are normally skipped rather than written.
+            // A namespace background has to paint them, or `set --ns prompt
+            // bg=…` colours the glyphs and leaves the space between them at the
+            // terminal's own background. Gated on the row actually having one,
+            // so the skip still applies everywhere else — which is everywhere,
+            // until someone sets a background.
+            if (!is_direct_color and raw.style_id == 0 and !raw.hyperlink and
+                (cp == 0 or cp == ' ') and cell_defaults.bg == null)
+            {
                 col += 1;
                 continue;
             }
@@ -94,9 +111,9 @@ pub fn drawRenderState(
 
             // Resolve style
             const style = if (raw.style_id != 0)
-                convertStyle(styles_arr[col], raw, is_direct_color)
+                convertStyle(styles_arr[col], raw, is_direct_color, ns_table, cell_ns, cell_defaults)
             else
-                convertDefaultStyle(raw, is_direct_color);
+                convertDefaultStyle(raw, is_direct_color, cell_defaults);
 
             const link = resolveCellLink(arena, row_pins[yi], @intCast(col), raw);
 
@@ -413,22 +430,57 @@ fn writeImageCellPreserve(win: vaxis.Window, col: u16, row: u16, placement: vaxi
     win.writeCell(col, row, .{ .image = placement });
 }
 
+/// The OSC 133 zone a row carries a mark for, or null when it carries none.
+fn rowZone(pin: ghostty.PageList.Pin) ?core.palette.Zone {
+    return switch (pin.rowAndCell().row.semantic_prompt) {
+        .unknown => null,
+        .prompt => .prompt,
+        .prompt_continuation => .prompt_continuation,
+        .input => .input,
+        .command => .command,
+    };
+}
+
+/// Indexed colour → vaxis colour, through the namespace table.
+///
+/// Slot 0 answers `passthrough`, so the index stays in the output and the host
+/// terminal resolves it against the user's theme, exactly as before namespaces
+/// existed. Only a real namespace bakes RGB into the stream.
+inline fn resolveColor(ns_table: *const NamespaceTable, ns: u8, idx: u8) vaxis.Color {
+    return switch (ns_table.resolveIndex(ns, idx)) {
+        .passthrough => |i| .{ .index = i },
+        .rgb => |c| .{ .rgb = .{ c.r, c.g, c.b } },
+    };
+}
+
 /// Convert ghostty Style to vaxis Style.
 /// (prise: server.zig:686-743)
-fn convertStyle(gs: Style, raw: pagepkg.Cell, is_direct_color: bool) vaxis.Style {
+fn convertStyle(
+    gs: Style,
+    raw: pagepkg.Cell,
+    is_direct_color: bool,
+    ns_table: *const NamespaceTable,
+    ns: u8,
+    defaults: core.palette.Defaults,
+) vaxis.Style {
     var style = vaxis.Style{};
 
-    // Foreground
+    // Foreground. `.none` means the cell named no colour, so it takes the
+    // namespace's default when there is one and the terminal's otherwise.
     switch (gs.fg_color) {
-        .none => {},
-        .palette => |idx| style.fg = .{ .index = @intCast(idx) },
+        .none => if (defaults.fg) |c| {
+            style.fg = .{ .rgb = .{ c.r, c.g, c.b } };
+        },
+        .palette => |idx| style.fg = resolveColor(ns_table, ns, @intCast(idx)),
         .rgb => |rgb| style.fg = .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
     }
 
     // Background
     switch (gs.bg_color) {
-        .none => {},
-        .palette => |idx| style.bg = .{ .index = @intCast(idx) },
+        .none => if (defaults.bg) |c| {
+            style.bg = .{ .rgb = .{ c.r, c.g, c.b } };
+        },
+        .palette => |idx| style.bg = resolveColor(ns_table, ns, @intCast(idx)),
         .rgb => |rgb| style.bg = .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
     }
 
@@ -464,8 +516,14 @@ fn convertStyle(gs: Style, raw: pagepkg.Cell, is_direct_color: bool) vaxis.Style
     return style;
 }
 
-fn convertDefaultStyle(raw: pagepkg.Cell, is_direct_color: bool) vaxis.Style {
+/// Style for a cell carrying no style of its own. It still belongs to the row's
+/// namespace, so the namespace's defaults apply — these are the majority of
+/// cells, and skipping them here would leave a background painted only under
+/// text that happened to be styled.
+fn convertDefaultStyle(raw: pagepkg.Cell, is_direct_color: bool, defaults: core.palette.Defaults) vaxis.Style {
     var style = vaxis.Style{};
+    if (defaults.fg) |c| style.fg = .{ .rgb = .{ c.r, c.g, c.b } };
+    if (defaults.bg) |c| style.bg = .{ .rgb = .{ c.r, c.g, c.b } };
     if (is_direct_color) applyDirectColor(&style, raw);
     return style;
 }

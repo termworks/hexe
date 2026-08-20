@@ -315,7 +315,37 @@ fn beginOsc(self: *Pane, c1: bool) void {
     }
 }
 
+/// Controls that cannot occur inside an OSC string. Their arrival means the
+/// emitter never finished the sequence — a program that died mid-write, or a
+/// `printf` missing its terminator.
+fn abortsOsc(b: u8) bool {
+    return switch (b) {
+        0x18, 0x1a, 0x0a, 0x0d => true,
+        else => false,
+    };
+}
+
+/// Leave capture without interpreting what was collected.
+///
+/// Capture diverts every byte away from the VT, so staying in it after a
+/// sequence that can no longer terminate blinds the pane for the rest of its
+/// life: the prompt, all output, everything. Real terminals abandon the OSC
+/// instead, and so does this.
+fn abandonOsc(self: *Pane) void {
+    self.osc_in_progress = false;
+    self.osc_pending_esc = false;
+    self.osc_prev_esc = false;
+    self.osc_discarding = false;
+    self.osc_buf.clearRetainingCapacity();
+}
+
 fn appendOscByte(self: *Pane, b: u8) void {
+    if (abortsOsc(b)) {
+        abandonOsc(self);
+        feedVtOutput(self, &[_]u8{b});
+        return;
+    }
+
     // BEL or ESC \ only. 0x9c (C1 ST) is a UTF-8 continuation byte — accepting
     // it truncates any OSC whose payload carries non-ASCII text, such as a
     // title or a hyperlink URI containing U+2700..U+273F.
@@ -328,6 +358,9 @@ fn appendOscByte(self: *Pane, b: u8) void {
             self.osc_buf.clearRetainingCapacity();
         };
         if (self.osc_buf.items.len > core.constants.Sizes.max_clipboard_osc_bytes) {
+            // Keep consuming, without keeping. Leaving capture here would spill
+            // the rest of the payload onto the screen as text; the abort rule
+            // above is what guarantees this cannot last forever.
             self.osc_discarding = true;
             self.osc_buf.clearRetainingCapacity();
         }
@@ -350,6 +383,10 @@ fn finishOsc(self: *Pane) void {
         feedVtOutput(self, self.osc_buf.items);
         return;
     };
+    if (code == self.vt.ns_table.osc) {
+        consumePaletteOsc(self, self.osc_buf.items);
+        return;
+    }
     if (isConsumedOscCode(code)) {
         consumeOsc(self, self.osc_buf.items);
         return;
@@ -367,6 +404,53 @@ fn finishOsc(self: *Pane) void {
     stdout.writeAll(self.osc_buf.items) catch |err| {
         core.logging.logError("terminal", "forward OSC sequence to terminal stdout", err);
     };
+}
+
+/// OSC 1330 — palette namespaces (PLAN.md §6).
+///
+/// Handled here rather than in the Consumer because it mutates the pane's
+/// namespace table instead of producing a notification, and a `set` carries up
+/// to 32 entries that are not worth copying through an Action.
+fn consumePaletteOsc(self: *Pane, seq: []const u8) void {
+    const params = oscParams(seq) orelse return;
+    switch (core.palette.applyOsc(&self.vt.ns_table, params)) {
+        .ignore => {},
+        .changed => {
+            // Selection changed: from here on, cells carry the new namespace.
+            self.vt.syncNamespaceStyle();
+            self.vt.invalidateRenderState();
+            self.palette_dirty = true;
+        },
+        .have => |reply| {
+            var buf: [64]u8 = undefined;
+            const text = std.fmt.bufPrint(&buf, "\x1b]{d};have;{d};{d}\x1b\\", .{
+                self.vt.ns_table.osc, reply.osc, reply.free,
+            }) catch return;
+            writeResponse(self, text, "OSC 1330 capability response write failed");
+        },
+    }
+}
+
+/// Everything after the OSC number and its `;`, with the introducer and the
+/// terminator stripped.
+fn oscParams(seq: []const u8) ?[]const u8 {
+    var start: usize = 0;
+    if (std.mem.startsWith(u8, seq, "\x1b]")) {
+        start = 2;
+    } else if (seq.len > 0 and seq[0] == 0x9d) {
+        start = 1;
+    } else return null;
+
+    var end = seq.len;
+    if (end > start and (seq[end - 1] == 0x07 or seq[end - 1] == 0x9c)) {
+        end -= 1;
+    } else if (end >= start + 2 and seq[end - 2] == 0x1b and seq[end - 1] == '\\') {
+        end -= 2;
+    } else return null;
+
+    const body = seq[start..end];
+    const semi = std.mem.indexOfScalar(u8, body, ';') orelse return null;
+    return body[semi + 1 ..];
 }
 
 fn consumeOsc(self: *Pane, seq: []const u8) void {

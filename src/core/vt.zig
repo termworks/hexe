@@ -1,5 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const palette_mod = @import("palette.zig");
+const logging = @import("logging.zig");
 
 // Re-export ghostty-vt - this IS our terminal emulation
 pub const ghostty = @import("ghostty-vt");
@@ -43,6 +45,11 @@ pub const VT = struct {
     // cached snapshot makes panes appear frozen — the historical bug here.
     render_state_dirty: bool = true,
 
+    /// Per-pane palette namespaces (PLAN.md M1). Slot 0 is the pane's ordinary
+    /// palette and passes indices through untouched, so this is inert until a
+    /// later milestone selects a namespace.
+    ns_table: palette_mod.NamespaceTable = undefined,
+
     /// Initialize the VT in-place.
     ///
     /// IMPORTANT: Ghostty terminal state must not be moved after initialization.
@@ -65,9 +72,11 @@ pub const VT = struct {
         self.stream = self.terminal.vtStream();
         self.render_state = .empty;
         self.kitty_image_cache = std.AutoHashMap(u32, KittyImageCache).init(allocator);
+        self.ns_table = palette_mod.NamespaceTable.init(allocator);
     }
 
     pub fn deinit(self: *VT) void {
+        self.ns_table.deinit();
         self.render_state.deinit(self.allocator);
         self.kitty_image_cache.deinit();
         self.stream.deinit();
@@ -147,6 +156,39 @@ pub const VT = struct {
     /// Check if in alternate screen mode
     pub fn inAltScreen(self: *VT) bool {
         return self.terminal.screens.active_key == .alternate;
+    }
+
+    /// Stamp the pane's current namespace onto the cursor's style.
+    ///
+    /// From here on every cell the program writes records which namespace was
+    /// selected when it was written, so recolouring one namespace repaints
+    /// exactly its own cells and leaves the rest of the screen alone. The tag
+    /// is opaque to the terminal engine (patches/ghostty-vt-ns.patch); it only
+    /// keeps styles distinct.
+    pub fn syncNamespaceStyle(self: *VT) void {
+        const ns = self.ns_table.currentSlot();
+        // Both screens, not just the active one. The selection is a property of
+        // the pane; each screen keeps its own cursor, and entering or leaving
+        // the alternate screen swaps which one is writing. Stamping only the
+        // active one let a program select on the primary, switch, release, and
+        // switch back to a cursor still carrying the released namespace.
+        var it = self.terminal.screens.all.iterator();
+        while (it.next()) |entry| {
+            const screen = entry.value.*;
+            if (screen.cursor.style.flags.ns == ns) continue;
+            screen.cursor.style.flags.ns = @truncate(ns);
+            screen.manualStyleUpdate() catch |err| {
+                logging.logError("vt", "failed to apply palette namespace to cursor style", err);
+            };
+        }
+    }
+
+    /// The palette namespace the cursor sits in.
+    ///
+    /// The pane's current selection: hexe does not decide where a namespace
+    /// applies, the program does, by selecting one and releasing it.
+    pub fn cursorNamespace(self: *VT) u8 {
+        return self.ns_table.currentSlot();
     }
 
     /// Get current working directory (from OSC 7)

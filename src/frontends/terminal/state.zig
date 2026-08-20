@@ -294,6 +294,9 @@ pub const State = struct {
     float_ui: std.AutoHashMap([32]u8, FloatUiState),
     running: bool,
     needs_render: bool,
+    /// Whether SES has been told this config's pane-name dictionary on the
+    /// current connection. Reset on disconnect so a reconnect re-sends it.
+    name_pool_sent: bool = false,
     force_full_render: bool,
     /// When true, keyboard input is broadcast to every split pane in the
     /// active tab (tmux `synchronize-panes`). Toggled by pane.sync_toggle.
@@ -313,6 +316,11 @@ pub const State = struct {
     cursor_needs_restore: bool,
     /// One-shot cursor snapshot restored after transient CLI float exits.
     cursor_restore_snapshot: ?CursorSnapshot,
+    /// Cursor colour last pushed to the HOST terminal for a palette namespace,
+    /// and whether anything was pushed at all. OSC 12 is global to the
+    /// terminal, so this is emitted only on change and undone on teardown.
+    cursor_color: ?core.palette.RGB = null,
+    cursor_color_set: bool = false,
     term_width: u16,
     term_height: u16,
     status_height: u16,
@@ -460,6 +468,14 @@ pub const State = struct {
         connect_options: core.FrontendConnectOptions,
     ) !State {
         const cfg = core.Config.load(allocator);
+        // Before any pane exists: every NamespaceTable seeds itself from these.
+        core.palette.default_enabled = cfg.palette_namespaces;
+        core.palette.default_osc = if (core.palette.isReservedOsc(cfg.palette_osc)) blk: {
+            core.logging.warn("palette", "palette.osc {d} is reserved; using {d}", .{
+                cfg.palette_osc, core.palette.DEFAULT_OSC,
+            });
+            break :blk core.palette.DEFAULT_OSC;
+        } else cfg.palette_osc;
         // Bind the live query API onto the `hexe` table the config already
         // built. Done after load so callbacks registered during load can call
         // it, and once per runtime rather than per evaluation.
@@ -473,8 +489,20 @@ pub const State = struct {
         const layout_h = height - status_h;
 
         const uuid = core.ipc.generateUuid();
+        // A configured dictionary wins over the built-in Greek pool. Uniqueness
+        // is SES's to enforce — it resolves a collision on register and tells us
+        // the name it settled on — so this only has to choose a candidate.
         const session_name = core.ipc.generateSessionName();
-        const runtime = try FrontendRuntime.createTerminal(allocator, uuid, session_name, log_level, log_file, connect_options);
+        const session_name_owned: ?[]const u8 = if (cfg.names.session) |pool| blk: {
+            const Never = struct {
+                fn taken(_: void, _: []const u8) bool {
+                    return false;
+                }
+            };
+            break :blk core.names.pick(allocator, pool, cfg.names.order, cfg.names.suffix, {}, Never.taken) catch null;
+        } else null;
+        defer if (session_name_owned) |n| allocator.free(n);
+        const runtime = try FrontendRuntime.createTerminal(allocator, uuid, session_name_owned orelse session_name, log_level, log_file, connect_options);
         errdefer runtime.destroy();
 
         return .{
@@ -2020,6 +2048,14 @@ pub const State = struct {
 
     pub fn syncPaneAux(self: *State, pane: *Pane, created_from: ?[32]u8) void {
         return state_sync.syncPaneAux(self, pane, created_from);
+    }
+
+    pub fn syncNamePool(self: *State) void {
+        return state_sync.syncNamePool(self);
+    }
+
+    pub fn syncPalettes(self: *State) void {
+        return state_sync.syncPalettes(self);
     }
 
     pub fn unfocusAllPanes(self: *State) void {

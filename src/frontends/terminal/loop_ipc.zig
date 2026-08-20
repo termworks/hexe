@@ -74,6 +74,14 @@ fn sendFailedFloatResult(state: *State, request_id: u32, exit_code: i32, comptim
     };
 }
 
+/// Roll widgets.pokemon.shiny_chance for a freshly shown sprite.
+fn rollShiny(state: *State) bool {
+    const chance = state.pop_config.widgets.pokemon.shiny_chance;
+    if (chance <= 0) return false;
+    if (chance >= 1) return true;
+    return std.crypto.random.float(f32) < chance;
+}
+
 /// Handle binary control messages from the SES control channel.
 /// Reads all available messages (CTL fd is non-blocking).
 pub fn handleSesMessage(state: *State, buffer: []u8) void {
@@ -209,6 +217,9 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
         },
         .pane_info_response => {
             handlePaneInfoResponse(state, fd, ctl_event.payload_len, buffer);
+        },
+        .palette_response => {
+            handlePaletteResponse(state, fd, ctl_event.payload_len, buffer);
         },
         .error_response => {
             skipPayload(fd, ctl_event.payload_len, buffer);
@@ -1075,6 +1086,45 @@ fn handleCwdResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []
     state.setPaneShell(payload.uuid, null, payload.cwd, null, null, null);
 }
 
+/// Handle the async get_pane_palette response: a pane's colours, parked in SES
+/// across a detach, arriving after the pane was adopted (PLAN.md M4).
+///
+/// The payload is read to completion on every path, including the ones that
+/// reject it: leaving bytes on the control stream desyncs it for every message
+/// after this one.
+fn handlePaletteResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(core.wire.PanePalette)) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+    // Bounded reads, like every other handler here. The untimed wire helpers
+    // carry the 10-second default, so a daemon that wrote a header and then
+    // stalled would freeze the UI for ten seconds per frame — the exact hazard
+    // the note at the top of this file describes.
+    const resp = readStructLogged(core.wire.PanePalette, fd, "failed to read pane palette response") orelse return;
+    const trail = payload_len - @sizeOf(core.wire.PanePalette);
+    if (trail == 0 or resp.blob_len != trail or trail > core.palette.MAX_BLOB_LEN) {
+        skipPayload(fd, trail, buffer);
+        return;
+    }
+
+    const blob = state.allocator.alloc(u8, trail) catch |err| {
+        core.logging.logError("terminal", "failed to allocate pane palette blob", err);
+        skipPayload(fd, trail, buffer);
+        return;
+    };
+    defer state.allocator.free(blob);
+    if (!readExactLogged(fd, blob, "failed to read pane palette blob")) return;
+
+    const pane = state.findPaneByUuid(resp.uuid) orelse return;
+    // Merges rather than replaces, so a colour set while this was in flight is
+    // not clobbered. `applySerialized` does not touch the dirty flag, so there
+    // is no echo loop back to SES either.
+    pane.vt.ns_table.applySerialized(blob);
+    pane.vt.invalidateRenderState();
+    state.needs_render = true;
+}
+
 /// Handle async pane_info response (updates fg_process cache).
 fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
     var payload = frontend_core.readPaneInfoPayload(state.allocator, fd, payload_len, buffer) catch |err| {
@@ -1102,6 +1152,12 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
 }
 
 fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
+    // The sprite id is the name the pane was born with, recorded here on the
+    // first name it is given and never afterwards. Renaming a pane changes what
+    // it is called, not what it shows. Recorded even when the widget is off,
+    // because the painter asks for the same id (region_render.zig).
+    recordPaneSprite(state, uuid, name);
+
     if (!state.pop_config.widgets.pokemon.enabled) return;
 
     // If pokemon widget is enabled by default, load the sprite only if not
@@ -1109,9 +1165,10 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
     for (state.view.float_views.items) |pane| {
         const uuid_match = std.mem.eql(u8, pane.uuid[0..], uuid[0..]);
         if (uuid_match and pane.pokemon_initialized and
-            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_name == null)
+            !pane.pokemon_state.manually_toggled and !pane.pokemon_state.show_sprite)
         {
-            pane.pokemon_state.loadSprite(name, false) catch |err| {
+            const id = pane.pokemon_state.sprite_name orelse name;
+            pane.pokemon_state.loadSprite(id, rollShiny(state)) catch |err| {
                 core.logging.logError("terminal", "failed to load float sprite after pane-name update", err);
             };
         }
@@ -1120,14 +1177,31 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
     var split_iter = state.currentLayout().splits.valueIterator();
     while (split_iter.next()) |pane| {
         if (std.mem.eql(u8, pane.*.uuid[0..], uuid[0..]) and pane.*.pokemon_initialized and
-            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_name == null)
+            !pane.*.pokemon_state.manually_toggled and !pane.*.pokemon_state.show_sprite)
         {
-            pane.*.pokemon_state.loadSprite(name, false) catch |err| {
+            const id = pane.*.pokemon_state.sprite_name orelse name;
+            pane.*.pokemon_state.loadSprite(id, rollShiny(state)) catch |err| {
                 core.logging.logError("terminal", "failed to load split sprite after pane-name update", err);
             };
         }
     }
     state.needs_render = true;
+}
+
+fn recordPaneSprite(state: *State, uuid: [32]u8, name: []const u8) void {
+    for (state.view.float_views.items) |pane| {
+        if (!std.mem.eql(u8, pane.uuid[0..], uuid[0..])) continue;
+        pane.pokemon_state.recordSprite(name) catch |err| {
+            core.logging.logError("terminal", "failed to record float sprite id", err);
+        };
+    }
+    var it = state.currentLayout().splits.valueIterator();
+    while (it.next()) |pane| {
+        if (!std.mem.eql(u8, pane.*.uuid[0..], uuid[0..])) continue;
+        pane.*.pokemon_state.recordSprite(name) catch |err| {
+            core.logging.logError("terminal", "failed to record split sprite id", err);
+        };
+    }
 }
 
 fn skipPayload(fd: posix.fd_t, len: u32, buffer: []u8) void {

@@ -21,6 +21,41 @@ See [architecture](docs/architecture.md) for the full picture.
 
 ---
 
+## Palette namespaces
+
+A program can claim its own 256-colour table — one of 32 numbered slots — for
+the output it writes.
+Recolour that table and only its cells change — the rest of the pane stays
+exactly as it was, on screen and in scrollback, with no redraw from the
+application.
+
+```sh
+hexe palette set --ns 4 33=#ff00aa bg=#1a1020
+hexe palette get                                    # what is actually set
+```
+
+An application drives it directly, with nothing to negotiate first — claim a
+slot, print, release it:
+
+```sh
+printf '\033]1330;set;4;33=#ff00aa\033\\'
+printf '\033]1330;use;4\033\\'
+printf 'this line resolves colour 33 through slot 4\n'
+printf '\033]1330;end\033\\'
+```
+
+hexe holds the colours and resolves the indexes; it never decides which cells
+belong to which slot. Every cell records the slot that was current when it was
+written — the number itself, so there is no mapping to lose — and two slots are
+correct on screen at once, with a repaint reaching scrollback. Slot 0 is what
+unclaimed output resolves against, so setting it recolours the ordinary palette. Anything hexe does not recognise — an unknown name, a program that
+claims nothing, another terminal entirely — falls back to your own palette, so a
+default install looks exactly as it did before.
+
+See [the palette protocol](docs/palette.md) for the sequences to emit.
+
+---
+
 ## Docs
 
 One document per feature in [`docs/`](docs/README.md), each opening with a recording of it running:
@@ -41,6 +76,7 @@ hexe itself — see [recording](docs/recording.md).
 | [Overlays and popups](docs/overlays.md) | notifications, questions, pickers, keycast, pane labels |
 | [Painting](docs/regions.md) | the bar, titles, sprites and popups are drawn by an external painter |
 | [Shell integration](docs/prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
+| [Palette protocol](docs/palette.md) | a program claims its own 256-colour table for the output it writes |
 | [Configuration](docs/config.md) | one Lua file, a schema that refuses typos, reload without losing panes |
 | [Project sessions](docs/session-manager.md) | `.hexe.lua`, freezing a session, and the trust ledger |
 | [Isolation](docs/isolation.md) | namespaces and cgroups per pane — and what it needs from the kernel |

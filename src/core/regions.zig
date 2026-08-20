@@ -105,6 +105,9 @@ pub const Snapshot = struct {
     stale: bool = false,
     /// Clickable rectangles the painter reported, in region-local coordinates.
     hits: []const Interactive = &.{},
+    /// Which frame this is. Hit-testing compares it against the frame that was
+    /// actually drawn, so rectangles are never read against a stale origin.
+    done_ms: i64 = 0,
 };
 
 /// Caller state handed to the painter: shell fields at the top level, mux
@@ -196,6 +199,12 @@ const Region = struct {
     /// on every retry.
     spawned_ms: i64 = 0,
 
+    /// The last response was a well-formed refusal (`ok:false`) rather than a
+    /// transport failure, so the painter is known to be running.
+    declined: bool = false,
+    /// A syntactically valid response frame arrived, even if its body turned
+    /// out to be unusable. Also means the painter is running.
+    answered: bool = false,
     last_done_ms: i64 = 0,
     next_try_ms: i64 = 0,
     last_used_ms: i64 = 0,
@@ -325,6 +334,7 @@ pub const Registry = struct {
             .hits = r.hits.items,
             .done = done,
             .stale = done and (now - r.last_done_ms) > r.stale_ms,
+            .done_ms = r.last_done_ms,
         };
     }
 
@@ -564,15 +574,29 @@ pub const Registry = struct {
 
     /// A completed frame arrived: parse it and retire the connection.
     fn finish(self: *Registry, r: *Region, now: i64) void {
+        r.declined = false;
+        r.answered = false;
         const parsed = self.parseResponse(r, r.body.items);
         self.closeConn(r);
         if (parsed) {
             r.last_done_ms = now;
             r.fail_streak = 0;
             r.next_try_ms = 0;
-        } else {
-            self.backoff(r, now);
+            return;
         }
+        // A painter that answers `ok:false` is UP and simply does not implement
+        // this view. Backing off through the failure ladder also re-ran
+        // `command`, so a declining painter was relaunched forever (every
+        // SPAWN_COOLDOWN_MS, capped only by the retry ceiling). Retry on the
+        // ordinary cadence instead, and never spawn: nothing is missing.
+        if (r.declined) {
+            r.fail_streak = 0;
+            r.next_try_ms = now + @max(r.refresh_ms, RETRY_BASE_MS);
+            return;
+        }
+        // A frame that parsed but carried a body this mode cannot use still
+        // proves the painter is running: back off, but do not fork another one.
+        self.backoffInner(r, now, !r.answered);
     }
 
     fn fail(self: *Registry, r: *Region, now: i64) void {
@@ -603,13 +627,41 @@ pub const Registry = struct {
         };
     }
 
+    /// Milliseconds until the soonest live region is due, or null when nothing
+    /// is scheduled. `next_frame_ms` was only ever a gate inside isDue(), so a
+    /// painter asking for 75ms still repainted at the loop's own cadence; the
+    /// caller uses this to arm its timer for the painter's frame instead.
+    pub fn msUntilDue(self: *Registry, now: i64) ?i64 {
+        var soonest: ?i64 = null;
+        var it = self.entries.valueIterator();
+        while (it.next()) |r| {
+            if (r.*.inFlight()) continue;
+            if (r.*.next_try_ms != 0 and now < r.*.next_try_ms) continue;
+            const interval: i64 = if (r.*.next_frame_ms) |nf|
+                @min(r.*.refresh_ms, @as(i64, @intCast(nf)))
+            else
+                r.*.refresh_ms;
+            const due = r.*.last_done_ms + @max(interval, 16);
+            const delta = @max(due - now, 0);
+            if (soonest == null or delta < soonest.?) soonest = delta;
+        }
+        return soonest;
+    }
+
     fn backoff(self: *Registry, r: *Region, now: i64) void {
+        self.backoffInner(r, now, true);
+    }
+
+    /// `spawn` is false when the painter demonstrably answered: the retry ladder
+    /// still applies, because hammering a painter that cannot serve this view is
+    /// no better than hammering a dead one, but running `command` again would
+    /// fork a second copy of a process that is already up.
+    fn backoffInner(self: *Registry, r: *Region, now: i64, spawn: bool) void {
         r.fail_streak +|= 1;
         const shift: u6 = @intCast(@min(r.fail_streak - 1, 6));
         const delay = @min(RETRY_BASE_MS * (@as(i64, 1) << shift), RETRY_MAX_MS);
         r.next_try_ms = now + delay;
-        // Nothing answered, so bring the painter up if the config named one.
-        self.spawnPainter(r, now);
+        if (spawn) self.spawnPainter(r, now);
     }
 
     fn buildRequest(self: *Registry, r: *Region, ctx: RequestContext) !void {
@@ -819,12 +871,16 @@ pub const Registry = struct {
             else => return false,
         };
         if (root.get("ok")) |ok| {
-            if (ok == .bool and !ok.bool) return false;
+            if (ok == .bool and !ok.bool) {
+                r.declined = true;
+                return false;
+            }
         }
         const output = switch (root.get("output") orelse return false) {
             .object => |o| o,
             else => return false,
         };
+        r.answered = true;
 
         r.next_frame_ms = null;
         if (output.get("next_frame_ms")) |nf| {
@@ -836,8 +892,6 @@ pub const Registry = struct {
                 r.out_width = @intCast(@min(wv.integer, std.math.maxInt(u16)));
             }
         }
-
-        self.parseInteractive(r, output);
 
         switch (r.mode) {
             .run => {
@@ -896,6 +950,11 @@ pub const Registry = struct {
                 r.ansi.appendSlice(self.allocator, ansi) catch return false;
             },
         }
+
+        // Committed only after the body validated: a frame rejected above must
+        // leave the previous rectangles in place, or clicks stop working while
+        // the bar still shows the content they belong to.
+        self.parseInteractive(r, output);
         return true;
     }
 };

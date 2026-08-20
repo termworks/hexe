@@ -11,6 +11,8 @@ const pod = @import("pod");
 const shell_hooks = @import("shp");
 const pop_handlers = @import("pop_handlers.zig");
 const cli_cmds = @import("commands/com.zig");
+const profile_cmds = @import("commands/profile.zig");
+const palette_cmds = @import("commands/palette.zig");
 const config_validate = @import("commands/config_validate.zig");
 const ses_export = @import("commands/ses_export.zig");
 const ses_pipe = @import("commands/ses_pipe.zig");
@@ -300,7 +302,24 @@ fn runSyslinkServe(allocator: std.mem.Allocator, socket_path: []const u8, no_aut
     );
 }
 
+/// A profile and an instance are the SAME thing: one separate daemon with its
+/// own sessions, sockets, state and config. `--instance` is the original
+/// spelling (and what the tests use); `--profile` is the name users think in.
+/// Both are accepted wherever either was.
+fn addProfileArgs(command: *yazap.Command) !void {
+    try command.addArg(Arg.singleValueOption("instance", 'I', "Profile to act on (alias of --profile)"));
+    try command.addArg(Arg.singleValueOption("profile", 'P', "Profile to act on: a separate daemon and sessions"));
+}
+
+/// The profile named on a subcommand, under either spelling.
+fn profileArg(m: anytype) []const u8 {
+    if (m.getSingleValue("profile")) |v| return v;
+    if (m.getSingleValue("instance")) |v| return v;
+    return "";
+}
+
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
+    if (std.mem.eql(u8, command, "instance")) return "profile";
     if (std.mem.eql(u8, command, "ses")) return "session";
     if (std.mem.eql(u8, command, "lay")) return "layout";
     if (std.mem.eql(u8, command, "mux")) return "terminal";
@@ -372,34 +391,34 @@ pub fn main() !void {
     try ses_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
     try ses_daemon.addArg(Arg.singleValueOption("log", null, null));
     try ses_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try ses_daemon.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_daemon);
     try ses_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
 
     var ses_status_cmd = app.createCommand("status", "Show daemon info");
-    try ses_status_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_status_cmd);
 
     var ses_list = app.createCommand("list", "List sessions and panes (optionally filtered to a directory)");
     try ses_list.addArg(Arg.positional("dir", null, null));
     try ses_list.addArg(Arg.booleanOption("details", 'd', null));
-    try ses_list.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_list);
     try ses_list.addArg(Arg.booleanOption("json", 'j', null));
 
     var ses_kill = app.createCommand("kill", "Kill a detached session");
     try ses_kill.addArg(Arg.positional("target", null, null));
-    try ses_kill.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_kill);
 
     var ses_clear = app.createCommand("clear", "Kill all detached sessions (--orphans: orphaned/sticky panes instead)");
-    try ses_clear.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_clear);
     try ses_clear.addArg(Arg.booleanOption("force", 'f', null));
     try ses_clear.addArg(Arg.booleanOption("orphans", null, null));
 
     var ses_export_cmd = app.createCommand("export", "Export detached session to JSON");
     try ses_export_cmd.addArg(Arg.positional("session", null, null));
     try ses_export_cmd.addArg(Arg.singleValueOption("output", 'o', null));
-    try ses_export_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_export_cmd);
 
     var ses_stats_cmd = app.createCommand("stats", "Show resource usage statistics");
-    try ses_stats_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&ses_stats_cmd);
 
     var ses_pipe_cmd = app.createCommand("pipe", "Internal SES byte-stream bridge");
     try ses_pipe_cmd.addArg(Arg.singleValueOption("ses-socket", null, null));
@@ -422,10 +441,10 @@ pub fn main() !void {
     try layout_open.addArg(Arg.positional("target", null, null));
     try layout_open.addArg(Arg.singleValueOption("log", null, null));
     try layout_open.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try layout_open.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&layout_open);
 
     var layout_save = app.createCommand("save", "Save current session as .hexe.lua");
-    try layout_save.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&layout_save);
     try layout_save.addArg(Arg.singleValueOption("scope", null, null));
 
     try layout_cmd.addSubcommands(&[_]yazap.Command{ layout_list, layout_open, layout_save });
@@ -444,7 +463,7 @@ pub fn main() !void {
     try pod_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
     try pod_daemon.addArg(Arg.singleValueOption("log", null, null));
     try pod_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try pod_daemon.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&pod_daemon);
     try pod_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
 
     var pod_list = app.createCommand("list", "List discoverable pods (from .meta)");
@@ -461,7 +480,7 @@ pub fn main() !void {
     try pod_new.addArg(Arg.booleanOption("alias", null, null));
     try pod_new.addArg(Arg.singleValueOption("log", null, null));
     try pod_new.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try pod_new.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&pod_new);
     try pod_new.addArg(Arg.booleanOption("test-only", 'T', null));
 
     var pod_send = app.createCommand("send", "Send input to a pod (by uuid/name/socket)");
@@ -505,7 +524,7 @@ pub fn main() !void {
     try mux_new.addArg(Arg.singleValueOption("logfile", 'L', null));
     try mux_new.addArg(Arg.singleValueOption("ses-socket", null, null));
     try mux_new.addArg(Arg.booleanOption("no-autostart-ses", null, null));
-    try mux_new.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_new);
     try mux_new.addArg(Arg.booleanOption("test-only", 'T', null));
     try mux_new.addArg(Arg.singleValueOption("remote", null, null));
     try mux_new.addArg(Arg.singleValueOption("user", 'u', null));
@@ -517,24 +536,24 @@ pub fn main() !void {
     try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', null));
     try mux_attach.addArg(Arg.singleValueOption("ses-socket", null, null));
     try mux_attach.addArg(Arg.booleanOption("no-autostart-ses", null, null));
-    try mux_attach.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_attach);
     try mux_attach.addArg(Arg.singleValueOption("remote", null, null));
     try mux_attach.addArg(Arg.singleValueOption("user", 'u', null));
     try mux_attach.addArg(Arg.singleValueOption("identity", 'i', null));
 
     var mux_kill = app.createCommand("kill", "Kill a session (attached or detached) or a single pane/float by name or uuid prefix");
     try mux_kill.addArg(Arg.positional("id", null, null));
-    try mux_kill.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_kill);
 
     var mux_close = app.createCommand("close", "Alias of kill");
     try mux_close.addArg(Arg.positional("id", null, null));
-    try mux_close.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_close);
 
     var mux_record = app.createCommand("record", "Attach to a session and record it as asciicast");
     try mux_record.addArg(Arg.positional("session", null, null));
     try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
     try mux_record.addArg(Arg.booleanOption("capture-input", null, null));
-    try mux_record.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_record);
 
     var mux_float = app.createCommand("float", "Spawn a transient float pane");
     try mux_float.addArg(Arg.singleValueOption("command", 'c', null));
@@ -547,7 +566,7 @@ pub fn main() !void {
     try mux_float.addArg(Arg.singleValueOption("isolation", null, null));
     try mux_float.addArg(Arg.singleValueOption("size", null, null));
     try mux_float.addArg(Arg.singleValueOption("key", null, null));
-    try mux_float.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_float);
 
     var mux_notify = app.createCommand("notify", "Send notification");
     try mux_notify.addArg(Arg.singleValueOption("uuid", 'u', null));
@@ -555,7 +574,7 @@ pub fn main() !void {
     try mux_notify.addArg(Arg.booleanOption("last", 'l', null));
     try mux_notify.addArg(Arg.booleanOption("broadcast", 'b', null));
     try mux_notify.addArg(Arg.positional("message", null, null));
-    try mux_notify.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_notify);
 
     var mux_send = app.createCommand("send", "Send keystrokes to pane");
     try mux_send.addArg(Arg.singleValueOption("uuid", 'u', null));
@@ -565,13 +584,13 @@ pub fn main() !void {
     try mux_send.addArg(Arg.booleanOption("enter", 'e', null));
     try mux_send.addArg(Arg.singleValueOption("ctrl", 'C', null));
     try mux_send.addArg(Arg.positional("text", null, null));
-    try mux_send.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_send);
 
     var mux_info = app.createCommand("info", "Show information about a pane");
     try mux_info.addArg(Arg.singleValueOption("uuid", 'u', null));
     try mux_info.addArg(Arg.booleanOption("creator", 'c', null));
     try mux_info.addArg(Arg.booleanOption("last", 'l', null));
-    try mux_info.addArg(Arg.singleValueOption("instance", 'I', null));
+    try addProfileArgs(&mux_info);
 
     var mux_layout = app.createCommand("layout", "Save and restore layouts");
     mux_layout.setProperty(.help_on_empty_args);
@@ -684,7 +703,61 @@ pub fn main() !void {
     var allow_cmd = app.createCommand("allow", "Trust a project .hexe.lua so its on_start/on_stop hooks may run");
     try allow_cmd.addArg(Arg.positional("path", null, null));
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd });
+    // A profile is a wholly separate daemon with its own sessions, sockets and
+    // state. It was reachable only through HEXE_INSTANCE or a subcommand flag,
+    // so the command a user actually types -- bare `hexe` -- could not pick one.
+    try root.addArg(Arg.singleValueOption("profile", 'P', "Use a named profile (separate daemon and sessions)"));
+    try root.addArg(Arg.singleValueOption("instance", 'I', "Alias for --profile"));
+
+    var profile_cmd = app.createCommand("profile", "Profiles: separate daemons and sessions");
+    profile_cmd.setProperty(.help_on_empty_args);
+    const profile_list = app.createCommand("list", "List profiles and whether each is running");
+    try profile_cmd.addSubcommands(&[_]yazap.Command{profile_list});
+
+    var palette_cmd = app.createCommand("palette", "Per-pane palette namespaces");
+    palette_cmd.setProperty(.help_on_empty_args);
+
+    var palette_list = app.createCommand("list", "Panes a palette change would reach");
+    try palette_list.addArg(Arg.booleanOption("json", 'j', null));
+    try addProfileArgs(&palette_list);
+
+    var palette_set = app.createCommand("set", "Patch entries: <i>=#rrggbb or fg/bg/cursor");
+    try palette_set.addArg(Arg.multiValuesPositional("entries", null, null));
+    try palette_set.addArg(Arg.singleValueOption("ns", null, "Namespace, or '*' for all"));
+    try palette_set.addArg(Arg.booleanOption("all", 'a', "Every namespace (same as --ns '*')"));
+    try palette_set.addArg(Arg.singleValueOption("from", 'f', "Read entries from a colours file"));
+    try palette_set.addArg(Arg.singleValueOption("pane", 'p', "Pane uuid (default: every live pane)"));
+    try addProfileArgs(&palette_set);
+
+    var palette_use = app.createCommand("use", "Select a namespace for what the pane draws next");
+    try palette_use.addArg(Arg.singleValueOption("ns", null, null));
+    try palette_use.addArg(Arg.singleValueOption("pane", 'p', null));
+    try addProfileArgs(&palette_use);
+
+    var palette_end = app.createCommand("end", "Pop the selected namespace");
+    try palette_end.addArg(Arg.singleValueOption("pane", 'p', null));
+    try addProfileArgs(&palette_end);
+
+    var palette_drop = app.createCommand("drop", "Release a namespace binding");
+    try palette_drop.addArg(Arg.singleValueOption("ns", null, null));
+    try palette_drop.addArg(Arg.singleValueOption("pane", 'p', null));
+    try addProfileArgs(&palette_drop);
+
+    var palette_get = app.createCommand("get", "Show the colours a pane actually has set");
+    try palette_get.addArg(Arg.multiValuesPositional("indices", null, null));
+    try palette_get.addArg(Arg.singleValueOption("ns", null, "Only this namespace"));
+    try palette_get.addArg(Arg.singleValueOption("pane", 'p', "Pane uuid (default: every live pane)"));
+    try addProfileArgs(&palette_get);
+
+    var palette_reset = app.createCommand("reset", "Forget a namespace's colours (default: all)");
+    try palette_reset.addArg(Arg.singleValueOption("ns", null, "Namespace, or '*' for all"));
+    try palette_reset.addArg(Arg.booleanOption("all", 'a', "Every namespace (same as --ns '*')"));
+    try palette_reset.addArg(Arg.singleValueOption("pane", 'p', null));
+    try addProfileArgs(&palette_reset);
+
+    try palette_cmd.addSubcommands(&[_]yazap.Command{ palette_list, palette_get, palette_set, palette_use, palette_end, palette_drop, palette_reset });
+
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -699,8 +772,23 @@ pub fn main() !void {
         owned_alias_args.deinit(allocator);
     }
 
-    for (raw_args[1..], 0..) |arg, idx| {
-        const mapped = if (idx == 0) normalizeTopLevelCommand(arg) else arg;
+    // Alias normalisation applies to the first non-flag token, not literally
+    // argv[1]: with a root flag in front (`hexe --profile work ses list`) the
+    // subcommand moves, and `ses`/`mux`/`pop` stopped being recognised.
+    var normalized_command = false;
+    var skip_flag_value = false;
+    for (raw_args[1..]) |arg| {
+        const is_flag = arg.len > 0 and arg[0] == '-';
+        const takes_value = is_flag and !std.mem.containsAtLeast(u8, arg, 1, "=") and
+            (std.mem.eql(u8, arg, "--profile") or std.mem.eql(u8, arg, "-P") or
+                std.mem.eql(u8, arg, "--instance") or std.mem.eql(u8, arg, "-I"));
+        const consume_as_value = skip_flag_value;
+        skip_flag_value = takes_value;
+
+        const mapped = if (!normalized_command and !is_flag and !consume_as_value) blk: {
+            normalized_command = true;
+            break :blk normalizeTopLevelCommand(arg);
+        } else arg;
         if (!std.mem.eql(u8, mapped, arg)) {
             const duped = try allocator.dupeZ(u8, mapped);
             try owned_alias_args.append(allocator, duped);
@@ -711,6 +799,85 @@ pub fn main() !void {
     }
 
     const matches = try app.parseFrom(normalized_args.items);
+
+    // Must run before any path is resolved: every socket/state/log path is
+    // derived from HEXE_INSTANCE. A flag beats the environment; HEXE_PROFILE is
+    // simply the other spelling of HEXE_INSTANCE.
+    if (!hasInstanceEnv()) {
+        if (std.posix.getenv("HEXE_PROFILE")) |name| setInstanceFromCli(name);
+    }
+    if (matches.getSingleValue("profile")) |name| setInstanceFromCli(name);
+    if (matches.getSingleValue("instance")) |name| setInstanceFromCli(name);
+
+    // yazap turns a repeated flag into a multi-value, and getSingleValue then
+    // answers null — which `orelse "*"` quietly widened into "every namespace in
+    // every pane". Repeating a flag is a mistake, not a request to broadcast.
+    const repeated = struct {
+        fn check(sub: anytype, flag: []const u8) bool {
+            const vals = sub.getMultiValues(flag) orelse return false;
+            if (vals.len <= 1) return false;
+            std.debug.print("Error: --{s} given more than once\n", .{flag});
+            return true;
+        }
+    }.check;
+
+    if (matches.subcommandMatches("palette")) |m| {
+        if (m.subcommandMatches("list")) |sub| {
+            if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+            return palette_cmds.runPaletteList(allocator, sub.containsArg("json"));
+        }
+        if (m.subcommandMatches("set")) |sub| {
+            if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+            if (repeated(sub, "ns") or repeated(sub, "pane")) return error.BadArgument;
+            const ns = if (sub.containsArg("all")) "*" else (sub.getSingleValue("ns") orelse "*");
+            return palette_cmds.runPaletteSet(
+                allocator,
+                ns,
+                sub.getSingleValue("from") orelse "",
+                sub.getSingleValue("pane") orelse "",
+                sub.getMultiValues("entries") orelse &[_][]const u8{},
+            );
+        }
+        if (m.subcommandMatches("get")) |sub| {
+            if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+            return palette_cmds.runPaletteGet(
+                allocator,
+                sub.getSingleValue("ns") orelse "",
+                sub.getSingleValue("pane") orelse "",
+                sub.getMultiValues("indices") orelse &[_][]const u8{},
+            );
+        }
+        if (m.subcommandMatches("reset")) |sub| {
+            if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+            const ns = if (sub.containsArg("all")) "*" else (sub.getSingleValue("ns") orelse "*");
+            return palette_cmds.runPaletteVerb(
+                allocator,
+                "reset",
+                ns,
+                sub.getSingleValue("pane") orelse "",
+            );
+        }
+        inline for (.{ "use", "end", "drop" }) |verb| {
+            if (m.subcommandMatches(verb)) |sub| {
+                if (profileArg(sub).len > 0) setInstanceFromCli(profileArg(sub));
+                return palette_cmds.runPaletteVerb(
+                    allocator,
+                    verb,
+                    sub.getSingleValue("ns") orelse "",
+                    sub.getSingleValue("pane") orelse "",
+                );
+            }
+        }
+        return;
+    }
+
+    if (matches.subcommandMatches("profile")) |profile_matches| {
+        if (profile_matches.subcommandMatches("list")) |_| {
+            try profile_cmds.runProfileList(allocator);
+            return;
+        }
+        return;
+    }
 
     if (!matches.containsArgs()) {
         // Bare `hexe`: the frontend asks — in a popup, once it owns the screen —
@@ -723,7 +890,7 @@ pub fn main() !void {
 
     if (matches.subcommandMatches("session")) |ses_matches| {
         if (ses_matches.subcommandMatches("daemon")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             if (m.containsArg("test-only")) {
                 setTestOnlyEnv();
@@ -737,25 +904,25 @@ pub fn main() !void {
             return;
         }
         if (ses_matches.subcommandMatches("status")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try runSesStatus(allocator);
             return;
         }
         if (ses_matches.subcommandMatches("list")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runList(allocator, m.containsArg("details"), m.containsArg("json"), m.getSingleValue("dir") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("kill")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runSesKill(allocator, m.getSingleValue("target") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("clear")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             if (m.containsArg("orphans")) {
                 try cli_cmds.runSesClearOrphans(allocator, m.containsArg("force"));
@@ -765,13 +932,13 @@ pub fn main() !void {
             return;
         }
         if (ses_matches.subcommandMatches("export")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try ses_export.run(allocator, m.getSingleValue("session") orelse "", m.getSingleValue("output") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("stats")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try ses_stats.run(allocator);
             return;
@@ -788,7 +955,7 @@ pub fn main() !void {
             return;
         }
         if (layout_matches.subcommandMatches("open")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try cli_cmds.runSesOpen(
@@ -801,7 +968,7 @@ pub fn main() !void {
             return;
         }
         if (layout_matches.subcommandMatches("save")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const scope_raw = m.getSingleValue("scope") orelse "both";
             const scope = std.meta.stringToEnum(cli_cmds.LayoutSaveScope, scope_raw) orelse {
@@ -813,7 +980,7 @@ pub fn main() !void {
         }
     } else if (matches.subcommandMatches("pod")) |pod_matches| {
         if (pod_matches.subcommandMatches("daemon")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             if (m.containsArg("test-only")) {
                 setTestOnlyEnv();
@@ -846,7 +1013,7 @@ pub fn main() !void {
             return;
         }
         if (pod_matches.subcommandMatches("new")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             if (m.containsArg("test-only")) {
                 setTestOnlyEnv();
@@ -924,7 +1091,7 @@ pub fn main() !void {
         }
     } else if (matches.subcommandMatches("terminal")) |mux_matches| {
         if (mux_matches.subcommandMatches("new")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) {
                 setInstanceFromCli(instance);
                 if (m.containsArg("test-only")) setTestOnlyEnv();
@@ -949,19 +1116,19 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("kill")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runTerminalKill(allocator, m.getSingleValue("id") orelse "");
             return;
         }
         if (mux_matches.subcommandMatches("close")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runTerminalKill(allocator, m.getSingleValue("id") orelse "");
             return;
         }
         if (mux_matches.subcommandMatches("attach")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
             try runTerminalAttach(
@@ -979,7 +1146,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("record")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const out = m.getSingleValue("out") orelse "";
             if (out.len == 0) {
@@ -995,7 +1162,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("float")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const exit_key = m.getSingleValue("key") orelse "Esc";
             try cli_cmds.runMuxFloat(
@@ -1014,7 +1181,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("notify")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runNotify(
                 allocator,
@@ -1027,7 +1194,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("send")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runSend(
                 allocator,
@@ -1060,7 +1227,7 @@ pub fn main() !void {
             return;
         }
         if (mux_matches.subcommandMatches("info")) |m| {
-            const instance = m.getSingleValue("instance") orelse "";
+            const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runInfo(allocator, m.getSingleValue("uuid") orelse "", m.containsArg("creator"), m.containsArg("last"));
             return;
@@ -1271,7 +1438,10 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
     @memcpy(&target_uuid, pane_uuid[0..32]);
 
     const allocator = std.heap.page_allocator;
-    const fd = cli_cmds.connectSesCliChannel(allocator) orelse return false;
+    // "Could not ask" is not "the user said no". Reporting it as a decline made
+    // `hexe mux new` exit 0 with no session and no error, which a script reads
+    // as success. Every unanswerable path below returns an error instead.
+    const fd = cli_cmds.connectSesCliChannel(allocator) orelse return error.NestedMuxConfirmUnavailable;
 
     const message = "Start nested mux session?";
     const timeout_ms: i32 = 0;
@@ -1284,23 +1454,23 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
 
     wire.writeControlWithTrail(fd, .pop_confirm, std.mem.asBytes(&pc), message) catch {
         posix.close(fd);
-        return false;
+        return error.NestedMuxConfirmUnavailable;
     };
 
     // Block UNBOUNDED: this confirm has timeout_ms=0 (waits for the user forever);
     // the 10s wire default aborted the prompt after 10s.
     const hdr = wire.readControlHeaderBlocking(fd) catch {
         posix.close(fd);
-        return false;
+        return error.NestedMuxConfirmUnavailable;
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .pop_response or hdr.payload_len < @sizeOf(wire.PopResponse)) {
         posix.close(fd);
-        return false;
+        return error.NestedMuxConfirmUnavailable;
     }
     const resp = wire.readStruct(wire.PopResponse, fd) catch {
         posix.close(fd);
-        return false;
+        return error.NestedMuxConfirmUnavailable;
     };
     posix.close(fd);
 
@@ -1381,9 +1551,17 @@ fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool, 
 fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool, remote: RemoteConnectArgs, startup_chooser: bool) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
-            if (!try showNestedMuxConfirmation(pane_uuid)) {
-                return;
-            }
+            const allowed = showNestedMuxConfirmation(pane_uuid) catch {
+                // Inherited pane identity but no daemon to ask through: usually
+                // a script that carried HEXE_PANE_UUID into a different
+                // HEXE_INSTANCE. Say so and fail, rather than exiting 0 with no
+                // session, which reads as success.
+                print("Error: cannot ask whether to start a nested mux (ses daemon unreachable).\n", .{});
+                print("       This shell claims a pane (HEXE_PANE_UUID) whose daemon is not running.\n", .{});
+                print("       Unset HEXE_PANE_UUID to start a session anyway.\n", .{});
+                return error.NestedMuxConfirmUnavailable;
+            };
+            if (!allowed) return;
         }
     }
 

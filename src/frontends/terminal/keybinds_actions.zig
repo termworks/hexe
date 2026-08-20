@@ -65,6 +65,14 @@ fn focusedPane(state: *State) ?*Pane {
     return state.currentLayout().getFocusedPane();
 }
 
+/// Roll widgets.pokemon.shiny_chance for a freshly shown sprite.
+fn rollShiny(state: *State) bool {
+    const chance = state.pop_config.widgets.pokemon.shiny_chance;
+    if (chance <= 0) return false;
+    if (chance >= 1) return true;
+    return std.crypto.random.float(f32) < chance;
+}
+
 pub fn dispatchAction(state: *State, action: BindAction) bool {
     const cfg = &state.config;
 
@@ -371,6 +379,19 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
 /// are the statusbar threadlocal caches (cleared here via `deinitThreadlocals`),
 /// and no pane/float caches a pointer into `config`. On a parse error we keep
 /// the current config rather than clobber a working one with defaults.
+/// Push `hexe.palette` to every live pane. Reaching panes that already exist
+/// is the point: turning namespaces on and reloading should light up the
+/// session you are looking at, not only panes opened afterwards.
+fn applyPaletteConfig(state: *State) void {
+    core.palette.default_enabled = state.config.palette_namespaces;
+    core.palette.default_osc = state.config.palette_osc;
+    for (state.view.tab_views.items) |*tab| {
+        var it = tab.layout.splitIterator();
+        while (it.next()) |p| p.*.vt.ns_table.applyDefaults();
+    }
+    for (state.view.float_views.items) |p| p.vt.ns_table.applyDefaults();
+}
+
 fn performConfigReload(state: *State) void {
     var new_config = core.Config.load(state.allocator);
     if (new_config.status == .@"error") {
@@ -403,6 +424,7 @@ fn performConfigReload(state: *State) void {
     // every callback registered by the reloaded config is dead after a reload —
     // conditions silently stop matching and actions silently do nothing.
     if (state.config._lua_runtime) |rt| lua_api.install(rt);
+    applyPaletteConfig(state);
     state.renderer.invalidate();
     state.force_full_render = true;
     state.needs_render = true;
@@ -558,11 +580,11 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
                             pane.pokemon_state.hide();
                         } else {
                             // Get the pane's Pokemon name from pane_names cache
-                            const pokemon_name = state.paneName(pane.uuid) orelse "pikachu";
+                            const pokemon_name = pane.pokemon_state.sprite_name orelse state.paneName(pane.uuid) orelse "pikachu";
 
-                            pane.pokemon_state.loadSprite(pokemon_name, false) catch {
+                            pane.pokemon_state.loadSprite(pokemon_name, rollShiny(state)) catch {
                                 // Fallback to pikachu if loading fails
-                                pane.pokemon_state.loadSprite("pikachu", false) catch |err| {
+                                pane.pokemon_state.loadSprite("pikachu", rollShiny(state)) catch |err| {
                                     core.logging.logError("terminal", "failed to load fallback sprite for focused float", err);
                                 };
                             };
@@ -576,10 +598,10 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
                         pane.pokemon_state.hide();
                     } else {
                         // Get the pane's Pokemon name from pane_names cache
-                        const pokemon_name = state.paneName(pane.uuid) orelse "pikachu";
+                        const pokemon_name = pane.pokemon_state.sprite_name orelse state.paneName(pane.uuid) orelse "pikachu";
 
-                        pane.pokemon_state.loadSprite(pokemon_name, false) catch {
-                            pane.pokemon_state.loadSprite("pikachu", false) catch |err| {
+                        pane.pokemon_state.loadSprite(pokemon_name, rollShiny(state)) catch {
+                            pane.pokemon_state.loadSprite("pikachu", rollShiny(state)) catch |err| {
                                 core.logging.logError("terminal", "failed to load fallback sprite for focused pane", err);
                             };
                         };

@@ -147,7 +147,7 @@ fn probeSockets(allocator: std.mem.Allocator, records: *std.ArrayList(PodRecord)
     }
 }
 
-fn scanMetaFiles(allocator: std.mem.Allocator, socket_dir: []const u8, out: *std.ArrayList(PodRecord)) !void {
+pub fn scanMetaFiles(allocator: std.mem.Allocator, socket_dir: []const u8, out: *std.ArrayList(PodRecord)) !void {
     var dir = try std.fs.cwd().openDir(socket_dir, .{ .iterate = true });
     defer dir.close();
 
@@ -171,7 +171,7 @@ fn scanMetaFiles(allocator: std.mem.Allocator, socket_dir: []const u8, out: *std
     }
 }
 
-fn freeRecord(allocator: std.mem.Allocator, rec: PodRecord) void {
+pub fn freeRecord(allocator: std.mem.Allocator, rec: PodRecord) void {
     allocator.free(rec.name);
     allocator.free(rec.cwd);
     allocator.free(rec.shell);

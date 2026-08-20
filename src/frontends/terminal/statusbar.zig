@@ -20,6 +20,7 @@ const lua_events = @import("lua_events.zig");
 const Color = core.style.Color;
 const Style = core.style.Style;
 const regions = core.regions;
+const layout = @import("statusbar_layout.zig");
 const sanitizeLabelUtf8 = @import("text_width.zig").sanitizeLabelUtf8;
 const clipTextToWidth = @import("text_width.zig").clipTextToWidth;
 
@@ -53,10 +54,21 @@ fn setSlot(buf: []u8, len: *usize, value: []const u8) bool {
     return true;
 }
 
+/// Where each zone was drawn on the frame the user is looking at. Hit-testing
+/// must offset by these, not by freshly computed origins: a zone that changed
+/// width between draw and click would otherwise send the click to the wrong
+/// segment.
+threadlocal var drawn_slots: [3]layout.Slot = .{layout.Slot{}} ** 3;
+
+/// Latches the "every zone refused" diagnostic to once per outage.
+threadlocal var zones_all_silent_logged: bool = false;
+
 pub fn deinitThreadlocals() void {
     statusbar_redraw_last_emit_ms = null;
     hover_len = 0;
     press_len = 0;
+    drawn_slots = .{layout.Slot{}} ** 3;
+    zones_all_silent_logged = false;
 }
 
 fn tabTitleForDisplay(state: *State, tab_idx: usize, tab: anytype, use_basename: bool) []const u8 {
@@ -223,20 +235,156 @@ pub fn draw(
     emitStatusbarRedrawEventIfDue(state, &ctx, term_width, term_height, active_tab);
 
     const registry = regions.active orelse return;
+
+    if (cfg.zonesEnabled()) {
+        drawZones(renderer, registry, cfg, ctx, term_width, y);
+        return;
+    }
+
+    drawn_slots = .{ .{ .x = 0, .width = term_width, .drawn = true }, .{}, .{} };
     const snap = registry.snapshot(specFor(cfg, cfg.view, term_width, 1), ctx);
     if (!snap.done) return;
 
-    _ = drawRuns(renderer, 0, y, snap.runs, term_width);
+    // Content older than stale_ms means the painter stopped answering. Drawing
+    // it unchanged left a frozen clock looking live; dimming says "this is the
+    // last thing the painter said" without blanking the bar.
+    _ = drawRunsDimmed(renderer, 0, y, snap.runs, term_width, snap.stale);
 }
+
+/// Zones pointed at selectors the painter does not implement leave the bar
+/// blank, which looks like hexe is broken. Name the selectors that were asked
+/// for: the fix is always either the painter or those names.
+fn warnIfEveryZoneSilent(cfg: *const core.config.StatusBarConfig, snaps: [3]regions.Snapshot) void {
+    for (snaps) |s| {
+        if (s.done) {
+            zones_all_silent_logged = false;
+            return;
+        }
+    }
+    if (zones_all_silent_logged) return;
+    zones_all_silent_logged = true;
+    log.warn("no status zone answered; asked for {s} / {s} / {s}", .{
+        cfg.zone_left orelse "(unset)",
+        cfg.zone_center orelse "(unset)",
+        cfg.zone_right orelse "(unset)",
+    });
+}
+
+/// The zone view configured for a slot, or null when that zone is unused.
+fn zoneView(cfg: *const core.config.StatusBarConfig, zone: layout.Zone) ?[]const u8 {
+    return switch (zone) {
+        .left => cfg.zone_left,
+        .center => cfg.zone_center,
+        .right => cfg.zone_right,
+    };
+}
+
+/// One spec per zone, distinguished by `key_suffix` so the three share no cache
+/// entry. Asked at the full bar width: the painter composes freely and hexe
+/// places what comes back.
+fn zoneSpec(cfg: *const core.config.StatusBarConfig, zone: layout.Zone, view: []const u8, term_width: u16) regions.Spec {
+    var spec = specFor(cfg, view, term_width, 1);
+    spec.key_suffix = @tagName(zone);
+    return spec;
+}
+
+fn drawZones(
+    renderer: *Renderer,
+    registry: *regions.Registry,
+    cfg: *const core.config.StatusBarConfig,
+    ctx: regions.RequestContext,
+    term_width: u16,
+    y: u16,
+) void {
+    var snaps: [3]regions.Snapshot = .{regions.Snapshot{}} ** 3;
+    var widths: [3]u16 = .{ 0, 0, 0 };
+
+    for (0..3) |i| {
+        const zone: layout.Zone = @enumFromInt(i);
+        const view = zoneView(cfg, zone) orelse continue;
+        snaps[i] = registry.snapshot(zoneSpec(cfg, zone, view, term_width), ctx);
+        // A zone that has not answered yet, or answered `ok:false`, measures
+        // zero and takes no width.
+        if (snaps[i].done) widths[i] = runsWidth(snaps[i].runs);
+    }
+
+    warnIfEveryZoneSilent(cfg, snaps);
+
+    var shrink: [3]layout.Zone = undefined;
+    for (cfg.shrink, 0..) |idx, i| shrink[i] = @enumFromInt(@min(idx, 2));
+
+    const placement = layout.place(term_width, widths, shrink);
+    drawn_slots = placement.slots;
+
+    // Staleness is per zone: one silent painter dims its own zone while the
+    // others stay live.
+    for (placement.slots, 0..) |slot, i| {
+        if (!slot.drawn) continue;
+        _ = drawRunsDimmed(renderer, slot.x, y, snaps[i].runs, slot.width, snaps[i].stale);
+    }
+}
+
+/// Walks every zone's hit rectangles, translated from zone-local coordinates
+/// into bar coordinates. Yielding translated copies keeps callers written
+/// against plain `hit.contains(x, 0)`.
+const HitIter = struct {
+    zones: [3]Zone = .{Zone{}} ** 3,
+    zi: usize = 0,
+    hi: usize = 0,
+
+    const Zone = struct {
+        hits: []const regions.Interactive = &.{},
+        origin: u16 = 0,
+        width: u16 = 0,
+    };
+
+    fn next(self: *HitIter) ?regions.Interactive {
+        while (self.zi < self.zones.len) {
+            const zone = self.zones[self.zi];
+            if (self.hi < zone.hits.len) {
+                var hit = zone.hits[self.hi];
+                self.hi += 1;
+                // A painter reports rectangles against the width it was given,
+                // which is the whole bar, not the slot it ended up in. Left
+                // unclamped, a zone's rectangle answers for columns another
+                // zone is drawn on.
+                if (hit.x >= zone.width) continue;
+                hit.width = @min(hit.width, zone.width - hit.x);
+                hit.x = hit.x +| zone.origin;
+                return hit;
+            }
+            self.zi += 1;
+            self.hi = 0;
+        }
+        return null;
+    }
+};
 
 /// Re-read the painter's last reported hit rectangles. Cheap: no fetch is
 /// started, this is the same completed frame the bar was drawn from.
-fn currentHits(state: *State, config: *const core.Config, term_width: u16, tabs: anytype, active_tab: usize, session_name: []const u8) []const regions.Interactive {
-    const registry = regions.active orelse return &.{};
+fn currentHits(state: *State, config: *const core.Config, term_width: u16, tabs: anytype, active_tab: usize, session_name: []const u8) HitIter {
+    const registry = regions.active orelse return .{};
+    const cfg = &config.tabs.status;
     var tab_names: [16][]const u8 = undefined;
     const ctx = buildContext(state, tabs, active_tab, session_name, &tab_names);
-    const snap = registry.snapshot(specFor(&config.tabs.status, config.tabs.status.view, term_width, 1), ctx);
-    return snap.hits;
+
+    var iter: HitIter = .{};
+    if (!cfg.zonesEnabled()) {
+        const snap = registry.snapshot(specFor(cfg, cfg.view, term_width, 1), ctx);
+        iter.zones[0] = .{ .hits = snap.hits, .origin = 0, .width = term_width };
+        return iter;
+    }
+
+    // Origins come from the drawn frame, never from a fresh placement.
+    for (0..3) |i| {
+        const slot = drawn_slots[i];
+        if (!slot.drawn) continue;
+        const zone: layout.Zone = @enumFromInt(i);
+        const view = zoneView(cfg, zone) orelse continue;
+        const snap = registry.snapshot(zoneSpec(cfg, zone, view, term_width), ctx);
+        iter.zones[i] = .{ .hits = snap.hits, .origin = slot.x, .width = slot.width };
+    }
+    return iter;
 }
 
 /// A click on a region whose action is `tab.select.<n>` selects that tab.
@@ -256,7 +404,8 @@ pub fn hitTestTab(
     if (!config.tabs.status.enabled or term_height == 0) return null;
     if (y != term_height - 1) return null;
 
-    for (currentHits(state, config, term_width, tabs, active_tab, session_name)) |hit| {
+    var hits = currentHits(state, config, term_width, tabs, active_tab, session_name);
+    while (hits.next()) |hit| {
         if (!hit.contains(x, 0)) continue;
         const action = hit.actionFor(0);
         if (!std.mem.startsWith(u8, action, TAB_SELECT_PREFIX)) continue;
@@ -285,7 +434,8 @@ pub fn hitTestAction(
     if (!config.tabs.status.enabled or term_height == 0) return null;
     if (y != term_height - 1) return null;
 
-    for (currentHits(state, config, term_width, tabs, active_tab, session_name)) |hit| {
+    var hits = currentHits(state, config, term_width, tabs, active_tab, session_name);
+    while (hits.next()) |hit| {
         if (!hit.contains(x, 0)) continue;
         const action = hit.actionFor(button);
         if (action.len == 0) continue;
@@ -300,14 +450,15 @@ pub fn hitTestAction(
 /// Resolve and record the hovered region for a pointer position.
 pub fn noteHover(state: *State, config: *const core.Config, term_width: u16, term_height: u16, tabs: anytype, active_tab: usize, session_name: []const u8, x: u16, y: u16) bool {
     if (term_height == 0 or y != term_height - 1) return setSlot(&hover_buf, &hover_len, "");
-    for (currentHits(state, config, term_width, tabs, active_tab, session_name)) |hit| {
+    var hits = currentHits(state, config, term_width, tabs, active_tab, session_name);
+    while (hits.next()) |hit| {
         if (hit.contains(x, 0)) return setSlot(&hover_buf, &hover_len, hit.id);
     }
     return setSlot(&hover_buf, &hover_len, "");
 }
 
 /// Ask the painter for a pane or float title. Empty until the first response.
-pub fn titleRuns(state: *const State, title: []const u8, width: u16, is_float: bool) []const regions.Run {
+pub fn titleRuns(state: *const State, title: []const u8, width: u16, is_float: bool, active: bool) []const regions.Run {
     const registry = regions.active orelse return &.{};
     const cfg = &state.config.tabs.status;
     const view = if (is_float) cfg.float_title_view else cfg.container_title_view;
@@ -319,7 +470,9 @@ pub fn titleRuns(state: *const State, title: []const u8, width: u16, is_float: b
         .now_ms = @intCast(std.time.milliTimestamp()),
         .home = std.posix.getenv("HOME"),
         .title = title,
-        .active = is_float,
+        // The focused float and a background one must be distinguishable by the
+        // painter; this used to report is_float, i.e. always true for floats.
+        .active = active,
     });
     return snap.runs;
 }
@@ -372,6 +525,10 @@ pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u
 /// Draw a painter's runs into a bounded span, clipping to `max_width`. Text is
 /// sanitized here, so nothing a painter emits can address cells outside it.
 pub fn drawRuns(renderer: *Renderer, start_x: u16, y: u16, runs: []const regions.Run, max_width: u16) u16 {
+    return drawRunsDimmed(renderer, start_x, y, runs, max_width, false);
+}
+
+pub fn drawRunsDimmed(renderer: *Renderer, start_x: u16, y: u16, runs: []const regions.Run, max_width: u16, dim: bool) u16 {
     const limit = start_x +| max_width;
     var x = start_x;
     var scratch: [512]u8 = undefined;
@@ -381,7 +538,12 @@ pub fn drawRuns(renderer: *Renderer, start_x: u16, y: u16, runs: []const regions
         if (text.len == 0) continue;
         const clipped = clipTextToWidth(text, limit -| x);
         if (clipped.len == 0) break;
-        x = drawStyledText(renderer, x, y, clipped, run.style);
+        var style = run.style;
+        if (dim) {
+            style.dim = true;
+            style.bold = false;
+        }
+        x = drawStyledText(renderer, x, y, clipped, style);
     }
     return x;
 }

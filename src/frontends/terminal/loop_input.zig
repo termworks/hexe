@@ -12,6 +12,7 @@ const terminal_main = @import("main.zig");
 const actions = @import("loop_actions.zig");
 const loop_ipc = @import("loop_ipc.zig");
 const keybinds = @import("keybinds.zig");
+const keypad = @import("keypad.zig");
 const loop_input_keys = @import("loop_input_keys.zig");
 const loop_mouse = @import("loop_mouse.zig");
 
@@ -1381,7 +1382,9 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
     const cpr_res = consumeCprRepliesFromTerminal(state, stable);
     defer if (cpr_res.owned) |m| state.allocator.free(m);
-    const inp = cpr_res.bytes;
+    const kp_res = normalizeKeypad(state, cpr_res.bytes);
+    defer if (kp_res.owned) |m| state.allocator.free(m);
+    const inp = kp_res.bytes;
     if (inp.len == 0) return;
 
     // Record all input for keycast display (before any processing)
@@ -1775,4 +1778,25 @@ fn consumeCprRepliesFromTerminal(state: *State, inp: []const u8) OscConsumeResul
     @memcpy(trimmed, out[0..out_i]);
     state.allocator.free(out);
     return .{ .bytes = trimmed, .owned = trimmed };
+}
+
+/// Rewrite keypad sequences into the conventional form panes understand.
+///
+/// Runs before parsing: the parser does not decode application-keypad SS3 at
+/// all, and Kitty keypad codes decode to a key the bind type cannot express, so
+/// both used to reach a pane as raw bytes it could not interpret (or not at
+/// all). See keypad.zig.
+fn normalizeKeypad(state: *State, inp: []const u8) OscConsumeResult {
+    if (inp.len < 3) return .{ .bytes = inp };
+    if (std.mem.indexOfScalar(u8, inp, 0x1b) == null) return .{ .bytes = inp };
+
+    const out = state.allocator.alloc(u8, inp.len) catch |err| {
+        core.logging.logError("terminal", "failed to allocate keypad rewrite buffer", err);
+        return .{ .bytes = inp };
+    };
+    const n = keypad.rewrite(out, inp) orelse {
+        state.allocator.free(out);
+        return .{ .bytes = inp };
+    };
+    return .{ .bytes = out[0..n], .owned = out };
 }

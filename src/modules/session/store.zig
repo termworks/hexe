@@ -112,6 +112,10 @@ pub const Pane = struct {
     last_duration_ms: ?u64 = null,
     last_jobs: ?u16 = null,
 
+    /// Palette namespaces parked for this pane (PLAN.md M4). Opaque here: the
+    /// daemon stores and returns the bytes, and never interprets one.
+    palette_blob: ?[]u8 = null,
+
     allocator: std.mem.Allocator,
 
     /// Request a pod VT reconnect + backlog replay, clearing any retry backoff.
@@ -164,6 +168,7 @@ pub const Pane = struct {
         if (self.fg_process) |p| self.allocator.free(p);
         if (self.layout_path) |path| self.allocator.free(path);
         if (self.last_cmd) |c| self.allocator.free(c);
+        if (self.palette_blob) |b| self.allocator.free(b);
     }
 
     var proc_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;

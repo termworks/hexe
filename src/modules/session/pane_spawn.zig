@@ -11,6 +11,36 @@ pub const SpawnResult = struct {
     child_pid: posix.pid_t,
 };
 
+/// Whether any pane already answers to this name.
+///
+/// A pane name is also its pod socket filename, so a duplicate is not a display
+/// nuisance — the two panes collide on `pod@<name>.sock`.
+pub fn paneNameTaken(store: *store_mod.SessionStore, candidate: []const u8) bool {
+    var it = store.panes.valueIterator();
+    while (it.next()) |p| {
+        if (p.name) |n| {
+            if (std.mem.eql(u8, n, candidate)) return true;
+        }
+    }
+    return false;
+}
+
+/// Take the first free entry from `pool`, in `order`, suffixing on exhaustion.
+pub fn pickPaneName(
+    allocator: std.mem.Allocator,
+    store: *store_mod.SessionStore,
+    pool: []const []const u8,
+    order: core.names.Order,
+    suffix: []const u8,
+) ![]const u8 {
+    const Ctx = struct { store: *store_mod.SessionStore };
+    return core.names.pick(allocator, pool, order, suffix, Ctx{ .store = store }, struct {
+        fn taken(ctx: Ctx, candidate: []const u8) bool {
+            return paneNameTaken(ctx.store, candidate);
+        }
+    }.taken);
+}
+
 pub fn generateUniquePaneName(
     allocator: std.mem.Allocator,
     store: *store_mod.SessionStore,

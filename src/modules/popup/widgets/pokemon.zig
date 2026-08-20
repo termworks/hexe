@@ -21,6 +21,10 @@ pub const Position = enum {
 pub const PokemonState = struct {
     show_sprite: bool = false,
     sprite_name: ?[]const u8 = null,
+    /// Rolled once per sprite load from widgets.pokemon.shiny_chance, and sent
+    /// to the painter. It used to be discarded here and hardcoded false at the
+    /// draw call, so configuring a chance did nothing.
+    is_shiny: bool = false,
     manually_toggled: bool = false,
     allocator: std.mem.Allocator,
 
@@ -29,13 +33,31 @@ pub const PokemonState = struct {
     }
 
     pub fn deinit(self: *PokemonState) void {
+        if (self.sprite_name) |n| self.allocator.free(n);
         self.* = .{ .allocator = self.allocator };
     }
 
+    /// Own the name. Callers pass a slice out of the pane-name cache, which is
+    /// freed on rename and when the pane goes away, so storing it borrowed left
+    /// a dangling pointer that the next sprite request read straight into its
+    /// JSON body.
     pub fn loadSprite(self: *PokemonState, name: []const u8, shiny: bool) !void {
-        _ = shiny;
-        self.sprite_name = name;
+        const owned = try self.allocator.dupe(u8, name);
+        if (self.sprite_name) |old_name| self.allocator.free(old_name);
+        self.sprite_name = owned;
+        self.is_shiny = shiny;
         self.show_sprite = true;
+    }
+
+    /// Record which sprite this pane shows, without making it visible.
+    ///
+    /// Called once with the name the pane was created under. The sprite is a
+    /// property of the pane's birth, not of what it is currently called, so a
+    /// later rename must not move the picture. Never overwrites: the first
+    /// name wins for the life of the pane.
+    pub fn recordSprite(self: *PokemonState, name: []const u8) !void {
+        if (self.sprite_name != null) return;
+        self.sprite_name = try self.allocator.dupe(u8, name);
     }
 
     pub fn toggle(self: *PokemonState) void {

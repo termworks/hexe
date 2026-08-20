@@ -112,6 +112,12 @@ pub const Pane = struct {
     osc_notifications: std.ArrayList(pane_osc.Notification) = .empty,
     osc_progress: pane_osc.Progress = .{},
     osc_progress_changed: bool = false,
+    /// Last observed alt-screen state, for the palette stack save/restore.
+    /// Palette colours changed and SES has not been told yet.
+    palette_dirty: bool = false,
+    /// SES has been asked for this pane's parked palette. One attempt per
+    /// pane: a miss must not turn into a per-tick request storm.
+    palette_restored: bool = false,
 
     // Pane-local DCS query capture (DECRQSS support)
     dcs_query_state: DcsQueryState = .idle,
@@ -180,6 +186,27 @@ pub const Pane = struct {
         self.sendResizeToPod(width, height);
     }
 
+    /// Rebind this pane object to a different pane.
+    ///
+    /// Reattach recycles Pane structs rather than reallocating them, so the
+    /// namespace table would otherwise carry the previous occupant's colours
+    /// into a pane that never asked for them — and `palette_restored` would
+    /// still read "already asked", so the new pane would never fetch its own.
+    pub fn adoptIdentity(self: *Pane, new_uuid: [32]u8) void {
+        // Same pane, recycled object: keep everything. Reattach reuses Pane
+        // structs for the panes it is restoring, so this runs on the common
+        // path with an UNCHANGED uuid — resetting there threw away the live
+        // palette on every reconnect, and after a daemon restart there was no
+        // parked copy left to restore it from either.
+        if (std.mem.eql(u8, &self.uuid, &new_uuid)) return;
+
+        self.uuid = new_uuid;
+        self.vt.ns_table.deinit();
+        self.vt.ns_table = core.palette.NamespaceTable.init(self.allocator);
+        self.palette_restored = false;
+        self.palette_dirty = false;
+    }
+
     pub fn deinit(self: *Pane) void {
         self.vt.deinit();
         self.osc_buf.deinit(self.allocator);
@@ -213,6 +240,14 @@ pub const Pane = struct {
         self.osc_prev_esc = false;
         self.osc_discarding = false;
         self.osc_buf.clearRetainingCapacity();
+        // The VT was just rebuilt, taking the namespace table with it. Without
+        // clearing these the pane believes it already has its colours and syncs
+        // the empty table back over the copy SES parked for it.
+        self.palette_restored = false;
+        self.palette_dirty = false;
+        // Edge detector for the alt-screen save/restore. Left stale it never
+        // sees the next transition, so a full-screen app's namespace is neither
+        // parked on entry nor restored on exit.
         self.osc_consumer.reset();
         self.osc_notifications.clearRetainingCapacity();
         self.osc_progress = .{};

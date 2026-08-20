@@ -219,6 +219,7 @@ const ROOT_FIELDS = [_]Field{
     .{ .name = "status", .kind = .table },
     .{ .name = "pop", .kind = .table },
     .{ .name = "ses", .kind = .table },
+    .{ .name = "names", .kind = .table },
     // Written by hexe.setup itself, not by the user.
     .{ .name = "__hexe_type", .kind = .any },
 };
@@ -233,6 +234,8 @@ const STATUS_FIELDS = [_]Field{
     .{ .name = "float_title_view", .kind = .string },
     .{ .name = "container_title_view", .kind = .string },
     .{ .name = "sprite_view", .kind = .string },
+    .{ .name = "zones", .kind = .table },
+    .{ .name = "shrink", .kind = .table },
 };
 
 /// Static so the slice handed to ValidationContext outlives the frame that
@@ -298,6 +301,22 @@ pub fn validateLoaded(runtime: *LuaRuntime, ctx: *ValidationContext) ValidationE
         if (runtime.getInt(u64, -1, "refresh_ms")) |v| status.refresh_ms = v;
         try status.validate(ctx, "status");
     }
+}
+
+test "validateLoaded rejects status.zones that is not a table" {
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const code = "return { status = { zones = 'left' } }\n";
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 1 });
+    defer runtime.lua.pop(1);
+
+    var ctx = ValidationContext{};
+    try std.testing.expectError(error.InvalidConfig, validateLoaded(&runtime, &ctx));
+    try std.testing.expectEqualStrings("status.zones", ctx.path);
 }
 
 test "validateLoaded rejects a mistyped status field" {

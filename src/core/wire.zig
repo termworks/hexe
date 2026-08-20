@@ -140,6 +140,9 @@ pub const MsgType = enum(u16) {
     session_set_split_ratio = 0x0140,
     session_rename_tab = 0x0141, // MUX → SES: rename a tab in the canonical snapshot
     kill_target = 0x0142, // CLI → SES: kill a session (detached or attached) or a single pane/float by name/uuid prefix
+    update_pane_palette = 0x0143, // MUX → SES: park a pane's palette namespaces as session metadata
+    get_pane_palette = 0x0144, // MUX → SES: fetch them back when attaching
+    set_name_pool = 0x0145, // MUX → SES: the vocabulary panes are named from
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -560,6 +563,42 @@ pub const UpdatePaneShell = extern struct {
 /// GetPaneCwd: request CWD for a pane.
 pub const GetPaneCwd = extern struct {
     uuid: [32]u8 align(1),
+};
+
+/// SetNamePool: MUX → SES — the dictionary panes are named from.
+///
+/// SES creates panes but never reads the config, so the vocabulary has to
+/// arrive from the frontend that did. Sent once after attaching; SES keeps the
+/// last pool it was given and falls back to its built-in pool without one.
+///
+/// Followed by: suffix bytes (suffix_len), then `count` entries, each a u16
+/// length followed by that many bytes.
+pub const SetNamePool = extern struct {
+    /// 0 = random, 1 = sequential.
+    order: u8 align(1),
+    suffix_len: u8 align(1),
+    count: u16 align(1),
+};
+
+/// UpdatePanePalette: MUX → SES — park a pane's palette colours.
+/// Followed by: blob bytes (blob_len).
+///
+/// SES stores and returns the blob without interpreting a byte of it: the
+/// invariant is that the daemon never learns what VT bytes mean, and this is
+/// structured palette data rather than a captured sequence (PLAN.md §2).
+pub const UpdatePanePalette = extern struct {
+    uuid: [32]u8 align(1),
+    blob_len: u32 align(1),
+};
+
+/// GetPanePalette request, and the response carrying the blob back.
+pub const GetPanePalette = extern struct {
+    uuid: [32]u8 align(1),
+};
+
+pub const PanePalette = extern struct {
+    uuid: [32]u8 align(1),
+    blob_len: u32 align(1),
 };
 
 /// PopConfirm: SES → MUX — show confirm dialog.

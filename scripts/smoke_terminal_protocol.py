@@ -325,17 +325,65 @@ if not wait_screen(master, paste_marker.decode(), 5):
     fail("fragmented OSC 52 paste stalled or corrupted input")
 print(f"OSC52 PASTE: fragmented 32 KiB reply completed in {time.monotonic() - paste_started:.2f}s")
 
+# Let the notification queue drain before timing anything against it.
+#
+# The mux shows notifications one at a time for ~3s each. The clipboard phase
+# above leaves four queued, so this one used to arrive FIFTH — roughly twelve
+# seconds behind, against a fifteen-second window. Anything that stretched a
+# loop tick (a Debug build, and palette namespaces on top of it) pushed the
+# total past the window, and the check failed as though the notification had
+# been dropped. It never was: the manager queues and pops it correctly.
+#
+# "Drained" means the surface has been overlay-free for two CONTINUOUS seconds.
+# Checking for a single overlay-free sample is not enough — there is a gap
+# between one notification expiring and the next being popped.
+overlay_re = re.compile(r"\[[0-9a-f]{8}\] ")
+quiet_since = time.time()
+drain_deadline = time.time() + 60
+while time.time() < drain_deadline:
+    pump(master, 0.2)
+    if overlay_re.search(screen.text()):
+        quiet_since = time.time()
+    elif time.time() - quiet_since >= 2.0:
+        break
+else:
+    fail("earlier notifications never drained off the mux surface")
+
+# And make sure the shell is actually back at a prompt. The 32 KiB paste is
+# still draining through the pane's line discipline when this phase begins, so
+# the notification `printf`s can otherwise execute seconds after they are typed.
+os.write(master, b"printf 'PROTO_NOTIFY_READY\\n'\r")
+notify_ready, _ = read_until(master, b"PROTO_NOTIFY_READY", 30)
+if not notify_ready:
+    fail("shell never became ready for the notification phase")
+
 os.write(master, b"printf '\\033]99;i=live:p=title;Live\\033\\\\033]99;i=live:p=body;Once\\033\\'\r")
 os.write(master, b"printf '\\033]777;notify;Live;Once\\033\\'\r")
-if not wait_screen(master, "Live: Once", 15):
+
+# Assert on what the mux WROTE, not on a sample of the reconstructed screen.
+#
+# `wait_screen` inspects the screen once per 0.1s pump window, and the overlay
+# is transient — the draw and its erase are adjacent frames in the stream, so a
+# window that spans both reports the notification as never having appeared.
+# Accumulating the bytes is sampling-independent and no weaker: this pattern is
+# the mux's own overlay, and the pane's echo of the command carries `Live;Once`
+# with a semicolon, so it cannot match by accident.
+NOTIFY_DRAW = re.compile(rb"\[[0-9a-f]{8}\] Live: Once")
+notify_seen = b""
+notify_deadline = time.time() + 20
+while time.time() < notify_deadline:
+    notify_seen += pump(master, 0.1)
+    if NOTIFY_DRAW.search(notify_seen):
+        break
+else:
     fail("pane notification did not reach the mux surface")
-notification_match = re.search(r"\[[0-9a-f]{8}\] Live: Once", screen.text())
-if notification_match is None:
-    fail("pane notification did not identify its originating pane")
-pump(master, 3.8)
-if "Live: Once" in screen.text():
+print("NOTIFY: pane-attributed Kitty/legacy fallback rendered with its pane id")
+
+# The Kitty and legacy forms describe the same notification, so the mux must
+# draw it once. A duplicate would draw the same text again after this one.
+if NOTIFY_DRAW.search(pump(master, 6.0)):
     fail("matching Kitty and legacy notifications produced a duplicate queue entry")
-print("NOTIFY: pane-attributed Kitty/legacy fallback rendered exactly once")
+print("NOTIFY: not duplicated by the legacy fallback")
 
 # OSC 9;4 progress used to be asserted here by scraping the built-in status
 # bar. hexe draws no chrome now — the bar is an external painter, and this test

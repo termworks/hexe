@@ -1,4 +1,5 @@
 const std = @import("std");
+const names_mod = @import("names.zig");
 const posix = std.posix;
 const zlua = @import("zlua");
 const Lua = zlua.Lua;
@@ -251,6 +252,34 @@ pub fn getConfigDir(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 /// Get the path to a specific config file
+/// Config file for the ACTIVE profile.
+///
+/// A profile is a separate hexe -- its own daemon, sessions, sockets and state --
+/// but every profile still read the one shared init.lua, so `work` and
+/// `personal` could not differ in layout, keybinds or painter. A profile now
+/// uses `profiles/<name>.lua` when that file exists, and falls back to the
+/// shared init.lua otherwise, so nothing changes for anyone who has no such file.
+pub fn getActiveConfigPath(allocator: std.mem.Allocator) ![]const u8 {
+    const raw = std.posix.getenv("HEXE_INSTANCE") orelse return getConfigPath(allocator, "init.lua");
+    if (raw.len == 0 or raw.len > 64) return getConfigPath(allocator, "init.lua");
+    // The name arrives from --profile, so it must never reach into the
+    // filesystem: anything but a plain name falls back to the shared config.
+    for (raw) |ch| {
+        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+            (ch >= '0' and ch <= '9') or ch == '-' or ch == '_';
+        if (!ok) return getConfigPath(allocator, "init.lua");
+    }
+
+    const dir = try getConfigDir(allocator);
+    defer allocator.free(dir);
+    const candidate = try std.fmt.allocPrint(allocator, "{s}/profiles/{s}.lua", .{ dir, raw });
+    std.fs.accessAbsolute(candidate, .{}) catch {
+        allocator.free(candidate);
+        return getConfigPath(allocator, "init.lua");
+    };
+    return candidate;
+}
+
 pub fn getConfigPath(allocator: std.mem.Allocator, filename: []const u8) ![]const u8 {
     const dir = try getConfigDir(allocator);
     defer allocator.free(dir);
@@ -495,6 +524,8 @@ pub const LuaRuntime = struct {
         try self.applyMuxConfigV2();
         try self.applyKeysConfigV2();
         try self.applyStatusConfigV2();
+        try self.applyPaletteConfigV2();
+        try self.applyNamesConfigV2();
         try self.applyPopConfigV2();
         try self.applySesConfigV2();
     }
@@ -629,6 +660,105 @@ pub const LuaRuntime = struct {
         if (self.getInt(u64, -1, "refresh_ms")) |v| {
             if (v > 0) mux.tabs_config.status_refresh_ms = v;
         }
+        // Validated and documented, but previously never applied: renaming a
+        // painter view or widening the stale window silently did nothing.
+        if (self.getInt(u64, -1, "stale_ms")) |v| {
+            if (v > 0) mux.tabs_config.status_stale_ms = v;
+        }
+        if (self.getStringAlloc(-1, "float_title_view")) |v| mux.tabs_config.status_float_title_view = v;
+        if (self.getStringAlloc(-1, "container_title_view")) |v| mux.tabs_config.status_container_title_view = v;
+        if (self.getStringAlloc(-1, "sprite_view")) |v| mux.tabs_config.status_sprite_view = v;
+
+        if (self.pushTable(-1, "zones")) {
+            defer self.pop();
+            inline for (.{ "left", "center", "right" }) |name| {
+                if (self.pushTable(-1, name)) {
+                    defer self.pop();
+                    if (self.getStringAlloc(-1, "view")) |v| {
+                        @field(mux.tabs_config, "status_zone_" ++ name) = v;
+                    }
+                }
+            }
+        }
+
+        if (self.pushTable(-1, "shrink")) {
+            defer self.pop();
+            var order: [3]u8 = .{ 1, 2, 0 };
+            var seen: usize = 0;
+            var i: usize = 1;
+            while (i <= 3 and self.pushArrayElement(-1, i)) : (i += 1) {
+                defer self.pop();
+                const name = self.lua.toString(-1) catch continue;
+                order[seen] = zoneIndexFromName(name) orelse continue;
+                seen += 1;
+            }
+            if (seen == 3) mux.tabs_config.status_shrink = order;
+        }
+    }
+
+    /// Zone name to the index `StatusBarConfig.shrink` stores: 0 left, 1
+    /// center, 2 right.
+    fn zoneIndexFromName(name: []const u8) ?u8 {
+        if (std.mem.eql(u8, name, "left")) return 0;
+        if (std.mem.eql(u8, name, "center")) return 1;
+        if (std.mem.eql(u8, name, "right")) return 2;
+        return null;
+    }
+
+    fn applyPaletteConfigV2(self: *Self) !void {
+        if (!self.pushTable(-1, "palette")) return;
+        defer self.pop();
+
+        const mux = try self.getOrCreateMuxBuilder();
+        if (self.getBool(-1, "namespaces")) |v| mux.palette_namespaces = v;
+        if (self.getInt(u32, -1, "osc")) |v| mux.palette_osc = v;
+    }
+
+    /// `names` — where the naming vocabulary comes from.
+    ///
+    /// A surface is either a literal list of entries or a string, which is a
+    /// command hexe runs once here and splits on newlines. A command that
+    /// fails leaves that surface on its built-in pool: a painter that is not
+    /// installed must never stop panes from being created.
+    fn applyNamesConfigV2(self: *Self) !void {
+        if (!self.pushTable(-1, "names")) return;
+        defer self.pop();
+
+        const mux = try self.getOrCreateMuxBuilder();
+        mux.names_session = try self.readDictionary(-1, "session");
+        mux.names_pane = try self.readDictionary(-1, "pane");
+
+        if (self.getStringAlloc(-1, "order")) |v| {
+            mux.names_order = if (std.mem.eql(u8, v, "sequential")) .sequential else .random;
+        }
+        if (self.getStringAlloc(-1, "suffix")) |v| mux.names_suffix = v;
+    }
+
+    /// A list of entries, or the output of a command that produces them.
+    fn readDictionary(self: *Self, table_idx: i32, field: [:0]const u8) !?[][]const u8 {
+        if (self.getStringAlloc(table_idx, field)) |cmd| {
+            defer self.allocator.free(cmd);
+            return names_mod.fromCommand(self.allocator, cmd);
+        }
+        if (!self.pushTable(table_idx, field)) return null;
+        defer self.pop();
+
+        var list: std.ArrayList([]const u8) = .empty;
+        errdefer {
+            for (list.items) |e| self.allocator.free(e);
+            list.deinit(self.allocator);
+        }
+        var i: usize = 1;
+        while (i <= names_mod.MAX_ENTRIES and self.pushArrayElement(-1, i)) : (i += 1) {
+            defer self.pop();
+            const entry = self.lua.toString(-1) catch continue;
+            try list.append(self.allocator, try self.allocator.dupe(u8, entry));
+        }
+        if (list.items.len == 0) {
+            list.deinit(self.allocator);
+            return null;
+        }
+        return try list.toOwnedSlice(self.allocator);
     }
 
     fn applyPopConfigV2(self: *Self) !void {
@@ -1091,12 +1221,14 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.validate=hexe.validate or function(cfg) " ++
         "expect_table('config', cfg, false); " ++
         "scan_removed('config', cfg); " ++
-        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true }; " ++
+        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true, palette=true, names=true }; " ++
         "for k,_ in pairs(cfg) do if type(k)=='string' and k:sub(1,2)~='__' and not allowed[k] then error('config error: '..k..' is not a supported top-level section',2) end end; " ++
         "validate_theme('theme', cfg.theme); " ++
         "validate_keybindings('keys', cfg.keys); " ++
         "local mux=expect_table('mux', cfg.mux, true); if mux then reject_unknown_fields('mux', mux, { confirm=true, mouse=true, splits=true, floats=true, selection_color=true, float=true, keybindings=true, keymaps=true, config=true, options=true, tabs=true }); local confirm=expect_table('mux.confirm', mux.confirm, true); if confirm then reject_unknown_fields('mux.confirm', confirm, { exit=true, detach=true, disown=true, close=true }) end; local mouse=expect_table('mux.mouse', mux.mouse, true); if mouse then reject_unknown_fields('mux.mouse', mouse, { selection_override=true }); if mouse.selection_override~=nil then mod_mask('mux.mouse.selection_override', mouse.selection_override) end end; local mfloats=expect_table('mux.floats', mux.floats, true); if mfloats then reject_unknown_fields('mux.floats', mfloats, { defaults=true, adhoc=true, match=true }); validate_float_preset('mux.floats.defaults', mfloats.defaults); validate_float_preset('mux.floats.adhoc', mfloats.adhoc) end; local msplits=expect_table('mux.splits', mux.splits, true); if msplits then reject_unknown_fields('mux.splits', msplits, { color=true, chars=true }); local scolor=expect_table('mux.splits.color', msplits.color, true); if scolor then reject_unknown_fields('mux.splits.color', scolor, { active=true, passive=true }) end; local schars=expect_table('mux.splits.chars', msplits.chars, true); if schars then reject_unknown_fields('mux.splits.chars', schars, { vertical=true, horizontal=true }) end end; if mux.selection_color~=nil and type(mux.selection_color)~='number' then type_error('mux.selection_color','number',type(mux.selection_color)) end; if mux.float~=nil then error('config error: mux.float is removed; use mux.floats',2) end; if mux.keybindings~=nil then error('config error: mux.keybindings is removed; use top-level keys',2) end; if mux.keymaps~=nil then error('config error: mux.keymaps is removed; use top-level keys',2) end; if mux.config~=nil then error('config error: mux.config is removed; use canonical mux fields',2) end; if mux.options~=nil then error('config error: mux.options is removed; use canonical mux fields',2) end; if mux.tabs~=nil then error('config error: mux.tabs is removed; use top-level status',2) end end; " ++
-        "expect_table('status', cfg.status, true); " ++
+        "local status=expect_table('status', cfg.status, true); if status then reject_unknown_fields('status', status, { enabled=true, view=true, socket=true, command=true, refresh_ms=true, stale_ms=true, float_title_view=true, container_title_view=true, sprite_view=true, zones=true, shrink=true }); local zones=expect_table('status.zones', status.zones, true); if zones then if status.view~=nil then error('config error: status.view and status.zones are mutually exclusive; a bar is either one full-width view or three zones',2) end; reject_unknown_fields('status.zones', zones, { left=true, center=true, right=true }); local any=false; for _,k in ipairs({'left','center','right'}) do local z=expect_table('status.zones.'..k, zones[k], true); if z then reject_unknown_fields('status.zones.'..k, z, { view=true }); if type(z.view)~='string' or #z.view==0 then type_error('status.zones.'..k..'.view','non-empty string',type(z.view)) end; any=true end end; if not any then error('config error: status.zones names no zone; give at least one of left, center, right',2) end end; if status.shrink~=nil then if type(status.shrink)~='table' or #status.shrink~=3 then error('config error: status.shrink must list all three zones, e.g. { \"center\", \"right\", \"left\" }',2) end; local sawz={} for _,v in ipairs(status.shrink) do if v~='left' and v~='center' and v~='right' then error('config error: status.shrink entries must be left, center or right',2) end; if sawz[v] then error('config error: status.shrink lists '..v..' twice',2) end; sawz[v]=true end end end; " ++
+        "local palette=expect_table('palette', cfg.palette, true); if palette then reject_unknown_fields('palette', palette, { namespaces=true, osc=true }); if palette.namespaces~=nil and type(palette.namespaces)~='boolean' then type_error('palette.namespaces','boolean',type(palette.namespaces)) end; if palette.osc~=nil then if type(palette.osc)~='number' then type_error('palette.osc','number',type(palette.osc)) end; if palette.osc<1 or palette.osc>10000 or palette.osc%1~=0 then error('config error: palette.osc must be integer 1..10000',2) end; local reserved={[0]=true,[1]=true,[2]=true,[4]=true,[5]=true,[7]=true,[9]=true,[99]=true,[104]=true,[105]=true,[133]=true,[777]=true}; if reserved[palette.osc] or (palette.osc>=10 and palette.osc<=19) or (palette.osc>=50 and palette.osc<=59) or (palette.osc>=110 and palette.osc<=119) then error('config error: palette.osc '..palette.osc..' is reserved; hexe already forwards or consumes that OSC',2) end end end; " ++
+        "local names=expect_table('names', cfg.names, true); if names then reject_unknown_fields('names', names, { session=true, pane=true, order=true, suffix=true }); for _,k in ipairs({'session','pane'}) do local d=names[k]; if d~=nil then if type(d)=='table' then if #d==0 then error('config error: names.'..k..' is an empty list; omit it to use the built-in pool',2) end; for i,v in ipairs(d) do if type(v)~='string' then type_error('names.'..k..'['..i..']','string',type(v)) end; if not v:match('^[a-z0-9][a-z0-9._%-]*$') then error('config error: names.'..k..'['..i..']=\"'..v..'\" must match [a-z0-9][a-z0-9._-]* -- a name is also a filename and a CLI argument',2) end; if #v>32 then error('config error: names.'..k..'['..i..'] is longer than 32 characters',2) end end elseif type(d)~='string' then type_error('names.'..k,'list of names or hexe.command(...)',type(d)) end end end; if names.order~=nil then if type(names.order)~='string' then type_error('names.order','string',type(names.order)) end; if names.order~='random' and names.order~='sequential' then error('config error: names.order must be \"random\" or \"sequential\"',2) end end; if names.suffix~=nil then if type(names.suffix)~='string' then type_error('names.suffix','string',type(names.suffix)) end; if #names.suffix==0 then error('config error: names.suffix must not be empty',2) end end end; " ++
         "local pop=expect_table('pop', cfg.pop, true); if pop then local notify=expect_table('pop.notify', pop.notify, true); if notify and notify.carrier~=nil then error('config error: pop.notify.carrier is removed; use pop.notify.mux',2) end; local confirm=expect_table('pop.confirm', pop.confirm, true); if confirm and confirm.carrier~=nil then error('config error: pop.confirm.carrier is removed; use pop.confirm.mux',2) end; local choose=expect_table('pop.choose', pop.choose, true); if choose and choose.carrier~=nil then error('config error: pop.choose.carrier is removed; use pop.choose.mux',2) end; expect_table('pop.widgets', pop.widgets, true) end; " ++
         "local ses=expect_table('ses', cfg.ses, true); if ses then expect_table('ses.isolation', ses.isolation, true); local layouts=expect_array('ses.layouts', ses.layouts, true); if layouts then for i,layout in ipairs(layouts) do validate_layout('ses.layouts['..i..']',layout) end end end; " ++
         "return cfg end; " ++
@@ -1850,4 +1982,61 @@ test "LuaRuntime loadConfig applies returned hexe setup config" {
     // LayoutFloatDef identifies floats by key/command (the `name` arg to
     // hexe.float() is not stored on the def); assert the field that exists.
     try std.testing.expectEqualStrings("codex", ses_builder.layouts.items[0].floats[0].command.?);
+}
+
+test "palette config loads and rejects bad values" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "init.lua",
+        .data = "local hexe = require('hexe')\n" ++
+            "return hexe.setup({ palette = { namespaces = true, osc = 1331 } })\n",
+    });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "init.lua");
+    defer std.testing.allocator.free(path);
+
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+    try runtime.loadConfig(path);
+    defer runtime.pop();
+
+    const builder = runtime.getBuilder() orelse return error.NoConfigBuilder;
+    const mux_config = try builder.mux.?.build();
+    try std.testing.expectEqual(true, mux_config.palette_namespaces);
+    try std.testing.expectEqual(@as(u32, 1331), mux_config.palette_osc);
+}
+
+test "palette config rejects typos and out-of-range values" {
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const code =
+        "local hexe = require('hexe')\n" ++
+        "local checks = {\n" ++
+        "  function() return hexe.setup({ palette = { namespace = true } }) end,\n" ++
+        "  function() return hexe.setup({ palette = { namespaces = 'yes' } }) end,\n" ++
+        "  function() return hexe.setup({ palette = { osc = 'x' } }) end,\n" ++
+        "  function() return hexe.setup({ palette = { osc = 99999 } }) end,\n" ++
+        // Reserved numbers: claiming one makes the palette dispatch swallow a
+        // sequence hexe already forwards or consumes. `osc = 4` would stop the
+        // base palette reaching the terminal at all.
+        "  function() return hexe.setup({ palette = { osc = 4 } }) end,\n" ++
+        "  function() return hexe.setup({ palette = { osc = 133 } }) end,\n" ++
+        "  function() return hexe.setup({ palette = { osc = 11 } }) end,\n" ++
+        "  function() return hexe.setup({ palette = { osc = 777 } }) end,\n" ++
+        "}\n" ++
+        "local out = {}\n" ++
+        "for i,fn in ipairs(checks) do local ok, err = pcall(fn); out[i] = (not ok) and 'REJECTED' or 'ACCEPTED' end\n" ++
+        "__hexe_palette_errors = table.concat(out, '\\n')\n";
+
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try runtime.lua.getGlobal("__hexe_palette_errors");
+    defer runtime.lua.pop(1);
+    const errs = runtime.lua.toString(-1) catch "";
+    try std.testing.expect(std.mem.indexOf(u8, errs, "ACCEPTED") == null);
 }

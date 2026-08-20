@@ -1,6 +1,6 @@
 .{
     .name = .hexa,
-    .version = "0.3.0",
+    .version = "0.4.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -14,10 +14,10 @@
             .url = "git+https://github.com/mitchellh/libxev#42d4ead52667e03619dcd5b1a3ca8ef7d5dd24ed",
             .hash = "libxev-0.0.0-86vtc0IbEwBzMSXa-ZPZ8JpcV4Mw1SrsTuvtJmFAQ7Uu",
         },
-        .ghostty = .{
-            .url = "git+https://github.com/ghostty-org/ghostty#4e17eee5dea3d67aa9b0fec56be7f461c496ffe4",
-            .hash = "ghostty-1.3.0-dev-5UdBCw7QSATpenpLhfop3klSjURk7Aj_yT7u0yPXmgpQ",
-        },
+        // Patched by `make ghostty` from the upstream revision pinned in the
+        // Makefile plus patches/ghostty-vt-ns.patch. Run that target after a
+        // fresh clone, or to follow a newer upstream.
+        .ghostty = .{ .path = "vendor/ghostty" },
         .ziglua = .{
             .url = "git+https://github.com/natecraddock/ziglua#0.6.0",
             .hash = "zlua-0.1.0-hGRpCww-BQCx3cX6zbKWfTgOx6B7Peo4P17RK2hm7-xV",

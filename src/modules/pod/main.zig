@@ -1782,6 +1782,17 @@ const Pod = struct {
         const frame_type_byte = hdr_bytes[0];
         if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.input)) {
             self.queuePtyWrite(payload);
+        } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.output)) {
+            // Inject bytes into the pane's output as if the child had written
+            // them: they reach the frontend AND land in the backlog, so a
+            // reattach replays them. `hexe palette set` rides this rather than
+            // reaching into frontend state, which keeps one code path for
+            // CLI-driven and app-driven changes (PLAN.md M5).
+            //
+            // The pod still does not parse them. It gains no capability the
+            // existing aux `.input` path did not already have — that one writes
+            // to the child's stdin, which is strictly more powerful.
+            self.processPtyOutput(payload);
         } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize) and payload.len >= 4) {
             const cols = std.mem.readInt(u16, payload[0..2], .big);
             const rows = std.mem.readInt(u16, payload[2..4], .big);

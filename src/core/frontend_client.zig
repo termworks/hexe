@@ -5,6 +5,8 @@ const liblink_transport = @import("frontend_liblink_transport.zig");
 const logging = @import("logging.zig");
 const session_model = @import("session_model.zig");
 const wire = @import("wire.zig");
+const palette_mod = @import("palette.zig");
+const names_mod = @import("names.zig");
 const responses = @import("ses_client_responses.zig");
 const commands = @import("ses_client_commands.zig");
 const reads = @import("ses_client_reads.zig");
@@ -1012,6 +1014,84 @@ pub const SesClient = struct {
         }
         @memcpy(sync_cwd_buf[0..resp.cwd.len], resp.cwd);
         return sync_cwd_buf[0..resp.cwd.len];
+    }
+
+    /// Hand SES the vocabulary panes are named from.
+    ///
+    /// SES creates panes but never reads the config, so a dictionary produced
+    /// there has to be sent. Fire-and-forget and idempotent: SES keeps the last
+    /// pool it was given, and without one it uses its built-in pool — which is
+    /// exactly what a default config wants anyway.
+    pub fn setNamePool(
+        self: *SesClient,
+        entries: []const []const u8,
+        order: names_mod.Order,
+        suffix: []const u8,
+    ) void {
+        const fd = self.ctl_fd orelse return;
+        if (entries.len == 0 or entries.len > names_mod.MAX_ENTRIES) return;
+
+        var trail: std.ArrayList(u8) = .empty;
+        defer trail.deinit(self.allocator);
+        const sfx = suffix[0..@min(suffix.len, 255)];
+        trail.appendSlice(self.allocator, sfx) catch return;
+        var sent: u16 = 0;
+        for (entries) |e| {
+            if (e.len > names_mod.MAX_ENTRY_LEN) continue;
+            var len_buf: [2]u8 = undefined;
+            std.mem.writeInt(u16, &len_buf, @intCast(e.len), .little);
+            trail.appendSlice(self.allocator, &len_buf) catch return;
+            trail.appendSlice(self.allocator, e) catch return;
+            sent += 1;
+        }
+        if (sent == 0) return;
+
+        var msg: wire.SetNamePool = .{
+            .order = if (order == .sequential) 1 else 0,
+            .suffix_len = @intCast(sfx.len),
+            .count = sent,
+        };
+        self.drainQueuedControlResponses(fd);
+        _ = self.writeControlTrailRequest(fd, .set_name_pool, std.mem.asBytes(&msg), trail.items) catch |err| {
+            logging.logError("frontend-client", "failed to send the name pool", err);
+            if (self.ctl_fd == fd) self.ctl_fd = null;
+        };
+    }
+
+    /// Park a pane's palette namespaces in SES (PLAN.md M4).
+    ///
+    /// The pane's byte ring is not a store — a clear-screen empties it — so
+    /// this is what carries colours across a detach. Fire-and-forget: losing
+    /// one update costs the next sync, never correctness.
+    pub fn updatePanePalette(self: *SesClient, uuid: [32]u8, blob: []const u8) void {
+        const fd = self.ctl_fd orelse return;
+        if (blob.len > palette_mod.MAX_BLOB_LEN) {
+            // Reachable only by a pane that claimed a great many namespaces.
+            // Say so rather than quietly ceasing to persist its colours.
+            logging.warn("frontend-client", "pane palette too large to park ({d} > {d} bytes); colours will not survive a detach", .{ blob.len, palette_mod.MAX_BLOB_LEN });
+            return;
+        }
+        var msg: wire.UpdatePanePalette = .{ .uuid = uuid, .blob_len = @intCast(blob.len) };
+        self.drainQueuedControlResponses(fd);
+        _ = self.writeControlTrailRequest(fd, .update_pane_palette, std.mem.asBytes(&msg), blob) catch |err| {
+            logging.logError("frontend-client", "failed to sync pane palette", err);
+            if (self.ctl_fd == fd) self.ctl_fd = null;
+        };
+    }
+
+    /// Ask SES for a pane's parked palette.
+    ///
+    /// Fire-and-forget: the reply arrives as an ordinary control event and is
+    /// applied there. It deliberately does NOT read the socket itself — the
+    /// event loop owns that fd, and a synchronous read racing it desynced the
+    /// control stream and stopped the frontend rendering at all.
+    pub fn requestPanePalette(self: *SesClient, uuid: [32]u8) void {
+        const fd = self.ctl_fd orelse return;
+        var msg: wire.GetPanePalette = .{ .uuid = uuid };
+        _ = self.writeControlRequest(fd, .get_pane_palette, std.mem.asBytes(&msg)) catch |err| {
+            logging.logError("frontend-client", "failed to request pane palette", err);
+            if (self.ctl_fd == fd) self.ctl_fd = null;
+        };
     }
 
     /// Ping ses to check if it's alive.

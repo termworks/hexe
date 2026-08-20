@@ -26,6 +26,7 @@ pub const CtlEventKind = enum {
     ignorable_response,
     cwd_response,
     pane_info_response,
+    palette_response,
     error_response,
     unknown,
 };
@@ -62,6 +63,7 @@ pub fn ctlEventKindFromMsgType(msg_type: wire.MsgType) CtlEventKind {
         .ok, .pong => .ignorable_response,
         .get_pane_cwd => .cwd_response,
         .pane_info => .pane_info_response,
+        .get_pane_palette => .palette_response,
         .pane_not_found, .@"error" => .error_response,
         else => .unknown,
     };

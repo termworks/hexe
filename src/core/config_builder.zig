@@ -53,6 +53,15 @@ pub const MuxConfigBuilder = struct {
     confirm_on_disown: ?bool = null,
     confirm_on_close: ?bool = null,
     selection_color: ?u8 = null,
+    palette_namespaces: ?bool = null,
+    palette_osc: ?u32 = null,
+
+    // Name dictionaries. Owned here and handed to the built Config, which
+    // outlives the builder.
+    names_session: ?[][]const u8 = null,
+    names_pane: ?[][]const u8 = null,
+    names_order: ?config.names_mod.Order = null,
+    names_suffix: ?[]const u8 = null,
     mouse_selection_override_mods: ?u8 = null,
 
     // Keybindings
@@ -100,9 +109,17 @@ pub const MuxConfigBuilder = struct {
     const TabsConfig = struct {
         status_enabled: ?bool = null,
         status_view: ?[]const u8 = null,
+        status_zone_left: ?[]const u8 = null,
+        status_zone_center: ?[]const u8 = null,
+        status_zone_right: ?[]const u8 = null,
+        status_shrink: ?[3]u8 = null,
         status_socket: ?[]const u8 = null,
         status_command: ?[]const u8 = null,
         status_refresh_ms: ?u64 = null,
+        status_stale_ms: ?u64 = null,
+        status_float_title_view: ?[]const u8 = null,
+        status_container_title_view: ?[]const u8 = null,
+        status_sprite_view: ?[]const u8 = null,
     };
 
     const SplitsConfig = struct {
@@ -169,6 +186,12 @@ pub const MuxConfigBuilder = struct {
         if (self.confirm_on_disown) |v| result.confirm_on_disown = v;
         if (self.confirm_on_close) |v| result.confirm_on_close = v;
         if (self.selection_color) |v| result.selection_color = v;
+        if (self.palette_namespaces) |v| result.palette_namespaces = v;
+        if (self.palette_osc) |v| result.palette_osc = v;
+        if (self.names_session) |v| result.names.session = v;
+        if (self.names_pane) |v| result.names.pane = v;
+        if (self.names_order) |v| result.names.order = v;
+        if (self.names_suffix) |v| result.names.suffix = try self.allocator.dupe(u8, v);
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 
         // Apply binds (deep copy to prevent use-after-free)
@@ -220,9 +243,17 @@ pub const MuxConfigBuilder = struct {
         // Apply tabs config
         if (self.tabs_config.status_enabled) |v| result.tabs.status.enabled = v;
         if (self.tabs_config.status_view) |v| result.tabs.status.view = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_zone_left) |v| result.tabs.status.zone_left = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_zone_center) |v| result.tabs.status.zone_center = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_zone_right) |v| result.tabs.status.zone_right = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_shrink) |v| result.tabs.status.shrink = v;
         if (self.tabs_config.status_socket) |v| result.tabs.status.socket = try self.allocator.dupe(u8, v);
         if (self.tabs_config.status_command) |v| result.tabs.status.command = try self.allocator.dupe(u8, v);
         if (self.tabs_config.status_refresh_ms) |v| result.tabs.status.refresh_ms = v;
+        if (self.tabs_config.status_stale_ms) |v| result.tabs.status.stale_ms = v;
+        if (self.tabs_config.status_float_title_view) |v| result.tabs.status.float_title_view = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_container_title_view) |v| result.tabs.status.container_title_view = try self.allocator.dupe(u8, v);
+        if (self.tabs_config.status_sprite_view) |v| result.tabs.status.sprite_view = try self.allocator.dupe(u8, v);
         // Apply splits config
         if (self.splits_config.color) |v| result.splits.color = v;
         if (self.splits_config.separator_v) |v| result.splits.separator_v = v;

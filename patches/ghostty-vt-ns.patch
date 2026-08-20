@@ -1,0 +1,106 @@
+From: hexe
+Subject: [PATCH] terminal: opaque namespace tag in Style's spare flag bits
+
+hexe records which palette namespace was current when each cell was written, so
+it can resolve indexed colours per namespace and recolour one program's output
+without touching anything else on screen.
+
+The tag is never interpreted by ghostty. It occupies bits that were already
+padding inside Flags, so Style keeps its size (14 bytes) and its page layout
+unchanged. Sitting in Flags also means it joins equality and hashing with no
+further changes, and a tag of 0 behaves exactly as before.
+
+A separate u8 field on Style would also work and would give 255 tags instead of
+31, at the cost of growing Style to 16 bytes and needing explicit eql and
+PackedStyle changes. Measured resident memory was the same either way.
+
+The other three hunks all say one thing: the tag is embedder state, not terminal
+state a program can clear. Each is a path that rewrites the cursor style
+wholesale, and each would otherwise silently untag everything printed after it
+-- with the embedder unable to notice, because it never sees the sequence that
+did it.
+
+  - SGR reset (ESC[0m), which programs emit constantly.
+  - DECRC / cursor restore, which would additionally resurrect a selection the
+    program had already released.
+  - RIS / full reset, which reinitialises the screen. This one also re-interns,
+    because assigning the style without that leaves style_id at the default and
+    the cells written next carry a tag of 0 whatever the flag says.
+
+Each hunk is covered by a test in src/core/vt_test.zig that asserts on the
+cursor's tag directly, and each fails if its hunk is removed.
+---
+--- a/src/terminal/style.zig
++++ b/src/terminal/style.zig
+@@ -37,7 +37,14 @@
+         strikethrough: bool = false,
+         overline: bool = false,
+         underline: sgr.Attribute.Underline = .none,
+-        _padding: u5 = 0,
++
++        /// Opaque namespace tag owned by the embedder, never interpreted here.
++        ///
++        /// Lives in bits that were already padding, so Style keeps its size and
++        /// its page layout. Because it sits in Flags it joins equality and
++        /// hashing for free: cells written under different tags keep distinct
++        /// interned styles, and a tag of 0 is byte-identical to before.
++        ns: u5 = 0,
+     };
+ 
+     /// The color for an SGR attribute. A color can come from multiple
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -340,12 +340,21 @@
+     assert(cursor_pin.x == 0);
+     assert(cursor_pin.y == 0);
+     const cursor_rac = cursor_pin.rowAndCell();
++    // The embedder's namespace tag survives a reset: it tracks the embedder's
++    // own selection, not terminal state a program can reset. Without this, RIS
++    // silently untags everything printed after it, and the embedder cannot
++    // notice because it never sees the sequence.
++    const live_ns = self.cursor.style.flags.ns;
+     self.cursor.deinit(self.alloc);
+     self.cursor = .{
+         .page_pin = cursor_pin,
+         .page_row = cursor_rac.row,
+         .page_cell = cursor_rac.cell,
+     };
++    self.cursor.style.flags.ns = live_ns;
++    // Re-intern: assigning the style alone leaves style_id at the default, so
++    // the cells written next would carry a tag of 0 whatever the flag says.
++    if (live_ns != 0) self.manualStyleUpdate() catch {};
+ 
+     if (comptime build_options.kitty_graphics) {
+         // Reset kitty graphics storage
+@@ -1811,7 +1820,12 @@
+ 
+     switch (attr) {
+         .unset => {
++            // The embedder's namespace tag is not an SGR attribute, so a reset
++            // must not clear it. Programs emit ESC[0m constantly; clearing here
++            // would drop the tag on every cell written after the first reset.
++            const ns = self.cursor.style.flags.ns;
+             self.cursor.style = .{};
++            self.cursor.style.flags.ns = ns;
+         },
+ 
+         .bold => {
+--- a/src/terminal/Terminal.zig
++++ b/src/terminal/Terminal.zig
+@@ -1008,8 +1008,15 @@
+         .charset = .{},
+     };
+ 
+-    // Set the style first because it can fail
++    // Set the style first because it can fail.
++    //
++    // The embedder's namespace tag is deliberately NOT restored: it tracks the
++    // embedder's own selection, not the program's saved SGR state. Restoring it
++    // would resurrect a selection the program had already released, and stamp
++    // whatever it printed next with someone else's namespace.
++    const live_ns = self.screens.active.cursor.style.flags.ns;
+     self.screens.active.cursor.style = saved.style;
++    self.screens.active.cursor.style.flags.ns = live_ns;
+     self.screens.active.manualStyleUpdate() catch |err| {
+         // Regardless of the error here, we revert back to an unstyled
+         // cursor. It is more important that the restore succeeds in
