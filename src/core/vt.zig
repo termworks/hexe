@@ -166,13 +166,21 @@ pub const VT = struct {
     /// is opaque to the terminal engine (patches/ghostty-vt-ns.patch); it only
     /// keeps styles distinct.
     pub fn syncNamespaceStyle(self: *VT) void {
-        const screen = self.terminal.screens.active;
         const ns = self.ns_table.currentSlot();
-        if (screen.cursor.style.flags.ns == ns) return;
-        screen.cursor.style.flags.ns = @truncate(ns);
-        screen.manualStyleUpdate() catch |err| {
-            logging.logError("vt", "failed to apply palette namespace to cursor style", err);
-        };
+        // Both screens, not just the active one. The selection is a property of
+        // the pane; each screen keeps its own cursor, and entering or leaving
+        // the alternate screen swaps which one is writing. Stamping only the
+        // active one let a program select on the primary, switch, release, and
+        // switch back to a cursor still carrying the released namespace.
+        var it = self.terminal.screens.all.iterator();
+        while (it.next()) |entry| {
+            const screen = entry.value.*;
+            if (screen.cursor.style.flags.ns == ns) continue;
+            screen.cursor.style.flags.ns = @truncate(ns);
+            screen.manualStyleUpdate() catch |err| {
+                logging.logError("vt", "failed to apply palette namespace to cursor style", err);
+            };
+        }
     }
 
     /// The palette namespace the cursor sits in.
