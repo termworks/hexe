@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 
 const render_vx = @import("render_vx.zig");
+const core = @import("core");
 
 pub const CursorInfo = struct {
     x: u16 = 0,
@@ -78,7 +79,29 @@ pub const Renderer = struct {
             // store the caller's pointer.
             stable.char.grapheme = self.frame_arena.allocator().dupe(u8, grapheme) catch " ";
         }
+        // Everything hexe draws itself lands here -- borders, the status bar,
+        // float titles, popups, overlays, notifications, selection -- and
+        // nothing else does: pane content goes through the window writer in
+        // vt_bridge. So this is the one place that resolves chrome through
+        // hexe's reserved namespace.
+        stable.style.fg = hexeColor(stable.style.fg);
+        stable.style.bg = hexeColor(stable.style.bg);
+        stable.style.ul = hexeColor(stable.style.ul);
         self.vx.screen.writeCell(x, y, stable);
+    }
+
+    /// An indexed chrome colour, resolved through hexe's own palette.
+    ///
+    /// Untouched entries pass the index straight through, so a default install
+    /// emits exactly the bytes it always did.
+    inline fn hexeColor(c: vaxis.Color) vaxis.Color {
+        return switch (c) {
+            .index => |i| switch (core.palette.resolveHexeIndex(i)) {
+                .passthrough => c,
+                .rgb => |v| .{ .rgb = .{ v.r, v.g, v.b } },
+            },
+            else => c,
+        };
     }
 
     pub fn getVaxisCell(self: *const Renderer, x: u16, y: u16) ?vaxis.Cell {

@@ -34,6 +34,37 @@ const std = @import("std");
 /// Widening it to a byte would grow the style struct from 14 to 16 and needs
 /// explicit equality and hashing changes, for 224 more slots than a pane uses.
 pub const MAX_NS = 32;
+
+/// Reserved for hexe's own chrome: borders, the status bar, float titles,
+/// popups, overlays, notifications, selection.
+///
+/// It is not a per-pane namespace like the others. hexe draws its chrome once,
+/// over every pane, so the colours live process-wide and `set;1` from any pane
+/// themes all of it. Applications cannot claim it — `use;1` is refused — which
+/// is what keeps "slot 1 means hexe" true rather than a convention someone
+/// breaks by accident.
+pub const HEXE_SLOT: u8 = 1;
+
+/// hexe's own palette. One per process, not per pane.
+var hexe_palette: Palette = .{};
+
+/// Resolve an indexed colour for something hexe drew itself.
+///
+/// The render path for chrome calls this per cell, so it stays a flat array
+/// index and returns passthrough before touching anything when unset.
+pub inline fn resolveHexeIndex(idx: u8) Resolved {
+    if (!hexe_palette.patched[idx]) return .{ .passthrough = idx };
+    return .{ .rgb = hexe_palette.entries[idx] };
+}
+
+/// hexe's chrome defaults, for callers that draw a cell naming no colour.
+pub fn hexeDefaults() Defaults {
+    return .{ .fg = hexe_palette.fg, .bg = hexe_palette.bg };
+}
+
+pub fn resetHexePalette() void {
+    hexe_palette = .{};
+}
 /// PLAN.md §3.2: the spec floor is 8.
 pub const STACK_DEPTH = 16;
 
@@ -518,15 +549,26 @@ pub fn applyOsc(self: *NamespaceTable, params: []const u8) Applied {
         // Out of range selects nothing rather than guessing: silently folding
         // slot 40 onto slot 8 would paint cells with another caller's colours.
         const slot = NamespaceTable.parseSlot(target) orelse return .ignore;
+        // Reserved: an application must not be able to tag its cells as hexe's
+        // chrome, or recolouring the chrome would drag that output with it.
+        if (slot == HEXE_SLOT) return .ignore;
         self.push(slot);
         return .changed;
     }
     if (eqlFold(verb, "reset")) {
+        if (NamespaceTable.parseSlot(target)) |slot| {
+            if (slot == HEXE_SLOT) {
+                resetHexePalette();
+                return .changed;
+            }
+        }
         return if (self.reset(target)) .changed else .ignore;
     }
     if (!eqlFold(verb, "set")) return .ignore;
 
-    // `*` addresses every slot, 0 included.
+    // `*` addresses every slot, 0 included. It deliberately does NOT reach
+    // hexe's own slot: a program theming "everything" means its own colours,
+    // not the terminal's chrome.
     const all = std.mem.eql(u8, target, "*");
     const one: ?u8 = if (all) null else (NamespaceTable.parseSlot(target) orelse return .ignore);
     var touched = false;
@@ -543,13 +585,35 @@ pub fn applyOsc(self: *NamespaceTable, params: []const u8) Applied {
             // in use", not "allocate all 32".
             var slot: u16 = 0;
             while (slot < MAX_NS) : (slot += 1) {
+                if (slot == HEXE_SLOT) continue;
                 if (self.palettes[slot] != null and applyKey(self, @intCast(slot), key, rgb)) touched = true;
             }
+        } else if (one.? == HEXE_SLOT) {
+            // Named explicitly: this is how the chrome gets themed.
+            if (applyHexeKey(key, rgb)) touched = true;
         } else if (applyKey(self, one.?, key, rgb)) {
             touched = true;
         }
     }
     return if (touched) .changed else .ignore;
+}
+
+/// Same as `applyKey`, against hexe's own chrome palette.
+fn applyHexeKey(key: []const u8, rgb: RGB) bool {
+    if (eqlFold(key, "fg")) {
+        hexe_palette.fg = rgb;
+        return true;
+    }
+    if (eqlFold(key, "bg")) {
+        hexe_palette.bg = rgb;
+        return true;
+    }
+    // No `cursor`: the cursor belongs to whatever pane owns it, not to chrome.
+    const idx = std.fmt.parseUnsigned(u16, key, 10) catch return false;
+    if (idx > 255) return false;
+    hexe_palette.entries[idx] = rgb;
+    hexe_palette.patched[idx] = true;
+    return true;
 }
 
 /// One `<key>=#rrggbb` pair. `fg`/`bg`/`cursor` address the defaults; anything
@@ -697,16 +761,16 @@ test "set patches entries, defaults, and every slot with *" {
     defer t.deinit();
     t.setEnabled(true);
 
-    _ = applyOsc(&t, "set;1;1=#010203;fg=#040506;bg=#070809;cursor=#0a0b0c");
-    try std.testing.expectEqual(RGB{ .r = 1, .g = 2, .b = 3 }, t.resolveIndex(1, 1).rgb);
-    try std.testing.expectEqual(RGB{ .r = 4, .g = 5, .b = 6 }, t.defaultsFor(1).fg.?);
-    try std.testing.expectEqual(RGB{ .r = 7, .g = 8, .b = 9 }, t.defaultsFor(1).bg.?);
-    try std.testing.expectEqual(RGB{ .r = 10, .g = 11, .b = 12 }, t.cursorFor(1).?);
+    _ = applyOsc(&t, "set;5;1=#010203;fg=#040506;bg=#070809;cursor=#0a0b0c");
+    try std.testing.expectEqual(RGB{ .r = 1, .g = 2, .b = 3 }, t.resolveIndex(5, 1).rgb);
+    try std.testing.expectEqual(RGB{ .r = 4, .g = 5, .b = 6 }, t.defaultsFor(5).fg.?);
+    try std.testing.expectEqual(RGB{ .r = 7, .g = 8, .b = 9 }, t.defaultsFor(5).bg.?);
+    try std.testing.expectEqual(RGB{ .r = 10, .g = 11, .b = 12 }, t.cursorFor(5).?);
 
     _ = applyOsc(&t, "set;2;1=#000000");
     try std.testing.expect(applyOsc(&t, "set;*;5=#ffffff") == .changed);
     // Every slot already in use, slot 0 included once it has been touched.
-    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(1, 5).rgb.r);
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(5, 5).rgb.r);
     try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(2, 5).rgb.r);
     // A slot nobody has touched is not conjured into existence by `*`.
     try std.testing.expect(t.resolveIndex(30, 5) == .passthrough);
@@ -716,11 +780,11 @@ test "reset forgets a slot's colours, and * forgets all of them" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     t.setEnabled(true);
-    _ = applyOsc(&t, "set;1;1=#ff0000");
+    _ = applyOsc(&t, "set;3;1=#ff0000");
     _ = applyOsc(&t, "set;2;1=#00ff00");
 
-    try std.testing.expect(applyOsc(&t, "reset;1") == .changed);
-    try std.testing.expect(t.resolveIndex(1, 1) == .passthrough);
+    try std.testing.expect(applyOsc(&t, "reset;3") == .changed);
+    try std.testing.expect(t.resolveIndex(3, 1) == .passthrough);
     try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(2, 1).rgb.g);
 
     _ = applyOsc(&t, "reset;*");
@@ -771,7 +835,7 @@ test "a truncated or garbled blob restores what it can and never faults" {
     var t = NamespaceTable.init(std.testing.allocator);
     defer t.deinit();
     t.setEnabled(true);
-    _ = applyOsc(&t, "set;1;1=#010203");
+    _ = applyOsc(&t, "set;3;1=#010203");
     _ = applyOsc(&t, "set;2;1=#040506");
     const blob = try t.serialize(std.testing.allocator);
     defer std.testing.allocator.free(blob);
@@ -818,13 +882,13 @@ test "colour forms, and malformed payloads are discarded" {
     defer t.deinit();
     t.setEnabled(true);
 
-    _ = applyOsc(&t, "set;1;1=#ff8000;2=ff8000;3=rgb:ff/80/00");
+    _ = applyOsc(&t, "set;6;1=#ff8000;2=ff8000;3=rgb:ff/80/00");
     for ([_]u8{ 1, 2, 3 }) |idx| {
-        try std.testing.expectEqual(RGB{ .r = 0xff, .g = 0x80, .b = 0x00 }, t.resolveIndex(1, idx).rgb);
+        try std.testing.expectEqual(RGB{ .r = 0xff, .g = 0x80, .b = 0x00 }, t.resolveIndex(6, idx).rgb);
     }
     // Nothing usable: the slot keeps what it had.
-    try std.testing.expect(applyOsc(&t, "set;1;4=#gg0000") == .ignore);
-    try std.testing.expect(t.resolveIndex(1, 4) == .passthrough);
+    try std.testing.expect(applyOsc(&t, "set;6;4=#gg0000") == .ignore);
+    try std.testing.expect(t.resolveIndex(6, 4) == .passthrough);
 }
 
 test "reserved OSC numbers cannot be claimed by the config" {
@@ -833,4 +897,59 @@ test "reserved OSC numbers cannot be claimed by the config" {
     try std.testing.expect(isReservedOsc(52));
     try std.testing.expect(!isReservedOsc(DEFAULT_OSC));
     try std.testing.expect(!isReservedOsc(1331));
+}
+
+test "slot 1 is hexe's own and an application cannot claim it" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+    defer resetHexePalette();
+
+    _ = applyOsc(&t, "use;4");
+    // Refused: tagging cells as chrome would drag that output along whenever
+    // the chrome is recoloured.
+    try std.testing.expect(applyOsc(&t, "use;1") == .ignore);
+    try std.testing.expectEqual(@as(u8, 4), t.currentSlot());
+}
+
+test "setting slot 1 themes hexe's chrome, not the pane" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+    defer resetHexePalette();
+
+    try std.testing.expect(resolveHexeIndex(3) == .passthrough);
+    try std.testing.expect(applyOsc(&t, "set;1;3=#ff0000;bg=#101010") == .changed);
+    try std.testing.expectEqual(RGB{ .r = 0xff, .g = 0, .b = 0 }, resolveHexeIndex(3).rgb);
+    try std.testing.expectEqual(RGB{ .r = 0x10, .g = 0x10, .b = 0x10 }, hexeDefaults().bg.?);
+
+    // It is process-wide, not a slot in this pane's table.
+    try std.testing.expect(t.resolveIndex(1, 3) == .passthrough);
+    // Indices nobody set still pass through.
+    try std.testing.expect(resolveHexeIndex(4) == .passthrough);
+}
+
+test "a program theming every slot does not reach hexe's chrome" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+    defer resetHexePalette();
+
+    _ = applyOsc(&t, "set;2;5=#010203");
+    _ = applyOsc(&t, "set;*;5=#ffffff");
+    try std.testing.expectEqual(@as(u8, 0xff), t.resolveIndex(2, 5).rgb.r);
+    // `*` means the caller's own slots. Chrome is the terminal's.
+    try std.testing.expect(resolveHexeIndex(5) == .passthrough);
+}
+
+test "reset addresses hexe's slot too" {
+    var t = NamespaceTable.init(std.testing.allocator);
+    defer t.deinit();
+    t.setEnabled(true);
+    defer resetHexePalette();
+
+    _ = applyOsc(&t, "set;1;7=#abcdef");
+    try std.testing.expectEqual(@as(u8, 0xab), resolveHexeIndex(7).rgb.r);
+    try std.testing.expect(applyOsc(&t, "reset;1") == .changed);
+    try std.testing.expect(resolveHexeIndex(7) == .passthrough);
 }
