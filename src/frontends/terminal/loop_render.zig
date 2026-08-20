@@ -16,6 +16,7 @@ const vaxis = @import("vaxis");
 const pane_search = @import("pane_search.zig");
 const vt_bridge = @import("vt_bridge.zig");
 const region_render = @import("region_render.zig");
+const decor = @import("decor.zig");
 const sanitizeLabelUtf8 = @import("text_width.zig").sanitizeLabelUtf8;
 const Pane = @import("pane.zig").Pane;
 
@@ -235,6 +236,8 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         if (pane.*.pokemon_initialized and pane.*.pokemon_state.show_sprite) {
             drawPaneSprite(state, renderer, pane.*, stdout);
         }
+
+        decor.draw(state, renderer, pane.*, stdout);
     }
 
     // Draw split borders when there are multiple splits (never while zoomed —
@@ -320,6 +323,8 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         if (pane.pokemon_initialized and pane.pokemon_state.show_sprite) {
             drawPaneSprite(state, renderer, pane, stdout);
         }
+
+        decor.draw(state, renderer, pane, stdout);
     }
 
     // Draw active float last so it's on top.
@@ -363,6 +368,8 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (pane.pokemon_initialized and pane.pokemon_state.show_sprite) {
                 drawPaneSprite(state, renderer, pane, stdout);
             }
+
+            decor.draw(state, renderer, pane, stdout);
         }
     }
 

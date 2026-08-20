@@ -206,7 +206,7 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     };
 
     const tab_uuid = core.ipc.generateUuid();
-    var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+    var tab = self.newTabView();
 
     if (self.runtime.isConnected()) {
         tab.layout.setFrontendRuntime(self.runtime);
@@ -257,7 +257,7 @@ fn createTabFromLayoutDef(self: anytype, tab_config: LayoutTabDef) !void {
     const name_owned = try self.allocator.dupe(u8, tab_config.name);
 
     const tab_uuid = core.ipc.generateUuid();
-    var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+    var tab = self.newTabView();
 
     if (self.runtime.isConnected()) {
         tab.layout.setFrontendRuntime(self.runtime);

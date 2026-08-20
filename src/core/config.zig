@@ -537,6 +537,58 @@ pub const NamesConfig = struct {
     suffix: []const u8 = "-%d",
 };
 
+/// One edge of a pane's decoration, in three slots.
+///
+/// `start`/`end` rather than left/right or top/bottom: the same shape describes
+/// a horizontal edge (start = left) and a vertical one (start = top), so the
+/// four edges share one type and one placement routine.
+pub const DecorEdge = struct {
+    start: ?[]const u8 = null,
+    center: ?[]const u8 = null,
+    end: ?[]const u8 = null,
+
+    pub fn any(self: *const DecorEdge) bool {
+        return self.start != null or self.center != null or self.end != null;
+    }
+};
+
+/// Decoration around every pane, painted externally like everything else.
+///
+/// One scheme for all panes. Top and bottom sit on the border row and cost
+/// nothing; the side panels reserve columns and therefore SHRINK the pane,
+/// which resizes the program inside.
+pub const DecorConfig = struct {
+    top: DecorEdge = .{},
+    bottom: DecorEdge = .{},
+    left: DecorEdge = .{},
+    right: DecorEdge = .{},
+
+    /// Columns each side panel reserves. Config-driven on purpose: a
+    /// painter-chosen width would resize the pane on every frame the painter
+    /// changed its mind, and every full-screen program inside would redraw.
+    left_width: u16 = 0,
+    right_width: u16 = 0,
+
+    /// Total columns taken from a pane's content by the side panels.
+    pub fn sideInset(self: *const DecorConfig) u16 {
+        return self.leftInset() + self.rightInset();
+    }
+
+    pub fn leftInset(self: *const DecorConfig) u16 {
+        return if (self.left.any()) self.left_width else 0;
+    }
+
+    pub fn rightInset(self: *const DecorConfig) u16 {
+        return if (self.right.any()) self.right_width else 0;
+    }
+
+    /// Whether any slot is configured at all, so the render path can leave
+    /// immediately on the default install.
+    pub fn any(self: *const DecorConfig) bool {
+        return self.top.any() or self.bottom.any() or self.left.any() or self.right.any();
+    }
+};
+
 pub const Config = struct {
     pub const KeyMod = enum {
         alt,
@@ -741,6 +793,9 @@ pub const Config = struct {
     /// Greek for sessions, NATO for panes. Anything richer is produced by a
     /// command at config load, by whoever can also draw it.
     names: NamesConfig = .{},
+
+    /// Decoration slots around every pane (docs/decor.md).
+    decor: DecorConfig = .{},
 
     // Selection color (palette index, default 240)
     selection_color: u8 = 240,

@@ -412,6 +412,7 @@ fn performConfigReload(state: *State) void {
 
     var old = state.config;
     state.config = new_config;
+    state.applyDecorInsets();
     old.deinit();
 
     if (state.active_layout_floats.len > 0) state.allocator.free(state.active_layout_floats);

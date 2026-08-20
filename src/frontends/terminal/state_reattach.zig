@@ -927,7 +927,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     for (snapshot.tabs.items) |snapshot_tab| {
-        var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+        var tab = self.newTabView();
 
         if (self.runtime.isConnected()) {
             tab.layout.setFrontendRuntime(self.runtime);
@@ -1189,7 +1189,7 @@ pub fn applySessionSnapshot(self: anytype) bool {
     defer used_uuids.deinit();
 
     for (snapshot.tabs.items) |snapshot_tab| {
-        var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+        var tab = self.newTabView();
 
         if (self.runtime.isConnected()) {
             tab.layout.setFrontendRuntime(self.runtime);
@@ -1305,7 +1305,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
 
             // Create a new tab with this pane.
             const tab_uuid = core.ipc.generateUuid();
-            var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+            var tab = self.newTabView();
             var tab_needs_cleanup = true;
             defer if (tab_needs_cleanup) tab.deinit();
 

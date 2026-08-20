@@ -735,6 +735,34 @@ pub const State = struct {
     /// owner: nothing dropped it when the zoomed pane exited (the renderer then
     /// matches no pane and draws an empty tab), and `Layout.resize` hands the
     /// zoomed pane its small tiled rect back while zoom stays on.
+    /// Push the configured side-panel widths into every tab's layout and
+    /// re-place the panes.
+    ///
+    /// Layout does not read config, so this is the one place the two meet. Safe
+    /// to call repeatedly: it recalculates from the same inputs.
+    pub fn applyDecorInsets(self: *State) void {
+        const left = self.config.decor.leftInset();
+        const right = self.config.decor.rightInset();
+        for (self.view.tab_views.items) |*tab| {
+            tab.layout.decor_left = left;
+            tab.layout.decor_right = right;
+            tab.layout.recalculateLayout();
+        }
+    }
+
+    /// A tab view with the side panels already reserved.
+    ///
+    /// Every tab is born through here rather than through `TabView.init`
+    /// directly: tabs are created from six places (new tab, session open,
+    /// reattach, restore) and a site that forgot the insets would hand the
+    /// programs in that tab the panels' columns as if they were free.
+    pub fn newTabView(self: *State) TabView {
+        var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+        tab.layout.decor_left = self.config.decor.leftInset();
+        tab.layout.decor_right = self.config.decor.rightInset();
+        return tab;
+    }
+
     pub fn revalidateZoom(self: *State) void {
         const zu = self.zoomed_pane_uuid orelse return;
         const layout = self.currentLayout();
@@ -2443,6 +2471,14 @@ pub const State = struct {
         const pad_x: u16 = 1 + pad_x_cfg;
         const pad_y: u16 = 1 + pad_y_cfg;
 
+        // Side panels reserve columns from the CONTENT, never from the border:
+        // the frame keeps its position and size, and the program inside gets a
+        // narrower pty. Asymmetric on purpose — a panel on one side must not
+        // shift the float.
+        const decor = &self.config.decor;
+        const left_inset = decor.leftInset();
+        const right_inset = decor.rightInset();
+
         return .{
             .usable_w = usable.w,
             .usable_h = usable.h,
@@ -2450,9 +2486,9 @@ pub const State = struct {
             .outer_y = outer_y,
             .outer_w = outer_w,
             .outer_h = outer_h,
-            .content_x = outer_x + pad_x,
+            .content_x = outer_x + pad_x + left_inset,
             .content_y = outer_y + pad_y,
-            .content_w = outer_w -| (pad_x * 2),
+            .content_w = outer_w -| (pad_x * 2) -| left_inset -| right_inset,
             .content_h = outer_h -| (pad_y * 2),
             .max_x = max_x,
             .max_y = max_y,

@@ -112,7 +112,7 @@ pub fn createTab(self: anytype) !void {
     }
     const name_owned = try core.ipc.generateTabName(self.allocator, self.runtime.sessionName(), tab_counter);
     const tab_uuid = core.ipc.generateUuid();
-    var tab = TabView.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
+    var tab = self.newTabView();
     // Set ses client if connected (for new tabs after startup).
     if (self.runtime.isConnected()) {
         tab.layout.setFrontendRuntime(self.runtime);
