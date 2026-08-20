@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.4.0] - 2026-08-20
+
+### <!-- 0 -->⛰️  Features
+
+- Configure the dictionary from Lua
+- Address namespaces by number, not name
+- Name panes from a configured dictionary
+- Namespace cells, not zones
+- Compose the bar from three zones
+- Apply namespace cursor colour via osc 12
+- Add get, list contents from ses copy
+- Render namespace fg/bg defaults
+- Add reset verb, fix use default and set cap
+- Enable namespaces by default, add docs
+- Add hexe palette cli and pod injection
+- Add osc 1330 protocol and config section
+- Auto-namespace rows by osc 133 zone
+- Add namespace table and route render path
+- Make instance and profile fully aliased
+- Accept --profile wherever --instance works
+- Give each profile its own config
+- Select and list profiles from the CLI
+- Showcase painter for chrome+sprites
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Issue n cleanup
+- Keep the cell tag across reset and restore
+- Pin the sprite to the pane's first name
+- Commit hit rects after parsing
+- Stay silent on ask when disabled
+- Issue n cleanup
+- Bound blob, reject reserved osc, cap ses retries
+- Bound slot search, time reads, batch cli sends
+- Reset table on pane recycle, test split osc
+- Park palettes in ses so they survive reattach
+- Issue n cleanup
+- Never kill a hexe outside the smoke suite
+- Dim painter content once it goes stale
+- Report real focus to the title painter
+- Honour the configured shiny chance
+- Fail when nested-mux cannot be asked
+- Own the pane name and escape it
+- Measure title rect without a painter
+- Apply and guard status painter keys
+- Honour painter declines and frame rate
+- Translate keypad keys for the pane
+
+### <!-- 2 -->🚜 Refactor
+
+- Drop unused refcount array, escape json
+
+### <!-- 3 -->📚 Documentation
+
+- Numbered slots, and the names config
+- One protocol doc for clients
+- Feature palette namespaces in the readme
+- Add palette namespaces implementation spec
+- Record palette M0 spike findings
+
+### <!-- 6 -->🧪 Testing
+
+- Drain notification queue before asserting on it
+- Cover keypad, painter and env scrub
+
+### Build
+
+- Vendor ghostty-vt with a cell ns tag
+
 ## [0.3.0] - 2026-08-16
 
 ### <!-- 0 -->⛰️  Features
