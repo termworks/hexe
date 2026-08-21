@@ -56,6 +56,10 @@ pub const ActionRequest = union(enum) {
     tab_close,
     tab_remove,
     float_toggle: u8,
+    // Same payload, different intent: the frontend needs to know whether it was
+    // asked to flip the float or to put it in a stated state.
+    float_show: u8,
+    float_hide: u8,
     float_select,
     float_nudge: Direction,
     focus_set,
@@ -185,6 +189,8 @@ pub fn actionRequestFromBindAction(action: BindAction) ActionRequest {
         .tab_prev => .tab_prev,
         .tab_close => .tab_close,
         .float_toggle => |key| .{ .float_toggle = key },
+        .float_show => |key| .{ .float_show = key },
+        .float_hide => |key| .{ .float_hide = key },
         .float_nudge => |dir| if (directionFromBindKeyKind(dir)) |value|
             .{ .float_nudge = value }
         else
@@ -311,7 +317,9 @@ pub fn applyViewActionWithContext(view: *view_model.SessionView, request: Action
             );
             return .{ .result = .applied };
         },
-        .float_toggle => {
+        // The view only syncs the float state the frontend computed, so all
+        // three land here identically.
+        .float_toggle, .float_show, .float_hide => {
             const sync = context.sync_float orelse return .{ .result = .ignored };
             try view.applySyncFloat(sync.float_state, sync.active);
             return .{ .result = .applied };

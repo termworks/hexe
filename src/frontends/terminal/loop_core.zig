@@ -353,6 +353,11 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
 
         loop_updates.updateOverlaysPopupsAndKeyTimers(state, now2);
 
+        // Control-socket requests. Bound and non-blocking: a client that stops
+        // reading must never suspend the panes.
+        state.startApiServer();
+        if (state.api_server) |*srv| srv.service(state);
+
         const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);
         const dbg_t3 = std.time.milliTimestamp();

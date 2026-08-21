@@ -13,6 +13,7 @@ const pop_handlers = @import("pop_handlers.zig");
 const cli_cmds = @import("commands/com.zig");
 const profile_cmds = @import("commands/profile.zig");
 const palette_cmds = @import("commands/palette.zig");
+const api_cmd_impl = @import("commands/api.zig");
 const config_validate = @import("commands/config_validate.zig");
 const ses_export = @import("commands/ses_export.zig");
 const ses_pipe = @import("commands/ses_pipe.zig");
@@ -714,6 +715,13 @@ pub fn main() !void {
     const profile_list = app.createCommand("list", "List profiles and whether each is running");
     try profile_cmd.addSubcommands(&[_]yazap.Command{profile_list});
 
+    // One call against a running mux, answered as JSON. The same request a web
+    // gateway makes, so the CLI is also how you see what one would receive.
+    var api_cmd = app.createCommand("api", "Call the live API of a running session (JSON in, JSON out)");
+    try api_cmd.addArg(Arg.positional("call", "Name of a hexe.live function, e.g. panes, floats, tabs, session, act", null));
+    try api_cmd.addArg(Arg.positional("arg", "Optional JSON argument", null));
+    try api_cmd.addArg(Arg.singleValueOption("session", 's', "Session to call (default: the only one listening)"));
+
     var palette_cmd = app.createCommand("palette", "Per-pane palette namespaces");
     palette_cmd.setProperty(.help_on_empty_args);
 
@@ -757,7 +765,7 @@ pub fn main() !void {
 
     try palette_cmd.addSubcommands(&[_]yazap.Command{ palette_list, palette_get, palette_set, palette_use, palette_end, palette_drop, palette_reset });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd, api_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -820,6 +828,15 @@ pub fn main() !void {
             return true;
         }
     }.check;
+
+    if (matches.subcommandMatches("api")) |m| {
+        return api_cmd_impl.run(
+            allocator,
+            m.getSingleValue("call") orelse "",
+            m.getSingleValue("arg"),
+            m.getSingleValue("session"),
+        );
+    }
 
     if (matches.subcommandMatches("palette")) |m| {
         if (m.subcommandMatches("list")) |sub| {

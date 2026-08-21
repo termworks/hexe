@@ -384,6 +384,8 @@ pub const State = struct {
     regions: core.regions.Registry,
     /// Headless terminals backing surface-mode regions, one per region.
     region_surfaces: @import("region_render.zig").SurfaceCache,
+    /// The control socket, once a session name exists to name it after.
+    api_server: ?@import("api_server.zig").ApiServer = null,
     /// Resumable non-blocking reader for the SES VT stream. Reset whenever
     /// the VT connection is replaced (loop_watchers arms a new node).
     mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
@@ -1084,7 +1086,25 @@ pub const State = struct {
         return true;
     }
 
+    /// Open the control socket for this session, if it is not open already.
+    ///
+    /// Deferred rather than done at init: the socket is named after the
+    /// session, and the session name is not known until the frontend has
+    /// registered. A frontend that cannot bind it still runs — the mux is not
+    /// less useful because a control client cannot attach.
+    pub fn startApiServer(self: *State) void {
+        if (self.api_server != null) return;
+        const session = self.runtime.sessionName();
+        if (session.len == 0) return;
+        self.api_server = @import("api_server.zig").ApiServer.init(self.allocator, session) catch |err| {
+            core.logging.logError("terminal", "control socket unavailable", err);
+            return;
+        };
+    }
+
     pub fn deinit(self: *State) void {
+        if (self.api_server) |*srv| srv.deinit();
+        self.api_server = null;
         self.runtime.prepareFrontendExit(posix.STDIN_FILENO, true) catch |err| {
             core.logging.logError("terminal", "failed to finalize frontend exit with SES", err);
         };

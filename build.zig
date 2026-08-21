@@ -383,6 +383,23 @@ pub fn build(b: *std.Build) void {
     const lua_events_tests = b.addTest(.{ .root_module = lua_events_test_module });
     const run_lua_events_tests = b.addRunArtifact(lua_events_tests);
 
+    // Lua<->JSON conversion for the control socket. The live API's shape is
+    // decided by Lua, so the encoder's edge cases (records that also carry
+    // [1], empty tables, cycles) are what decide whether a client sees the
+    // truth or a plausible-looking lie.
+    const api_json_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/api_json.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    api_json_test_module.addImport("core", core_module);
+    if (ziglua_dep) |dep| {
+        api_json_test_module.addImport("zlua", dep.module("zlua"));
+    }
+    const api_json_tests = b.addTest(.{ .root_module = api_json_test_module });
+    const run_api_json_tests = b.addRunArtifact(api_json_tests);
+
     // Float position arithmetic: a percent<->cell round trip that silently
     // made float.nudge("right") a no-op, and a u16 multiply that overflowed
     // above 655 columns.
@@ -583,6 +600,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mouse_protocol_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
     test_step.dependOn(&run_lua_events_tests.step);
+    test_step.dependOn(&run_api_json_tests.step);
     test_step.dependOn(&run_float_geometry_tests.step);
     test_step.dependOn(&run_keypad_tests.step);
     test_step.dependOn(&run_statusbar_layout_tests.step);

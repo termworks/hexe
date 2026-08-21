@@ -1010,6 +1010,11 @@ fn hexe_config(lstate: ?*LuaState) callconv(.c) c_int {
     for (state.active_layout_floats, 0..) |*f, i| {
         lua.createTable(0, 12);
         setInt(lua, "key", f.key);
+        // The character the key actually is, so `float.show(f.key_name)` works
+        // without the caller converting a code point by hand.
+        var key_char = [_]u8{f.key};
+        setStr(lua, "key_name", key_char[0..]);
+        setOptStr(lua, "name", f.name);
         setBool(lua, "enabled", f.enabled);
         setOptStr(lua, "command", f.command);
         setOptStr(lua, "title", f.title);

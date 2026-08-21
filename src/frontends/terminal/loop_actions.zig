@@ -641,7 +641,18 @@ fn revealExistingFloatLocally(state: *State, pane: *Pane, existing_idx: usize, f
     return true;
 }
 
+/// What the caller wants to be true when this returns.
+///
+/// `toggle` flips whatever it finds; `show` and `hide` state the destination
+/// instead, so a script that reads visibility and then acts cannot be wrong
+/// about what it read.
+pub const FloatWant = enum { toggle, show, hide };
+
 pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) void {
+    setNamedFloat(state, float_def, .toggle);
+}
+
+pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want: FloatWant) void {
     // Float/workspace toggles change the visible/focused pane surface just like
     // tab switches do. Any in-mux mouse selection is tied to the old pane
     // geometry/viewport and can render as a bogus long highlight after the
@@ -718,6 +729,9 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             const was_visible_on_tab = state.paneVisibleOnTab(pane, state.activeTabIndex());
             const was_active = if (state.activeFloatingIndex()) |af| af == existing_idx else false;
 
+            // This branch reveals a hidden float, so hiding is already done.
+            if (want == .hide and !was_visible_on_tab and !was_active) return;
+
             if ((state.paneSticky(pane) or state.paneIsPwd(pane)) and !was_visible_on_tab and !was_active) {
                 // First try the cheap/local reveal. If this mux still owns the
                 // pane, SES accepts session_sync_float and there is no need to
@@ -788,6 +802,11 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 // reliability complaint.
                 continue;
             }
+
+            // Already where the caller asked for: nothing to do, and in
+            // particular no destroy and no session sync.
+            const visible_now = state.paneVisibleOnTab(pane, state.activeTabIndex());
+            if ((want == .show and visible_now) or (want == .hide and !visible_now)) return;
 
             // Toggle visibility (per-tab for global/per_cwd floats).
             const old_uuid = state.getCurrentFocusedUuid();
@@ -882,7 +901,10 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
         existing_idx += 1;
     }
 
-    // No existing float - create new.
+    // No existing float - create new. Hiding what does not exist is a no-op;
+    // creating one in order to hide it would be the opposite of the request.
+    if (want == .hide) return;
+
     const old_uuid = state.getCurrentFocusedUuid();
     if (state.activeFloatingIndex()) |afi| {
         if (afi < state.view.float_views.items.len) {
