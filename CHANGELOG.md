@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.4] - 2026-08-21
+
+### <!-- 0 -->⛰️  Features
+
+- Absolute geometry, split ratio and pane rename
+- Event subscriptions on the control socket
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Keep the socket when a stale daemon will not stop
+
 ## [0.4.3] - 2026-08-21
 
 ### <!-- 0 -->⛰️  Features

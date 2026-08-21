@@ -52,7 +52,13 @@ fn soleSession(allocator: std.mem.Allocator) ![]u8 {
     return found orelse error.NoControlSocket;
 }
 
-pub fn run(allocator: std.mem.Allocator, call: []const u8, arg_json: ?[]const u8, session_opt: ?[]const u8) !void {
+pub fn run(
+    allocator: std.mem.Allocator,
+    call: []const u8,
+    arg_json: ?[]const u8,
+    arg2_json: ?[]const u8,
+    session_opt: ?[]const u8,
+) !void {
     if (call.len == 0) {
         print("Error: a call name is required\n", .{});
         return error.InvalidArgument;
@@ -80,18 +86,36 @@ pub fn run(allocator: std.mem.Allocator, call: []const u8, arg_json: ?[]const u8
     const w = body.writer(allocator);
     try w.writeAll("{\"call\":");
     try core.regions.writeJsonString(w, call);
-    if (arg_json) |arg| {
-        if (arg.len > 0) {
-            // Validated here rather than at the far end: a malformed argument
-            // should name itself locally, not come back as a generic refusal.
-            var parsed = std.json.parseFromSlice(std.json.Value, allocator, arg, .{}) catch {
-                print("Error: argument is not valid JSON: {s}\n", .{arg});
+    // Validated here rather than at the far end: a malformed argument should
+    // name itself locally, not come back as a generic refusal.
+    const check = struct {
+        fn go(alloc: std.mem.Allocator, text: []const u8) !void {
+            var parsed = std.json.parseFromSlice(std.json.Value, alloc, text, .{}) catch {
+                print("Error: argument is not valid JSON: {s}\n", .{text});
                 return error.InvalidArgument;
             };
             parsed.deinit();
-            try w.writeAll(",\"arg\":");
-            try w.writeAll(arg);
         }
+    }.go;
+
+    const a1: ?[]const u8 = if (arg_json) |a| (if (a.len > 0) a else null) else null;
+    const a2: ?[]const u8 = if (arg2_json) |a| (if (a.len > 0) a else null) else null;
+
+    if (a2) |second| {
+        // Two arguments means a positional call -- `geometry <sel> <spec>`,
+        // `ratio <sel> <value>` -- which a single `arg` cannot express.
+        const first = a1 orelse "null";
+        try check(allocator, first);
+        try check(allocator, second);
+        try w.writeAll(",\"args\":[");
+        try w.writeAll(first);
+        try w.writeAll(",");
+        try w.writeAll(second);
+        try w.writeAll("]");
+    } else if (a1) |only| {
+        try check(allocator, only);
+        try w.writeAll(",\"arg\":");
+        try w.writeAll(only);
     }
     try w.writeAll("}");
 

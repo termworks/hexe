@@ -32,8 +32,24 @@ framing the painter protocol uses.
 <- {"ok":false,"error":"no such call: pane_list"}
 ```
 
-`call` names any function on `hexe.live`; `arg` is optional and may be any JSON
-value, not only an object. One request per connection.
+`call` names any function on `hexe.live`. `arg` is optional and may be any JSON
+value, not only an object. For a call that takes more than one argument, use
+`args` with the positional list — `geometry` and `ratio` take `(selector,
+value)`, which a single `arg` cannot express:
+
+```
+-> {"call":"geometry","args":["904dd85…",{"x":30,"y":20}]}
+-> {"call":"ratio","args":["904dd85…",0.25]}
+```
+
+From the shell those are the second and third words:
+
+```console
+$ hexe api geometry '"904dd85…"' '{"x":30,"y":20}'
+$ hexe api ratio '"904dd85…"' 0.25
+```
+
+One request per connection.
 
 ## What you can call
 
@@ -45,7 +61,8 @@ drift out of step with the first.
 | --- | --- |
 | read | `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `env`, `config` |
 | screen | `line`, `cursor_line`, `screen_text`, `find`, `selection`, `selection_range` |
-| act | `act`, `send`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`, `notify` |
+| act | `act`, `send`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`, `rename`, `notify` |
+| place | `geometry`, `ratio` |
 
 A pane record carries what you would expect to have to ask several commands
 for: `uuid`, `name`, geometry, `cwd`, `process`, `alive`, `alt_screen`, cursor
@@ -54,6 +71,62 @@ position and shape, `scrolled`, `last_command`, `jobs`, plus float attributes
 
 See [keybindings.md](keybindings.md) for the same API as it appears to Lua, and
 for what `act` accepts.
+
+## Placing things
+
+`float.nudge` steps a float in a direction and `split.resize` steps a divider by
+cells. Neither can say "the user dropped it *here*", so a pointer has to guess
+how many steps that is. These two state a destination instead.
+
+`geometry([selector] [, spec])` reads a pane's geometry, and sets it when given
+a spec. For a float the spec is percentages — `width`, `height`, `x`, `y`,
+`pad_x`, `pad_y` — and any field left out keeps its current value, so dragging
+does not reset the size. Values outside 0..100 are clamped, and the returned
+record is what actually took effect, not what was asked for:
+
+```console
+$ hexe api geometry '"904dd85…"' '{"x":30,"width":60}'
+{"ok":true,"result":{"width":60,"height":50,"x":30,"y":20,"pad_x":1,"pad_y":0,
+                     "cell_x":36,"cell_y":5,"cell_width":72,"cell_height":17,"float":true}}
+```
+
+`cell_*` is where it landed on screen, which is what a UI needs to draw a
+handle. A tiled pane has no percentage geometry of its own, so `geometry`
+reports its cell rect and the `ratio` of the divider above it instead.
+
+`ratio([selector] [, value])` reads that divider and sets it when given a number
+in 0..1, clamped to 0.05..0.95 — a divider at either end leaves a pane with no
+width to grab it back by. The selector always comes first and the value only
+ever second, so `ratio(2)` selects pane 2 rather than setting a ratio of 2.
+
+`rename(selector, name)` names a pane. Names reach socket paths and CLI
+arguments, so the same `[a-z0-9][a-z0-9._-]*` rule the name pool uses applies
+here; an invalid name is refused and the old one is kept.
+
+## Events
+
+Instead of polling, keep a connection open and be told:
+
+```
+-> {"subscribe":true}                        # everything
+-> {"subscribe":["tab_created","pane_exited"]}
+<- {"ok":true,"result":"subscribed"}
+<- {"event":"tab_created","payload":{"event":"tab_created","now_ms":1787…,"index":2}}
+<- {"event":"pane_focus_changed","payload":{ … }}
+```
+
+The connection then streams frames until you close it. Events carry the same
+payload a Lua `hexe.events.on` handler receives, because the fan-out happens at
+the one place every event already passes through — so this list grows with that
+one rather than beside it.
+
+Currently emitted: `pane_focus_changed`, `pane_cwd_changed`, `pane_process_changed`,
+`pane_shell_running_changed`, `pane_exited`, `command_finished`, `tab_created`,
+`tab_changed`, `tab_closed`, `statusbar_redraw`.
+
+A subscriber that stops reading is disconnected once its undelivered backlog
+passes 1 MiB. A phone on a bad link must not be able to grow the mux's memory,
+and a client that far behind is no longer showing anything current anyway.
 
 ## It cannot stall the mux
 

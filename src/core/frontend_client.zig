@@ -527,8 +527,28 @@ pub const SesClient = struct {
                 // re-linked). Stop the old daemon first and wait for its
                 // flock to release; pods survive and are re-adopted.
                 self.debugLog("ses connect: terminating stale-epoch daemon before restart", .{});
-                self.terminateStaleDaemon(socket_path);
-                deleteSocketPath(socket_path);
+                // Only once the old daemon is provably gone. Every path that
+                // deletes the socket without checking produces exactly the
+                // brick described above -- a live daemon holding the flock and
+                // an unlinked path nothing can reach or re-create -- and
+                // `terminateStaleDaemon` has several ways to leave it running
+                // (no recorded pid, a pid that is not ours, a refused signal,
+                // a daemon that outlives SIGKILL's wait).
+                if (self.terminateStaleDaemon(socket_path)) {
+                    deleteSocketPath(socket_path);
+                } else {
+                    // Leaving the socket in place keeps the instance usable
+                    // through the daemon that is still there. A version
+                    // mismatch is worth a warning; an unreachable mux is not
+                    // worth trading for it.
+                    logging.warn(
+                        "frontend-client",
+                        "a daemon from another build is still running and would not stop; " ++
+                            "keeping its socket so the session stays reachable. " ++
+                            "Stop it with `hexe session kill` (or kill its pid) to pick up the new build.",
+                        .{},
+                    );
+                }
                 self.stale_runtime_detected = false;
             }
             // Daemon not running, start it
@@ -570,32 +590,41 @@ pub const SesClient = struct {
     /// before signaling (pid reuse), SIGTERM it (graceful: final persist,
     /// pods survive for re-adoption), and escalate to SIGKILL only if the
     /// flock is still held after the grace window.
-    fn terminateStaleDaemon(self: *SesClient, socket_path: []const u8) void {
-        const lock_path = std.fmt.allocPrint(self.allocator, "{s}.lock", .{socket_path}) catch return;
+    /// Stop the daemon that owns this instance. True only when nothing holds
+    /// the instance lock afterwards.
+    ///
+    /// The return value gates deleting the socket, so every path reports what
+    /// is actually true rather than what was attempted: the lock is the
+    /// authority on whether a daemon is still there, not whether a signal was
+    /// sent. Answering "gone" while one is still running unlinks a socket that
+    /// cannot be re-created and leaves the whole instance unreachable.
+    fn terminateStaleDaemon(self: *SesClient, socket_path: []const u8) bool {
+        const lock_path = std.fmt.allocPrint(self.allocator, "{s}.lock", .{socket_path}) catch return false;
         defer self.allocator.free(lock_path);
 
         const pid = readLockPid(lock_path) orelse {
             self.debugLog("stale daemon: no pid recorded in lock file", .{});
-            return;
+            return instanceLockFree(lock_path);
         };
         if (!pidIsSesDaemon(pid)) {
             self.debugLog("stale daemon: pid {d} is not a ses daemon, not signaling", .{pid});
-            return;
+            return instanceLockFree(lock_path);
         }
 
         posix.kill(pid, posix.SIG.TERM) catch |err| {
             self.debugLog("stale daemon: SIGTERM pid {d} failed: {s}", .{ pid, @errorName(err) });
-            return;
+            return instanceLockFree(lock_path);
         };
-        if (self.waitInstanceLockFree(lock_path)) return;
+        if (self.waitInstanceLockFree(lock_path)) return true;
 
         // Graceful stop didn't finish in time. SIGKILL skips the final state
         // flush, but the daemon persists dirty state every second anyway.
         self.debugLog("stale daemon: pid {d} ignored SIGTERM, escalating to SIGKILL", .{pid});
         posix.kill(pid, posix.SIG.KILL) catch {};
-        if (!self.waitInstanceLockFree(lock_path)) {
-            self.debugLog("stale daemon: instance lock still held after SIGKILL", .{});
-        }
+        if (self.waitInstanceLockFree(lock_path)) return true;
+
+        self.debugLog("stale daemon: instance lock still held after SIGKILL", .{});
+        return false;
     }
 
     fn waitInstanceLockFree(self: *SesClient, lock_path: []const u8) bool {
