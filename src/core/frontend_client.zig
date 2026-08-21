@@ -81,6 +81,57 @@ fn pidIsSesDaemon(pid: posix.pid_t) bool {
         std.mem.indexOf(u8, cmd, "daemon") != null;
 }
 
+/// Whether the user asked for a running daemon to be replaced.
+///
+/// Off by default: the frontend cannot tell an upgrade from a developer
+/// running a second build, and only one of those is worth disconnecting every
+/// session in the instance for.
+fn replaceStaleDaemonRequested() bool {
+    const v = posix.getenv("HEXE_REPLACE_STALE_DAEMON") orelse return false;
+    return v.len > 0 and !std.mem.eql(u8, v, "0");
+}
+
+/// The last startup diagnosis, waiting to be shown.
+///
+/// Held rather than printed: by the time the frontend connects it has already
+/// claimed the terminal, so anything written now lands on the alternate screen
+/// and disappears when that is torn down. The caller prints this once the real
+/// screen is back.
+var diagnosis_buf: [1400]u8 = undefined;
+var diagnosis_len: usize = 0;
+
+pub fn takeStartupDiagnosis() ?[]const u8 {
+    if (diagnosis_len == 0) return null;
+    const out = diagnosis_buf[0..diagnosis_len];
+    diagnosis_len = 0;
+    return out;
+}
+
+/// Record which two things disagree and how to proceed.
+fn reportStaleDaemon(socket_path: []const u8) void {
+    var pid_note: [64]u8 = undefined;
+    const lock_path = std.fmt.bufPrint(&pid_note, "{s}.lock", .{socket_path}) catch "";
+    const pid: ?posix.pid_t = if (lock_path.len > 0) readLockPid(lock_path) else null;
+
+    const written = std.fmt.bufPrint(&diagnosis_buf,
+        \\hexe: the running session daemon is from a different build of hexe.
+        \\
+        \\They cannot talk to each other, and replacing the daemon would
+        \\disconnect every session attached to it, so hexe stopped instead.
+        \\
+        \\  socket: {s}
+        \\
+        \\Either run the build that daemon came from, or stop it and let this
+        \\build start a new one (panes survive and are re-adopted):
+        \\
+        \\  hexe session kill        # or: kill {?d}
+        \\
+        \\To replace it automatically, set HEXE_REPLACE_STALE_DAEMON=1.
+        \\
+    , .{ socket_path, pid }) catch return;
+    diagnosis_len = written.len;
+}
+
 /// Probe whether the daemon instance flock is currently held. A shared
 /// non-blocking flock succeeds iff no daemon holds the exclusive lock.
 fn instanceLockFree(lock_path: []const u8) bool {
@@ -520,27 +571,29 @@ pub const SesClient = struct {
                 return error.ConnectionRefused;
             }
             if (self.stale_runtime_detected) {
-                // Deleting the socket alone bricks the instance: the old
-                // daemon keeps the instance flock so our replacement daemon
+                self.stale_runtime_detected = false;
+
+                // Taking the instance over means stopping a daemon that other
+                // sessions are attached to: every one of them disconnects.
+                // That is far too much to do to somebody because two builds of
+                // hexe disagree -- which happens on any rebuild, since the
+                // epoch is a hash of the whole source tree. Refuse and say
+                // what to do, rather than disconnecting sessions the user
+                // never mentioned.
+                if (!replaceStaleDaemonRequested()) {
+                    reportStaleDaemon(socket_path);
+                    return error.RuntimeEpochMismatch;
+                }
+
+                // Asked for explicitly. Deleting the socket alone bricks the
+                // instance: the old daemon keeps the flock so our replacement
                 // exits without binding, while the old daemon itself becomes
-                // permanently unreachable (an unlinked socket path cannot be
-                // re-linked). Stop the old daemon first and wait for its
-                // flock to release; pods survive and are re-adopted.
-                self.debugLog("ses connect: terminating stale-epoch daemon before restart", .{});
-                // Only once the old daemon is provably gone. Every path that
-                // deletes the socket without checking produces exactly the
-                // brick described above -- a live daemon holding the flock and
-                // an unlinked path nothing can reach or re-create -- and
-                // `terminateStaleDaemon` has several ways to leave it running
-                // (no recorded pid, a pid that is not ours, a refused signal,
-                // a daemon that outlives SIGKILL's wait).
+                // unreachable -- an unlinked socket path cannot be re-linked.
+                // So the delete waits on the daemon actually being gone.
+                self.debugLog("ses connect: replacing stale-epoch daemon on request", .{});
                 if (self.terminateStaleDaemon(socket_path)) {
                     deleteSocketPath(socket_path);
                 } else {
-                    // Leaving the socket in place keeps the instance usable
-                    // through the daemon that is still there. A version
-                    // mismatch is worth a warning; an unreachable mux is not
-                    // worth trading for it.
                     logging.warn(
                         "frontend-client",
                         "a daemon from another build is still running and would not stop; " ++
@@ -548,8 +601,8 @@ pub const SesClient = struct {
                             "Stop it with `hexe session kill` (or kill its pid) to pick up the new build.",
                         .{},
                     );
+                    return error.RuntimeEpochMismatch;
                 }
-                self.stale_runtime_detected = false;
             }
             // Daemon not running, start it
             self.debugLog("ses connect: daemon not running, starting...", .{});

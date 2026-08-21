@@ -89,10 +89,11 @@ os.makedirs(SOCK_DIR, exist_ok=True)
 SES = os.path.join(SOCK_DIR, "ses.sock")
 LOCK = SES + ".lock"
 
-# A process that is alive but is emphatically not a ses daemon, so
-# `pidIsSesDaemon` refuses to signal it -- one of the ways termination gives up
-# while the daemon is still there.
-decoy = subprocess.Popen(["sleep", "300"])
+# A process that looks exactly like the daemon the lock file claims: argv[0]
+# says so, which is all `pidIsSesDaemon` checks. Disguised on purpose -- a
+# decoy it refused to signal would prove nothing about a real daemon, and the
+# behaviour under test is precisely what happens to one it WOULD signal.
+decoy = subprocess.Popen(["hexe ses daemon", "300"], executable="/bin/sleep")
 procs.append(decoy)
 with open(LOCK, "w") as fh:
     fh.write(str(decoy.pid))
@@ -151,11 +152,16 @@ os.close(sl)
 procs.append(fe)
 
 
+seen = bytearray()
+
+
 def drain():
     while True:
         try:
-            if not os.read(m, 65536):
+            b = os.read(m, 65536)
+            if not b:
                 return
+            seen.extend(b)
         except OSError:
             return
 
@@ -171,7 +177,33 @@ if not os.path.exists(SES):
          "A unix socket path cannot be re-linked, so that daemon is now "
          "unreachable and un-replaceable: every client reports 'daemon is not "
          "running' while it sits there listening")
-print("socket: survived a takeover attempt that could not stop the daemon")
+print("socket: survived a takeover attempt against a daemon from another build")
+
+# The daemon itself must still be running. Replacing it disconnects every
+# session attached to it, and two builds disagreeing is not reason enough to do
+# that to someone unasked -- an epoch is a hash of the whole source tree, so
+# every rebuild disagrees with what is installed.
+if decoy.poll() is not None:
+    fail("the frontend killed the running daemon just because it came from a "
+         "different build. Every session attached to it disconnects, and the "
+         "user asked for none of that")
+print("daemon: left running, so sessions attached to it keep working")
+
+# And the user has to be told why nothing started. The frontend redirects
+# stderr away from the screen so stray output cannot corrupt it, which used to
+# swallow startup failures whole: hexe exited having printed nothing anywhere
+# the user could look, which reads as "hexe is broken".
+if b"different build" not in bytes(seen):
+    fail(f"the frontend refused to start and explained nothing on the terminal "
+         f"({len(seen)} bytes written). An exit with no message is "
+         f"indistinguishable from a crash")
+if b"hexe session kill" not in bytes(seen):
+    fail("the explanation does not say how to proceed")
+rc = fe.poll()
+if rc == 0:
+    fail("the frontend exited 0 after failing to start; nothing scripting it "
+         "could tell that it had not worked")
+print(f"message: the refusal is visible on the terminal and exits {rc}")
 
 # The lock is the authority on whether a daemon is still there, and it is.
 try:
