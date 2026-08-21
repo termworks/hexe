@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.2] - 2026-08-21
+
+### <!-- 0 -->⛰️  Features
+
+- Twelve addressable slots around a pane
+
 ## [0.4.1] - 2026-08-20
 
 ### <!-- 0 -->⛰️  Features
