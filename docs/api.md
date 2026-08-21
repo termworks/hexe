@@ -55,6 +55,31 @@ position and shape, `scrolled`, `last_command`, `jobs`, plus float attributes
 See [keybindings.md](keybindings.md) for the same API as it appears to Lua, and
 for what `act` accepts.
 
+## Events
+
+Instead of polling, keep a connection open and be told:
+
+```
+-> {"subscribe":true}                        # everything
+-> {"subscribe":["tab_created","pane_exited"]}
+<- {"ok":true,"result":"subscribed"}
+<- {"event":"tab_created","payload":{"event":"tab_created","now_ms":1787…,"index":2}}
+<- {"event":"pane_focus_changed","payload":{ … }}
+```
+
+The connection then streams frames until you close it. Events carry the same
+payload a Lua `hexe.events.on` handler receives, because the fan-out happens at
+the one place every event already passes through — so this list grows with that
+one rather than beside it.
+
+Currently emitted: `pane_focus_changed`, `pane_cwd_changed`, `pane_process_changed`,
+`pane_shell_running_changed`, `pane_exited`, `command_finished`, `tab_created`,
+`tab_changed`, `tab_closed`, `statusbar_redraw`.
+
+A subscriber that stops reading is disconnected once its undelivered backlog
+passes 1 MiB. A phone on a bad link must not be able to grow the mux's memory,
+and a client that far behind is no longer showing anything current anyway.
+
 ## It cannot stall the mux
 
 The frontend loop drives every pane in the session, so a control socket that

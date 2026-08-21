@@ -50,6 +50,12 @@ const CONN_TIMEOUT_MS: i64 = 5_000;
 /// rendering.
 const ACCEPTS_PER_TICK = 4;
 
+/// How much undelivered event traffic a subscriber may accumulate before it is
+/// dropped. A phone on a bad link must not be able to grow the mux's memory:
+/// past this point the client is not keeping up and disconnecting it is the
+/// honest outcome.
+const MAX_SUBSCRIBER_BACKLOG = 1024 * 1024;
+
 const Conn = struct {
     fd: posix.socket_t = -1,
     buf: std.ArrayList(u8) = .empty,
@@ -59,9 +65,22 @@ const Conn = struct {
     need: ?u32 = null,
     started_ms: i64 = 0,
     replying: bool = false,
+    /// Once subscribed, the connection stays open and receives event frames
+    /// instead of being closed after a reply.
+    subscribed: bool = false,
+    /// Event names this client asked for. Empty means every event.
+    filter: std.ArrayList([]u8) = .empty,
 
     fn active(self: *const Conn) bool {
         return self.fd >= 0;
+    }
+
+    fn wants(self: *const Conn, event: []const u8) bool {
+        if (self.filter.items.len == 0) return true;
+        for (self.filter.items) |f| {
+            if (std.mem.eql(u8, f, event)) return true;
+        }
+        return false;
     }
 };
 
@@ -124,6 +143,10 @@ pub const ApiServer = struct {
         c.out_sent = 0;
         c.need = null;
         c.replying = false;
+        c.subscribed = false;
+        for (c.filter.items) |f| self.allocator.free(f);
+        c.filter.deinit(self.allocator);
+        c.filter = .empty;
     }
 
     fn slot(self: *ApiServer) ?*Conn {
@@ -158,7 +181,9 @@ pub const ApiServer = struct {
         const now = std.time.milliTimestamp();
         for (&self.conns) |*c| {
             if (!c.active()) continue;
-            if (now - c.started_ms > CONN_TIMEOUT_MS) {
+            // The timeout is for a request that never finished arriving. A
+            // subscriber is idle on purpose and must not be reaped for it.
+            if (!c.subscribed and now - c.started_ms > CONN_TIMEOUT_MS) {
                 self.dropConn(c);
                 continue;
             }
@@ -167,6 +192,21 @@ pub const ApiServer = struct {
     }
 
     fn step(self: *ApiServer, c: *Conn, state: *State) void {
+        if (c.subscribed) {
+            self.flush(c);
+            if (!c.active()) return;
+            // Notice a subscriber that has gone away, so its slot comes back.
+            var probe: [256]u8 = undefined;
+            const n = posix.read(c.fd, &probe) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => {
+                    self.dropConn(c);
+                    return;
+                },
+            };
+            if (n == 0) self.dropConn(c);
+            return;
+        }
         if (c.replying) {
             self.flush(c);
             return;
@@ -246,7 +286,11 @@ pub const ApiServer = struct {
             }
             c.out_sent += n;
         }
-        self.dropConn(c);
+        c.out.clearRetainingCapacity();
+        c.out_sent = 0;
+        // A subscriber's connection is the point; only a one-shot call is
+        // finished when its reply has been written.
+        if (!c.subscribed) self.dropConn(c);
     }
 
     fn fail(self: *ApiServer, c: *Conn, comptime fmt: []const u8, args: anytype) void {
@@ -261,6 +305,75 @@ pub const ApiServer = struct {
         self.reply(c, stream.getWritten());
     }
 
+    /// Turn this connection into an event stream.
+    ///
+    /// `{"subscribe":true}` or `{"subscribe":[]}` takes every event;
+    /// `{"subscribe":["pane_focus_changed"]}` takes only those named.
+    fn subscribe(self: *ApiServer, c: *Conn, spec: std.json.Value) void {
+        switch (spec) {
+            .bool => {},
+            .array => |a| {
+                for (a.items) |item| {
+                    const name = switch (item) {
+                        .string => |str| str,
+                        else => return self.fail(c, "event names must be strings", .{}),
+                    };
+                    const owned = self.allocator.dupe(u8, name) catch {
+                        return self.fail(c, "out of memory", .{});
+                    };
+                    c.filter.append(self.allocator, owned) catch {
+                        self.allocator.free(owned);
+                        return self.fail(c, "out of memory", .{});
+                    };
+                }
+            },
+            else => return self.fail(c, "`subscribe` must be true or a list of event names", .{}),
+        }
+
+        // Marked before the acknowledgement is queued, so writing it does not
+        // close the connection the way a one-shot reply would.
+        c.subscribed = true;
+        c.buf.clearRetainingCapacity();
+        c.need = null;
+        self.reply(c, "{\"ok\":true,\"result\":\"subscribed\"}");
+    }
+
+    /// Hand one event to every subscriber that asked for it.
+    ///
+    /// `payload` is the event's JSON object, already encoded. Nothing here can
+    /// fail loudly: an event is a side effect of something the user did, and a
+    /// misbehaving control client must not disturb it.
+    pub fn broadcast(self: *ApiServer, event: []const u8, payload: []const u8) void {
+        for (&self.conns) |*c| {
+            if (!c.active() or !c.subscribed) continue;
+            if (!c.wants(event)) continue;
+            if (c.out.items.len - c.out_sent > MAX_SUBSCRIBER_BACKLOG) {
+                self.dropConn(c);
+                continue;
+            }
+            var hdr: [4]u8 = undefined;
+            std.mem.writeInt(u32, &hdr, @intCast(payload.len), .big);
+            c.out.appendSlice(self.allocator, &hdr) catch {
+                self.dropConn(c);
+                continue;
+            };
+            c.out.appendSlice(self.allocator, payload) catch {
+                self.dropConn(c);
+                continue;
+            };
+            self.flush(c);
+        }
+    }
+
+    /// Whether anything is listening, so the emit path can skip encoding when
+    /// nobody would read it.
+    pub fn hasSubscribers(self: *const ApiServer) bool {
+        for (&self.conns) |*c| {
+            if (c.active() and c.subscribed) return true;
+        }
+        return false;
+    }
+
     /// Run one request against the live API.
     fn handle(self: *ApiServer, c: *Conn, state: *State, body: []const u8) void {
         var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch {
@@ -272,6 +385,12 @@ pub const ApiServer = struct {
             .object => |o| o,
             else => return self.fail(c, "request must be a JSON object", .{}),
         };
+        // Subscribing is not a call: the connection changes mode and stays
+        // open, so it is handled before the live-API lookup.
+        if (obj.get("subscribe")) |sub| {
+            return self.subscribe(c, sub);
+        }
+
         const call = switch (obj.get("call") orelse return self.fail(c, "request has no `call`", .{})) {
             .string => |s| s,
             else => return self.fail(c, "`call` must be a string", .{}),

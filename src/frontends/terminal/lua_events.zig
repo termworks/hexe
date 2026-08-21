@@ -51,9 +51,37 @@ pub fn emit(state: anytype, runtime: *LuaRuntime, event_name: []const u8, fields
 /// inside an event handler as inside a keybinding callback. `state` is
 /// `anytype` because this file is imported by State itself.
 pub fn emitWithState(state: anytype, runtime: *LuaRuntime, event_name: []const u8) void {
+    // Control-socket subscribers see the same payload the Lua handlers do, and
+    // see it here because this is the one place every event passes through.
+    // Encoding it anywhere else would mean a second list of events to keep in
+    // step with this one.
+    broadcastToApi(state, runtime, event_name);
+
     const scope = lua_api.pushLiveState(runtime, state, .handler);
     defer lua_api.popLiveState(runtime, scope);
     emitAutocmdWithPayloadOnStack(runtime, event_name);
+}
+
+/// Serialize the payload at the top of the stack to any socket subscribers.
+///
+/// Silent on every failure: an event is a side effect of something the user
+/// did, and a control client that cannot be served must not disturb it.
+fn broadcastToApi(state: anytype, runtime: *LuaRuntime, event_name: []const u8) void {
+    const S = @TypeOf(state);
+    if (!@hasField(@typeInfo(S).pointer.child, "api_server")) return;
+    const server = if (state.api_server) |*s| s else return;
+    if (!server.hasSubscribers()) return;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(state.allocator);
+    const api_json = @import("api_json.zig");
+    buf.appendSlice(state.allocator, "{\"event\":\"") catch return;
+    buf.appendSlice(state.allocator, event_name) catch return;
+    buf.appendSlice(state.allocator, "\",\"payload\":") catch return;
+    api_json.write(runtime.lua, -1, buf.writer(state.allocator), 0) catch return;
+    buf.appendSlice(state.allocator, "}") catch return;
+
+    server.broadcast(event_name, buf.items);
 }
 
 pub fn emitAutocmdWithPayloadOnStack(runtime: *LuaRuntime, event_name: []const u8) void {
