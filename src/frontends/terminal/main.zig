@@ -369,6 +369,15 @@ pub fn run(terminal_args: TerminalArgs) !void {
     // Get terminal size.
     const size = terminal.getTermSize();
 
+    // A startup failure has to be readable AFTER the screen is handed back.
+    // State.init claims the terminal (raw mode, alternate screen), so anything
+    // printed between here and teardown is written onto a screen that is torn
+    // down on the way out -- which is why "hexe just exits" was the whole
+    // symptom. Registered before State.init so it runs last, once the real
+    // screen is back.
+    var startup_error: ?[]const u8 = null;
+    defer if (startup_error) |msg| writeStartupMessage(msg);
+
     // Initialize state.
     var state = try State.init(
         allocator,
@@ -430,8 +439,13 @@ pub fn run(terminal_args: TerminalArgs) !void {
     // Connect to ses daemon FIRST (start it if needed).
     var startup_attach = state.runtime.attachFrontend() catch |e| {
         debugLog("ses connect failed: {s}", .{@errorName(e)});
-        std.debug.print("Could not connect to ses daemon: {s}\n", .{@errorName(e)});
-        return;
+        // A build mismatch has already explained itself in detail; repeating
+        // the error name on top of that reads like a second, unrelated fault.
+        // A build mismatch has already written a full explanation; anything
+        // else gets a plain line.
+        startup_error = core.frontend_client.takeStartupDiagnosis() orelse
+            "Could not connect to the session daemon.\n";
+        return e;
     };
     defer startup_attach.deinit(allocator);
     debugLog("ses connected (started={})", .{startup_attach.started_daemon});
@@ -673,7 +687,29 @@ pub fn main() !void {
     try run(terminal_args);
 }
 
+/// A dup of the real stderr, taken before it is redirected.
+///
+/// stderr goes to /dev/null (or a log) so that stray library output cannot
+/// corrupt the screen. That also silently swallowed every startup failure --
+/// hexe would exit 1 having printed nothing anywhere the user could look. A
+/// genuine startup error is written here instead, once the screen is back.
+var real_stderr: ?posix.fd_t = null;
+
+pub fn writeStartupMessage(msg: []const u8) void {
+    if (msg.len == 0) return;
+    const fd = real_stderr orelse posix.STDOUT_FILENO;
+    var off: usize = 0;
+    while (off < msg.len) {
+        off += posix.write(fd, msg[off..]) catch return;
+    }
+}
+
 fn redirectStderr(log_file: ?[]const u8) void {
+    // Taken before anything is replaced, so the fd still refers to the
+    // terminal the user is looking at.
+    if (real_stderr == null) {
+        real_stderr = posix.dup(posix.STDERR_FILENO) catch null;
+    }
     var redirected = false;
     if (log_file) |path| {
         if (path.len > 0) {
