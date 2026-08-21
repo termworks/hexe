@@ -143,6 +143,7 @@ SMOKES := \
 	smoke_palette_cells.py \
 	smoke_names.py \
 	smoke_decor.py \
+	smoke_float_state.py \
 	smoke_status_zones.py
 
 smoke: smoke-clean

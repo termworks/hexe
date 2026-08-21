@@ -341,6 +341,10 @@ pub const LayoutTabDef = struct {
 pub const LayoutFloatDef = struct {
     enabled: bool = true,
     key: u8,
+    /// The name the config gave this float. Validated by the config API and
+    /// carried through so a script can address a float by the name it wrote,
+    /// rather than by the character code its key happens to have.
+    name: ?[]const u8 = null,
     command: ?[]const u8 = null,
     title: ?[]const u8 = null,
     attributes: FloatAttributes = .{},
@@ -358,6 +362,7 @@ pub const LayoutFloatDef = struct {
     path_add: []const []const u8 = &.{},
 
     pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
+        if (self.name) |n| freeSlice(allocator, @constCast(n));
         if (self.command) |c| freeSlice(allocator, @constCast(c));
         if (self.title) |t| freeSlice(allocator, @constCast(t));
         if (self.isolation) |*iso| {
@@ -654,6 +659,8 @@ pub const Config = struct {
         tab_prev,
         tab_close,
         float_toggle,
+        float_show,
+        float_hide,
         float_nudge,
         focus_move,
         layout_save,
@@ -693,6 +700,11 @@ pub const Config = struct {
         tab_prev,
         tab_close,
         float_toggle: u8, // float key (matches FloatDef.key)
+        // Idempotent counterparts to the toggle: "make sure it is showing" and
+        // "make sure it is not". A script that reads visibility and then
+        // toggles acts on what it saw, not on what is true when it runs.
+        float_show: u8,
+        float_hide: u8,
         float_nudge: BindKeyKind, // up/down/left/right
         focus_move: BindKeyKind, // up/down/left/right
         layout_save,
@@ -1030,6 +1042,16 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
         const fk = runtime.getString(-1, "float") orelse return null;
         if (fk.len != 1) return null;
         return .{ .float_toggle = fk[0] };
+    }
+    if (std.mem.eql(u8, action_type, "float.show")) {
+        const fk = runtime.getString(-1, "float") orelse return null;
+        if (fk.len != 1) return null;
+        return .{ .float_show = fk[0] };
+    }
+    if (std.mem.eql(u8, action_type, "float.hide")) {
+        const fk = runtime.getString(-1, "float") orelse return null;
+        if (fk.len != 1) return null;
+        return .{ .float_hide = fk[0] };
     }
     if (std.mem.eql(u8, action_type, "float.nudge")) {
         const dir = runtime.getString(-1, "dir") orelse return null;

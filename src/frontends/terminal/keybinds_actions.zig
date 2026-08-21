@@ -306,9 +306,14 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             actions.performDetach(state);
             return true;
         },
-        .float_toggle => |fk| {
+        .float_toggle, .float_show, .float_hide => |fk| {
+            const want: actions.FloatWant = switch (action) {
+                .float_show => .show,
+                .float_hide => .hide,
+                else => .toggle,
+            };
             if (state.getLayoutFloatByKey(fk)) |float_def| {
-                actions.toggleNamedFloat(state, float_def);
+                actions.setNamedFloat(state, float_def, want);
                 state.needs_render = true;
                 return true;
             }

@@ -183,7 +183,7 @@ The full action set, as of this build:
 | panes | `pane.close`, `pane.select`, `pane.zoom`, `pane.sync_toggle`, `pane.disown`, `pane.adopt` |
 | splits | `split.horizontal`, `split.vertical`, `split.resize(dir)` |
 | tabs | `tab.new`, `tab.next`, `tab.prev`, `tab.close`, `tab.rename` |
-| floats | `float.toggle(key)`, `float.nudge(dir)` |
+| floats | `float.toggle(key)`, `float.show(key)`, `float.hide(key)`, `float.nudge(dir)` |
 | focus | `focus.move(dir)` |
 | layout | `layout.save`, `layout.load` |
 | config | `config.reload` |

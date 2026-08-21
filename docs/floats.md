@@ -19,6 +19,27 @@ hexe.float("git", {
 hexe.key({ hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1")),
 ```
 
+`toggle` flips whatever it finds. `show` and `hide` state where the float should
+end up instead, so running them again changes nothing — which is what a script
+deciding several floats at once wants:
+
+```lua
+hexe.key({ hexe.key.alt, hexe.key["a"] }, function(ctx)
+  for _, f in ipairs(ctx.config().floats) do
+    if f.per_cwd then ctx.act(hexe.action.float.hide(f.key_name))
+    else ctx.act(hexe.action.float.show(f.key_name)) end
+  end
+end),
+```
+
+`show` opens a float that was never opened, not only one that is hidden.
+`hide` on a float that does not exist does nothing rather than creating one.
+
+`ctx.config().floats` is the declared list, so it includes floats that have
+never been opened; each entry carries the `name` the config gave it and
+`key_name`, the key as a string. (`key` is the same key as a character code,
+which is not what the action constructors take.)
+
 <!-- demo:begin -->
 [![floats demo](https://asciinema.org/a/1263028.svg)](https://asciinema.org/a/1263028)
 <!-- demo:end -->

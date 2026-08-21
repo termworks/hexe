@@ -371,7 +371,10 @@ pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
             return .{ .split_resize = dir };
         }
 
-        if (std.mem.eql(u8, type_str, "float.toggle")) {
+        if (std.mem.eql(u8, type_str, "float.toggle") or
+            std.mem.eql(u8, type_str, "float.show") or
+            std.mem.eql(u8, type_str, "float.hide"))
+        {
             _ = lua.getField(idx, "float");
             const float_key = lua.toString(-1) catch {
                 lua.pop(1);
@@ -379,6 +382,8 @@ pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
             };
             lua.pop(1);
             if (float_key.len != 1) return null;
+            if (std.mem.eql(u8, type_str, "float.show")) return .{ .float_show = float_key[0] };
+            if (std.mem.eql(u8, type_str, "float.hide")) return .{ .float_hide = float_key[0] };
             return .{ .float_toggle = float_key[0] };
         }
 
@@ -670,6 +675,17 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
     var float_def = config.LayoutFloatDef{
         .key = key,
     };
+
+    // Parse name
+    _ = lua.getField(idx, "name");
+    if (lua.typeOf(-1) == .string) {
+        const name = lua.toString(-1) catch {
+            lua.pop(1);
+            return null;
+        };
+        float_def.name = dupeBridgeString(allocator, name, "failed to allocate layout float name");
+    }
+    lua.pop(1);
 
     // Parse enabled
     _ = lua.getField(idx, "enabled");
