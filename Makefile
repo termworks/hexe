@@ -147,6 +147,7 @@ SMOKES := \
 	smoke_api_socket.py \
 	smoke_api_events.py \
 	smoke_stale_daemon.py \
+	smoke_api_geometry.py \
 	smoke_status_zones.py
 
 smoke: smoke-clean

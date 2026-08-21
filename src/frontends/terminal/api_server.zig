@@ -43,6 +43,9 @@ const MAX_REQUEST = 64 * 1024;
 /// is the ceiling that stops a pathological query from allocating without end.
 const MAX_RESPONSE = 4 * 1024 * 1024;
 
+/// Positional arguments one call may take. The widest live-API verb takes two.
+const MAX_ARGS = 8;
+
 /// How long a half-finished request may sit before its connection is dropped.
 const CONN_TIMEOUT_MS: i64 = 5_000;
 
@@ -416,8 +419,26 @@ pub const ApiServer = struct {
             return self.fail(c, "no such call: {s}", .{call});
         }
 
+        // The live API is positional -- `geometry(selector, spec)`,
+        // `ratio(selector, value)` -- so one argument cannot express half of
+        // it. `args` carries the whole list; `arg` stays the spelling for the
+        // common single-argument call, and for one that IS a list.
         var argc: i32 = 0;
-        if (obj.get("arg")) |arg| {
+        if (obj.get("args")) |list| {
+            const items = switch (list) {
+                .array => |a| a.items,
+                else => return self.fail(c, "`args` must be a list", .{}),
+            };
+            if (items.len > MAX_ARGS) {
+                return self.fail(c, "at most {d} arguments", .{MAX_ARGS});
+            }
+            for (items) |item| {
+                api_json.push(rt.lua, item, 0) catch {
+                    return self.fail(c, "an argument is too deeply nested", .{});
+                };
+                argc += 1;
+            }
+        } else if (obj.get("arg")) |arg| {
             if (arg != .null) {
                 api_json.push(rt.lua, arg, 0) catch {
                     return self.fail(c, "argument is too deeply nested", .{});

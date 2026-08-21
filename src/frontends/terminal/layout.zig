@@ -246,6 +246,37 @@ pub const Layout = struct {
         };
     }
 
+    /// The divider that resizes `pane_uuid` — the innermost split containing it.
+    ///
+    /// `resizeFocused` walks for this too, but only ever to step a divider by
+    /// cells in a direction. A pointer that has already dropped a divider
+    /// somewhere needs the split itself, to set its ratio outright.
+    pub fn splitContaining(self: *Layout, pane_uuid: [32]u8) ?*LayoutNode.Split {
+        const root = self.root orelse return null;
+        return findSplitContaining(root, pane_uuid);
+    }
+
+    fn findSplitContaining(node: *LayoutNode, pane_uuid: [32]u8) ?*LayoutNode.Split {
+        return switch (node.*) {
+            .pane => null,
+            .split => |*sp| blk: {
+                // Deepest first, so the answer is the divider directly above
+                // the pane rather than the outermost one that merely contains it.
+                if (findSplitContaining(sp.first, pane_uuid)) |inner| break :blk inner;
+                if (findSplitContaining(sp.second, pane_uuid)) |inner| break :blk inner;
+                if (subtreeHasPane(sp.first, pane_uuid) or subtreeHasPane(sp.second, pane_uuid)) break :blk sp;
+                break :blk null;
+            },
+        };
+    }
+
+    fn subtreeHasPane(node: *const LayoutNode, pane_uuid: [32]u8) bool {
+        return switch (node.*) {
+            .pane => |uuid| std.mem.eql(u8, &uuid, &pane_uuid),
+            .split => |split| subtreeHasPane(split.first, pane_uuid) or subtreeHasPane(split.second, pane_uuid),
+        };
+    }
+
     pub fn splitRatioSyncForSplit(self: *Layout, split: *const LayoutNode.Split) ?SplitRatioSync {
         const first_anchor_uuid = self.firstLeafPaneUuid(split.first) orelse {
             core.logging.warn("terminal", "splitRatioSyncForSplit skipped: first split branch has no live pane", .{});

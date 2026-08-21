@@ -720,6 +720,7 @@ pub fn main() !void {
     var api_cmd = app.createCommand("api", "Call the live API of a running session (JSON in, JSON out)");
     try api_cmd.addArg(Arg.positional("call", "Name of a hexe.live function, e.g. panes, floats, tabs, session, act", null));
     try api_cmd.addArg(Arg.positional("arg", "Optional JSON argument", null));
+    try api_cmd.addArg(Arg.positional("arg2", "Second JSON argument, for calls that take (selector, value)", null));
     try api_cmd.addArg(Arg.singleValueOption("session", 's', "Session to call (default: the only one listening)"));
 
     var palette_cmd = app.createCommand("palette", "Per-pane palette namespaces");
@@ -834,6 +835,7 @@ pub fn main() !void {
             allocator,
             m.getSingleValue("call") orelse "",
             m.getSingleValue("arg"),
+            m.getSingleValue("arg2"),
             m.getSingleValue("session"),
         );
     }

@@ -881,6 +881,189 @@ fn hexe_tab_select(lstate: ?*LuaState) callconv(.c) c_int {
 
 /// `ctx.rename_tab([n,] name)` — set a tab's name directly. The `tab.rename`
 /// action only opens the inline editor, which a plugin cannot drive.
+/// Read one optional percentage from a table field, clamped to 0..100.
+///
+/// Absent leaves the current value alone, so a caller can move a float without
+/// restating its size and vice versa -- a drag changes one axis, not six.
+fn optPct(lua: *Lua, idx: i32, name: [:0]const u8, current: u8) u8 {
+    const ty = lua.getField(idx, name);
+    defer lua.pop(1);
+    if (ty != .number) return current;
+    const v = lua.toNumber(-1) catch return current;
+    if (v < 0) return 0;
+    if (v > 100) return 100;
+    return @intFromFloat(v);
+}
+
+/// `ctx.geometry([selector] [, {width=, height=, x=, y=, pad_x=, pad_y=}])`
+///
+/// Reads a float's geometry, and sets it when given a table. Percentages, and
+/// absolute: `float.nudge` can only step in a direction, which is the wrong
+/// shape for a pointer that already knows where it was dropped.
+///
+/// Returns the resulting geometry, so a caller sees what the clamp did rather
+/// than assuming its request survived intact.
+fn hexe_geometry(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    // The spec may be the first argument (meaning the focused pane) or the
+    // second (after a selector), so a caller need not pass a placeholder.
+    const spec_idx: ?i32 = if (lua.typeOf(1) == .table) 1 else if (lua.typeOf(2) == .table) 2 else null;
+    const sel_idx: i32 = if (spec_idx == 1) 3 else 1;
+
+    const pane = resolvePane(lua, state, sel_idx) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    if (!state.paneIsFloating(pane)) {
+        // A tiled pane has no percentage geometry of its own -- the layout
+        // decides its rect -- but "where is this pane" still has an answer, and
+        // nil would send a caller looking for another verb to ask it with.
+        lua.createTable(0, 6);
+        setInt(lua, "x", pane.x);
+        setInt(lua, "y", pane.y);
+        setInt(lua, "width", pane.width);
+        setInt(lua, "height", pane.height);
+        setBool(lua, "float", false);
+        if (state.currentLayout().splitContaining(pane.uuid)) |split| {
+            lua.pushNumber(split.ratio);
+            lua.setField(-2, "ratio");
+        }
+        return 1;
+    }
+
+    if (spec_idx) |idx| {
+        const w = optPct(lua, idx, "width", state.paneFloatWidthPct(pane));
+        const h = optPct(lua, idx, "height", state.paneFloatHeightPct(pane));
+        const x = optPct(lua, idx, "x", state.paneFloatPosXPct(pane));
+        const y = optPct(lua, idx, "y", state.paneFloatPosYPct(pane));
+        const px = optPct(lua, idx, "pad_x", state.paneFloatPadX(pane));
+        const py = optPct(lua, idx, "pad_y", state.paneFloatPadY(pane));
+
+        // Both halves, in this order, exactly as the nudge bind does: the UI
+        // copy is what gets drawn, the runtime copy is what SES persists, and
+        // setting only one leaves the float in a state that survives a redraw
+        // but not a reattach.
+        state.setPaneFloatGeometryUi(pane.uuid, w, h, x, y, px, py);
+        state.setPaneFloatGeometry(pane, w, h, x, y, px, py);
+        state.applyFrontendFloatNudge(pane);
+        state.resizeFloatingPanes();
+        state.needs_render = true;
+    }
+
+    // Percentages are what was asked for and what persists; the cell rect is
+    // what actually landed after clamping, which is what a pointer needs to
+    // draw a handle in the right place.
+    lua.createTable(0, 11);
+    setInt(lua, "width", state.paneFloatWidthPct(pane));
+    setInt(lua, "height", state.paneFloatHeightPct(pane));
+    setInt(lua, "x", state.paneFloatPosXPct(pane));
+    setInt(lua, "y", state.paneFloatPosYPct(pane));
+    setInt(lua, "pad_x", state.paneFloatPadX(pane));
+    setInt(lua, "pad_y", state.paneFloatPadY(pane));
+    setInt(lua, "cell_x", pane.x);
+    setInt(lua, "cell_y", pane.y);
+    setInt(lua, "cell_width", pane.width);
+    setInt(lua, "cell_height", pane.height);
+    setBool(lua, "float", true);
+    return 1;
+}
+
+/// `ctx.ratio([selector] [, value])` — the divider above a tiled pane.
+///
+/// Reads the ratio of the split this pane sits in, and sets it when given a
+/// number in 0..1. `split.resize` only steps by cells in a direction, which
+/// cannot express "the user dragged the divider to here".
+fn hexe_ratio(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    // The selector comes first, as in every other verb, and the new value only
+    // ever second. Reading a number in the first position as the value would
+    // make `ratio(2)` -- plainly "pane 2" -- silently resize a divider instead.
+    const num_idx: ?i32 = if (lua.typeOf(2) == .number) 2 else null;
+
+    const pane = resolvePane(lua, state, 1) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const layout = state.currentLayout();
+    const split = layout.splitContaining(pane.uuid) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    if (num_idx) |idx| {
+        var v = lua.toNumber(idx) catch {
+            lua.pushNil();
+            return 1;
+        };
+        // A divider at 0 or 1 leaves a zero-width pane that cannot be grabbed
+        // again, so the range stops short of both ends.
+        if (v < 0.05) v = 0.05;
+        if (v > 0.95) v = 0.95;
+        // The terminal's own tree first: that is what decides pane rects. Going
+        // only through SES would leave the divider where it was until the
+        // round trip came back, and leave it there for good if SES is not
+        // reachable. `split.resize` moves the tree the same way before syncing.
+        split.ratio = @floatCast(v);
+        layout.recalculateLayout();
+
+        if (layout.splitRatioSyncForSplit(split)) |sync| {
+            state.applyFrontendSplitRatio(sync.first_anchor_uuid, sync.second_anchor_uuid, @floatCast(v));
+            state.syncSessionSplitRatio(sync.first_anchor_uuid, sync.second_anchor_uuid, @floatCast(v));
+        }
+        state.needs_render = true;
+        state.renderer.invalidate();
+        state.force_full_render = true;
+    }
+
+    lua.pushNumber(split.ratio);
+    return 1;
+}
+
+/// `ctx.rename(selector, name)` — a pane's name.
+///
+/// Names reach socket paths and CLI arguments, so the same constraint the name
+/// pool enforces applies to one chosen by hand.
+fn hexe_rename(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+
+    const two_args = lua.typeOf(2) == .string;
+    const name = (if (two_args) lua.toString(2) else lua.toString(1)) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    if (!core.names.validEntry(name)) {
+        lua.pushBoolean(false);
+        return 1;
+    }
+    const pane = resolvePane(lua, state, if (two_args) 1 else 3) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+
+    const owned = state.allocator.dupe(u8, name) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    state.setPaneNameOwned(pane.uuid, owned);
+    state.needs_render = true;
+    lua.pushBoolean(true);
+    return 1;
+}
+
 fn hexe_rename_tab(lstate: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(lstate orelse return 0);
     const state = liveState(lua) orelse {
@@ -1272,6 +1455,9 @@ const ENTRIES = [_]Entry{
     .{ .name = "focus", .func = hexe_focus },
     .{ .name = "tab_select", .func = hexe_tab_select },
     .{ .name = "rename_tab", .func = hexe_rename_tab },
+    .{ .name = "rename", .func = hexe_rename },
+    .{ .name = "geometry", .func = hexe_geometry },
+    .{ .name = "ratio", .func = hexe_ratio },
     .{ .name = "close", .func = hexe_close },
     .{ .name = "scroll", .func = hexe_scroll },
     .{ .name = "selection", .func = hexe_selection },
