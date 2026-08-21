@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.5] - 2026-08-21
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Never replace a running daemon unasked
+
 ## [0.4.4] - 2026-08-21
 
 ### <!-- 0 -->⛰️  Features
