@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.3] - 2026-08-21
+
+### <!-- 0 -->⛰️  Features
+
+- Live API over a per-session control socket
+- Idempotent show/hide and declared names
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Cleanup
+
 ## [0.4.2] - 2026-08-21
 
 ### <!-- 0 -->⛰️  Features
