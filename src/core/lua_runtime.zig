@@ -526,6 +526,7 @@ pub const LuaRuntime = struct {
         try self.applyStatusConfigV2();
         try self.applyPaletteConfigV2();
         try self.applyNamesConfigV2();
+        try self.applyDecorConfigV2();
         try self.applyPopConfigV2();
         try self.applySesConfigV2();
     }
@@ -712,6 +713,47 @@ pub const LuaRuntime = struct {
         const mux = try self.getOrCreateMuxBuilder();
         if (self.getBool(-1, "namespaces")) |v| mux.palette_namespaces = v;
         if (self.getInt(u32, -1, "osc")) |v| mux.palette_osc = v;
+    }
+
+    /// `decor` — the slots painted around every pane.
+    fn applyDecorConfigV2(self: *Self) !void {
+        if (!self.pushTable(-1, "decor")) return;
+        defer self.pop();
+
+        const mux = try self.getOrCreateMuxBuilder();
+        var d: config.DecorConfig = .{};
+        d.top = try self.readDecorEdge("top");
+        d.bottom = try self.readDecorEdge("bottom");
+        d.left = try self.readDecorEdge("left");
+        d.right = try self.readDecorEdge("right");
+        if (self.pushTable(-1, "left")) {
+            defer self.pop();
+            if (self.getInt(u16, -1, "width")) |w| d.left_width = w;
+        }
+        if (self.pushTable(-1, "right")) {
+            defer self.pop();
+            if (self.getInt(u16, -1, "width")) |w| d.right_width = w;
+        }
+        mux.decor = d;
+    }
+
+    /// One edge's three slots. `start`/`end` read as left/right on a horizontal
+    /// edge and top/bottom on a vertical one, and both spellings are accepted so
+    /// a config can say what it means.
+    fn readDecorEdge(self: *Self, edge: [:0]const u8) !config.DecorEdge {
+        if (!self.pushTable(-1, edge)) return .{};
+        defer self.pop();
+
+        var out: config.DecorEdge = .{};
+        out.start = self.getStringAlloc(-1, "start") orelse
+            self.getStringAlloc(-1, "left") orelse
+            self.getStringAlloc(-1, "top");
+        out.center = self.getStringAlloc(-1, "center") orelse
+            self.getStringAlloc(-1, "middle");
+        out.end = self.getStringAlloc(-1, "end") orelse
+            self.getStringAlloc(-1, "right") orelse
+            self.getStringAlloc(-1, "bottom");
+        return out;
     }
 
     /// `names` — where the naming vocabulary comes from.
@@ -1221,7 +1263,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.validate=hexe.validate or function(cfg) " ++
         "expect_table('config', cfg, false); " ++
         "scan_removed('config', cfg); " ++
-        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true, palette=true, names=true }; " ++
+        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true, palette=true, names=true, decor=true }; " ++
         "for k,_ in pairs(cfg) do if type(k)=='string' and k:sub(1,2)~='__' and not allowed[k] then error('config error: '..k..' is not a supported top-level section',2) end end; " ++
         "validate_theme('theme', cfg.theme); " ++
         "validate_keybindings('keys', cfg.keys); " ++

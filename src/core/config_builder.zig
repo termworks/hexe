@@ -62,6 +62,9 @@ pub const MuxConfigBuilder = struct {
     names_pane: ?[][]const u8 = null,
     names_order: ?config.names_mod.Order = null,
     names_suffix: ?[]const u8 = null,
+
+    // Decoration slots around every pane.
+    decor: ?config.DecorConfig = null,
     mouse_selection_override_mods: ?u8 = null,
 
     // Keybindings
@@ -192,6 +195,7 @@ pub const MuxConfigBuilder = struct {
         if (self.names_pane) |v| result.names.pane = v;
         if (self.names_order) |v| result.names.order = v;
         if (self.names_suffix) |v| result.names.suffix = try self.allocator.dupe(u8, v);
+        if (self.decor) |d| result.decor = d;
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 
         // Apply binds (deep copy to prevent use-after-free)

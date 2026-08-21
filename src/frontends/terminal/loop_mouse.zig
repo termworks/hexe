@@ -777,6 +777,15 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
         }
     }
 
+    // Panels sit outside their pane, so this is checked before the pane search
+    // below -- which by construction cannot match a point outside every pane.
+    if (!ev.is_release and !is_motion) {
+        if (@import("decor.zig").hitTestVisible(state, ev.x, ev.y, @intCast(ev.btn & 3))) |cmd| {
+            runStatusbarAction(state, cmd);
+            return true;
+        }
+    }
+
     const target = findFocusableAt(state, ev.x, ev.y);
     const forward_to_app = if (target) |t|
         ev.x >= t.pane.x and ev.x < t.pane.x + t.pane.width and

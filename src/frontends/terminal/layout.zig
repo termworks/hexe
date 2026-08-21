@@ -45,6 +45,11 @@ pub const Layout = struct {
     y: u16,
     width: u16,
     height: u16,
+    /// Columns the side decoration panels reserve. Held here rather than read
+    /// from config, so layout stays self-contained; the frontend sets it when
+    /// the config loads or reloads.
+    decor_left: u16 = 0,
+    decor_right: u16 = 0,
     // Optional shared runtime for pane creation
     runtime: ?*FrontendRuntime,
     // Optional pane notification config (from pop.json)
@@ -268,7 +273,12 @@ pub const Layout = struct {
         switch (node.*) {
             .pane => |uuid| {
                 if (self.splits.get(uuid)) |pane| {
-                    pane.resize(x, y, w, h) catch |err| {
+                    // Side panels take columns from the pane, not from the
+                    // split's share of the screen, so a panel never moves the
+                    // divider — it narrows what the program inside sees.
+                    const inset_x = x + self.decor_left;
+                    const inset_w = w -| self.decor_left -| self.decor_right;
+                    pane.resize(inset_x, y, inset_w, h) catch |err| {
                         core.logging.logError("terminal", "layout pane resize failed", err);
                     };
                 }
