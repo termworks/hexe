@@ -2229,6 +2229,10 @@ pub const State = struct {
         self.runtime.setPaneProc(uuid, name, pid);
     }
 
+    pub fn setPaneObservers(self: *State, uuid: [32]u8, observers: u16, blocked: bool) void {
+        self.runtime.setPaneObservers(uuid, observers, blocked);
+    }
+
     pub fn getPaneShell(self: *const State, uuid: [32]u8) ?PaneShellInfo {
         return self.runtime.getPaneShell(uuid);
     }

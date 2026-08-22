@@ -104,6 +104,12 @@ const CLIENT_WRITE_TIMEOUT_MS: i32 = 2_000;
 const MAX_PENDING_HANDSHAKES: usize = 64;
 const MAX_OBSERVERS: usize = 8;
 
+/// Budget for the share control channel's one-byte request and its reply. Much
+/// shorter than the client write timeout because this runs inline on the event
+/// loop: the pod must never stop draining the PTY, so a caller that connects
+/// and then goes quiet gets dropped long before the shell notices.
+const SHARE_CTL_TIMEOUT_MS: i32 = 250;
+
 /// mux→pod INPUT frames from the SES main client carry a 16-byte
 /// `[epoch:u64][seq:u64]` (little-endian) prefix for exactly-once dedup across a
 /// frontend VT reconnect. Must match vt_write_queue.INPUT_SEQ_PREFIX_LEN.
@@ -498,6 +504,12 @@ const Pod = struct {
     /// permanently deaf to input while its output keeps flowing.
     client_gen: u64 = 0,
     observers: std.array_list.Managed(core.IpcConnection),
+    /// Refuse observers entirely, and stay refusing until told otherwise.
+    ///
+    /// Dropping the current observers without this would be a race the user
+    /// loses: whatever opened them reconnects in the time it takes to read the
+    /// notification, and "stop sharing" would silently not have.
+    share_blocked: bool = false,
     backlog: RingBuffer,
     /// Absolute offset of the byte AFTER the last one appended to `backlog`
     /// (ring start offset = backlog_abs - backlog.len).
@@ -1274,6 +1286,10 @@ const Pod = struct {
 
         const uplink_attached = timer_ctx.pod.client != null or timer_ctx.pod.observers.items.len > 0;
         timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid, uplink_attached);
+        // The mutation sites report immediately; this is the retry for the ones
+        // that could not reach SES at the time, and the first announcement for a
+        // pod nobody has ever watched. Idempotent, so it costs a comparison.
+        timer_ctx.pod.publishObservers();
 
         {
             const now_ms: i64 = std.time.milliTimestamp();
@@ -1417,6 +1433,9 @@ const Pod = struct {
         } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_OBSERVER) {
             debugLog("accept: aux observer fd={d}", .{conn.fd});
             self.acceptObserver(conn, backlog_tmp);
+        } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_CONTROL) {
+            debugLog("accept: share control fd={d}", .{conn.fd});
+            self.acceptShareControl(conn);
         } else {
             debugLog("accept: unknown handshake 0x{x:0>2} fd={d}", .{ handshake[0], conn.fd });
             var tmp_conn = conn;
@@ -1424,8 +1443,72 @@ const Pod = struct {
         }
     }
 
+    /// Tell SES how many programs are watching, so the rest of hexe can say so.
+    ///
+    /// Called from every path that can change the set. The uplink compares
+    /// against what it last delivered, so calling it redundantly costs a
+    /// comparison and calling it from a path that did not actually change
+    /// anything is harmless -- which is why every mutation site can just call
+    /// it rather than reason about whether it needs to.
+    fn publishObservers(self: *Pod) void {
+        self.uplink.publishObservers(@intCast(self.observers.items.len), self.share_blocked);
+    }
+
+    /// Disconnect everyone watching, and decide whether new ones may arrive.
+    ///
+    /// Returns the state afterwards. `blocked` is what makes this a stop rather
+    /// than a pause: dropping alone leaves the door open behind you.
+    fn setShareBlocked(self: *Pod, blocked: bool) wire.PodShareStatus {
+        self.share_blocked = blocked;
+        if (blocked) {
+            for (self.observers.items) |*obs| obs.close();
+            self.observers.clearRetainingCapacity();
+            debugLog("share blocked: dropped all observers", .{});
+        }
+        self.publishObservers();
+        return .{
+            .observers = @intCast(self.observers.items.len),
+            .blocked = @intFromBool(self.share_blocked),
+        };
+    }
+
+    /// The share control channel (⑥): one command byte in, one status out.
+    ///
+    /// Deliberately tiny and synchronous. The bounded read is short because
+    /// this runs on the pod's event loop, which must keep draining the PTY --
+    /// a caller that opens the channel and then says nothing must not be able
+    /// to hold the shell still. Callers send handshake and command in one
+    /// write, so in practice the byte is already buffered.
+    fn acceptShareControl(self: *Pod, conn: core.IpcConnection) void {
+        var ctl = conn;
+        defer ctl.close();
+
+        var cmd_buf: [1]u8 = undefined;
+        wire.readExactTimeout(ctl.fd, &cmd_buf, SHARE_CTL_TIMEOUT_MS) catch |err| {
+            debugLog("share control: no command byte on fd={d}: {s}", .{ ctl.fd, @errorName(err) });
+            return;
+        };
+
+        const status = switch (@as(wire.PodShareCmd, @enumFromInt(cmd_buf[0]))) {
+            .block => self.setShareBlocked(true),
+            .allow => self.setShareBlocked(false),
+            else => wire.PodShareStatus{
+                .observers = @intCast(self.observers.items.len),
+                .blocked = @intFromBool(self.share_blocked),
+            },
+        };
+        wire.writeAllTimeout(ctl.fd, std.mem.asBytes(&status), SHARE_CTL_TIMEOUT_MS) catch |err| {
+            debugLog("share control: reply failed on fd={d}: {s}", .{ ctl.fd, @errorName(err) });
+        };
+    }
+
     fn acceptObserver(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
         var obs_conn = conn;
+        if (self.share_blocked) {
+            debugLog("reject observer fd={d}: sharing is blocked for this pane", .{conn.fd});
+            obs_conn.close();
+            return;
+        }
         // Refuse before the backlog replay below, not at the append: the replay
         // is the expensive part, so capping afterwards would let a caller pay
         // for a full scrollback dump per rejected observer.
@@ -1491,10 +1574,12 @@ const Pod = struct {
         // Refresh cwd/fg info right away — detached polling is slow.
         self.uplink.forceRefresh();
         self.uplink.tick(self.pty.child_pid, true);
+        self.publishObservers();
     }
 
     fn broadcastToObservers(self: *Pod, frame_type: pod_protocol.FrameType, data: []const u8) void {
         if (self.password_mode) return;
+        var dropped = false;
         var i: usize = 0;
         while (i < self.observers.items.len) {
             const obs = &self.observers.items[i];
@@ -1503,10 +1588,15 @@ const Pod = struct {
             pod_protocol.writeFrameBounded(obs, frame_type, data, CLIENT_WRITE_TIMEOUT_MS) catch {
                 obs.close();
                 _ = self.observers.swapRemove(i);
+                dropped = true;
                 continue;
             };
             i += 1;
         }
+        // A viewer that closed its tab leaves this way, so the indicator has to
+        // follow it down. Reported only on an actual drop: this is the output
+        // hot path and the common case must stay a single bool test.
+        if (dropped) self.publishObservers();
     }
 
     fn processPtyOutput(self: *Pod, data: []const u8) void {

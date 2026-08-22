@@ -14,6 +14,7 @@ pub const runPodNew = @import("pod_new.zig").runPodNew;
 pub const runPodAttach = @import("pod_attach.zig").runPodAttach;
 pub const runPodRecord = @import("pod_record.zig").runPodRecord;
 pub const runPodKill = @import("pod_kill.zig").runPodKill;
+pub const runPodShare = @import("pod_share.zig").runPodShare;
 pub const runPodGc = @import("pod_gc.zig").runPodGc;
 pub const runRecordStart = @import("record_ctl.zig").runRecordStart;
 pub const runRecordStop = @import("record_ctl.zig").runRecordStop;

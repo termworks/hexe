@@ -335,6 +335,19 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     setOptStr(lua, "exit_key", state.paneExitKey(pane));
     setOptStr(lua, "title", if (is_float) state.paneFloatTitle(pane) else null);
 
+    // Who is watching this pane, straight from the pod that holds their
+    // sockets. `shared` is the question a privacy indicator actually asks, and
+    // deriving it from a count every caller would get subtly wrong on the
+    // blocked-with-zero-observers case is worse than answering it here.
+    {
+        const proc = state.getPaneProc(pane.uuid);
+        const observers: i64 = if (proc) |p| @intCast(p.observers) else 0;
+        const blocked = if (proc) |p| p.share_blocked else false;
+        setInt(lua, "observers", observers);
+        setBool(lua, "shared", observers > 0);
+        setBool(lua, "share_blocked", blocked);
+    }
+
     // Where this pane's bytes can be read: the pod socket, which serves
     // scrollback and the live stream to an observer (docs/streaming.md).
     //
@@ -1082,6 +1095,49 @@ fn hexe_rename(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// Read or change who may watch a pane: `share(sel)`, `share(sel, false)`.
+///
+/// Goes to the pod rather than to whatever opened the observers, so it still
+/// works when that program is hung -- the case a stop button exists for. The
+/// answer is the pod's own state after the change, not an echo of the request,
+/// so a caller that is refused finds out.
+fn hexe_share(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    // `share(false)` acts on the focused pane; `share(sel, false)` names one.
+    const has_selector = lua.typeOf(1) != .boolean;
+    const enable_idx: i32 = if (has_selector) 2 else 1;
+    const cmd: core.wire.PodShareCmd = switch (lua.typeOf(enable_idx)) {
+        .boolean => if (lua.toBoolean(enable_idx)) .allow else .block,
+        else => .query,
+    };
+
+    const pane = resolvePane(lua, state, if (has_selector) 1 else 3) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    const status = core.pod_share.requestLogged(state.allocator, pane.uuid[0..], cmd) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    // Do not wait for the pod's uplink to come back around: a button whose
+    // label updates on the next event tick reads as a button that did nothing.
+    state.setPaneObservers(pane.uuid, status.observers, status.blocked);
+    state.needs_render = true;
+
+    lua.createTable(0, 3);
+    setInt(lua, "observers", @intCast(status.observers));
+    setBool(lua, "shared", status.observers > 0);
+    setBool(lua, "blocked", status.blocked);
+    return 1;
+}
+
 fn hexe_rename_tab(lstate: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(lstate orelse return 0);
     const state = liveState(lua) orelse {
@@ -1474,6 +1530,7 @@ const ENTRIES = [_]Entry{
     .{ .name = "tab_select", .func = hexe_tab_select },
     .{ .name = "rename_tab", .func = hexe_rename_tab },
     .{ .name = "rename", .func = hexe_rename },
+    .{ .name = "share", .func = hexe_share },
     .{ .name = "geometry", .func = hexe_geometry },
     .{ .name = "ratio", .func = hexe_ratio },
     .{ .name = "close", .func = hexe_close },

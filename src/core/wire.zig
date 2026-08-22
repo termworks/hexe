@@ -68,6 +68,32 @@ pub const POD_HANDSHAKE_SHP_CTL: u8 = 0x02;
 pub const POD_HANDSHAKE_AUX_INPUT: u8 = 0x03;
 /// Sent by CLI tools for auxiliary output tap (observe-only, no replace).
 pub const POD_HANDSHAKE_AUX_OBSERVER: u8 = 0x04;
+/// Sent by a CLI tool or frontend to POD to manage who may watch this pane (⑥).
+/// Followed by one `PodShareCmd` byte; the pod answers with `PodShareStatus`.
+///
+/// This is on the pod socket rather than the session API because it is about
+/// the pod's own observer list, and because it has to work when the thing that
+/// opened those observers has stopped answering. A kill switch routed through
+/// the process it kills is not a kill switch.
+pub const POD_HANDSHAKE_AUX_CONTROL: u8 = 0x05;
+
+pub const PodShareCmd = enum(u8) {
+    /// Report the current state without changing it.
+    query = 0,
+    /// Permit observers again. Does not reconnect anyone; they must come back.
+    allow = 1,
+    /// Disconnect every observer and refuse new ones until `allow`.
+    block = 2,
+    _,
+};
+
+/// The pod's answer on the control channel: who is watching, and whether new
+/// observers are being refused.
+pub const PodShareStatus = extern struct {
+    observers: u16 align(1),
+    blocked: u8 align(1),
+    _reserved: u8 align(1) = 0,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Control message types — carried inside ControlHeader on channels ①④⑤.
@@ -154,6 +180,7 @@ pub const MsgType = enum(u16) {
     // 0x0406 (query_state) reserved — removed 2026-04, never implemented.
     // 0x0407 (pod_register) reserved — removed 2026-04, POD registration
     // happens via the initial handshake instead.
+    observers_changed = 0x0408,
 
     // Channel ⑤ — SHP → POD control
     shp_shell_event = 0x0500,
@@ -766,6 +793,19 @@ pub const FgChanged = extern struct {
 pub const Exited = extern struct {
     uuid: [32]u8 align(1),
     status: i32 align(1),
+};
+
+/// ObserversChanged: the set of programs watching this pane's output changed,
+/// or the pane started/stopped refusing them.
+///
+/// Edge-triggered from the pod, which is the only process that knows: the
+/// observer list lives in its memory and nothing else could see it. Without
+/// this, hexe cannot honestly tell a user their pane is being watched.
+pub const ObserversChanged = extern struct {
+    uuid: [32]u8 align(1),
+    count: u16 align(1),
+    blocked: u8 align(1),
+    _reserved: u8 align(1) = 0,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

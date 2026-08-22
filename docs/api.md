@@ -63,11 +63,25 @@ drift out of step with the first.
 | screen | `line`, `cursor_line`, `screen_text`, `find`, `selection`, `selection_range` |
 | act | `act`, `send`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`, `rename`, `notify` |
 | place | `geometry`, `ratio` |
+| share | `share` |
 
 A pane record carries what you would expect to have to ask several commands
 for: `uuid`, `name`, geometry, `cwd`, `process`, `alive`, `alt_screen`, cursor
 position and shape, `scrolled`, `last_command`, `jobs`, plus float attributes
-(`per_cwd`, `sticky`, `visible`, `visible_tabs`, size percentages).
+(`per_cwd`, `sticky`, `visible`, `visible_tabs`, size percentages), and who is
+watching it (`observers`, `shared`, `share_blocked`).
+
+`share([selector] [, enable])` reads whether a pane is being watched, and cuts
+it off when given `false`:
+
+```console
+$ hexe api share '"904dd85…"'          -> {"observers":2,"shared":true,"blocked":false}
+$ hexe api share '"904dd85…"' false    -> {"observers":0,"shared":false,"blocked":true}
+```
+
+It talks to the pod rather than to whatever opened those observers, so it still
+works when that program is hung — which is the situation a stop button is for.
+See [streaming.md](streaming.md).
 
 See [keybindings.md](keybindings.md) for the same API as it appears to Lua, and
 for what `act` accepts.

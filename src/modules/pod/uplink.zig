@@ -22,6 +22,12 @@ pub const PodUplink = struct {
     /// Set when the cache is updated, cleared only after both uplink messages
     /// are written, so a failed send is retried on the next tick.
     send_pending: bool = false,
+    /// Last observer count delivered to SES, so the report is edge-triggered.
+    /// Null until the first send, which is what makes a pod with zero observers
+    /// still announce zero once: otherwise "never watched" and "never reported"
+    /// look identical from the outside.
+    last_observers: ?u16 = null,
+    last_blocked: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, uuid: [32]u8) PodUplink {
         return .{ .allocator = allocator, .uuid = uuid };
@@ -173,6 +179,34 @@ pub const PodUplink = struct {
 
         self.fd = fd;
         return true;
+    }
+
+    /// Report who is watching this pane, if it changed since the last report.
+    ///
+    /// Compare-and-send rather than fire-on-every-mutation: the callers are the
+    /// accept path, the drop-on-stall path and the kill switch, and making this
+    /// idempotent means none of them has to know whether the others already
+    /// reported. A failed send leaves the cache untouched, so the next tick
+    /// retries instead of stranding SES on a stale count -- the same hazard
+    /// `send_pending` exists for above.
+    pub fn publishObservers(self: *PodUplink, count: u16, blocked: bool) void {
+        if (self.last_observers) |prev| {
+            if (prev == count and self.last_blocked == blocked) return;
+        }
+        if (!self.ensureConnected()) return;
+
+        const msg: wire.ObserversChanged = .{
+            .uuid = self.uuid,
+            .count = count,
+            .blocked = @intFromBool(blocked),
+        };
+        wire.writeControlMsgTimeout(self.fd.?, .observers_changed, std.mem.asBytes(&msg), &.{}, UPLINK_WRITE_TIMEOUT_MS) catch |err| {
+            log.warn("failed to send observers_changed uplink message: {}", .{err});
+            self.disconnect();
+            return;
+        };
+        self.last_observers = count;
+        self.last_blocked = blocked;
     }
 
     pub fn disconnect(self: *PodUplink) void {

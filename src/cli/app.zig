@@ -513,10 +513,18 @@ pub fn main() !void {
     try pod_kill.addArg(Arg.singleValueOption("signal", 's', null));
     try pod_kill.addArg(Arg.booleanOption("force", 'f', null));
 
+    var pod_share = app.createCommand("share", "Show or cut the observers watching a pane");
+    try pod_share.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try pod_share.addArg(Arg.singleValueOption("name", 'n', null));
+    try pod_share.addArg(Arg.singleValueOption("socket", 's', null));
+    try pod_share.addArg(Arg.booleanOption("on", null, null));
+    try pod_share.addArg(Arg.booleanOption("off", null, null));
+    try pod_share.addArg(Arg.booleanOption("json", null, null));
+
     var pod_gc = app.createCommand("gc", "Garbage-collect stale pod metadata");
     try pod_gc.addArg(Arg.booleanOption("dry-run", 'n', null));
 
-    try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_record, pod_kill, pod_gc });
+    try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_record, pod_kill, pod_share, pod_gc });
 
     // MUX subcommands
     var mux_new = app.createCommand("new", "Create new terminal session");
@@ -1103,6 +1111,18 @@ pub fn main() !void {
                 m.getSingleValue("name") orelse "",
                 m.getSingleValue("signal") orelse "",
                 m.containsArg("force"),
+            );
+            return;
+        }
+        if (pod_matches.subcommandMatches("share")) |m| {
+            try cli_cmds.runPodShare(
+                allocator,
+                m.getSingleValue("uuid") orelse "",
+                m.getSingleValue("name") orelse "",
+                m.getSingleValue("socket") orelse "",
+                m.containsArg("on"),
+                m.containsArg("off"),
+                m.containsArg("json"),
             );
             return;
         }

@@ -119,6 +119,33 @@ pub fn handleBinaryFgChanged(self: *Server, fd: posix.fd_t, payload_len: u32, bu
     forwardToOwningMux(self, fc.uuid, .fg_changed, std.mem.asBytes(&fc), buf[0..fc.name_len]);
 }
 
+/// Record who is watching a pane, and pass it on to the frontend showing it.
+///
+/// SES keeps a copy so a pane that is detached, or attached to a frontend that
+/// has not started yet, still reports its true state when someone asks. The
+/// forward is what makes the on-screen indicator live rather than polled.
+pub fn handleBinaryObserversChanged(self: *Server, fd: posix.fd_t, payload_len: u32) void {
+    if (payload_len < @sizeOf(wire.ObserversChanged)) {
+        self.skipPayloadRest();
+        core.logging.warnWithSource("ses", "observers_changed payload too small: fd={d} len={d}", .{ fd, payload_len }, @src());
+        return;
+    }
+    const oc = self.readPayloadStruct(wire.ObserversChanged) catch |err| {
+        self.ctlStreamDesynced(fd, "mid-message read failed");
+        core.logging.warnWithSource("ses", "observers_changed read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
+        return;
+    };
+
+    if (self.ses_state.store.panes.getPtr(oc.uuid)) |pane| {
+        ses.debugLog("observers_changed: uuid={s} count={d} blocked={d}", .{ oc.uuid[0..8], oc.count, oc.blocked });
+        pane.observers = oc.count;
+        pane.share_blocked = oc.blocked != 0;
+        self.ses_state.markDirty();
+    }
+
+    forwardToOwningMux(self, oc.uuid, .observers_changed, std.mem.asBytes(&oc), &.{});
+}
+
 pub fn handleBinaryShellEvent(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
     if (payload_len < @sizeOf(wire.ShpShellEvent)) {
         self.skipPayloadRest();

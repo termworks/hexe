@@ -89,8 +89,11 @@ makes read-only sharing the default rather than a mode you have to ask for.
 
 ## What the pod will not send you
 
-Three limits, and each exists because of the failure it prevents:
+Four limits, and each exists because of the failure it prevents:
 
+- **A blocked pane refuses you outright.** Someone said "stop sharing" (see
+  below) and the pane stays shut until they say otherwise. Reconnecting does not
+  get you back in; that is the whole point of it.
 - **Password prompts are not broadcast.** When the pod detects one it stops
   sending output entirely and emits a `password_mode` frame carrying `1`, then
   another carrying `0` when the prompt is gone. Those two are written directly
@@ -125,6 +128,69 @@ a fork loop with a delay, and one that wants to survive its own crashes knows
 how to better than hexe does. Declare as many as you like; each is started once,
 in the order declared.
 
+## Knowing you are shared
+
+A pane being watched is a privacy state, so hexe reports it rather than leaving
+it to the program doing the watching. The pod owns the observer sockets and is
+the only process that can see them; it pushes the count up through SES, and from
+there it is readable everywhere something might want to draw it:
+
+```console
+$ hexe api panes
+{"uuid":"2c88beab…","observers":2,"shared":true,"share_blocked":false, …}
+```
+
+| where | what you get |
+| --- | --- |
+| the pane record | `observers`, `shared`, `share_blocked` |
+| the `pane_observers_changed` event | fires on connect and disconnect, so a painter repaints instead of polling |
+| a decor slot's context | the same three, plus `pane_uuid` |
+| `hexe pod share` | the same answer with no frontend in the path |
+
+### The pane keeps rendering
+
+Deliberately. You are typing into something other people are reading, and the
+way that goes wrong is showing them too much — which you cannot catch if hexe
+has blanked the pane to tell you it is shared. Blanking would also save nothing:
+the pod broadcasts to the frontend and to observers independently.
+
+So the content stays and the frame changes. `contrib/painter.py` ships a `share`
+view that draws `● LIVE 2` on the pane's border and nothing at all when nobody
+is watching — an indicator that is always there is one nobody reads:
+
+```lua
+hexe.status.socket = "/run/user/1000/painter.sock"
+hexe.decor.top = { right = "share" }
+```
+
+(`right` rather than `end` because `end` is a Lua keyword and cannot be written
+as a key; both spellings mean the same slot.)
+
+The one thing hexe does hide is the opposite direction: during a password prompt
+the pod stops broadcasting entirely, so viewers see nothing while you still do.
+
+### Stopping
+
+```console
+$ hexe pod share -u 2c88beab… --off      # drop everyone, refuse new ones
+$ hexe pod share -u 2c88beab… --on       # allow again
+$ hexe api share '"2c88beab…"' false     # the same, from Lua or a keybind
+```
+
+Two properties this depends on, both load-bearing:
+
+- **It goes to the pod, not to the streamer.** A kill switch routed through the
+  process it is killing stops working exactly when you need it — when that
+  process is wedged. `hexe pod share` needs no frontend either, so a detached
+  session can still be cut.
+- **Blocking outlasts the drop.** Disconnecting observers alone loses the race
+  against a reconnect: whatever opened them opens them again while you are
+  reading the notification, and "stop sharing" silently did not. The pane stays
+  closed until someone says `--on`.
+
+The `share` view in the reference painter wires the click through, so the badge
+is also the button: left-click stops, right-click resumes.
+
 ## Recording, without writing anything
 
 `hexe pod attach` is an observer already, and `--record` writes
@@ -137,3 +203,31 @@ $ hexe pod attach --name victor --record /tmp/session.cast
 Useful on its own, and useful as a reference implementation: it is the same
 handshake, the same frames and the same password-mode rule a streaming plugin
 needs.
+
+## The whole thing, put together
+
+A streamer, a badge that says it is on, a button that stops it, and a QR code to
+join from a phone — the pieces above, assembled:
+
+```lua
+hexe.status.socket = "/run/user/1000/painter.sock"
+hexe.decor.top = { right = "share" }              -- ● LIVE, click to stop
+hexe.plugin("share", { command = "my-streamer --port 8080" })
+```
+
+The streamer does the rest with what it was handed. On start it reads
+`HEXE_API_SOCKET`, calls `panes`, and connects to a pane's `pod_socket` as an
+observer; to show the join link it runs
+
+```sh
+hexe mux float -c "qrencode -t UTF8 http://$(hostname):8080/; read" --title "scan to join"
+```
+
+which is a transient float — a QR code is cells like anything else. Everything
+after that is the streamer's own business: hexe's side is the bytes, the count,
+and the switch.
+
+Four things hexe guarantees it, so it does not have to arrange them itself:
+the stream keeps flowing while you work, the badge is true because it comes from
+the pod rather than from the streamer, the stop button works even if the
+streamer is wedged, and a password prompt is never broadcast.

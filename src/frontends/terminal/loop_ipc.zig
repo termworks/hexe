@@ -184,6 +184,9 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
         .fg_changed => {
             handlePodFgChanged(state, fd, ctl_event.payload_len, buffer);
         },
+        .observers_changed => {
+            handlePodObserversChanged(state, fd, ctl_event.payload_len, buffer);
+        },
         .send_keys => {
             handleSendKeys(state, fd, ctl_event.payload_len, buffer);
         },
@@ -442,6 +445,36 @@ fn handlePodCwdChanged(state: *State, fd: posix.fd_t, payload_len: u32, buffer: 
         lua_events.emit(state, rt, "pane_cwd_changed", &.{
             .{ .name = "pane_uuid", .value = .{ .uuid = cc.uuid } },
             .{ .name = "cwd", .value = .{ .str = cwd } },
+        });
+    }
+    state.needs_render = true;
+}
+
+/// Somebody started or stopped watching a pane's output.
+///
+/// This is the only way the frontend can know: the observer sockets are open in
+/// the pod, so a "this pane is being shared" indicator drawn from anything else
+/// would be a guess. Emitting the Lua event means a painter repaints on the
+/// change rather than polling for it.
+fn handlePodObserversChanged(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(core.wire.ObserversChanged)) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+    const oc = core.wire.readStruct(core.wire.ObserversChanged, fd) catch |err| {
+        core.logging.logError("terminal", "failed to read observers_changed", err);
+        return;
+    };
+    const trail = payload_len - @sizeOf(core.wire.ObserversChanged);
+    if (trail > 0) skipPayload(fd, trail, buffer);
+
+    const blocked = oc.blocked != 0;
+    state.setPaneObservers(oc.uuid, oc.count, blocked);
+    if (state.config._lua_runtime) |rt| {
+        lua_events.emit(state, rt, "pane_observers_changed", &.{
+            .{ .name = "pane_uuid", .value = .{ .uuid = oc.uuid } },
+            .{ .name = "observers", .value = .{ .int = @intCast(oc.count) } },
+            .{ .name = "blocked", .value = .{ .boolean = blocked } },
         });
     }
     state.needs_render = true;

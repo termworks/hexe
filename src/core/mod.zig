@@ -21,6 +21,7 @@ pub const palette = @import("palette.zig");
 pub const regions = @import("regions.zig");
 pub const pod_protocol = @import("pod_protocol.zig");
 pub const pod_meta = @import("pod_meta.zig");
+pub const pod_share = @import("pod_share.zig");
 pub const lua_runtime = @import("lua_runtime.zig");
 pub const config_builder = @import("config_builder.zig");
 pub const api_bridge = @import("api_bridge.zig");

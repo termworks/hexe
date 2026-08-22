@@ -207,10 +207,63 @@ def view_title(req):
             "width": len(text), "next_frame_ms": None}
 
 
+def view_share(req):
+    """A pane's share state, for a decor slot: "● LIVE 2", and a click to stop.
+
+    Drawn on the border rather than over the pane on purpose. A shared pane must
+    keep rendering -- you are typing into something other people are reading,
+    and the way that goes wrong is showing them too much, which you cannot catch
+    if hexe has blanked the pane to tell you it is shared. So the content stays
+    and the frame changes.
+
+    Nothing is drawn when nobody is watching: an indicator that is always
+    present is one nobody looks at, and this one has to be noticed.
+    """
+    vals = (req.get("context", {}) or {}).get("values", {}) or {}
+    uuid = vals.get("pane_uuid") or ""
+    observers = int(vals.get("observers") or 0)
+    blocked = bool(vals.get("share_blocked"))
+
+    if blocked:
+        text = " ⏻ sharing off "
+        style = "dim fg:7"
+    elif observers > 0:
+        text = f" ● LIVE {observers} " if observers > 1 else " ● LIVE "
+        style = "bold fg:1"      # red: this is a privacy state, not a status
+    else:
+        return {"mode": "run", "runs": [], "width": 0, "next_frame_ms": None}
+
+    # The button names its own pane. `HEXE_PANE_UUID` in a decor action's
+    # environment is the FOCUSED pane, which is not necessarily this one -- a
+    # badge on an unfocused pane would otherwise stop the wrong stream.
+    hexe = "${HEXE_BIN:-hexe}"
+    actions = {}
+    if uuid:
+        actions = {
+            "left": f"{hexe} pod share -u {uuid} --off",
+            "right": f"{hexe} pod share -u {uuid} --on",
+        }
+
+    return {
+        "mode": "run",
+        "runs": [{"text": text, "style": style}],
+        "width": len(text),
+        # Repainted when hexe says the count changed, not on a timer: the
+        # frontend re-renders on `observers_changed`, so polling here would only
+        # add latency of its own.
+        "next_frame_ms": None,
+        "regions": [{
+            "id": "share", "x": 0, "y": 0, "width": len(text), "height": 1,
+            "actions": actions, "hover_style": "bold fg:15",
+        }] if actions else [],
+    }
+
+
 VIEWS = {
     "status": view_status,
     "float.title": view_title,
     "container.title": view_title,
+    "share": view_share,
 }
 
 

@@ -41,6 +41,11 @@ pub const PaneProcInfo = struct {
     shell_pid: ?i32 = null,
     ses_state: u8 = 0,
     created_at: i64 = 0,
+    /// Programs watching this pane's output, and whether it is refusing them.
+    /// Pushed up from the pod (which owns the observer list) via SES, because
+    /// nothing on this side can see a socket in another process.
+    observers: u16 = 0,
+    share_blocked: bool = false,
 
     pub fn deinit(self: *PaneProcInfo, allocator: std.mem.Allocator) void {
         if (self.name) |n| allocator.free(n);
@@ -720,6 +725,21 @@ pub const SessionProjection = struct {
             if (shell_pid) |v| e.shell_pid = v;
             e.ses_state = ses_state;
             if (created_at != 0) e.created_at = created_at;
+        }
+    }
+
+    pub fn setPaneObservers(self: *SessionProjection, uuid: [32]u8, observers: u16, blocked: bool) void {
+        var entry = self.pane_proc.getPtr(uuid);
+        if (entry == null) {
+            self.pane_proc.put(uuid, .{}) catch |err| {
+                logging.logError("session_projection", "failed to allocate pane process metadata", err);
+                return;
+            };
+            entry = self.pane_proc.getPtr(uuid);
+        }
+        if (entry) |e| {
+            e.observers = observers;
+            e.share_blocked = blocked;
         }
     }
 
