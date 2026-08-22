@@ -48,11 +48,14 @@ base_env.update({"HEXE_INSTANCE": INST, "XDG_STATE_HOME": os.path.join(SCRATCH, 
 base_env.pop("HEXE_SESSION", None)
 base_env.pop("HEXE_PANE_UUID", None)
 os.makedirs(base_env["XDG_STATE_HOME"], exist_ok=True)
+# Assignment style: declaring the layout registers it, and the file returns
+# nothing. The host has to find it on the module table rather than on a
+# returned value.
 LAYOUT_LUA = """local hexe = require("hexe")
-return hexe.setup({ ses = { layouts = { hexe.layout("%s", {
+hexe.layout("%s", {
   root = "%s",
   tabs = { hexe.tab("%s", { root = hexe.pane() }) },
-}) } } })
+})
 """
 
 procs = []

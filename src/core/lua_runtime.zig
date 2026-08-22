@@ -518,8 +518,21 @@ pub const LuaRuntime = struct {
     }
 
     fn applyReturnedConfig(self: *Self) !void {
-        if (self.lua.typeOf(-1) != .table) return;
-        if (!std.mem.eql(u8, self.getString(-1, "__hexe_type") orelse "", "config")) return;
+        const returned_config = self.lua.typeOf(-1) == .table and
+            std.mem.eql(u8, self.getString(-1, "__hexe_type") orelse "", "config");
+
+        // A file in the assignment style returns nothing, so what the chunk left
+        // on the stack is not the config -- the settings are on the module
+        // table. `__finish` collects and validates them into the same shape
+        // `setup` produces, so everything below reads one thing either way.
+        //
+        // Pushed alongside rather than replacing: whatever the chunk returned
+        // stays where it is, because other readers (a plain returned table of
+        // session layouts) still expect to find it there.
+        if (!returned_config) {
+            if (!self.pushFinishedModuleConfig()) return;
+        }
+        defer if (!returned_config) self.lua.pop(1);
 
         try self.applyMuxConfigV2();
         try self.applyKeysConfigV2();
@@ -529,6 +542,36 @@ pub const LuaRuntime = struct {
         try self.applyDecorConfigV2();
         try self.applyPopConfigV2();
         try self.applySesConfigV2();
+    }
+
+    /// Push what the config assigned to the `hexe` module, validated.
+    ///
+    /// Returns false when there is nothing to apply, having left the stack as
+    /// it found it -- an empty config is a legitimate thing to write.
+    pub fn pushFinishedModuleConfig(self: *Self) bool {
+        if (self.lua.getGlobal("hexe") catch {
+            return false;
+        } != .table) {
+            self.lua.pop(1);
+            return false;
+        }
+        if (self.lua.getField(-1, "__finish") != .function) {
+            self.lua.pop(2);
+            return false;
+        }
+        // A raise here is a real config error -- a typo the validator caught --
+        // so it is reported the same way a bad `setup` call is.
+        self.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+            const msg = self.getErrorMessage();
+            self.last_error = self.allocator.dupe(u8, msg) catch null;
+            log.warn("config error: {s}", .{msg});
+            self.lua.pop(2);
+            return false;
+        };
+        // Leaves the produced config on top; the module table below it is
+        // harmless and goes when the caller unwinds.
+        self.lua.remove(-2);
+        return true;
     }
 
     fn getOrCreateMuxBuilder(self: *Self) !*config_builder.MuxConfigBuilder {
@@ -1189,8 +1232,14 @@ fn setupUnsafeRequire(lua: *Lua, allocator: std.mem.Allocator) !void {
 
     const path = std.fmt.allocPrint(
         allocator,
-        "{s}/lua/?.lua;{s}/lua/?/init.lua;./.hexe/lua/?.lua;./.hexe/lua/?/init.lua",
-        .{ config_dir, config_dir },
+        // The config directory itself is on the path, not only its `lua/`
+        // subdirectory, so a fragment beside init.lua is `require("layout")`.
+        //
+        // The verb matters now that declarations register themselves: `require`
+        // loads a file once however many times it is named, while `dofile` runs
+        // it again and registers a second copy of every key and layout in it.
+        "{s}/?.lua;{s}/?/init.lua;{s}/lua/?.lua;{s}/lua/?/init.lua;./.hexe/lua/?.lua;./.hexe/lua/?/init.lua",
+        .{ config_dir, config_dir, config_dir, config_dir },
     ) catch |err| {
         log.warn("failed to allocate Lua package.path: {}", .{err});
         return;
@@ -1281,10 +1330,14 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.split=hexe.split or function(dir, children, opts) if type(dir)=='string' then local t=opts or {}; t.dir=dir; if type(children)=='table' then for i,v in ipairs(children) do t[i]=v end end; return mark(t,'split') end; return mark(dir,'split') end; " ++
         "hexe.tab=hexe.tab or function(name, spec) return named('tab', name, spec) end; " ++
         "hexe.float=hexe.float or function(name, spec) return named('float', name, spec) end; " ++
-        "hexe.layout=hexe.layout or function(name, spec) return named('layout', name, spec) end; " ++
+        // A registrar, like `hexe.key`: declaring a layout adds it. It still returns
+        // the layout so `setup{ ses = { layouts = { hexe.layout(...) } } }` reads
+        // the same, and that spelling wins when a config uses it -- the module's
+        // list is only read when the file returns nothing.
+        "hexe.layout=hexe.layout or function(name, spec) local l=named('layout', name, spec); local t=rawget(hexe,'ses'); if type(t)=='table' then local ls=rawget(t,'layouts'); if type(ls)~='table' then ls={}; t.layouts=ls end; ls[#ls+1]=l end; return l end; " ++
         "local function keybinding(keys, act, opts) local t={key=keys, action=act}; if type(opts)=='table' then for k,v in pairs(opts) do t[k]=v end end; return mark(t,'keybinding') end; " ++
         "hexe.keybinding=hexe.keybinding or keybinding; " ++
-        "if type(hexe.key)=='table' and getmetatable(hexe.key)==nil then setmetatable(hexe.key,{__call=function(_, keys, act, opts) return keybinding(keys, act, opts) end}) end; " ++
+        "if type(hexe.key)=='table' and getmetatable(hexe.key)==nil then setmetatable(hexe.key,{__call=function(_, keys, act, opts) local b=keybinding(keys, act, opts); hexe.keys[#hexe.keys+1]=b; return b end}) end; " ++
         "if hexe.keymap==nil then hexe.keymap={set=keybinding}; setmetatable(hexe.keymap,{__call=function(_, list) return mark(list,'keymap') end}) elseif type(hexe.keymap)=='table' and hexe.keymap.set==nil then hexe.keymap.set=keybinding end; " ++
         "if type(hexe.action)=='table' then " ++
         "hexe.action.quit=hexe.action.quit or function() return action('mux.quit') end; " ++
@@ -1301,7 +1354,37 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.action.layout=hexe.action.layout or {}; hexe.action.layout.save=hexe.action.layout.save or function(o) return action('layout.save',o) end; hexe.action.layout.load=hexe.action.layout.load or function(o) return action('layout.load',o) end; " ++
         "end; " ++
         "hexe.setup=function(cfg) hexe.validate(cfg); rawset(cfg,'__hexe_type','config'); __theme_styles=(type(cfg.theme)=='table' and type(cfg.theme.styles)=='table') and cfg.theme.styles or {}; return cfg end; " ++
-        "hexe.mux=nil; hexe.ses=nil; hexe.shp=nil; hexe.pop=nil; " ++
+        // Assignment style: the settings live on the module table and the file
+        // returns nothing. `hexe.mux.confirm.exit = true` has to work without
+        // the config first building the tables above it, so each namespace
+        // creates its children on the way down.
+        //
+        // The module table itself is deliberately NOT auto-creating: `hexe.mxu`
+        // stays nil, so a mistyped namespace raises at load time instead of
+        // quietly collecting settings nothing will ever read.
+        "local function __ns() local mt; mt={__index=function(t,k) local v=setmetatable({},mt); rawset(t,k,v); return v end}; return setmetatable({},mt) end; " ++
+        "hexe.mux=__ns(); hexe.ses=__ns(); hexe.pop=__ns(); hexe.status=__ns(); hexe.palette=__ns(); hexe.names=__ns(); hexe.decor=__ns(); hexe.keys={}; hexe.shp=nil; " ++
+        // Assemble what the config assigned, validate it exactly as `setup`
+        // would have, and hand it back for the host to read. Same validator, so
+        // a typo inside a namespace is still caught and still names its path.
+        // Auto-creation has to stop before anything reads the config, or the
+        // reader makes what it is looking for: the validator probes
+        // `mux.mouse.selection_override[1]`, which vivified an empty table and
+        // was then rejected for being one. Stripped depth-first, tracking what
+        // has been seen so a table referenced twice cannot loop.
+        "local function __solid(t, seen) if type(t)~='table' then return t end; seen=seen or {}; if seen[t] then return t end; seen[t]=true; setmetatable(t,nil); for _,v in pairs(t) do __solid(v, seen) end; return t end; " ++
+        // `hexe.on.<noun>(fn)` beside the existing `hexe.events.on("<noun>", fn)`.
+        // The noun is the name of the thing that happened, which is what the
+        // shared style spells this way in every tool; the older form still
+        // works and both reach the same list.
+        "hexe.on=setmetatable({},{__index=function(_,name) return function(fn) return hexe.events.on(name, fn) end end}); " ++
+        // What the module carried before the config ran. Anything else on it
+        // afterwards is a setting hexe does not have -- assignment style puts
+        // settings in the same namespace as the API, so without this
+        // `hexe.mxu = {...}` is accepted in silence and simply never read.
+        "local __known={}; for k in pairs(hexe) do __known[k]=true end; " ++
+        "hexe.__finish=function() for k in pairs(hexe) do if type(k)=='string' and k:sub(1,1)~='_' and not __known[k] then error('config error: hexe.'..k..' is not a hexe setting', 2) end end; local cfg={}; for _,k in ipairs({'theme','keys','mux','status','pop','ses','palette','names','decor'}) do local v=rawget(hexe,k); if type(v)=='table' then cfg[k]=__solid(v) end end; " ++
+        "hexe.validate(cfg); __theme_styles=(type(cfg.theme)=='table' and type(cfg.theme.styles)=='table') and cfg.theme.styles or {}; rawset(cfg,'__hexe_type','config'); return cfg end; " ++
         "end";
 
     const z = std.heap.page_allocator.dupeZ(u8, code) catch |alloc_err| {
@@ -1481,6 +1564,165 @@ fn hexeLoader(state: ?*LuaState) callconv(.c) c_int {
     // Return the hexe module from registry
     _ = lua.getField(zlua.registry_index, "_hexe_module");
     return 1;
+}
+
+test "a setting hexe does not have is refused, not ignored" {
+    // The cost of assignment style: settings share a namespace with the API, so
+    // a name hexe never reads looks exactly like one it does. Silence here means
+    // a config that says something and has no effect.
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const code =
+        "local hexe = require('hexe')\n" ++
+        "hexe.mxu = { confirm = { exit = true } }\n" ++
+        "local ok, err = pcall(hexe.__finish)\n" ++
+        "__err = (not ok) and tostring(err) or ''\n";
+
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try runtime.lua.getGlobal("__err");
+    defer runtime.lua.pop(1);
+    const err = try runtime.lua.toString(-1);
+    try std.testing.expect(std.mem.indexOf(u8, err, "mxu") != null);
+}
+
+test "on.<noun> registers the same handler list as events.on" {
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const code =
+        "local hexe = require('hexe')\n" ++
+        "hexe.on.pane_exited(function() end)\n" ++
+        "hexe.events.on('pane_exited', function() end)\n" ++
+        "local h = hexe.__events and hexe.__events.pane_exited\n" ++
+        "__count = (type(h)=='table' and #h) or (h and 1) or 0\n";
+
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try runtime.lua.getGlobal("__count");
+    defer runtime.lua.pop(1);
+    // Both spellings land in one list, and registration repeats.
+    try std.testing.expectEqual(@as(i64, 2), try runtime.lua.toInteger(-1));
+}
+
+test "a fragment loaded twice registers once" {
+    // Rule 4's hazard, made concrete. Declarations register themselves now, so a
+    // fragment run twice contributes twice -- `require` loads it once however
+    // many times it is named, which is why the config uses that verb and not
+    // `dofile`.
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const code =
+        "local hexe = require('hexe')\n" ++
+        "package.loaded['frag'] = nil\n" ++
+        "package.preload['frag'] = function()\n" ++
+        "  hexe.key({ hexe.key.alt, hexe.key.j }, hexe.action.quit())\n" ++
+        "end\n" ++
+        "require('frag'); require('frag'); require('frag')\n" ++
+        "__once = #hexe.keys\n" ++
+        "package.loaded['frag'] = nil\n" ++
+        "require('frag')\n" ++
+        "__twice = #hexe.keys\n";
+
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try runtime.lua.getGlobal("__once");
+    const once = try runtime.lua.toInteger(-1);
+    runtime.lua.pop(1);
+    _ = try runtime.lua.getGlobal("__twice");
+    const twice = try runtime.lua.toInteger(-1);
+    runtime.lua.pop(1);
+
+    // Three `require`s of one fragment: one binding. Loading it again on purpose
+    // is what adds the second, which is exactly the behaviour `dofile` would
+    // have given every time.
+    try std.testing.expectEqual(@as(i64, 1), once);
+    try std.testing.expectEqual(@as(i64, 2), twice);
+}
+
+test "the assignment style produces the same config as setup" {
+    // Both spellings must reach the host identically, or converting a config
+    // silently changes what it does -- which is the one thing a style change
+    // must not do.
+    const assigned =
+        "local hexe = require('hexe')\n" ++
+        "hexe.mux.confirm.exit = true\n" ++
+        "hexe.key({ hexe.key.alt, hexe.key.q }, hexe.action.quit())\n" ++
+        "local cfg = hexe.__finish()\n" ++
+        "__probe = tostring(cfg.mux.confirm.exit) .. ':' .. tostring(#cfg.keys)\n";
+
+    const returned =
+        "local hexe = require('hexe')\n" ++
+        "local cfg = hexe.setup({ mux = { confirm = { exit = true } },\n" ++
+        "  keys = { hexe.key({ hexe.key.alt, hexe.key.q }, hexe.action.quit()) } })\n" ++
+        "__probe = tostring(cfg.mux.confirm.exit) .. ':' .. tostring(#cfg.keys)\n";
+
+    for ([_][]const u8{ assigned, returned }) |code| {
+        var runtime = try LuaRuntime.init(std.testing.allocator);
+        defer runtime.deinit();
+        const z = try std.testing.allocator.dupeZ(u8, code);
+        defer std.testing.allocator.free(z);
+        try runtime.lua.loadString(z);
+        try runtime.lua.protectedCall(.{ .args = 0, .results = 0 });
+
+        _ = try runtime.lua.getGlobal("__probe");
+        defer runtime.lua.pop(1);
+        try std.testing.expectEqualStrings("true:1", try runtime.lua.toString(-1));
+    }
+}
+
+test "a mistyped namespace raises instead of collecting settings nobody reads" {
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    // `hexe.mxu` is nil, so indexing it raises. The alternative -- auto-creating
+    // every name touched -- would accept this file and apply nothing.
+    const code =
+        "local hexe = require('hexe')\n" ++
+        "local ok = pcall(function() hexe.mxu.confirm.exit = true end)\n" ++
+        "__typo_rejected = not ok\n";
+
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try runtime.lua.getGlobal("__typo_rejected");
+    defer runtime.lua.pop(1);
+    try std.testing.expect(runtime.lua.toBoolean(-1));
+}
+
+test "a typo inside a namespace is still caught, with its path" {
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const code =
+        "local hexe = require('hexe')\n" ++
+        "hexe.mux.confirm.exti = true\n" ++
+        "local ok, err = pcall(hexe.__finish)\n" ++
+        "__err = (not ok) and tostring(err) or ''\n";
+
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try runtime.lua.getGlobal("__err");
+    defer runtime.lua.pop(1);
+    const err = try runtime.lua.toString(-1);
+    try std.testing.expect(std.mem.indexOf(u8, err, "exti") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err, "mux.confirm") != null);
 }
 
 test "hexe module exposes prompt action constructors" {

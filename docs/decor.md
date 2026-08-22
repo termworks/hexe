@@ -6,15 +6,12 @@ asks the painter what goes there and puts it where the slot says; it never
 decides the content itself.
 
 ```lua
-return hexe.setup({
-  status = { socket = "/run/user/1000/painter.sock" },
-  decor = {
-    left  = { width = 4, top = "dock.apps", center = "dock.tools", bottom = "dock.sys" },
-    right = { width = 2, center = "dock.notify" },
-    top    = { left = "pane.name", center = "pane.title", right = "pane.status" },
-    bottom = { left = "pane.mode", right = "pane.clock" },
-  },
-})
+hexe.status.socket = "/run/user/1000/painter.sock"
+
+hexe.decor.left   = { width = 4, top = "dock.apps", center = "dock.tools", bottom = "dock.sys" }
+hexe.decor.right  = { width = 2, center = "dock.notify" }
+hexe.decor.top    = { left = "pane.name", center = "pane.title", right = "pane.status" }
+hexe.decor.bottom = { left = "pane.mode", right = "pane.clock" }
 ```
 
 Slots are optional. An edge with no slots set costs nothing and reserves

@@ -288,7 +288,17 @@ fn validateTable(
 /// Only the sections hexe reads are checked; unknown sections are left alone so
 /// a user's own scratch keys do not become errors.
 pub fn validateLoaded(runtime: *LuaRuntime, ctx: *ValidationContext) ValidationError!void {
-    if (runtime.typeOf(-1) != .table) return ctx.failPath("", "config must return a table");
+    // A file in the assignment style returns nothing and leaves its settings on
+    // the module table, so "must return a table" would be the wrong complaint
+    // about a perfectly good config.
+    var pushed_module = false;
+    if (runtime.typeOf(-1) != .table) {
+        if (!runtime.pushFinishedModuleConfig()) {
+            return ctx.failPath("", "config declared no settings");
+        }
+        pushed_module = true;
+    }
+    defer if (pushed_module) runtime.pop();
 
     try validateTable(runtime, ctx, "", &ROOT_FIELDS);
 

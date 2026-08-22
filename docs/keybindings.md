@@ -121,16 +121,29 @@ costing you.
 
 ### Events
 
-Bindings react to keys; `hexe.events` reacts to the session:
+Bindings react to keys; `hexe.on.<event>` reacts to the session:
 
 ```lua
-hexe.events.on("command_finished", function(ev)
+hexe.on.command_finished(function(ev)
   -- ev.command, ev.cwd, ev.status, ev.duration_ms, ev.jobs, ev.pane_uuid
 end)
 
-hexe.events.on("statusbar_redraw", hexe.events.debounce(250, function(ev) … end))
+hexe.on.statusbar_redraw(hexe.events.debounce(250, function(ev) … end))
 hexe.events.once("pane_focus_changed", function(ev) … end)
 ```
+
+Register as often as you like — the config is as many small named handlers as it wants, rather than
+one function that does everything:
+
+```lua
+hexe.on.pane_exited(log_it)
+hexe.on.pane_exited(respawn_if_wanted)
+```
+
+They run in the order they were registered, and **one that raises is reported and the rest still
+run**: a mistake in the third is not a reason to skip the fourth.
+
+`hexe.events.on("<event>", fn)` is the same registrar spelled out, and still works.
 
 Available: `pane_focus_changed`, `tab_changed`, `command_finished`,
 `pane_shell_running_changed`, `statusbar_redraw` (throttled, 120 ms by default).

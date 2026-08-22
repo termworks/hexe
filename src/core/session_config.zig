@@ -414,10 +414,15 @@ pub fn parseSessionLuaOnce(allocator: std.mem.Allocator, path: []const u8) !Pars
 }
 
 fn extractLegacyFromRuntime(allocator: std.mem.Allocator, runtime: *LuaRuntime, path: []const u8) !SessionConfig {
-    // The file should return a table — check top of stack
+    // A file in the assignment style returns nothing and leaves its layouts on
+    // the module table, so what is on the stack is not the config. Same
+    // fallback the main config path takes, or a converted `.hexe.lua` would be
+    // reported as "must return a table" -- true, and useless.
     if (runtime.typeOf(-1) != .table) {
-        std.debug.print("Error: {s} must return a table\n", .{path});
-        return error.LuaError;
+        if (!runtime.pushFinishedModuleConfig()) {
+            std.debug.print("Error: {s} declared no session layout\n", .{path});
+            return error.LuaError;
+        }
     }
 
     var config = SessionConfig{};

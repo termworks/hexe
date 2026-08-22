@@ -137,20 +137,14 @@ Sessions get their initial shape from a layout, which is ordinary config:
 ```lua
 local hexe = require("hexe")
 
-return hexe.setup({
-  ses = {
-    layouts = {
-      hexe.layout("default", {
-        enabled = true,
-        tabs = {
-          hexe.tab("main", { root = hexe.pane({ cwd = "." }) }),
-          hexe.tab("logs", { root = hexe.pane({ command = "journalctl -f" }) }),
-        },
-        floats = {
-          hexe.float("git", { key = "1", command = "lazygit", attrs = { per_cwd = true } }),
-        },
-      }),
-    },
+hexe.layout("default", {
+  enabled = true,
+  tabs = {
+    hexe.tab("main", { root = hexe.pane({ cwd = "." }) }),
+    hexe.tab("logs", { root = hexe.pane({ command = "journalctl -f" }) }),
+  },
+  floats = {
+    hexe.float("git", { key = "1", command = "lazygit", attrs = { per_cwd = true } }),
   },
 })
 ```
