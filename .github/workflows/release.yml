@@ -74,9 +74,12 @@ jobs:
         # build.zig.zon points at vendor/ghostty, which is generated rather than
         # committed: it is upstream ghostty at a pinned revision plus
         # patches/ghostty-vt-ns.patch. Without this the build has no dependency
-        # to resolve. `make ghostty` also gives it its own .git, which keeps
+        # to resolve. The script also gives it its own .git, which keeps
         # ghostty's version detection from walking up and finding OUR tags.
-        run: make ghostty
+        #
+        # The script rather than a build recipe: `.make.lua` needs oslo, which a
+        # runner does not have. The recipe calls this same file.
+        run: scripts/vendor-ghostty.sh
 
       - name: Build binary
         env:

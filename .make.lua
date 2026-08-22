@@ -36,14 +36,9 @@ local TARGET = os.getenv("TARGET") or "x86_64-linux-musl"
 local PREFIX = os.getenv("PREFIX") or "/usr"
 local BIN = "zig-out/bin/hexe"
 
--- ghostty-vt, patched.
---
--- hexe needs one field ghostty does not have: an opaque per-cell tag recording which palette
--- namespace wrote each cell. Rather than maintain a fork, the upstream revision is pinned here and
--- the diff lives in patches/ as a file, so following ghostty is: bump the rev, re-run `make
--- ghostty`, fix the patch if it drifted. vendor/ is generated and not committed.
-local GHOSTTY_REV = os.getenv("GHOSTTY_REV") or "4e17eee5dea3d67aa9b0fec56be7f461c496ffe4"
-local GHOSTTY_URL = os.getenv("GHOSTTY_URL") or "https://github.com/ghostty-org/ghostty"
+-- Where the vendored, patched ghostty lands. The revision and the fetch live in
+-- scripts/vendor-ghostty.sh, which CI runs too -- CI has no oslo, so a pin kept
+-- here as well would be a second copy that goes stale without anyone noticing.
 local GHOSTTY_DIR = "vendor/ghostty"
 
 ---------------------------------------------------------------------------- helpers
@@ -215,17 +210,7 @@ end
 make.recipe{
   name = "ghostty",
   desc = "fetch the pinned ghostty and apply hexe's patch",
-  run = function()
-    oslo.run{ "rm", "-rf", GHOSTTY_DIR }
-    sh.mkdir("-p", GHOSTTY_DIR)
-    local git = function(...) sh.git("-C", GHOSTTY_DIR, ...) end
-    git("init", "-q", ".")
-    git("remote", "add", "origin", GHOSTTY_URL)
-    git("fetch", "-q", "--depth", "1", "origin", GHOSTTY_REV)
-    git("checkout", "-q", "FETCH_HEAD")
-    git("apply", "--whitespace=nowarn", oslo.fs.cwd() .. "/patches/ghostty-vt-ns.patch")
-    print(("ghostty %s + patches/ghostty-vt-ns.patch -> %s"):format(GHOSTTY_REV, GHOSTTY_DIR))
-  end,
+  run = function() sh.bash("scripts/vendor-ghostty.sh") end,
 }
 
 -- Fail with an instruction rather than a compile error a reader cannot place.
