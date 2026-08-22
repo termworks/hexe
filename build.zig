@@ -201,7 +201,7 @@ pub fn build(b: *std.Build) void {
         // Zig's per-module strip flag would leave dependency debug info in
         // the link, and `zig objcopy --strip-*` is unimplemented in 0.15, so
         // run the system `strip` on the finished binary (~78MB -> ~22MB).
-        // Fine for native builds (make build, CI); build without -Dstrip if
+        // Fine for native builds (`make build`, CI); build without -Dstrip if
         // no `strip` is available for the target.
         const strip_cmd = b.addSystemCommand(&.{ "strip", "-o" });
         const stripped_bin = strip_cmd.addOutputFileArg("hexe");

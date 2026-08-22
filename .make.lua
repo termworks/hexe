@@ -1,13 +1,14 @@
--- hexe's build, as recipes.
---
--- The `Makefile` beside this file still works and still ships — CI calls it, and a checkout
--- without oslo's `make` feature needs it. This is the same build written in the language the
--- rest of hexe's configuration is written in.
+-- hexe's build, as recipes. This file replaced the Makefile; there is no other.
 --
 --   make                 the recipes, with what each of them says it does
 --   make build           the static release binary
 --   make install         that binary, everywhere hexe is on $PATH
 --   make smoke           the live end-to-end suite
+--
+-- At an oslo prompt in this directory `make` is the builtin and reads this file. Anywhere else,
+-- `oslo make <recipe>` does the same thing, and the two commands a checkout needs without oslo at
+-- all are `scripts/vendor-ghostty.sh` and `zig build` — which is exactly what CI runs, so nothing
+-- here is on the release path.
 --
 -- The parts worth reading are the ones the Makefile could not say plainly: the smoke runner is a
 -- loop with a tally instead of a `define` full of `$$` and backslashes, and `install` covers every
