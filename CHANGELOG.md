@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.6] - 2026-08-22
+
+### <!-- 0 -->⛰️  Features
+
+- Convert shipped examples and layout save
+- Assign settings, register behaviour, return nothing
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Pane environment in a memfd, not a world-readable /tmp file
+
+### <!-- 3 -->📚 Documentation
+
+- The Makefile is gone; name the two commands it hid
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Vendor ghostty from a script, not the Makefile
+
 ## [0.4.5] - 2026-08-21
 
 ### <!-- 1 -->🐛 Bug Fixes
