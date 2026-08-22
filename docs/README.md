@@ -26,6 +26,7 @@ reading twice.
 | [Keybindings](keybindings.md) | no prefix: chords, conditions, and what happens to the key afterwards |
 | [Reading what already happened](copy-and-search.md) | scrollback search, copy-mode, OSC 133 prompt marks |
 | [Overlays and popups](overlays.md) | notifications, questions, pickers, keycast, pane labels |
+| [Dictation](dictation.md) | speech to text as a tool hexe drives, and the sign that a mic is open |
 
 ## Appearance
 
@@ -35,6 +36,7 @@ reading twice.
 | [Shell integration](prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
 | [Names](names.md) | where session and pane names come from, and how to bring your own |
 | [Palette protocol](palette.md) | a program claims its own 256-colour table for the output it writes |
+| [Pane decoration](decor.md) | twelve painter-drawn slots around every pane, and buttons in them |
 
 ## Configuring it
 
@@ -49,6 +51,8 @@ reading twice.
 | | |
 |---|---|
 | [The command line](cli.md) | addressing sessions, panes and pods from a script |
+| [The control socket](api.md) | the live query API over a unix socket, for scripts and gateways |
+| [Streaming a pane](streaming.md) | a pane's bytes, who is watching, and how to cut them off |
 | [Recording](recording.md) | hexe writes asciicasts of itself; every film below was made that way |
 
 ## The recordings

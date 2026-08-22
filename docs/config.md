@@ -286,3 +286,15 @@ Tooling:
 | `src/cli/commands/config_validate.zig` | `config check` / `validate` |
 | `src/frontends/terminal/keybinds_actions.zig` | `performConfigReload` |
 | `config/init.lua`, `config/layout.lua` | the author's own config, which is the repo's live example |
+
+## Dictation
+
+`hexe.dictate` names a tool that turns speech into text. hexe starts it, shows
+the pane is listening, and types back what it prints:
+
+```lua
+hexe.dictate = { command = "~/.config/hexe/dictate.sh" }
+```
+
+See [dictation.md](dictation.md) for the tool's contract — it is two lines —
+and for the bars that appear while a microphone is open.

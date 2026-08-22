@@ -58,6 +58,13 @@ fn loopTimerCallback(
         _ = timer_ctx.state.runtime.sendPing();
     }
 
+    // The dictate tool is a child process the render loop owns: drained here so
+    // a tool that never writes cannot park the loop, and reaped here so the
+    // transcript lands as soon as it exits.
+    if (timer_ctx.state.dictation.active()) {
+        @import("dictate.zig").poll(timer_ctx.state);
+    }
+
     timer_ctx.last_fire = std.time.milliTimestamp();
     // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
     timer_ctx.ticker.run(loop, completion, tickDelayMs(), LoopTimerContext, timer_ctx, loopTimerCallback);

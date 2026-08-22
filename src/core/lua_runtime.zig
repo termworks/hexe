@@ -541,6 +541,7 @@ pub const LuaRuntime = struct {
         try self.applyNamesConfigV2();
         try self.applyDecorConfigV2();
         try self.applyPluginsConfigV2();
+        try self.applyDictateConfigV2();
         try self.applyPopConfigV2();
         try self.applySesConfigV2();
     }
@@ -714,6 +715,16 @@ pub const LuaRuntime = struct {
             const name = self.getString(-1, "name") orelse "plugin";
             try mux.appendPlugin(name, command);
         }
+    }
+
+    /// `dictate` — the speech-to-text tool.
+    fn applyDictateConfigV2(self: *Self) !void {
+        if (!self.pushTable(-1, "dictate")) return;
+        defer self.pop();
+
+        const mux = try self.getOrCreateMuxBuilder();
+        if (self.getStringAlloc(-1, "command")) |v| mux.dictate_command = v;
+        if (self.getInt(u32, -1, "timeout_ms")) |v| mux.dictate_timeout_ms = v;
     }
 
     fn applyStatusConfigV2(self: *Self) !void {
@@ -1338,7 +1349,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.validate=hexe.validate or function(cfg) " ++
         "expect_table('config', cfg, false); " ++
         "scan_removed('config', cfg); " ++
-        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true, palette=true, names=true, decor=true, plugins=true }; " ++
+        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true, palette=true, names=true, decor=true, plugins=true, dictate=true }; " ++
         "for k,_ in pairs(cfg) do if type(k)=='string' and k:sub(1,2)~='__' and not allowed[k] then error('config error: '..k..' is not a supported top-level section',2) end end; " ++
         "validate_theme('theme', cfg.theme); " ++
         "validate_keybindings('keys', cfg.keys); " ++
@@ -1347,6 +1358,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "local palette=expect_table('palette', cfg.palette, true); if palette then reject_unknown_fields('palette', palette, { namespaces=true, osc=true }); if palette.namespaces~=nil and type(palette.namespaces)~='boolean' then type_error('palette.namespaces','boolean',type(palette.namespaces)) end; if palette.osc~=nil then if type(palette.osc)~='number' then type_error('palette.osc','number',type(palette.osc)) end; if palette.osc<1 or palette.osc>10000 or palette.osc%1~=0 then error('config error: palette.osc must be integer 1..10000',2) end; local reserved={[0]=true,[1]=true,[2]=true,[4]=true,[5]=true,[7]=true,[9]=true,[99]=true,[104]=true,[105]=true,[133]=true,[777]=true}; if reserved[palette.osc] or (palette.osc>=10 and palette.osc<=19) or (palette.osc>=50 and palette.osc<=59) or (palette.osc>=110 and palette.osc<=119) then error('config error: palette.osc '..palette.osc..' is reserved; hexe already forwards or consumes that OSC',2) end end end; " ++
         "local names=expect_table('names', cfg.names, true); if names then reject_unknown_fields('names', names, { session=true, pane=true, order=true, suffix=true }); for _,k in ipairs({'session','pane'}) do local d=names[k]; if d~=nil then if type(d)=='table' then if #d==0 then error('config error: names.'..k..' is an empty list; omit it to use the built-in pool',2) end; for i,v in ipairs(d) do if type(v)~='string' then type_error('names.'..k..'['..i..']','string',type(v)) end; if not v:match('^[a-z0-9][a-z0-9._%-]*$') then error('config error: names.'..k..'['..i..']=\"'..v..'\" must match [a-z0-9][a-z0-9._-]* -- a name is also a filename and a CLI argument',2) end; if #v>32 then error('config error: names.'..k..'['..i..'] is longer than 32 characters',2) end end elseif type(d)~='string' then type_error('names.'..k,'list of names or hexe.command(...)',type(d)) end end end; if names.order~=nil then if type(names.order)~='string' then type_error('names.order','string',type(names.order)) end; if names.order~='random' and names.order~='sequential' then error('config error: names.order must be \"random\" or \"sequential\"',2) end end; if names.suffix~=nil then if type(names.suffix)~='string' then type_error('names.suffix','string',type(names.suffix)) end; if #names.suffix==0 then error('config error: names.suffix must not be empty',2) end end end; " ++
         "local pop=expect_table('pop', cfg.pop, true); if pop then local notify=expect_table('pop.notify', pop.notify, true); if notify and notify.carrier~=nil then error('config error: pop.notify.carrier is removed; use pop.notify.mux',2) end; local confirm=expect_table('pop.confirm', pop.confirm, true); if confirm and confirm.carrier~=nil then error('config error: pop.confirm.carrier is removed; use pop.confirm.mux',2) end; local choose=expect_table('pop.choose', pop.choose, true); if choose and choose.carrier~=nil then error('config error: pop.choose.carrier is removed; use pop.choose.mux',2) end; expect_table('pop.widgets', pop.widgets, true) end; " ++
+        "local dictate=expect_table('dictate', cfg.dictate, true); if dictate then reject_unknown_fields('dictate', dictate, { command=true, timeout_ms=true }); if dictate.command~=nil then if type(dictate.command)~='string' then type_error('dictate.command','string',type(dictate.command)) end; if #dictate.command==0 then error('config error: dictate.command is empty; omit it to leave dictation off',2) end end; if dictate.timeout_ms~=nil then if type(dictate.timeout_ms)~='number' then type_error('dictate.timeout_ms','number',type(dictate.timeout_ms)) end; if dictate.timeout_ms<1000 then error('config error: dictate.timeout_ms below 1000 would abandon a tool mid-sentence',2) end end end; " ++
         "local ses=expect_table('ses', cfg.ses, true); if ses then expect_table('ses.isolation', ses.isolation, true); local layouts=expect_array('ses.layouts', ses.layouts, true); if layouts then for i,layout in ipairs(layouts) do validate_layout('ses.layouts['..i..']',layout) end end end; " ++
         "return cfg end; " ++
         "hexe.theme=hexe.theme or function(spec) return mark(spec,'theme') end; " ++
@@ -1377,6 +1389,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.action.clipboard=hexe.action.clipboard or {}; hexe.action.clipboard.copy=hexe.action.clipboard.copy or function(o) return action('clipboard.copy',o) end; hexe.action.clipboard.request=hexe.action.clipboard.request or function(o) return action('clipboard.request',o) end; " ++
         "hexe.action.system=hexe.action.system or {}; hexe.action.system.notify=hexe.action.system.notify or function(o) return action('system.notify',o) end; " ++
         "hexe.action.overlay=hexe.action.overlay or {}; hexe.action.overlay.keycast_toggle=hexe.action.overlay.keycast_toggle or function(o) return action('overlay.keycast_toggle',o) end; hexe.action.overlay.sprite_toggle=hexe.action.overlay.sprite_toggle or function(o) return action('overlay.sprite_toggle',o) end; " ++
+        "hexe.action.dictate=hexe.action.dictate or {}; hexe.action.dictate.start=hexe.action.dictate.start or function(o) return action('dictate.start',o) end; hexe.action.dictate.stop=hexe.action.dictate.stop or function(o) return action('dictate.stop',o) end; hexe.action.dictate.toggle=hexe.action.dictate.toggle or function(o) return action('dictate.toggle',o) end; " ++
         "hexe.action.layout=hexe.action.layout or {}; hexe.action.layout.save=hexe.action.layout.save or function(o) return action('layout.save',o) end; hexe.action.layout.load=hexe.action.layout.load or function(o) return action('layout.load',o) end; " ++
         "end; " ++
         "hexe.setup=function(cfg) hexe.validate(cfg); rawset(cfg,'__hexe_type','config'); __theme_styles=(type(cfg.theme)=='table' and type(cfg.theme.styles)=='table') and cfg.theme.styles or {}; return cfg end; " ++
@@ -1389,7 +1402,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         // stays nil, so a mistyped namespace raises at load time instead of
         // quietly collecting settings nothing will ever read.
         "local function __ns() local mt; mt={__index=function(t,k) local v=setmetatable({},mt); rawset(t,k,v); return v end}; return setmetatable({},mt) end; " ++
-        "hexe.mux=__ns(); hexe.ses=__ns(); hexe.pop=__ns(); hexe.status=__ns(); hexe.palette=__ns(); hexe.names=__ns(); hexe.decor=__ns(); hexe.keys={}; hexe.shp=nil; " ++
+        "hexe.mux=__ns(); hexe.ses=__ns(); hexe.pop=__ns(); hexe.status=__ns(); hexe.palette=__ns(); hexe.names=__ns(); hexe.decor=__ns(); hexe.dictate=__ns(); hexe.keys={}; hexe.shp=nil; " ++
         // Assemble what the config assigned, validate it exactly as `setup`
         // would have, and hand it back for the host to read. Same validator, so
         // a typo inside a namespace is still caught and still names its path.
@@ -1412,7 +1425,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         // settings in the same namespace as the API, so without this
         // `hexe.mxu = {...}` is accepted in silence and simply never read.
         "local __known={}; for k in pairs(hexe) do __known[k]=true end; " ++
-        "hexe.__finish=function() for k in pairs(hexe) do if type(k)=='string' and k:sub(1,1)~='_' and not __known[k] then error('config error: hexe.'..k..' is not a hexe setting', 2) end end; local cfg={}; for _,k in ipairs({'theme','keys','mux','status','pop','ses','palette','names','decor','plugins'}) do local v=rawget(hexe,k); if type(v)=='table' then cfg[k]=__solid(v) end end; " ++
+        "hexe.__finish=function() for k in pairs(hexe) do if type(k)=='string' and k:sub(1,1)~='_' and not __known[k] then error('config error: hexe.'..k..' is not a hexe setting', 2) end end; local cfg={}; for _,k in ipairs({'theme','keys','mux','status','pop','ses','palette','names','decor','plugins','dictate'}) do local v=rawget(hexe,k); if type(v)=='table' then cfg[k]=__solid(v) end end; " ++
         "hexe.validate(cfg); __theme_styles=(type(cfg.theme)=='table' and type(cfg.theme.styles)=='table') and cfg.theme.styles or {}; rawset(cfg,'__hexe_type','config'); return cfg end; " ++
         "end";
 

@@ -66,6 +66,10 @@ pub const MuxConfigBuilder = struct {
     /// Helper programs the session starts alongside itself, in declared order.
     plugins: std.ArrayList(config.PluginDef) = .empty,
 
+    /// The speech-to-text tool, if one is configured.
+    dictate_command: ?[]const u8 = null,
+    dictate_timeout_ms: ?u32 = null,
+
     // Decoration slots around every pane.
     decor: ?config.DecorConfig = null,
     mouse_selection_override_mods: ?u8 = null,
@@ -218,6 +222,8 @@ pub const MuxConfigBuilder = struct {
         if (self.plugins.items.len > 0) {
             result.plugins = try self.plugins.toOwnedSlice(self.allocator);
         }
+        if (self.dictate_command) |v| result.dictate.command = try self.allocator.dupe(u8, v);
+        if (self.dictate_timeout_ms) |v| result.dictate.timeout_ms = v;
         if (self.decor) |d| result.decor = d;
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 

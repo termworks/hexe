@@ -238,6 +238,9 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
 
         decor.draw(state, renderer, pane.*, stdout);
+        // Last, so the meter is never painted over by chrome: it is the one
+        // thing on screen that says a microphone is open.
+        @import("dictate.zig").draw(state, renderer, pane.*);
     }
 
     // Draw split borders when there are multiple splits (never while zoomed —

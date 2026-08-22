@@ -520,6 +520,31 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
             state.needs_render = true;
             return true;
         },
+        // Push-to-talk binds start on press and stop on release, so `start`
+        // must be idempotent while held: key repeat fires it many times, and
+        // spawning a second recorder per repeat would leave orphaned tools.
+        .dictate_start, .dictate_stop, .dictate_toggle => {
+            const dict = @import("dictate.zig");
+            if (action == .dictate_stop) {
+                dict.stop(state);
+                return true;
+            }
+            const uuid = state.getCurrentFocusedUuid() orelse return true;
+            const pane = state.findPaneByUuid(uuid) orelse return true;
+            const err = if (action == .dictate_toggle)
+                dict.toggle(state, pane)
+            else
+                dict.start(state, pane);
+            if (err) |msg| {
+                // "already dictating" is what key repeat looks like; saying it
+                // on every repeat would bury the pane in notifications.
+                if (!std.mem.eql(u8, msg, "already dictating")) {
+                    state.notifications.showFor(msg, 1600);
+                    state.needs_render = true;
+                }
+            }
+            return true;
+        },
         .sync_toggle => {
             state.sync_input = !state.sync_input;
             state.notifications.showFor(if (state.sync_input) "Input sync: ON" else "Input sync: OFF", 1200);

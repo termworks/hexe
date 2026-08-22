@@ -21,6 +21,7 @@ pub const FloatUiState = state_types.FloatUiState;
 
 const layout_mod = @import("layout.zig");
 const pane_search = @import("pane_search.zig");
+const dictate_mod = @import("dictate.zig");
 const Layout = layout_mod.Layout;
 
 const Renderer = @import("render_core.zig").Renderer;
@@ -388,6 +389,9 @@ pub const State = struct {
     api_server: ?@import("api_server.zig").ApiServer = null,
     /// Whether the configured plugins have been started for this session.
     plugins_started: bool = false,
+
+    /// The speech-to-text tool, when one is running. See dictate.zig.
+    dictation: dictate_mod.Dictation,
     /// Resumable non-blocking reader for the SES VT stream. Reset whenever
     /// the VT connection is replaced (loop_watchers arms a new node).
     mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
@@ -564,6 +568,7 @@ pub const State = struct {
 
             .mux_vt_write_queue = .{},
             .async_cmds = core.async_cmd.AsyncCmdCache.init(allocator),
+            .dictation = dictate_mod.Dictation.init(allocator),
             .regions = core.regions.Registry.init(allocator),
             .region_surfaces = @import("region_render.zig").SurfaceCache.init(allocator),
             .mux_vt_write_overflow_notified = false,
@@ -1184,6 +1189,7 @@ pub const State = struct {
         self.csi_reply_buf.deinit(self.allocator);
         self.stdin_tail.deinit(self.allocator);
         self.mux_vt_write_queue.deinit(self.allocator);
+        self.dictation.deinit();
         self.async_cmds.deinit();
         self.regions.deinit();
         self.region_surfaces.deinit();

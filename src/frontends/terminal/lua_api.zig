@@ -1138,6 +1138,47 @@ fn hexe_share(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// `dictate()` reads the state; `dictate(true)` starts, `dictate(false)` stops.
+///
+/// The same three verbs the keybindings use, so a phone UI or a script can
+/// drive dictation without a keyboard in front of the session.
+fn hexe_dictate(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const dict = @import("dictate.zig");
+
+    var err_msg: ?[]const u8 = null;
+    if (lua.typeOf(1) == .boolean) {
+        if (lua.toBoolean(1)) {
+            const pane = focusedPane(state) orelse {
+                lua.pushNil();
+                return 1;
+            };
+            err_msg = dict.start(state, pane);
+        } else {
+            dict.stop(state);
+        }
+    }
+
+    const d = &state.dictation;
+    lua.createTable(0, 3);
+    setBool(lua, "active", d.active());
+    setStr(lua, "phase", if (!d.active()) "idle" else switch (d.phase) {
+        .listening => "listening",
+        .thinking => "thinking",
+    });
+    if (d.active() and d.has_target) {
+        setStr(lua, "pane_uuid", d.target[0..]);
+    } else {
+        setOptStr(lua, "pane_uuid", null);
+    }
+    setOptStr(lua, "error", err_msg);
+    return 1;
+}
+
 fn hexe_rename_tab(lstate: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(lstate orelse return 0);
     const state = liveState(lua) orelse {
@@ -1531,6 +1572,7 @@ const ENTRIES = [_]Entry{
     .{ .name = "rename_tab", .func = hexe_rename_tab },
     .{ .name = "rename", .func = hexe_rename },
     .{ .name = "share", .func = hexe_share },
+    .{ .name = "dictate", .func = hexe_dictate },
     .{ .name = "geometry", .func = hexe_geometry },
     .{ .name = "ratio", .func = hexe_ratio },
     .{ .name = "close", .func = hexe_close },
