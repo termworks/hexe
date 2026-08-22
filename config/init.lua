@@ -1,16 +1,5 @@
 local hexe = require("hexe")
 
-local function concat(...)
-  local out = {}
-  for _, list in ipairs({ ... }) do
-    if list then
-      for _, item in ipairs(list) do
-        table.insert(out, item)
-      end
-    end
-  end
-  return out
-end
 
 -- Conditions and actions are plain Lua over live state. The callback argument
 -- `ctx` is the query API (also `hexe.live` outside a callback): ctx.pane(),
@@ -49,106 +38,104 @@ local border = {
   },
 }
 
-local layout_config = dofile(os.getenv("HOME") .. "/.config/hexe/layout.lua")
-local layout_keys = layout_config.keys or {}
-local layouts = {}
+-- The layout, loaded for its declarations rather than for a value: the layout
+-- and the keys in it register themselves as the file runs.
+--
+-- `require`, not `dofile`: a required file is loaded once no matter how many
+-- times it is named, and running this one twice would register every key and
+-- the layout a second time.
+require("layout")
 
-if layout_config.__hexe_type == "layout" then
-  layouts = { layout_config }
-elseif layout_config.ses and layout_config.ses.layouts then
-  layouts = layout_config.ses.layouts
-end
+---------------------------------------------------------------------------- keys
 
-return hexe.setup({
-  keys = concat(layout_keys, {
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.d }, hexe.action.detach()),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.d }, hexe.action.detach())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.z }, hexe.action.pane.disown())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.a }, hexe.action.pane.adopt())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.c }, hexe.action.clipboard.copy())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.v }, hexe.action.clipboard.request())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.n }, hexe.action.system.notify())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.k }, hexe.action.overlay.keycast_toggle())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.o }, hexe.action.pane.select())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.h }, hexe.action.split.horizontal(), { when = focused_split })
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.v }, hexe.action.split.vertical(), { when = focused_split })
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.t }, hexe.action.tab.new())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.x }, hexe.action.tab.close())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.dot }, hexe.action.tab.next())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.comma }, hexe.action.tab.prev())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only })
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only })
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only })
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only })
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, hexe.action.focus.move("up"))
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down }, hexe.action.focus.move("down"))
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left }, hexe.action.focus.move("left"))
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, hexe.action.focus.move("right"))
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.p }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_and_consume })
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.shift, hexe.key.p }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_and_consume })
 
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.z }, hexe.action.pane.disown()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.a }, hexe.action.pane.adopt()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.c }, hexe.action.clipboard.copy()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.v }, hexe.action.clipboard.request()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.n }, hexe.action.system.notify()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.k }, hexe.action.overlay.keycast_toggle()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.o }, hexe.action.pane.select()),
+---------------------------------------------------------------------------- settings
 
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.h }, hexe.action.split.horizontal(), { when = focused_split }),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.v }, hexe.action.split.vertical(), { when = focused_split }),
+-- Nested data stays nested: what changed is how a setting is delivered, not
+-- the shape of its value.
 
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.t }, hexe.action.tab.new()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.x }, hexe.action.tab.close()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.dot }, hexe.action.tab.next()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.comma }, hexe.action.tab.prev()),
+hexe.mux = {
+  confirm = {
+    exit = true,
+    detach = true,
+    disown = true,
+    close = true,
+  },
 
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only }),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only }),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only }),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only }),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, hexe.action.focus.move("up")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down }, hexe.action.focus.move("down")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left }, hexe.action.focus.move("left")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, hexe.action.focus.move("right")),
+  selection_color = 238,
 
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.p }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_and_consume }),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.shift, hexe.key.p }, hexe.action.overlay.sprite_toggle(), { mode = hexe.mode.act_and_consume }),
-  }),
+  mouse = {
+    selection_override = { "ctrl", "alt" },
+  },
 
-  mux = {
-    confirm = {
-      exit = true,
-      detach = true,
-      disown = true,
-      close = true,
-    },
-
-    selection_color = 238,
-
-    mouse = {
-      selection_override = { "ctrl", "alt" },
-    },
-
-    floats = {
-      defaults = {
-        size = { width = 80, height = 70 },
-        attrs = {
-          exclusive = true,
-          sticky = true,
-          global = true,
-          destroy = false,
-        },
-        color = { active = 1, passive = 237 },
-        style = {
-          border = border,
-          position = "bottomright",
-        },
+  floats = {
+    defaults = {
+      size = { width = 80, height = 70 },
+      attrs = {
+        exclusive = true,
+        sticky = true,
+        global = true,
+        destroy = false,
       },
-
-      adhoc = {
-        size = { width = 82, height = 72 },
-        color = { active = 4, passive = 237 },
-      },
-
-      match = {
-        ["^container$"] = {
-          color = { active = 1, passive = 237 },
-          padding = { x = 2, y = 1 },
-          style = {
-            shadow = { color = 236 },
-            border = border,
-            position = "topright",
-          },
-        },
-      },
-    },
-
-    splits = {
       color = { active = 1, passive = 237 },
-      chars = {
-        vertical = "│",
-        horizontal = "─",
+      style = {
+        border = border,
+        position = "bottomright",
+      },
+    },
+
+    adhoc = {
+      size = { width = 82, height = 72 },
+      color = { active = 4, passive = 237 },
+    },
+
+    match = {
+      ["^container$"] = {
+        color = { active = 1, passive = 237 },
+        padding = { x = 2, y = 1 },
+        style = {
+          shadow = { color = 236 },
+          border = border,
+          position = "topright",
+        },
       },
     },
   },
+
+  splits = {
+    color = { active = 1, passive = 237 },
+    chars = {
+      vertical = "│",
+      horizontal = "─",
+    },
+  },
+}
+
 
   -- The bar, the pane and float titles and the sprite overlay are drawn by an
   -- external painter over a small JSON protocol -- hexe draws no chrome of its
@@ -157,95 +144,91 @@ return hexe.setup({
   --
   --     python3 contrib/painter.py &
   --
-  status = {
-    enabled = true,
-    view = "status",
-    refresh_ms = 250,
-    -- socket  = nil,   -- nil = $HEXE_PAINTER_SOCKET, then
-    --                  --       $XDG_RUNTIME_DIR/hexe/painter.sock
-    -- command = nil,   -- optional: hexe starts this if nothing is listening
-  },
+hexe.status = {
+  enabled = true,
+  view = "status",
+  refresh_ms = 250,
+  -- socket  = nil,   -- nil = $HEXE_PAINTER_SOCKET, then
+  --                  --       $XDG_RUNTIME_DIR/hexe/painter.sock
+  -- command = nil,   -- optional: hexe starts this if nothing is listening
+}
 
-  pop = {
-    notify = {
-      mux = {
-        fg = 232,
-        bg = 1,
-        bold = true,
-        padding_x = 3,
-        padding_y = 1,
-        offset = 3,
-        alignment = "center",
-        duration_ms = 3000,
-      },
-      pane = {
-        fg = 232,
-        bg = 1,
-        bold = true,
-        padding_x = 3,
-        padding_y = 1,
-        offset = 2,
-        alignment = "center",
-        duration_ms = 3000,
-      },
+
+hexe.pop = {
+  notify = {
+    mux = {
+      fg = 232,
+      bg = 1,
+      bold = true,
+      padding_x = 3,
+      padding_y = 1,
+      offset = 3,
+      alignment = "center",
+      duration_ms = 3000,
     },
-
-    confirm = {
-      mux = {
-        fg = 232,
-        bg = 1,
-        bold = true,
-        padding_x = 3,
-        padding_y = 1,
-      },
-      pane = {
-        fg = 232,
-        bg = 1,
-        bold = true,
-        padding_x = 3,
-        padding_y = 1,
-      },
-    },
-
-    choose = {
-      mux = {
-        fg = 232,
-        bg = 1,
-        highlight_fg = 1,
-        highlight_bg = 232,
-        visible_count = 10,
-      },
-      pane = {
-        fg = 232,
-        bg = 1,
-        highlight_fg = 1,
-        highlight_bg = 232,
-        visible_count = 10,
-      },
-    },
-
-    widgets = {
-      pokemon = {
-        enabled = false,
-        position = "topright",
-        shiny_chance = 0.01,
-      },
-      keycast = {
-        enabled = false,
-        position = "bottomright",
-        duration_ms = 2000,
-        max_entries = 8,
-        grouping_timeout_ms = 700,
-      },
-      digits = {
-        enabled = false,
-        position = "topleft",
-        size = "small",
-      },
+    pane = {
+      fg = 232,
+      bg = 1,
+      bold = true,
+      padding_x = 3,
+      padding_y = 1,
+      offset = 2,
+      alignment = "center",
+      duration_ms = 3000,
     },
   },
 
-  ses = {
-    layouts = layouts,
+  confirm = {
+    mux = {
+      fg = 232,
+      bg = 1,
+      bold = true,
+      padding_x = 3,
+      padding_y = 1,
+    },
+    pane = {
+      fg = 232,
+      bg = 1,
+      bold = true,
+      padding_x = 3,
+      padding_y = 1,
+    },
   },
-})
+
+  choose = {
+    mux = {
+      fg = 232,
+      bg = 1,
+      highlight_fg = 1,
+      highlight_bg = 232,
+      visible_count = 10,
+    },
+    pane = {
+      fg = 232,
+      bg = 1,
+      highlight_fg = 1,
+      highlight_bg = 232,
+      visible_count = 10,
+    },
+  },
+
+  widgets = {
+    pokemon = {
+      enabled = false,
+      position = "topright",
+      shiny_chance = 0.01,
+    },
+    keycast = {
+      enabled = false,
+      position = "bottomright",
+      duration_ms = 2000,
+      max_entries = 8,
+      grouping_timeout_ms = 700,
+    },
+    digits = {
+      enabled = false,
+      position = "topleft",
+      size = "small",
+    },
+  },
+}
