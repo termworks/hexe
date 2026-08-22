@@ -1090,6 +1090,56 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
 /// present a confirm dialog for the last split.
 ///
 /// Exit codes: 0=allow, 1=deny
+// libc's environment, the same symbol `pty.zig` reads. This process was forked
+// by the shell, so this IS the shell's exported environment.
+extern var environ: [*:null]?[*:0]u8;
+
+/// `hexe shell env-save` — publish this shell's environment to the pane's file.
+///
+/// The environment cannot be fetched on demand: a shell running a foreground
+/// command is blocked in `waitpid`, and that is exactly when a float gets
+/// opened. So the shell pushes, at every prompt, and SES reads whenever it
+/// likes.
+///
+/// This process's own environment IS the shell's exported environment, which is
+/// what makes the helper trivial and shell-agnostic — the same one line in all
+/// four integrations, replacing four different spellings of `env -0 >`.
+pub fn runEnvSave() !void {
+    const text = std.posix.getenv("HEXE_ENV_FD") orelse return;
+    const fd = std.fmt.parseInt(i32, text, 10) catch return;
+    if (fd < 3) return;
+
+    // Rewritten in place from the start, not appended: this file is the current
+    // environment, not a log of every prompt.
+    std.posix.ftruncate(fd, 0) catch |err| {
+        core.logging.logError("shell", "failed to truncate pane env descriptor", err);
+        return;
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.heap.page_allocator);
+
+    var i: usize = 0;
+    while (environ[i]) |entry| : (i += 1) {
+        const line = std.mem.span(entry);
+        buf.appendSlice(std.heap.page_allocator, line) catch return;
+        buf.append(std.heap.page_allocator, 0) catch return;
+    }
+
+    var off: usize = 0;
+    while (off < buf.items.len) {
+        // pwrite, so the offset is ours: the descriptor is shared with SES and
+        // with every other `env-save` this shell has run, and a shared file
+        // offset would have them writing over each other.
+        const n = std.posix.pwrite(fd, buf.items[off..], off) catch |err| {
+            core.logging.logError("shell", "failed to write pane environment", err);
+            return;
+        };
+        if (n == 0) break;
+        off += n;
+    }
+}
+
 pub fn runExitIntent(allocator: std.mem.Allocator) !void {
     const wire = core.wire;
 

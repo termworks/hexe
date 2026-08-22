@@ -90,11 +90,20 @@ hexe itself — see [recording](docs/recording.md).
 
 ## Quick start
 
-**Build** (requires Zig). A static musl binary, which is what `make build` gives you:
+**Build** (requires Zig). A static musl binary:
 
 ```sh
-make build       # zig build -Doptimize=ReleaseFast, static musl, stripped
-make install     # …and copy it to ~/.local/bin/hexe
+scripts/vendor-ghostty.sh                                  # once: fetch + patch ghostty-vt
+zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=x86_64-linux-musl
+```
+
+Those two commands are the whole build, and they are what CI runs. With [oslo](https://github.com/bresilla/oslo)
+the recipes in `.make.lua` wrap them:
+
+```sh
+make build       # the above, then reports size and which hexe is on $PATH
+make install     # …and copies it everywhere hexe already is
+make smoke       # the live end-to-end suite
 ```
 
 **Run:**

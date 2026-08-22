@@ -7,12 +7,10 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\# Hexe shell->mux communication hooks (Bash)
         \\__hexe_last_cmd=""
         \\__hexe_start=""
-        \\__hexe_env_snapshot=""
         \\
         \\__hexe_refresh_env_snapshot() {
-        \\    [[ -n "$HEXE_PANE_UUID" ]] || return 0
-        \\    __hexe_env_snapshot="/tmp/hexe-env-${HEXE_PANE_UUID}"
-        \\    env -0 > "$__hexe_env_snapshot" 2>/dev/null || true
+        \\    [[ -n "$HEXE_ENV_FD" ]] || return 0
+        \\    "${HEXE_BIN:-hexe}" shell env-save 2>/dev/null || true
         \\}
         \\
         \\__hexe_exit_intent() {

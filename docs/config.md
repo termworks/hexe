@@ -2,21 +2,92 @@
 
 One Lua file, one entry point, and a validator that will tell you before you start anything. The
 config describes five things — theme, keys, frontend behaviour, where the status bar comes from,
-popups — plus the layouts a session starts with, and every one of them is a table passed to
-`hexe.setup`.
+popups — plus the layouts a session starts with.
+
+**Assign the settings, register the behaviour, return nothing.** The same style oslo, lule and pixy
+use, so one habit covers all of them.
 
 ```lua
 local hexe = require("hexe")
 
+hexe.theme = hexe.theme({ styles = { ["git.branch"] = "bg:5 fg:0" } })
+hexe.mux.confirm = { exit = true, detach = true }
+hexe.status.enabled = true
+hexe.status.view = "status"
+
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit())
+
+hexe.layout("work", { tabs = { hexe.tab("main", { root = hexe.pane() }) } })
+```
+
+A setting the config never mentions is left alone, so there is no defaults table to keep in sync and
+no way to blank something by forgetting to list it. `hexe.key` and `hexe.layout` are registrars:
+calling one adds it, and calling it again adds another. Handlers and binds are tried in the order
+they were registered.
+
+**Nested data stays nested.** What changed is how a setting is *delivered*, not the shape of its
+value — a structured setting is still a table on the right-hand side:
+
+```lua
+hexe.pop.widgets.keycast = { enabled = false, position = "bottomright", duration_ms = 2000 }
+hexe.mux.floats.defaults = {
+  size  = { width = 80, height = 70 },
+  attrs = { sticky = true, global = true },
+}
+```
+
+Most of a hexe config is a tree of plain data — border glyphs, widget positions, colour numbers —
+and spelling that out as a hundred separate assignments would be worse than the table it already is.
+Assign the tree.
+
+A namespace that does not exist stays nil, so `hexe.mxu.confirm = {}` raises at load time instead of
+quietly collecting settings nothing will read. A typo *inside* a namespace is caught by the
+validator, with its path: `config error: mux.confirm.exti`.
+
+## Splitting the config up
+
+A file you split out **registers what it declares and returns nothing**, and the config loads it for
+that effect:
+
+```lua
+-- ~/.config/hexe/layout.lua
+local hexe = require("hexe")
+
+hexe.layout("default", { tabs = { hexe.tab("main", { root = hexe.pane() }) } })
+hexe.key({ hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1"))
+```
+
+```lua
+-- ~/.config/hexe/init.lua
+require("layout")
+```
+
+The config directory is on the module path, so a file beside `init.lua` is `require("layout")` — no
+absolute path, and no `os.getenv("HOME")`.
+
+**`require`, not `dofile`.** A required file is loaded once however many times it is named; `dofile`
+runs it again, and running a fragment twice registers every key and layout in it twice.
+
+The shape to avoid is a fragment that *returns* a table for the config to merge — `local cfg =
+dofile(...)`, then `cfg.keys or {}`, then a check of what shape it turned out to be. That merge
+lives in the config and every new fragment re-implements it. A table is fine as an **argument**
+(`hexe.layout("name", {...})` is one); what does not work is a table handed back for somebody else
+to take apart.
+
+<details>
+<summary>The older <code>hexe.setup{}</code> form still loads</summary>
+
+```lua
 return hexe.setup({
-  theme  = hexe.theme({ styles = { ["git.branch"] = "bg:5 fg:0" } }),
-  keys   = { hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit()) },
-  mux    = { confirm = { exit = true, detach = true } },
-  status = { enabled = true, view = "status" },
-  pop    = { notify = {} },
-  ses    = { layouts = { dofile(os.getenv("HOME") .. "/.config/hexe/layout.lua") } },
+  mux  = { confirm = { exit = true } },
+  keys = { hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit()) },
 })
 ```
+
+Both spellings build the same config. A file that calls `setup` uses what it passed and ignores
+anything assigned to the module, so the two do not mix within one file.
+
+</details>
 
 ```sh
 hexe config check     # validate and summarise
@@ -35,7 +106,7 @@ Exactly one, by name:
 | path | who opens it |
 |---|---|
 | `~/.config/hexe/init.lua` | **hexe**. The config. The only file it looks for. |
-| `~/.config/hexe/layout.lua` | **your init.lua**, if it chooses to `dofile()` it. hexe never looks for this name — split your layouts out or inline them, as you like. |
+| `~/.config/hexe/layout.lua` | **your init.lua**, if it chooses to `require("layout")`. hexe never looks for this name — split your layouts out or inline them, as you like. |
 | `~/.config/hexe/lua/…` | **you**, via `require()`. A search path for modules you write; empty by default and needed by nobody. |
 | `./.hexe.lua` | **hexe**, per directory, sandboxed unless trusted. |
 

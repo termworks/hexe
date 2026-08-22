@@ -116,40 +116,32 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
-    file.writeAll("return hexe.setup({\n") catch |err| {
+    writeLuaString(file, "hexe.layout(\"", layout_name, "\", {\n") catch |err| {
         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
-    file.writeAll("  ses = {\n    layouts = {\n") catch |err| {
-        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
-        std.process.exit(1);
-    };
-    writeLuaString(file, "      hexe.layout(\"", layout_name, "\", {\n") catch |err| {
-        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
-        std.process.exit(1);
-    };
-    writeLuaString(file, "        root = \"", cwd, "\",\n") catch |err| {
+    writeLuaString(file, "  root = \"", cwd, "\",\n") catch |err| {
         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
 
     // Tabs
     const tabs_val = root_obj.get("tabs") orelse {
-        try file.writeAll("      }),\n    },\n  },\n})\n");
+        try file.writeAll("})\n");
         try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
         return;
     };
     const tabs_arr = switch (tabs_val) {
         .array => |a| a,
         else => {
-            try file.writeAll("      }),\n    },\n  },\n})\n");
+            try file.writeAll("})\n");
             try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
             return;
         },
     };
 
     // Build a CWD map for all panes across all tabs
-    try file.writeAll("        tabs = {\n");
+    try file.writeAll("  tabs = {\n");
 
     for (tabs_arr.items, 0..) |tab_val, ti| {
         const tab = switch (tab_val) {
@@ -194,7 +186,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
             }
         }
 
-        writeLuaString(file, "          hexe.tab(\"", tab_name, "\", {\n") catch |err| {
+        writeLuaString(file, "    hexe.tab(\"", tab_name, "\", {\n") catch |err| {
             print("Error: failed to write layout: {s}\n", .{@errorName(err)});
             std.process.exit(1);
         };
@@ -217,7 +209,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
 
                 if (type_str) |ts| {
                     if (std.mem.eql(u8, ts, "split")) {
-                        try file.writeAll("            root = ");
+                        try file.writeAll("      root = ");
                         try writeLuaSplitTree(file, tree, &cwd_map, cwd, 3);
                         try file.writeAll(",\n");
                         wrote_root = true;
@@ -233,7 +225,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
                         if (pane_id) |pid| {
                             if (cwd_map.get(pid)) |pane_cwd| {
                                 if (!std.mem.eql(u8, pane_cwd, cwd)) {
-                                    writeLuaString(file, "            root = hexe.pane({ cwd = \"", pane_cwd, "\" }),\n") catch |err| {
+                                    writeLuaString(file, "      root = hexe.pane({ cwd = \"", pane_cwd, "\" }),\n") catch |err| {
                                         print("Error: failed to write layout: {s}\n", .{@errorName(err)});
                                         std.process.exit(1);
                                     };
@@ -246,13 +238,13 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
             }
         }
 
-        if (!wrote_root) try file.writeAll("            root = hexe.pane(),\n");
-        try file.writeAll("          })");
+        if (!wrote_root) try file.writeAll("      root = hexe.pane(),\n");
+        try file.writeAll("    })");
         if (ti + 1 < tabs_arr.items.len) try file.writeAll(",");
         try file.writeAll("\n");
     }
 
-    try file.writeAll("        },\n");
+    try file.writeAll("  },\n");
 
     // Floats
     const floats_val = root_obj.get("floats");
@@ -260,14 +252,14 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         switch (fv) {
             .array => |floats_arr| {
                 if (floats_arr.items.len > 0) {
-                    try file.writeAll("        floats = {\n");
+                    try file.writeAll("  floats = {\n");
                     for (floats_arr.items, 0..) |float_val, fi| {
                         const float = switch (float_val) {
                             .object => |o| o,
                             else => continue,
                         };
 
-                        try w(file, "          hexe.float(\"float-{d}\", {{", .{fi + 1});
+                        try w(file, "    hexe.float(\"float-{d}\", {{", .{fi + 1});
 
                         if (float.get("float_key")) |key_val| {
                             switch (key_val) {
@@ -300,14 +292,14 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
                         if (fi + 1 < floats_arr.items.len) try file.writeAll(",");
                         try file.writeAll("\n");
                     }
-                    try file.writeAll("        },\n");
+                    try file.writeAll("  },\n");
                 }
             },
             else => {},
         }
     }
 
-    try file.writeAll("      }),\n    },\n  },\n})\n");
+    try file.writeAll("})\n");
     try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
 }
 

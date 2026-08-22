@@ -74,6 +74,9 @@ pub fn beginCreatePane(
 /// Insert the pane now that the pod has reported its shell pid. Consumes
 /// `flight` either way — on failure it reaps the pod and frees the strings.
 pub fn finishCreatePane(self: anytype, flight: *InFlightPane, child_pid: std.posix.pid_t) !*store_mod.Pane {
+    // Claimed before `deinit`, which closes whatever the spawn still owns.
+    const env_fd = flight.spawn.takeEnvFd();
+    errdefer if (env_fd) |fd| std.posix.close(fd);
     flight.spawn.deinit();
 
     var pane_inserted = false;
@@ -102,6 +105,7 @@ pub fn finishCreatePane(self: anytype, flight: *InFlightPane, child_pid: std.pos
         .created_at = std.time.timestamp(),
         .orphaned_at = null,
         .pane_id = self.allocPaneId(),
+        .env_fd = env_fd,
         .allocator = self.allocator,
     };
 
@@ -198,6 +202,7 @@ pub fn createPane(
         .created_at = now,
         .orphaned_at = null,
         .pane_id = pane_id,
+        .env_fd = spawn.env_fd,
         .allocator = self.allocator,
     };
 

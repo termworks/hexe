@@ -201,7 +201,7 @@ pub fn build(b: *std.Build) void {
         // Zig's per-module strip flag would leave dependency debug info in
         // the link, and `zig objcopy --strip-*` is unimplemented in 0.15, so
         // run the system `strip` on the finished binary (~78MB -> ~22MB).
-        // Fine for native builds (make build, CI); build without -Dstrip if
+        // Fine for native builds (`make build`, CI); build without -Dstrip if
         // no `strip` is available for the target.
         const strip_cmd = b.addSystemCommand(&.{ "strip", "-o" });
         const stripped_bin = strip_cmd.addOutputFileArg("hexe");
@@ -637,13 +637,40 @@ fn manifestVersion(b: *std.Build) []const u8 {
     return manifest.version;
 }
 
+/// The files that decide whether two hexe processes can talk to each other:
+/// message ids and structs, framing and handshake, the payloads that cross the
+/// socket, and the snapshot shape a frontend parses.
+///
+/// Deliberately not "all of src". The epoch used to hash the whole tree, so a
+/// comment in a rendering file made a running daemon unreachable to the very
+/// next build -- which is every build, for anyone working on hexe. Real
+/// incompatibility is what PROTOCOL_VERSION/MIN_PROTOCOL_VERSION are for; this
+/// catches the narrower case of a daemon whose wire types differ.
+const PROTOCOL_SOURCES = [_][]const u8{
+    "src/core/wire.zig",
+    "src/core/ipc.zig",
+    "src/frontends/core/ctl_payloads.zig",
+    "src/frontends/core/ctl_events.zig",
+    "src/frontends/core/ses_events.zig",
+    "src/frontends/core/host_protocol.zig",
+    "src/frontends/core/view_model.zig",
+};
+
 fn computeRuntimeEpoch(b: *std.Build) []const u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
-    hashFile(b, &hasher, "build.zig");
-    hashFile(b, &hasher, "build.zig.zon");
-    hashFile(b, &hasher, "Makefile");
-    hashDirRecursive(b, &hasher, "src");
+    for (PROTOCOL_SOURCES) |path| {
+        // Loudly, not silently: `hashFile` ignores a file it cannot read, so a
+        // renamed or mistyped path here would quietly stop contributing and
+        // weaken the check with nothing to show for it.
+        const data = std.fs.cwd().readFileAlloc(b.allocator, path, 64 * 1024 * 1024) catch
+            std.debug.panic("runtime epoch: cannot read protocol source '{s}'", .{path});
+        defer b.allocator.free(data);
+        hasher.update(path);
+        hasher.update(&[_]u8{0});
+        hasher.update(data);
+        hasher.update(&[_]u8{0});
+    }
 
     var digest: [32]u8 = undefined;
     hasher.final(&digest);

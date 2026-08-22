@@ -32,8 +32,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\end
         \\
         \\local function snapshot()
-        \\  local id = pane()
-        \\  if id then oslo.run{ "sh", "-c", "env -0 > /tmp/hexe-env-" .. id } end
+        \\  if oslo.env.get("HEXE_ENV_FD") then oslo.run{ oslo.env.get("HEXE_BIN") or "hexe", "shell", "env-save" } end
         \\end
         \\
         \\local function may_exit()

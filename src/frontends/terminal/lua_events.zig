@@ -118,6 +118,11 @@ pub fn emitAutocmdWithPayloadOnStack(runtime: *LuaRuntime, event_name: []const u
         .function => {
             lua.pushValue(payload_idx);
             lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
+                const msg = lua.toString(-1) catch "error";
+                std.log.scoped(.lua_events).warn(
+                    "handler for '{s}' raised: {s}",
+                    .{ event_name, msg },
+                );
                 lua.pop(1); // error object
             };
             // The call consumed the function, so put a placeholder back for
@@ -135,6 +140,14 @@ pub fn emitAutocmdWithPayloadOnStack(runtime: *LuaRuntime, event_name: []const u
                 }
                 lua.pushValue(payload_idx);
                 lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
+                    // Reported, then carried on with: a mistake in the third
+                    // handler is not a reason to skip the fourth, and one that
+                    // fails in silence is a handler that looks like it ran.
+                    const msg = lua.toString(-1) catch "error";
+                    std.log.scoped(.lua_events).warn(
+                        "handler for '{s}' raised: {s}",
+                        .{ event_name, msg },
+                    );
                     lua.pop(1); // error object
                 };
             }
@@ -169,6 +182,33 @@ test "emitAutocmdWithPayloadOnStack calls single function handler" {
     defer rt.lua.pop(1);
     try std.testing.expect(rt.lua.typeOf(-1) == .string);
     try std.testing.expectEqualStrings("alpha", rt.lua.toString(-1) catch "");
+}
+
+test "a handler that raises does not stop the ones after it" {
+    // Registration repeats, so a config is many small handlers -- and a mistake
+    // in one of them has nothing to do with the next. It is reported and the
+    // rest still run.
+    var rt = try LuaRuntime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    const setup_z = try rt.allocator.dupeZ(
+        u8,
+        "__ran = 0;" ++
+            "hexe.on.test_event(function() __ran = __ran + 1 end);" ++
+            "hexe.on.test_event(function() error('deliberate') end);" ++
+            "hexe.on.test_event(function() __ran = __ran + 1 end)",
+    );
+    defer rt.allocator.free(setup_z);
+    try rt.lua.loadString(setup_z);
+    try rt.lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    rt.lua.createTable(0, 0);
+    emitAutocmdWithPayloadOnStack(&rt, "test_event");
+
+    _ = try rt.lua.getGlobal("__ran");
+    defer rt.lua.pop(1);
+    // The third ran even though the second raised.
+    try std.testing.expectEqual(@as(i32, 2), rt.lua.toInteger(-1) catch 0);
 }
 
 test "emitAutocmdWithPayloadOnStack calls handler list" {

@@ -40,25 +40,19 @@ config can be read by a person who has never seen one:
 ```lua
 local hexe = require("hexe")
 
-return hexe.setup({
-  ses = {
-    layouts = {
-      hexe.layout("myproject", {
-        root = ".",
-        tabs = {
-          hexe.tab("editor", {
-            root = hexe.split("horizontal", {
-              hexe.pane({ command = "nvim", cwd = "." }),
-              hexe.pane({ cwd = "." }),
-            }, { ratio = 0.70 }),
-          }),
-          hexe.tab("server", { root = hexe.pane({ command = "npm run dev" }) }),
-        },
-        floats = {
-          hexe.float("git", { key = "g", command = "lazygit", attrs = { global = true } }),
-        },
-      }),
-    },
+hexe.layout("myproject", {
+  root = ".",
+  tabs = {
+    hexe.tab("editor", {
+      root = hexe.split("horizontal", {
+        hexe.pane({ command = "nvim", cwd = "." }),
+        hexe.pane({ cwd = "." }),
+      }, { ratio = 0.70 }),
+    }),
+    hexe.tab("server", { root = hexe.pane({ command = "npm run dev" }) }),
+  },
+  floats = {
+    hexe.float("git", { key = "g", command = "lazygit", attrs = { global = true } }),
   },
 })
 ```
@@ -181,16 +175,10 @@ Local project configs use the same canonical entrypoint as the global config:
 ```lua
 local hexe = require("hexe")
 
-return hexe.setup({
-  ses = {
-    layouts = {
-      hexe.layout("name", {
-        root = ".",
-        tabs = {},
-        floats = {},
-      }),
-    },
-  },
+hexe.layout("name", {
+  root = ".",
+  tabs = {},
+  floats = {},
 })
 ```
 

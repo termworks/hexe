@@ -1,6 +1,6 @@
 local hexe = require("hexe")
 
-local layout = hexe.layout("default", {
+hexe.layout("default", {
   enabled = true,
   tabs = {
     hexe.tab("main", {
@@ -52,21 +52,11 @@ local layout = hexe.layout("default", {
   },
 })
 
-return hexe.setup({
-  keys = {
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.s }, hexe.action.layout.save()),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.l }, hexe.action.layout.load()),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.s }, hexe.action.layout.save())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.l }, hexe.action.layout.load())
 
-    hexe.key({ hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1")),
-    hexe.key({ hexe.key.alt, hexe.key["2"] }, hexe.action.float.toggle("2")),
-    hexe.key({ hexe.key.alt, hexe.key["3"] }, hexe.action.float.toggle("3")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["9"] }, hexe.action.float.toggle("p")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["0"] }, hexe.action.float.toggle("0")),
-  },
-
-  ses = {
-    layouts = {
-      layout,
-    },
-  },
-})
+hexe.key({ hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1"))
+hexe.key({ hexe.key.alt, hexe.key["2"] }, hexe.action.float.toggle("2"))
+hexe.key({ hexe.key.alt, hexe.key["3"] }, hexe.action.float.toggle("3"))
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["9"] }, hexe.action.float.toggle("p"))
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["0"] }, hexe.action.float.toggle("0"))
