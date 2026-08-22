@@ -63,6 +63,9 @@ pub const MuxConfigBuilder = struct {
     names_order: ?config.names_mod.Order = null,
     names_suffix: ?[]const u8 = null,
 
+    /// Helper programs the session starts alongside itself, in declared order.
+    plugins: std.ArrayList(config.PluginDef) = .empty,
+
     // Decoration slots around every pane.
     decor: ?config.DecorConfig = null,
     mouse_selection_override_mods: ?u8 = null,
@@ -145,6 +148,11 @@ pub const MuxConfigBuilder = struct {
     }
 
     pub fn deinit(self: *MuxConfigBuilder) void {
+        for (self.plugins.items) |*plugin| {
+            var p = plugin.*;
+            p.deinit(self.allocator);
+        }
+        self.plugins.deinit(self.allocator);
         if (self.float_defaults) |*defaults| defaults.deinit(self.allocator);
         if (self.float_adhoc) |*adhoc| adhoc.deinit(self.allocator);
         if (self.float_matches.items.len > 0) {
@@ -179,6 +187,16 @@ pub const MuxConfigBuilder = struct {
         return style;
     }
 
+    /// Record one plugin. Strings are copied: the Lua values they came from are
+    /// collected as soon as the config chunk is done with them.
+    pub fn appendPlugin(self: *MuxConfigBuilder, name: []const u8, command: []const u8) !void {
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        const owned_cmd = try self.allocator.dupe(u8, command);
+        errdefer self.allocator.free(owned_cmd);
+        try self.plugins.append(self.allocator, .{ .name = owned_name, .command = owned_cmd });
+    }
+
     pub fn build(self: *MuxConfigBuilder) !config.Config {
         var result = config.Config{};
         result._allocator = self.allocator;
@@ -195,6 +213,11 @@ pub const MuxConfigBuilder = struct {
         if (self.names_pane) |v| result.names.pane = v;
         if (self.names_order) |v| result.names.order = v;
         if (self.names_suffix) |v| result.names.suffix = try self.allocator.dupe(u8, v);
+
+        // Ownership moves to the Config, which frees them.
+        if (self.plugins.items.len > 0) {
+            result.plugins = try self.plugins.toOwnedSlice(self.allocator);
+        }
         if (self.decor) |d| result.decor = d;
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 

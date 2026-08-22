@@ -356,6 +356,8 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         // Control-socket requests. Bound and non-blocking: a client that stops
         // reading must never suspend the panes.
         state.startApiServer();
+        // After the socket, so HEXE_API_SOCKET is real when they read it.
+        state.startPlugins();
         if (state.api_server) |*srv| srv.service(state);
 
         const dbg_t2 = std.time.milliTimestamp();

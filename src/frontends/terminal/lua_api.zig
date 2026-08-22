@@ -334,6 +334,24 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     setOptStr(lua, "pwd_dir", state.panePwdDir(pane));
     setOptStr(lua, "exit_key", state.paneExitKey(pane));
     setOptStr(lua, "title", if (is_float) state.paneFloatTitle(pane) else null);
+
+    // Where this pane's bytes can be read: the pod socket, which serves
+    // scrollback and the live stream to an observer (docs/streaming.md).
+    //
+    // Reported rather than left to be derived, so a program that wants the
+    // stream does not have to know hexe's runtime layout. Built with the same
+    // helper SES used when it spawned the pod, so this is the path in use and
+    // not a guess at one.
+    {
+        var scratch: [std.fs.max_path_bytes]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&scratch);
+        if (core.ipc.getPodSocketPath(fba.allocator(), pane.uuid[0..])) |path| {
+            setStr(lua, "pod_socket", path);
+        } else |err| {
+            core.logging.logError("lua_api", "could not resolve pod socket path", err);
+            setOptStr(lua, "pod_socket", null);
+        }
+    }
 }
 
 /// Is this pane showing on the active tab right now? For a split, membership in

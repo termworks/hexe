@@ -386,6 +386,8 @@ pub const State = struct {
     region_surfaces: @import("region_render.zig").SurfaceCache,
     /// The control socket, once a session name exists to name it after.
     api_server: ?@import("api_server.zig").ApiServer = null,
+    /// Whether the configured plugins have been started for this session.
+    plugins_started: bool = false,
     /// Resumable non-blocking reader for the SES VT stream. Reset whenever
     /// the VT connection is replaced (loop_watchers arms a new node).
     mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
@@ -1100,6 +1102,50 @@ pub const State = struct {
             core.logging.logError("terminal", "control socket unavailable", err);
             return;
         };
+    }
+
+    /// Start the helper programs the config declared, once.
+    ///
+    /// After the control socket exists, so `HEXE_API_SOCKET` can point at it:
+    /// a plugin's first job is to ask hexe what the session contains, and
+    /// making it guess the path would be making it know hexe's layout.
+    ///
+    /// Detached, stdio closed, and not supervised. Restarting one that exits
+    /// deliberately is a fork loop with a delay; one that wants to survive its
+    /// own crashes knows better than hexe how to.
+    pub fn startPlugins(self: *State) void {
+        if (self.plugins_started) return;
+        if (self.config.plugins.len == 0) {
+            self.plugins_started = true;
+            return;
+        }
+        // Waits for the socket: a plugin started before it exists would have to
+        // poll for it.
+        const srv = if (self.api_server) |*s| s else return;
+        self.plugins_started = true;
+
+        for (self.config.plugins) |plugin| {
+            var child = std.process.Child.init(&.{ "/bin/sh", "-c", plugin.command }, self.allocator);
+            child.stdin_behavior = .Ignore;
+            child.stdout_behavior = .Ignore;
+            child.stderr_behavior = .Ignore;
+
+            var env_map = std.process.getEnvMap(self.allocator) catch |err| {
+                core.logging.logError("terminal", "plugin env copy failed", err);
+                continue;
+            };
+            defer env_map.deinit();
+            env_map.put("HEXE_API_SOCKET", srv.path) catch {};
+            env_map.put("HEXE_SESSION", self.runtime.sessionName()) catch {};
+            child.env_map = &env_map;
+
+            child.spawn() catch |err| {
+                core.logging.logError("terminal", "failed to start plugin", err);
+                core.logging.warn("terminal", "plugin '{s}' did not start: {s}", .{ plugin.name, plugin.command });
+                continue;
+            };
+            core.logging.warn("terminal", "started plugin '{s}': {s}", .{ plugin.name, plugin.command });
+        }
     }
 
     pub fn deinit(self: *State) void {

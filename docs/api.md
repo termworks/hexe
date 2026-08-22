@@ -151,10 +151,10 @@ with no knowledge of hexe's internals:
 - **control** — proxy JSON between a WebSocket and this socket. Layout, pane
   list, focus, splits, floats and names all come from calls you can already make
   from the shell.
-- **screen content** — not served here. A pane's output is a byte stream, and
-  the natural path is the one the terminal frontend already uses: attach to the
-  session and forward each pane's VT bytes to `xterm.js`. `screen_text` and
-  `line` are for reading text, not for driving a display.
+- **screen content** — not served here, on purpose. A pane's output is a byte
+  stream, and it has its own channel: connect to the pane's `pod_socket` as an
+  observer and forward what comes back. See [streaming.md](streaming.md).
+  `screen_text` and `line` are for reading text, not for driving a display.
 - **input** — `send` puts keystrokes into a pane by uuid.
 
 The transport for a remote *terminal* frontend already exists (liblink, an

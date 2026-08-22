@@ -540,6 +540,7 @@ pub const LuaRuntime = struct {
         try self.applyPaletteConfigV2();
         try self.applyNamesConfigV2();
         try self.applyDecorConfigV2();
+        try self.applyPluginsConfigV2();
         try self.applyPopConfigV2();
         try self.applySesConfigV2();
     }
@@ -688,6 +689,31 @@ pub const LuaRuntime = struct {
             self.last_error = try std.fmt.allocPrint(self.allocator, "config error: failed to apply keys: {}", .{err});
             return error.LuaError;
         };
+    }
+
+    /// `plugins` — helper programs the session starts alongside itself.
+    fn applyPluginsConfigV2(self: *Self) !void {
+        if (!self.pushTable(-1, "plugins")) return;
+        defer self.pop();
+
+        const mux = try self.getOrCreateMuxBuilder();
+        const len = self.lua.rawLen(-1);
+        var i: i32 = 1;
+        while (i <= @as(i32, @intCast(len))) : (i += 1) {
+            _ = self.lua.rawGetIndex(-1, i);
+            defer self.lua.pop(1);
+            if (self.lua.typeOf(-1) != .table) continue;
+
+            // A plugin with no command is a name and nothing else; saying so
+            // beats starting nothing and leaving the user to wonder.
+            const command = self.getString(-1, "command") orelse {
+                const name = self.getString(-1, "name") orelse "?";
+                log.warn("plugin '{s}' has no command; nothing to start", .{name});
+                continue;
+            };
+            const name = self.getString(-1, "name") orelse "plugin";
+            try mux.appendPlugin(name, command);
+        }
     }
 
     fn applyStatusConfigV2(self: *Self) !void {
@@ -1312,7 +1338,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.validate=hexe.validate or function(cfg) " ++
         "expect_table('config', cfg, false); " ++
         "scan_removed('config', cfg); " ++
-        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true, palette=true, names=true, decor=true }; " ++
+        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true, palette=true, names=true, decor=true, plugins=true }; " ++
         "for k,_ in pairs(cfg) do if type(k)=='string' and k:sub(1,2)~='__' and not allowed[k] then error('config error: '..k..' is not a supported top-level section',2) end end; " ++
         "validate_theme('theme', cfg.theme); " ++
         "validate_keybindings('keys', cfg.keys); " ++
@@ -1377,13 +1403,16 @@ fn injectSetupHelpers(lua: *Lua) void {
         // The noun is the name of the thing that happened, which is what the
         // shared style spells this way in every tool; the older form still
         // works and both reach the same list.
+        // `hexe.plugin("name", { command = ... })` -- a registrar, so declaring a
+        // second one adds it rather than replacing the first.
+        "hexe.plugins={}; hexe.plugin=hexe.plugin or function(name, spec) local t=named('plugin', name, spec); hexe.plugins[#hexe.plugins+1]=t; return t end; " ++
         "hexe.on=setmetatable({},{__index=function(_,name) return function(fn) return hexe.events.on(name, fn) end end}); " ++
         // What the module carried before the config ran. Anything else on it
         // afterwards is a setting hexe does not have -- assignment style puts
         // settings in the same namespace as the API, so without this
         // `hexe.mxu = {...}` is accepted in silence and simply never read.
         "local __known={}; for k in pairs(hexe) do __known[k]=true end; " ++
-        "hexe.__finish=function() for k in pairs(hexe) do if type(k)=='string' and k:sub(1,1)~='_' and not __known[k] then error('config error: hexe.'..k..' is not a hexe setting', 2) end end; local cfg={}; for _,k in ipairs({'theme','keys','mux','status','pop','ses','palette','names','decor'}) do local v=rawget(hexe,k); if type(v)=='table' then cfg[k]=__solid(v) end end; " ++
+        "hexe.__finish=function() for k in pairs(hexe) do if type(k)=='string' and k:sub(1,1)~='_' and not __known[k] then error('config error: hexe.'..k..' is not a hexe setting', 2) end end; local cfg={}; for _,k in ipairs({'theme','keys','mux','status','pop','ses','palette','names','decor','plugins'}) do local v=rawget(hexe,k); if type(v)=='table' then cfg[k]=__solid(v) end end; " ++
         "hexe.validate(cfg); __theme_styles=(type(cfg.theme)=='table' and type(cfg.theme.styles)=='table') and cfg.theme.styles or {}; rawset(cfg,'__hexe_type','config'); return cfg end; " ++
         "end";
 
@@ -1536,10 +1565,6 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.pushFunction(hexe_color_bg);
     lua.setField(-2, "bg");
     lua.setField(-2, "color");
-
-    // hexe.plugin = {}
-    lua.createTable(0, 0);
-    lua.setField(-2, "plugin");
 
     // hexe.version
     _ = lua.pushString("0.1.0");

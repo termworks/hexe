@@ -44,6 +44,20 @@ A namespace that does not exist stays nil, so `hexe.mxu.confirm = {}` raises at 
 quietly collecting settings nothing will read. A typo *inside* a namespace is caught by the
 validator, with its path: `config error: mux.confirm.exti`.
 
+## Helper programs
+
+`hexe.plugin` starts something alongside the session — a recorder, a gateway
+streaming panes to a browser, anything that wants the session's data and has to
+be running for it to be there:
+
+```lua
+hexe.plugin("share", { command = "my-streamer --port 8080" })
+```
+
+It gets `HEXE_API_SOCKET` and `HEXE_SESSION` in its environment, so it never has
+to guess where hexe is. Started once, detached, and **not supervised** — see
+[streaming.md](streaming.md) for what it can then read.
+
 ## Splitting the config up
 
 A file you split out **registers what it declares and returns nothing**, and the config loads it for

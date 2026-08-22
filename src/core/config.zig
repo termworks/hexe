@@ -66,6 +66,28 @@ fn freeOwnedStr(a: std.mem.Allocator, slice: []const u8, comptime default: []con
     a.free(@constCast(slice));
 }
 
+/// A helper program the session runs alongside itself.
+///
+/// The painter is started this way already, by `status.command`, but that hook
+/// belongs to the bar. A plugin is the general form: something that wants the
+/// session's data -- a recorder, a web gateway streaming panes to a browser --
+/// and needs to be running for it to be there.
+///
+/// hexe starts it once and does not supervise it. Restarting a helper that
+/// exits on purpose is a fork loop with a delay, and a helper that wants to
+/// survive its own crashes knows better than hexe does how to.
+pub const PluginDef = struct {
+    /// Only so a message can say which one failed.
+    name: []const u8,
+    /// Run through `/bin/sh -c`, detached, with stdio closed.
+    command: []const u8,
+
+    pub fn deinit(self: *PluginDef, allocator: std.mem.Allocator) void {
+        freeSlice(allocator, @constCast(self.name));
+        freeSlice(allocator, @constCast(self.command));
+    }
+};
+
 /// Status bar config
 pub const StatusBarConfig = struct {
     enabled: bool = true,
@@ -820,6 +842,9 @@ pub const Config = struct {
 
     // Notifications
     notifications: NotificationConfig = .{},
+
+    // Helper programs hexe starts for you.
+    plugins: []const PluginDef = &.{},
 
     // Internal
     _allocator: ?std.mem.Allocator = null,
