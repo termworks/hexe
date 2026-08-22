@@ -9,6 +9,8 @@ const store_mod = @import("store.zig");
 pub const SpawnResult = struct {
     pod_pid: posix.pid_t,
     child_pid: posix.pid_t,
+    /// The pane's environment file; the caller puts it on the `Pane`.
+    env_fd: ?posix.fd_t = null,
 };
 
 /// Whether any pane already answers to this name.
@@ -266,11 +268,31 @@ pub fn startPodSpawn(
 
     const instance_env = posix.getenv("HEXE_INSTANCE");
     const test_only_env = posix.getenv("HEXE_TEST_ONLY");
-    const needs_runtime_env = (instance_env != null and instance_env.?.len > 0) or
-        (test_only_env != null and test_only_env.?.len > 0) or
-        (isolation_profile != null and isolation_profile.?.len > 0);
 
-    if (env != null or base_env != null or needs_runtime_env) {
+    // The pane's environment file. Anonymous, so there is no path for anyone
+    // else to open; it dies with the last descriptor.
+    //
+    // Created with CLOEXEC and handed to the pod as a `dup`, which does NOT
+    // carry the flag — that copy is the one that survives `execve` into the
+    // pod, and its number is what `HEXE_ENV_FD` names. SES keeps the CLOEXEC
+    // original so no other child it spawns inherits it.
+    const env_fd: ?posix.fd_t = posix.memfd_create("hexe-env", std.os.linux.MFD.CLOEXEC) catch |err| blk: {
+        core.logging.logError("ses", "failed to create pane env descriptor", err);
+        break :blk null;
+    };
+    errdefer if (env_fd) |fd| posix.close(fd);
+
+    var inherit_fd: ?posix.fd_t = null;
+    if (env_fd) |fd| {
+        inherit_fd = posix.dup(fd) catch |err| blk: {
+            core.logging.logError("ses", "failed to dup pane env descriptor", err);
+            break :blk null;
+        };
+    }
+    // The parent's copy is only needed until the fork; the pod keeps its own.
+    defer if (inherit_fd) |fd| posix.close(fd);
+
+    {
         // `base_env` is the session's own environment, captured from the
         // frontend at register. Falling back to SES's environ is the legacy
         // path: the daemon outlives every session, so its environment is
@@ -293,6 +315,26 @@ pub fn startPodSpawn(
         }
         if (test_only_env) |v| {
             if (v.len > 0) try env_map.put("HEXE_TEST_ONLY", v);
+        }
+
+        if (inherit_fd) |fd| {
+            var fd_buf: [16]u8 = undefined;
+            const text = std.fmt.bufPrint(&fd_buf, "{d}", .{fd}) catch "";
+            if (text.len > 0) try env_map.put("HEXE_ENV_FD", text);
+        }
+
+        // The hexe that owns this pane, by absolute path.
+        //
+        // The integration would otherwise run whatever `hexe` the user's PATH
+        // finds, and a shell's rc file commonly reorders PATH — so the pane can
+        // easily be talking to a DIFFERENT, older build than the one that
+        // spawned it. When that build predates a subcommand the integration
+        // uses, the hook fails silently and the feature simply does not happen.
+        var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (std.fs.readLinkAbsolute("/proc/self/exe", &exe_buf)) |exe| {
+            try env_map.put("HEXE_BIN", exe);
+        } else |err| {
+            core.logging.logError("ses", "could not resolve own path for HEXE_BIN", err);
         }
 
         if (isolation_profile) |profile| {
@@ -320,6 +362,7 @@ pub fn startPodSpawn(
         .pod_pid = @intCast(child.id),
         .stdout_file = stdout_file,
         .deadline_ms = std.time.milliTimestamp() + core.constants.Timing.ses_spawn_timeout,
+        .env_fd = env_fd,
     };
 }
 
@@ -337,9 +380,22 @@ pub const PendingPodSpawn = struct {
     deadline_ms: i64,
     buf: [512]u8 = undefined,
     pos: usize = 0,
+    /// The pane's environment file, to be moved onto the `Pane`.
+    ///
+    /// Held here so a spawn that fails still closes it: `takeEnvFd` hands over
+    /// ownership, and whatever is left when `deinit` runs was never claimed.
+    env_fd: ?posix.fd_t = null,
+
+    pub fn takeEnvFd(self: *PendingPodSpawn) ?posix.fd_t {
+        const fd = self.env_fd;
+        self.env_fd = null;
+        return fd;
+    }
 
     pub fn deinit(self: *PendingPodSpawn) void {
         self.stdout_file.close();
+        if (self.env_fd) |fd| posix.close(fd);
+        self.env_fd = null;
     }
 
     pub fn expired(self: *const PendingPodSpawn, now_ms: i64) bool {
@@ -414,7 +470,9 @@ pub fn spawnPod(
 
     while (true) {
         switch (pollPodHandshake(&sp)) {
-            .ready => |child_pid| return .{ .pod_pid = sp.pod_pid, .child_pid = child_pid },
+            // Taken out of `sp` so its `deinit` does not close what the pane is
+            // about to own.
+            .ready => |child_pid| return .{ .pod_pid = sp.pod_pid, .child_pid = child_pid, .env_fd = sp.takeEnvFd() },
             .failed => return error.PodBadHandshake,
             .pending => {},
         }

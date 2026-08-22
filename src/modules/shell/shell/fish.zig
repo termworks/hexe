@@ -6,14 +6,12 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
     try stdout.writeAll(
         \\# Hexe shell->mux communication hooks (Fish)
         \\set -g __hexe_last_cmd ""
-        \\set -g __hexe_env_snapshot ""
         \\
         \\function __hexe_refresh_env_snapshot
-        \\    if not set -q HEXE_PANE_UUID
+        \\    if not set -q HEXE_ENV_FD
         \\        return
         \\    end
-        \\    set -g __hexe_env_snapshot "/tmp/hexe-env-$HEXE_PANE_UUID"
-        \\    env -0 > "$__hexe_env_snapshot" 2>/dev/null
+        \\    if set -q HEXE_BIN; $HEXE_BIN shell env-save 2>/dev/null; else; hexe shell env-save 2>/dev/null; end
         \\end
         \\
         \\function __hexe_exit_intent

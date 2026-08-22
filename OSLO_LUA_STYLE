@@ -1,0 +1,119 @@
+# The oslo Lua config style
+
+One config style across oslo, hexe, lule and pixy. oslo already reads this way; lule was converted
+to it; this describes the style so hexe can match.
+
+The whole of it: **assign the settings, register the behaviour, return nothing.**
+
+```lua
+local hexe = require("hexe")
+
+hexe.vi.enabled = true
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit())
+hexe.on.attach(function(s) ... end)
+```
+
+## The four rules
+
+### 1. Settings are assigned, not declared in a table
+
+```lua
+tool.theme = "dark"                  -- yes
+tool.suggest.sources = { "history" } -- yes, when there is more than one subsystem
+
+return tool.setup({ settings = { theme = "dark" } })   -- no
+```
+
+A setting the config never mentions is left alone — the environment or a flag decides it. There is
+no "defaults table" to keep in sync, and no way to blank a setting by forgetting to list it.
+
+Namespace only where there is genuinely more than one subsystem. oslo has `oslo.vi`, `oslo.suggest`,
+`oslo.builtin`; lule has one subject and so keeps its settings flat. A namespace with one member is
+a directory with one file in it.
+
+### 2. Behaviour is registered, and registration repeats
+
+```lua
+tool.on.event(handler)      -- as often as you like
+```
+
+This is the rule the other three follow from. If a hook is one field in a returned table there is
+exactly one place to put anything, so everything a config does piles into one function. If it is a
+call, the config is as many small named functions as it wants:
+
+```lua
+local function write_cache(c) ... end
+local function recolour_terminals(c) ... end
+local function reload_desktop(c) ... end
+
+lule.on.colors(write_cache)
+lule.on.colors(recolour_terminals)
+lule.on.colors(reload_desktop)
+```
+
+Handlers run in the order they were registered. **One that raises is reported and the rest still
+run** — a mistake in the third handler is not a reason to skip the fourth, which has nothing to do
+with it.
+
+The same goes for anything else that is a list: `hexe.key(...)`, `lule.template(...)`,
+`make.recipe{...}` are all calls that append, not entries in a table someone has to assemble.
+
+### 3. The file returns nothing
+
+No `return tool.setup({...})`, no `return M`. The config is a list of statements, so it can compute
+freely between them:
+
+```lua
+for _, app in ipairs({ "kitty", "waybar", "rofi" }) do
+  lule.template(app, { input = shared, output = "~/.config/" .. app .. "/colors.ini" })
+end
+
+if oslo.term.kitty_keyboard() then
+  oslo.lua.enter = "newline"
+end
+```
+
+The host reads its settings off the module table after the chunk has run, so there is nothing to
+hand back.
+
+### 4. A handler's return value means something, or nothing
+
+Where a handler can influence what happens next, `nil` means "not mine, carry on" and a table means
+"here is what to do instead":
+
+```lua
+oslo.on.on_key(function(k)
+  if k.language ~= "sh" then return end          -- not mine
+  if k.name == "enter" and k.text == "" then
+    return { text = "la --git-ignore", submit = true }
+  end
+end)
+```
+
+Where a handler is purely a side effect — lule's `on.colors` — the return value is ignored and the
+handler returns nothing.
+
+## What the host implements
+
+Small enough to be worth stating exactly:
+
+- The module table is created, the host's functions are added to it, and it is parked before the
+  config chunk runs. `package.loaded['<tool>'] = tool` so `require` never touches the filesystem.
+- Registrars append to a plain Lua list on that table (`tool.templates`, `tool.handlers.colors`).
+  Keeping them in Lua rather than in the host means the list can also be assigned outright, and
+  can be read back by the config.
+- After the chunk runs, the host reads its settings off the module table. Missing key means unset,
+  not zero.
+- A syntax error or a raise **at load time** stops the run and names file and line — carrying on
+  with defaults silently applies something the user did not ask for. A raise **inside a handler**
+  is reported and the run stands.
+- Handlers are called one at a time under `pcall`, in registration order.
+
+## Naming
+
+- `tool.on.<noun>` for events — the thing that happened, not when. `on.colors`, `on.attach`,
+  `on.key`. Not `after`, `post`, `hook`: those say when, and a config full of `after` tells you
+  nothing about what any of it does.
+- Settings take the same name as the equivalent command-line flag.
+- A registrar that takes a name (`lule.template("kitty", ...)`, `hexe.key(...)`) uses the name only
+  so a warning can say *which* one is wrong.

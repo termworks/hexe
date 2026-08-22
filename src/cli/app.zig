@@ -639,6 +639,8 @@ pub fn main() !void {
 
     const shp_exit_intent = app.createCommand("exit-intent", "Ask mux permission before shell exits");
 
+    const shp_env_save = app.createCommand("env-save", "Publish this shell's environment to the pane");
+
     var shp_shell_event = app.createCommand("shell-event", "Send shell command metadata to the current mux");
     try shp_shell_event.addArg(Arg.singleValueOption("cmd", null, null));
     try shp_shell_event.addArg(Arg.singleValueOption("status", null, null));
@@ -649,7 +651,7 @@ pub fn main() !void {
     try shp_shell_event.addArg(Arg.booleanOption("running", null, null));
     try shp_shell_event.addArg(Arg.singleValueOption("started-at", null, null));
 
-    try shp_cmd.addSubcommands(&[_]yazap.Command{ shp_init, shp_exit_intent, shp_shell_event });
+    try shp_cmd.addSubcommands(&[_]yazap.Command{ shp_init, shp_exit_intent, shp_env_save, shp_shell_event });
 
     // POP subcommands
     var pop_notify = app.createCommand("notify", "Show notification");
@@ -1300,6 +1302,10 @@ pub fn main() !void {
         }
         if (shp_matches.subcommandMatches("exit-intent")) |_| {
             try cli_cmds.runExitIntent(allocator);
+            return;
+        }
+        if (shp_matches.subcommandMatches("env-save")) |_| {
+            try cli_cmds.runEnvSave();
             return;
         }
         if (shp_matches.subcommandMatches("shell-event")) |m| {

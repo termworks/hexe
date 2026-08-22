@@ -178,7 +178,7 @@ pub const Pty = struct {
 
             // Close all file descriptors >= 3 before exec to prevent FD leaks
             // into the child process (other PTY masters, server sockets, etc.)
-            closeExtraFds();
+            closeExtraFds(keepFdFromEnv());
 
             // Check if command has spaces (needs shell wrapper)
             const has_spaces = std.mem.indexOfScalar(u8, shell, ' ') != null;
@@ -391,12 +391,45 @@ pub const Pty = struct {
         return @ptrCast(slice.ptr);
     }
 
-    fn closeExtraFds() void {
+    /// The one descriptor the shell is allowed to keep, named by `HEXE_ENV_FD`.
+    ///
+    /// Parsed rather than trusted: anything that is not a plain number in range
+    /// means no exemption at all, so a malformed value cannot widen the hole to
+    /// "keep everything from here up".
+    fn keepFdFromEnv() ?posix.fd_t {
+        const text = posix.getenv("HEXE_ENV_FD") orelse return null;
+        const n = std.fmt.parseInt(i32, text, 10) catch return null;
+        if (n < 3) return null;
+        return n;
+    }
+
+    /// Close everything the shell has no business holding.
+    ///
+    /// `keep` is a single descriptor, not a floor. Raising the floor would let
+    /// every fd above it through, and the point of this is that a pane's shell
+    /// inherits no pty masters, no server sockets and no other pane's channels.
+    /// So the range is closed in two halves with one number missing from it.
+    fn closeExtraFds(keep: ?posix.fd_t) void {
         const first_fd: usize = 3;
         const max_fd: usize = std.math.maxInt(u32);
-        const result = linux.syscall3(.close_range, first_fd, max_fd, 0);
-        const signed: isize = @bitCast(result);
-        if (!(signed < 0 and signed > -4096)) return;
+
+        if (keep) |k| {
+            const kept: usize = @intCast(k);
+            var ok = true;
+            if (kept > first_fd) {
+                const lower = linux.syscall3(.close_range, first_fd, kept - 1, 0);
+                if (rangeFailed(lower)) ok = false;
+            }
+            if (kept < max_fd) {
+                const upper = linux.syscall3(.close_range, kept + 1, max_fd, 0);
+                if (rangeFailed(upper)) ok = false;
+            }
+            if (ok) return;
+        } else {
+            const result = linux.syscall3(.close_range, first_fd, max_fd, 0);
+            if (!rangeFailed(result)) return;
+        }
+
         // Fallback: close_range not available (pre-Linux 5.9). Walk up to the
         // actual RLIMIT_NOFILE so raised ulimits don't leak FDs >= 1024 to
         // the child shell.
@@ -404,8 +437,16 @@ pub const Pty = struct {
         const end_fd: usize = @intCast(limit.cur);
         var fd: usize = first_fd;
         while (fd < end_fd) : (fd += 1) {
+            if (keep) |k| {
+                if (fd == @as(usize, @intCast(k))) continue;
+            }
             posix.close(@intCast(fd));
         }
+    }
+
+    fn rangeFailed(result: usize) bool {
+        const signed: isize = @bitCast(result);
+        return signed < 0 and signed > -4096;
     }
 
     pub fn read(self: Pty, buffer: []u8) !usize {

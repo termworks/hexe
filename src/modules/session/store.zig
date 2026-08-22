@@ -70,6 +70,20 @@ pub const Pane = struct {
     pane_id: u16 = 0,
     pod_vt_fd: ?posix.fd_t = null,
     pod_ctl_fd: ?posix.fd_t = null,
+    /// An anonymous file holding this pane's exported environment, rewritten by
+    /// the shell integration at every prompt.
+    ///
+    /// The environment has to be PUSHED, not asked for: a shell running a
+    /// foreground command is blocked in `waitpid` and cannot answer, and that
+    /// is a common moment to open a float. `/proc/<pid>/environ` is the only
+    /// thing readable unilaterally and it is the image as of `execve`, so it
+    /// can never contain a later `export`.
+    ///
+    /// A memfd rather than the `/tmp/hexe-env-<uuid>` file it replaces: that
+    /// path was world-readable under the usual umask, held the whole
+    /// environment including tokens, and was never unlinked. This one has no
+    /// name to open and dies with the pane.
+    env_fd: ?posix.fd_t = null,
     needs_backlog_replay: bool = false,
     /// Backoff state for `needs_backlog_replay` retries.
     ///
@@ -160,6 +174,12 @@ pub const Pane = struct {
     }
 
     pub fn deinit(self: *Pane) void {
+        // Closed here rather than beside the pod descriptors: SES is the only
+        // owner of this one, so every path that drops a pane drops it too.
+        if (self.env_fd) |fd| {
+            posix.close(fd);
+            self.env_fd = null;
+        }
         if (self.name) |n| self.allocator.free(n);
         self.allocator.free(self.pod_socket_path);
         if (self.sticky_pwd) |pwd| self.allocator.free(pwd);
@@ -249,32 +269,49 @@ pub const Pane = struct {
         return entries;
     }
 
-    fn getSnapshotEnviron(self: *const Pane, allocator: std.mem.Allocator) ?[]const []const u8 {
-        var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/tmp/hexe-env-{s}", .{&self.uuid}) catch |err| {
-            core.logging.logError("ses", "failed to format pane env snapshot path", err);
-            return null;
-        };
-        const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
-            if (err != error.FileNotFound) {
-                core.logging.logError("ses", "failed to open pane env snapshot", err);
-            }
-            return null;
-        };
-        defer file.close();
+    /// The environment the pane's shell last published.
+    ///
+    /// `pread`, so this never disturbs any offset the shell is using, and the
+    /// shell need not be responsive: it wrote at its last prompt and SES reads
+    /// whenever it likes. That is the whole point — a shell blocked in
+    /// `waitpid` cannot answer a question, and opening a float during a build
+    /// is exactly when this gets asked.
+    fn getPublishedEnviron(self: *const Pane, allocator: std.mem.Allocator) ?[]const []const u8 {
+        const fd = self.env_fd orelse return null;
 
-        const max_size: usize = 256 * 1024;
-        const data = file.readToEndAlloc(allocator, max_size) catch |err| {
-            core.logging.logError("ses", "failed to read pane env snapshot", err);
-            return null;
+        const size = blk: {
+            const st = posix.fstat(fd) catch |err| {
+                core.logging.logError("ses", "failed to stat pane env descriptor", err);
+                return null;
+            };
+            break :blk @as(usize, @intCast(st.size));
         };
+        if (size == 0) return null;
+
+        const max_size: usize = 1024 * 1024;
+        const data = allocator.alloc(u8, @min(size, max_size)) catch return null;
         defer allocator.free(data);
 
-        return parseNulSeparatedEnv(allocator, data);
+        var off: usize = 0;
+        while (off < data.len) {
+            const n = posix.pread(fd, data[off..], off) catch |err| {
+                core.logging.logError("ses", "failed to read pane environment", err);
+                return null;
+            };
+            if (n == 0) break;
+            off += n;
+        }
+        if (off == 0) return null;
+
+        return parseNulSeparatedEnv(allocator, data[0..off]);
     }
 
     pub fn getProcEnviron(self: *const Pane, allocator: std.mem.Allocator) ?[]const []const u8 {
-        if (self.getSnapshotEnviron(allocator)) |snapshot| return snapshot;
+        // What the shell published, first. `/proc/<pid>/environ` is the image
+        // as of `execve` and can never contain a later `export`, so it is the
+        // fallback for a pane whose shell has no integration loaded -- stale,
+        // but present, which beats no environment at all.
+        if (self.getPublishedEnviron(allocator)) |published| return published;
         if (self.child_pid == 0) return null;
 
         var path_buf: [64]u8 = undefined;

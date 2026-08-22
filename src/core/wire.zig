@@ -226,8 +226,12 @@ pub const FrontendCapabilityFlag = struct {
 /// session is the unit that owns an environment; tabs, splits and floats
 /// inherit it from there.
 ///
-/// The pid travels instead of the environment itself because a real nix/direnv
-/// environment runs well past the 64KiB CTL payload ceiling. It is meaningful
+/// The pid travels instead of the environment itself because reading it from
+/// `/proc` keeps the session's environment in one place rather than copying it
+/// into every message. Size is not the reason: an earlier comment here claimed
+/// a 64KiB CTL payload ceiling, and there is none -- `constants.zig`
+/// `max_payload_len` is 4 MiB, against a measured nix+direnv environment of
+/// 13 KB. It is meaningful
 /// only for same-host transports; remote frontends send 0 and keep the
 /// fallback. `/proc/<pid>/environ` is readable only within the same uid, and
 /// the SES socket is already uid-scoped, so a client cannot reach an
