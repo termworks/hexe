@@ -51,9 +51,12 @@ asryx >/dev/null 2>&1 || true          # start capture; returns at once
 read -r _ignored || true               # hexe closes stdin when you stop
 asryx >/dev/null 2>&1 || true          # stop, transcribe, copy
 
-# The README does not promise the stop invocation blocks until transcription
-# finishes, and there is an explicit "transcribing" state, so wait for idle
-# rather than assume. Harmless if it was synchronous all along.
+# asryx's stop path (runtime.cpp: stop_and_transcribe) runs inline with no
+# fork, so by the time the call above returns the clipboard is already set and
+# this loop exits on its first check. Kept because "transcribing" is a state
+# asryx can report, and a future async stop would otherwise read the clipboard
+# before the transcript lands -- a race that would show up as the PREVIOUS
+# dictation being typed.
 i=0
 while [ "$i" -lt 600 ]; do
     case "$(asryx status 2>/dev/null || echo idle)" in

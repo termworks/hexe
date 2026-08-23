@@ -127,6 +127,13 @@ Three things to know before you rely on it:
 - **Do not also bind asryx to a compositor hotkey.** Two toggles driving one
   state machine will fight, and you get a recording nobody stops.
 
-The adapter waits for `idle` rather than assuming the stop call blocks, because
-asryx documents a `transcribing` state but does not say whether the second
-invocation returns before or after it. Waiting is correct either way.
+The adapter waits for `idle` before reading the clipboard. As of writing that
+loop exits immediately — asryx's stop path transcribes inline — but it costs
+one status call and protects against the race that would otherwise type the
+*previous* dictation.
+
+Building asryx needs a C++23 compiler with `<expected>`: GCC 13+ or Clang 16+.
+Its installer prefers `clang++`, then bare `g++`, so on a machine where
+`/usr/bin/g++` is older than the one you use it can pick the wrong one and stop
+at `error.hpp:5: fatal error: expected: No such file or directory`. Setting both
+`CC` and `CXX` overrides the choice.
