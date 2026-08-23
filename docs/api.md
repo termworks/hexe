@@ -136,12 +136,16 @@ here; an invalid name is refused and the old one is kept.
 
 ## Calling it from another Lua
 
-`hexe lua-api` prints a plain-Lua client library; `--install` writes it to
-`~/.local/share/hexe/lua/hexe.lua` for a host that cannot shell out to get it —
-oslo's VM refuses `io.popen`, so it reads the file:
+`hexe lua-api` prints a plain-Lua client library. A host that can shell out
+pipes it; one that cannot — oslo's VM refuses `io.popen` — reads it from
+wherever you put it:
+
+```sh
+hexe lua-api > ~/.config/oslo/hexe.lua
+```
 
 ```lua
-local src  = io.open(os.getenv("HOME") .. "/.local/share/hexe/lua/hexe.lua"):read("a")
+local src  = io.open(os.getenv("HOME") .. "/.config/oslo/hexe.lua"):read("a")
 local hexe = load(src)(oslo.stream)      -- the one thing it cannot do itself
 local mux  = hexe.connect()
 for _, pane in ipairs(mux.panes()) do print(pane.name, pane.cwd) end

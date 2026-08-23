@@ -525,8 +525,7 @@ pub fn main() !void {
     // reachable from here.
     // Not a subcommand of anything: it is hexe handing out a file, and the
     // program that wants it is not hexe.
-    var lua_api_cmd = app.createCommand("lua-api", "Print the Lua client library other programs require");
-    try lua_api_cmd.addArg(Arg.booleanOption("install", null, null));
+    const lua_api_cmd = app.createCommand("lua-api", "Print the Lua client library other programs require");
 
     var plugin_cmd = app.createCommand("plugin", "Install, list, remove and approve plugins");
     var plugin_list = app.createCommand("list", "What is installed, what it may do, and whether it changed");
@@ -859,8 +858,8 @@ pub fn main() !void {
         }
     }.check;
 
-    if (matches.subcommandMatches("lua-api")) |m| {
-        try cli_cmds.runLuaApi(allocator, m.containsArg("install"));
+    if (matches.subcommandMatches("lua-api")) |_| {
+        try cli_cmds.runLuaApi();
         return;
     }
 
