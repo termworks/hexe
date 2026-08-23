@@ -60,6 +60,7 @@ What comes back is **framed, not raw VT**:
 | `3` | `resize` | the pane's new size |
 | `4` | `backlog_end` | the replay is over; everything after this is live |
 | `5` | `password_mode` | one byte: `1` broadcasting has stopped, `0` it has resumed |
+| `6` | `refused` | one byte: `1` blocked, `2` at capacity. Sent just before the pod hangs up. |
 
 An observer receives the **scrollback first**, then `backlog_end`, then the live
 stream. A viewer that wants only current output can discard everything before
@@ -93,13 +94,30 @@ Four limits, and each exists because of the failure it prevents:
 
 - **A blocked pane refuses you outright.** Someone said "stop sharing" (see
   below) and the pane stays shut until they say otherwise. Reconnecting does not
-  get you back in; that is the whole point of it.
-- **Password prompts are not broadcast.** When the pod detects one it stops
-  sending output entirely and emits a `password_mode` frame carrying `1`, then
-  another carrying `0` when the prompt is gone. Those two are written directly
-  rather than through the broadcast path, which is suppressed — otherwise the
-  edge that turns it on would be swallowed by the mode it turns on. A recorder
-  must stop writing to its file between them.
+  get you back in; that is the whole point of it. You get a `refused` frame
+  saying which it was first: without it every refusal looks like a pod that
+  died, and a client that reconnects on loss — which it should — turns "stop
+  sharing" into a reconnect loop that quietly defeats it. `blocked` means stop;
+  `at_capacity` means waiting might help.
+- **Password prompts are not broadcast.** The pod detects one the only way a
+  terminal can — the child put its tty into canonical mode with echo off — and
+  then sends observers nothing at all: `broadcastToObservers` drops **output and
+  input alike** while it is on, and the backlog stops recording. It emits a
+  `password_mode` frame carrying `1`, and `0` when the prompt is gone; those two
+  are written directly rather than through the broadcast path, which is
+  suppressed, otherwise the edge that turns it on would be swallowed by the mode
+  it turns on.
+
+  **If you keep your own scrollback, clear it on `1` — do not merely stop
+  appending.** Detection cannot precede the prompt: the bytes that drew
+  `Password:` were broadcast before the tty flags changed, so they are already
+  in your buffer. The pod handles this by wiping its own backlog on entry
+  (`applyPasswordMode` calls `backlog.clear()`), and a downstream ring that does
+  not do the same becomes the leak the pod just prevented — replaying the prompt
+  to whoever joins next.
+
+  What no one can close is the window itself: bytes emitted before the child
+  flipped the tty are already gone. That is inherent, not a bug to fix.
 - **Observers are capped**, at 8 per pod. Past that a connection is refused *before*
   the scrollback replay, not after — otherwise a caller could pay for a full
   history dump per rejected attempt.

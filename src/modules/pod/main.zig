@@ -1502,11 +1502,19 @@ const Pod = struct {
         };
     }
 
+    /// Say why, then hang up. Best effort: a caller that has already gone away
+    /// is exactly the case where the refusal does not matter.
+    fn refuse(conn: *core.IpcConnection, why: pod_protocol.Refusal) void {
+        const reason: [1]u8 = .{@intFromEnum(why)};
+        pod_protocol.writeFrameBounded(conn, .refused, &reason, CLIENT_WRITE_TIMEOUT_MS) catch {};
+        conn.close();
+    }
+
     fn acceptObserver(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
         var obs_conn = conn;
         if (self.share_blocked) {
             debugLog("reject observer fd={d}: sharing is blocked for this pane", .{conn.fd});
-            obs_conn.close();
+            refuse(&obs_conn, .blocked);
             return;
         }
         // Refuse before the backlog replay below, not at the append: the replay
@@ -1514,7 +1522,7 @@ const Pod = struct {
         // for a full scrollback dump per rejected observer.
         if (self.observers.items.len >= MAX_OBSERVERS) {
             debugLog("reject observer fd={d}: observer limit ({d}) reached", .{ conn.fd, MAX_OBSERVERS });
-            obs_conn.close();
+            refuse(&obs_conn, .at_capacity);
             return;
         }
         // Observers are secondary/diagnostic clients. Keep their fd

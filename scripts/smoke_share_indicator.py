@@ -188,16 +188,33 @@ if blocked.get("shared"):
     fail("a blocked pane still reports shared")
 print("stop: blocking dropped every watcher")
 
+# A refused observer must be TOLD why. Otherwise a refusal is indistinguishable
+# from a pod that died, and a streamer that reconnects on loss -- which it
+# should -- turns "stop sharing" into a reconnect loop that defeats it.
 try:
     late = observe()
-    late.sendall(b"")
-    got = late.recv(64)
-    if got:
-        fail("an observer connected AFTER the pane was blocked and received "
-             f"{len(got)} bytes -- stop sharing did not stop it")
+    late.settimeout(10)
+    got = b""
+    while len(got) < 6:
+        chunk = late.recv(64)
+        if not chunk:
+            break
+        got += chunk
 except (ConnectionResetError, BrokenPipeError, socket.timeout, OSError):
-    pass
-print("stop: a reconnecting watcher is refused, not raced")
+    got = b""
+
+if len(got) >= 6 and got[0] == 1:
+    fail("an observer connected AFTER the pane was blocked and was sent output "
+         "-- stop sharing did not stop it")
+if len(got) < 6:
+    fail("a refused observer was hung up on with no explanation; it cannot tell "
+         "'give up' from 'the pod died' and will reconnect forever")
+ftype = got[0]
+ln = int.from_bytes(got[1:5], "big")
+if ftype != 6 or ln != 1 or got[5] != 1:
+    fail(f"expected a refused frame saying 'blocked', got type={ftype} len={ln} "
+         f"payload={got[5:6]!r}")
+print("stop: a reconnecting watcher is refused, and told it is blocked")
 
 # 4. And it is reversible, or it would be a one-way door.
 api("share", json.dumps(uuid), "true")
