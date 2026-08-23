@@ -1,5 +1,6 @@
 const std = @import("std");
 pub const names_mod = @import("names.zig");
+pub const access_mod = @import("access.zig");
 const posix = std.posix;
 const lua_runtime = @import("lua_runtime.zig");
 const LuaRuntime = lua_runtime.LuaRuntime;
@@ -81,6 +82,11 @@ pub const PluginDef = struct {
     name: []const u8,
     /// Run through `/bin/sh -c`, detached, with stdio closed.
     command: []const u8,
+    /// What it may ask hexe to do, beyond the always-granted `read` floor.
+    /// Empty means read-only: a plugin that forgot to say gets the harmless
+    /// thing rather than everything, because the failure of the other default
+    /// is a helper quietly able to type into your shell.
+    access: access_mod.Set = access_mod.Set.baseline,
 
     pub fn deinit(self: *PluginDef, allocator: std.mem.Allocator) void {
         freeSlice(allocator, @constCast(self.name));

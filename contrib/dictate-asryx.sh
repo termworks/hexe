@@ -81,3 +81,5 @@ if [ "${HEXE_ASRYX_RESTORE_CLIPBOARD:-0}" = "1" ]; then
 fi
 
 printf '%s' "$TEXT"
+# access = { "typing" } is all a dictation tool needs: hexe types the text, and
+# the tool never has to touch the pane itself.

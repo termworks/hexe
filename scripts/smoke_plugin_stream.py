@@ -104,7 +104,7 @@ while time.time() < end:
 
 open(os.path.join(CF, "hexe", "init.lua"), "w").write(f"""
 local hexe = require("hexe")
-hexe.plugin("stream", {{ command = "python3 {PLUGIN}" }})
+hexe.plugin("stream", {{ command = "python3 {PLUGIN}", access = {{ "stream" }} }})
 """)
 
 env = os.environ.copy()

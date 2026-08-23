@@ -713,7 +713,28 @@ pub const LuaRuntime = struct {
                 continue;
             };
             const name = self.getString(-1, "name") orelse "plugin";
-            try mux.appendPlugin(name, command);
+
+            // `access = { "stream", "popup" }`. Absent means read-only: a
+            // plugin that says nothing should not thereby get everything.
+            var granted: config.access_mod.Set = .{};
+            if (self.pushTable(-1, "access")) {
+                defer self.pop();
+                const n = self.lua.rawLen(-1);
+                var ai: i32 = 1;
+                while (ai <= @as(i32, @intCast(n))) : (ai += 1) {
+                    _ = self.lua.rawGetIndex(-1, ai);
+                    defer self.lua.pop(1);
+                    const word = self.lua.toString(-1) catch continue;
+                    if (config.access_mod.Kind.parse(word)) |kind| {
+                        granted = granted.with(kind);
+                    } else {
+                        log.warn("plugin '{s}': unknown access '{s}'", .{ name, word });
+                    }
+                }
+            }
+            // `read` is not something a plugin declares: it is the floor.
+            // Without it nothing can even name a pane to act on.
+            try mux.appendPluginWithAccess(name, command, granted.merge(config.access_mod.Set.baseline));
         }
     }
 

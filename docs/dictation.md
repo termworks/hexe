@@ -13,6 +13,16 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.d }, hexe.action.dictate.stop()
 That is push-to-talk: hold the chord, speak, release. Bind `hexe.action.dictate.toggle()` to a
 single press instead if you would rather not hold a key.
 
+Dictation needs only `typing` access — hexe types the text, and the tool never
+touches the pane itself. A tool driven as a plugin rather than through
+`hexe.dictate` declares it:
+
+```lua
+hexe.plugin("dictate", { command = "dictate.sh", access = { "typing" } })
+```
+
+See [access.md](access.md) for why typing and keyboard are separate powers.
+
 ## The contract
 
 Two lines, and nothing in them is hexe-specific:

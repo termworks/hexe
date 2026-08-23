@@ -112,15 +112,17 @@ Four limits, and each exists because of the failure it prevents:
 ## Having hexe start it
 
 ```lua
-hexe.plugin("share", { command = "my-streamer --port 8080" })
+hexe.plugin("share", { command = "my-streamer --port 8080", access = { "stream", "popup" } })
 ```
 
 Started once when the session comes up, through `/bin/sh -c`, detached and with
-stdio closed. Its environment carries:
+stdio closed. `access` is what it may ask hexe to do — without `stream` it is
+not even shown `pod_socket`. See [access.md](access.md). Its environment carries:
 
 | | |
 | --- | --- |
-| `HEXE_API_SOCKET` | the control socket, so it never has to guess the path |
+| `HEXE_API_SOCKET` | its own scoped control socket, so it never has to guess the path |
+| `HEXE_ACCESS` | what it holds, e.g. `read,stream,popup` |
 | `HEXE_SESSION` | the session it belongs to |
 
 hexe does **not** supervise it. Restarting a helper that exited deliberately is

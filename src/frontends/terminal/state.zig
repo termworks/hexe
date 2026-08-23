@@ -22,6 +22,7 @@ pub const FloatUiState = state_types.FloatUiState;
 const layout_mod = @import("layout.zig");
 const pane_search = @import("pane_search.zig");
 const dictate_mod = @import("dictate.zig");
+const api_server = @import("api_server.zig");
 const Layout = layout_mod.Layout;
 
 const Renderer = @import("render_core.zig").Renderer;
@@ -389,6 +390,12 @@ pub const State = struct {
     api_server: ?@import("api_server.zig").ApiServer = null,
     /// Whether the configured plugins have been started for this session.
     plugins_started: bool = false,
+    /// What the caller currently being served may do. Full authority except
+    /// while a scoped socket's request is in flight; the loop is single
+    /// threaded, so this is a stack discipline rather than shared state.
+    api_grant: core.access.Set = core.access.Set.all,
+    /// One scoped control socket per plugin, each with its own grant.
+    plugin_servers: std.ArrayList(api_server.ApiServer) = .empty,
 
     /// The speech-to-text tool, when one is running. See dictate.zig.
     dictation: dictate_mod.Dictation,
@@ -1124,12 +1131,33 @@ pub const State = struct {
             self.plugins_started = true;
             return;
         }
-        // Waits for the socket: a plugin started before it exists would have to
-        // poll for it.
-        const srv = if (self.api_server) |*s| s else return;
+        // Waits until the session's own socket exists, which is the signal
+        // that the frontend is far enough along to serve anyone at all.
+        if (self.api_server == null) return;
         self.plugins_started = true;
 
         for (self.config.plugins) |plugin| {
+            // Its own socket, carrying only what it declared. Falling back to
+            // the session socket would hand a plugin everything precisely when
+            // its narrower socket failed to open -- the wrong way round -- so a
+            // plugin whose socket cannot be made does not start.
+            const scoped = api_server.ApiServer.initScoped(
+                self.allocator,
+                self.runtime.sessionName(),
+                plugin.name,
+                plugin.access,
+            ) catch |err| {
+                core.logging.logError("terminal", "could not open a scoped socket for a plugin", err);
+                core.logging.warn("terminal", "plugin '{s}' did not start: no scoped socket", .{plugin.name});
+                continue;
+            };
+            self.plugin_servers.append(self.allocator, scoped) catch {
+                var tmp = scoped;
+                tmp.deinit();
+                continue;
+            };
+            const sock = self.plugin_servers.items[self.plugin_servers.items.len - 1].path;
+
             var child = std.process.Child.init(&.{ "/bin/sh", "-c", plugin.command }, self.allocator);
             child.stdin_behavior = .Ignore;
             child.stdout_behavior = .Ignore;
@@ -1140,8 +1168,14 @@ pub const State = struct {
                 continue;
             };
             defer env_map.deinit();
-            env_map.put("HEXE_API_SOCKET", srv.path) catch {};
+            env_map.put("HEXE_API_SOCKET", sock) catch {};
             env_map.put("HEXE_SESSION", self.runtime.sessionName()) catch {};
+            // Told what it holds, so it can fail loudly at startup instead of
+            // discovering a missing grant halfway through doing something.
+            var acc_buf: [96]u8 = undefined;
+            var acc_stream = std.io.fixedBufferStream(&acc_buf);
+            plugin.access.format(acc_stream.writer()) catch {};
+            env_map.put("HEXE_ACCESS", acc_stream.getWritten()) catch {};
             child.env_map = &env_map;
 
             child.spawn() catch |err| {
@@ -1149,11 +1183,13 @@ pub const State = struct {
                 core.logging.warn("terminal", "plugin '{s}' did not start: {s}", .{ plugin.name, plugin.command });
                 continue;
             };
-            core.logging.warn("terminal", "started plugin '{s}': {s}", .{ plugin.name, plugin.command });
+            core.logging.warn("terminal", "started plugin '{s}' ({s}): {s}", .{ plugin.name, acc_stream.getWritten(), plugin.command });
         }
     }
 
     pub fn deinit(self: *State) void {
+        for (self.plugin_servers.items) |*srv| srv.deinit();
+        self.plugin_servers.deinit(self.allocator);
         if (self.api_server) |*srv| srv.deinit();
         self.api_server = null;
         self.runtime.prepareFrontendExit(posix.STDIN_FILENO, true) catch |err| {

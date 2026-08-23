@@ -366,6 +366,10 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         // After the socket, so HEXE_API_SOCKET is real when they read it.
         state.startPlugins();
         if (state.api_server) |*srv| srv.service(state);
+        // Each plugin's own socket, serviced the same way. Separate listeners
+        // rather than one with per-connection grants, so authority is a
+        // property of the door rather than of what the caller claims.
+        for (state.plugin_servers.items) |*srv| srv.service(state);
 
         const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);

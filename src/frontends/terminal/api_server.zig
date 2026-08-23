@@ -92,14 +92,39 @@ pub const ApiServer = struct {
     fd: posix.socket_t = -1,
     path: []u8 = &.{},
     conns: [MAX_CONNS]Conn = @splat(.{}),
+    /// What callers on THIS socket may do. The session's own socket holds
+    /// everything; a plugin's socket holds what it asked for.
+    granted: core.access.Set = core.access.Set.all,
 
     /// Bind the socket for `session`, replacing a stale one left by a crash.
     pub fn init(allocator: std.mem.Allocator, session: []const u8) !ApiServer {
+        return initScoped(allocator, session, null, core.access.Set.all);
+    }
+
+    /// A second socket for one plugin, carrying only what that plugin declared.
+    ///
+    /// A separate socket rather than a token on the shared one: a token the
+    /// caller supplies is a token the caller can omit, and then the grant means
+    /// nothing. A path the plugin is handed, and a listener that knows its own
+    /// authority, cannot be talked out of it.
+    pub fn initScoped(
+        allocator: std.mem.Allocator,
+        session: []const u8,
+        plugin: ?[]const u8,
+        granted: core.access.Set,
+    ) !ApiServer {
         const dir = try core.ipc.getSocketDir(allocator);
         defer allocator.free(dir);
         std.fs.cwd().makePath(dir) catch {};
 
-        const path = try std.fmt.allocPrint(allocator, "{s}/api@{s}.sock", .{ dir, session });
+        // `plug@` and not `api@`: session discovery globs `api@*.sock` to find
+        // what is listening, so naming a plugin's socket that way made three
+        // plugins look like three more sessions and `hexe api` refused to pick
+        // one. Different prefix, same directory, no ambiguity.
+        const path = if (plugin) |p|
+            try std.fmt.allocPrint(allocator, "{s}/plug@{s}.{s}.sock", .{ dir, session, p })
+        else
+            try std.fmt.allocPrint(allocator, "{s}/api@{s}.sock", .{ dir, session });
         errdefer allocator.free(path);
         if (path.len >= 108) return error.NameTooLong;
 
@@ -122,7 +147,7 @@ pub const ApiServer = struct {
             log.warn("could not restrict control socket permissions: {s}", .{@errorName(err)});
         };
 
-        return .{ .allocator = allocator, .fd = fd, .path = path };
+        return .{ .allocator = allocator, .fd = fd, .path = path, .granted = granted };
     }
 
     pub fn deinit(self: *ApiServer) void {
@@ -399,6 +424,15 @@ pub const ApiServer = struct {
             else => return self.fail(c, "`call` must be a string", .{}),
         };
 
+        // Refused before the verb runs, and named precisely: a plugin author
+        // reading "needs typing access" knows exactly what to add to their
+        // `access` list, where "permission denied" would send them guessing.
+        if (lua_api.accessFor(call)) |needs| {
+            if (!self.granted.has(needs)) {
+                return self.fail(c, "call `{s}` needs `{s}` access, which this plugin was not granted", .{ call, needs.name() });
+            }
+        }
+
         const rt = state.config._lua_runtime orelse {
             return self.fail(c, "no Lua runtime; the live API is unavailable", .{});
         };
@@ -406,6 +440,12 @@ pub const ApiServer = struct {
         // Accessors read this pointer, exactly as they do for a keybind
         // callback. `.handler` and not `.predicate`: a control request is a
         // deliberate act, not something evaluated on every keypress.
+        // The grant has to reach the accessors too, not just the dispatch: a
+        // `read` plugin calling `panes` must not be handed `pod_socket`, which
+        // is the whole byte stream behind a field name.
+        state.api_grant = self.granted;
+        defer state.api_grant = core.access.Set.all;
+
         const scope = lua_api.pushLiveState(rt, state, .handler);
         defer lua_api.popLiveState(rt, scope);
 

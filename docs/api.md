@@ -64,6 +64,13 @@ drift out of step with the first.
 | act | `act`, `send`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`, `rename`, `notify` |
 | place | `geometry`, `ratio` |
 | share | `share` |
+| keyboard | `keys` |
+
+`keys(chord)` presses a chord **at hexe** — `"ctrl+alt+d"`, `"super+left"`,
+`"space"` — so it fires whatever you bound rather than reaching the program in
+the pane. It returns whether a binding consumed it. That is the opposite of
+`send`, which writes bytes into the pane and which hexe never interprets; see
+[access.md](access.md) for why they are separate powers.
 
 A pane record carries what you would expect to have to ask several commands
 for: `uuid`, `name`, geometry, `cwd`, `process`, `alive`, `alt_screen`, cursor
@@ -182,6 +189,9 @@ Two things to know before building on this:
   so a gateway polls. For layout changes that is fine at human timescales; for
   pane output it is the wrong shape, which is why output should come from the
   VT stream instead.
+- **Plugins get a narrower socket.** The session's own socket is full control;
+  a plugin declares what it needs and is handed a socket carrying only that.
+  See [access.md](access.md).
 - **The socket is full control of the session, authenticated only by file
   permissions.** It is `0600` and belongs on a machine boundary, not a network
   one. A gateway that exposes it to a phone is the thing that must authenticate;

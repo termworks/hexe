@@ -54,8 +54,17 @@ be running for it to be there:
 hexe.plugin("share", { command = "my-streamer --port 8080" })
 ```
 
-It gets `HEXE_API_SOCKET` and `HEXE_SESSION` in its environment, so it never has
-to guess where hexe is. Started once, detached, and **not supervised** — see
+```lua
+hexe.plugin("share", { command = "my-streamer --port 8080", access = { "stream", "popup" } })
+```
+
+`access` says what it may do — `read`, `screen`, `typing`, `keyboard`, `stream`,
+`popup`, `control`. Declaring nothing means read-only. See
+[access.md](access.md).
+
+It gets `HEXE_API_SOCKET` (its own scoped socket), `HEXE_ACCESS` and
+`HEXE_SESSION` in its environment, so it never has to guess where hexe is.
+Started once, detached, and **not supervised** — see
 [streaming.md](streaming.md) for what it can then read.
 
 ## Splitting the config up

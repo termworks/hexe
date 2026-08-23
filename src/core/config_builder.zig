@@ -193,6 +193,16 @@ pub const MuxConfigBuilder = struct {
 
     /// Record one plugin. Strings are copied: the Lua values they came from are
     /// collected as soon as the config chunk is done with them.
+    pub fn appendPluginWithAccess(
+        self: *MuxConfigBuilder,
+        name: []const u8,
+        command: []const u8,
+        access: config.access_mod.Set,
+    ) !void {
+        try self.appendPlugin(name, command);
+        self.plugins.items[self.plugins.items.len - 1].access = access;
+    }
+
     pub fn appendPlugin(self: *MuxConfigBuilder, name: []const u8, command: []const u8) !void {
         const owned_name = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned_name);

@@ -355,7 +355,11 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     // stream does not have to know hexe's runtime layout. Built with the same
     // helper SES used when it spawned the pod, so this is the path in use and
     // not a guess at one.
-    {
+    if (!state.api_grant.has(.stream)) {
+        // Withheld rather than faked: a caller without stream access should
+        // learn it cannot have the bytes, not be handed a path that fails.
+        setOptStr(lua, "pod_socket", null);
+    } else {
         var scratch: [std.fs.max_path_bytes]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&scratch);
         if (core.ipc.getPodSocketPath(fba.allocator(), pane.uuid[0..])) |path| {
@@ -1138,6 +1142,81 @@ fn hexe_share(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// Parse `ctrl+alt+d`, `super+left`, `space` into hexe's chord representation.
+///
+/// Mod names match the ones a config writes (`hexe.key.ctrl`), because a person
+/// bridging a compositor to hexe is reading their hexe config to decide what to
+/// send, and having to translate between two spellings is a bug generator.
+fn parseChord(spec: []const u8) ?struct { mods: u8, key: core.Config.BindKey } {
+    var mods: u8 = 0;
+    var key: ?core.Config.BindKey = null;
+
+    var it = std.mem.tokenizeAny(u8, spec, "+- \t");
+    while (it.next()) |part| {
+        var lower_buf: [16]u8 = undefined;
+        if (part.len > lower_buf.len) return null;
+        const word = std.ascii.lowerString(lower_buf[0..part.len], part);
+
+        if (std.mem.eql(u8, word, "alt")) {
+            mods |= 1;
+        } else if (std.mem.eql(u8, word, "ctrl") or std.mem.eql(u8, word, "control")) {
+            mods |= 2;
+        } else if (std.mem.eql(u8, word, "shift")) {
+            mods |= 4;
+        } else if (std.mem.eql(u8, word, "super") or std.mem.eql(u8, word, "meta")) {
+            mods |= 8;
+        } else if (std.mem.eql(u8, word, "up")) {
+            key = .up;
+        } else if (std.mem.eql(u8, word, "down")) {
+            key = .down;
+        } else if (std.mem.eql(u8, word, "left")) {
+            key = .left;
+        } else if (std.mem.eql(u8, word, "right")) {
+            key = .right;
+        } else if (std.mem.eql(u8, word, "space")) {
+            key = .space;
+        } else if (word.len == 1) {
+            key = .{ .char = word[0] };
+        } else {
+            return null;
+        }
+    }
+    // A chord with only modifiers is not a chord; refusing beats pressing
+    // something the caller did not name.
+    return if (key) |k| .{ .mods = mods, .key = k } else null;
+}
+
+/// `keys("ctrl+alt+d")` — press a chord *at hexe*.
+///
+/// Not `send`: this goes through the keybinding machinery, so it fires whatever
+/// the user bound rather than reaching the program inside the pane. That is the
+/// whole point of a compositor bridge — Hyprland knows the key was pressed, but
+/// only hexe knows what it means here.
+///
+/// Returns whether a binding consumed it, so a bridge can fall back to its own
+/// handling instead of silently swallowing the key.
+fn hexe_keys(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    const spec = lua.toString(1) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    const chord = parseChord(spec) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+
+    const keybinds = @import("keybinds.zig");
+    const consumed = keybinds.handleKeyEvent(state, chord.mods, chord.key, .press, false);
+    state.needs_render = true;
+    lua.pushBoolean(consumed);
+    return 1;
+}
+
 /// `dictate()` reads the state; `dictate(true)` starts, `dictate(false)` stops.
 ///
 /// The same three verbs the keybindings use, so a phone UI or a script can
@@ -1552,38 +1631,58 @@ fn hexe_selection_range(lstate: ?*LuaState) callconv(.c) c_int {
 
 // ─── installation ───────────────────────────────────────────────────────────
 
-const Entry = struct { name: [:0]const u8, func: *const fn (?*LuaState) callconv(.c) c_int };
+/// A verb, and the one access kind it needs.
+///
+/// Kept on the verb rather than checked at each call site so the mapping is a
+/// table someone can read top to bottom -- and so a new verb cannot be added
+/// without stating what it costs. Lua callers are unaffected: config already
+/// runs with the user's full authority. The grant is enforced at the socket,
+/// where a stranger's program is on the other end.
+const Entry = struct {
+    name: [:0]const u8,
+    func: *const fn (?*LuaState) callconv(.c) c_int,
+    needs: core.access.Kind = .control,
+};
+
+/// What `call` requires, or null if there is no such verb.
+pub fn accessFor(call: []const u8) ?core.access.Kind {
+    inline for (ENTRIES) |e| {
+        if (std.mem.eql(u8, call, std.mem.span(e.name.ptr))) return e.needs;
+    }
+    return null;
+}
 
 const ENTRIES = [_]Entry{
-    .{ .name = "pane", .func = hexe_pane },
-    .{ .name = "panes", .func = hexe_panes },
-    .{ .name = "floats", .func = hexe_floats },
-    .{ .name = "splits", .func = hexe_splits },
-    .{ .name = "tabs", .func = hexe_tabs },
-    .{ .name = "session", .func = hexe_session },
-    .{ .name = "ui", .func = hexe_ui },
-    .{ .name = "count", .func = hexe_count },
-    .{ .name = "env", .func = hexe_env },
+    .{ .name = "pane", .func = hexe_pane, .needs = .read },
+    .{ .name = "panes", .func = hexe_panes, .needs = .read },
+    .{ .name = "floats", .func = hexe_floats, .needs = .read },
+    .{ .name = "splits", .func = hexe_splits, .needs = .read },
+    .{ .name = "tabs", .func = hexe_tabs, .needs = .read },
+    .{ .name = "session", .func = hexe_session, .needs = .read },
+    .{ .name = "ui", .func = hexe_ui, .needs = .read },
+    .{ .name = "count", .func = hexe_count, .needs = .read },
+    .{ .name = "env", .func = hexe_env, .needs = .screen },
     .{ .name = "act", .func = hexe_act },
-    .{ .name = "notify", .func = hexe_notify },
-    .{ .name = "send", .func = hexe_send },
+    .{ .name = "notify", .func = hexe_notify, .needs = .popup },
+    .{ .name = "send", .func = hexe_send, .needs = .typing },
     .{ .name = "focus", .func = hexe_focus },
     .{ .name = "tab_select", .func = hexe_tab_select },
     .{ .name = "rename_tab", .func = hexe_rename_tab },
     .{ .name = "rename", .func = hexe_rename },
     .{ .name = "share", .func = hexe_share },
-    .{ .name = "dictate", .func = hexe_dictate },
+    .{ .name = "dictate", .func = hexe_dictate, .needs = .typing },
+    .{ .name = "keys", .func = hexe_keys, .needs = .keyboard },
     .{ .name = "geometry", .func = hexe_geometry },
     .{ .name = "ratio", .func = hexe_ratio },
     .{ .name = "close", .func = hexe_close },
     .{ .name = "scroll", .func = hexe_scroll },
-    .{ .name = "selection", .func = hexe_selection },
-    .{ .name = "config", .func = hexe_config },
-    .{ .name = "line", .func = hexe_line },
-    .{ .name = "cursor_line", .func = hexe_cursor_line },
-    .{ .name = "screen_text", .func = hexe_screen_text },
-    .{ .name = "find", .func = hexe_find },
-    .{ .name = "selection_range", .func = hexe_selection_range },
+    .{ .name = "selection", .func = hexe_selection, .needs = .screen },
+    .{ .name = "config", .func = hexe_config, .needs = .read },
+    .{ .name = "line", .func = hexe_line, .needs = .screen },
+    .{ .name = "cursor_line", .func = hexe_cursor_line, .needs = .screen },
+    .{ .name = "screen_text", .func = hexe_screen_text, .needs = .screen },
+    .{ .name = "find", .func = hexe_find, .needs = .screen },
+    .{ .name = "selection_range", .func = hexe_selection_range, .needs = .screen },
 };
 
 /// Registry slot holding the accessor table, so a callback invocation can push
