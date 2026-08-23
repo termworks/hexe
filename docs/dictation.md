@@ -132,8 +132,27 @@ loop exits immediately — asryx's stop path transcribes inline — but it costs
 one status call and protects against the race that would otherwise type the
 *previous* dictation.
 
-Building asryx needs a C++23 compiler with `<expected>`: GCC 13+ or Clang 16+.
-Its installer prefers `clang++`, then bare `g++`, so on a machine where
-`/usr/bin/g++` is older than the one you use it can pick the wrong one and stop
-at `error.hpp:5: fatal error: expected: No such file or directory`. Setting both
-`CC` and `CXX` overrides the choice.
+### Getting asryx installed
+
+Three things caught me, none of them obvious from the error you get:
+
+- **It needs a C++23 compiler with `<expected>`** — GCC 13+ or Clang 16+. The
+  installer prefers `clang++`, then bare `g++`, so a machine whose
+  `/usr/bin/g++` is older than the one it actually uses stops at
+  `error.hpp:5: fatal error: expected: No such file or directory`. Setting
+  **both** `CC` and `CXX` overrides the choice.
+- **`--model install` does not fetch the VAD model.** asryx also wants
+  `ggml-silero-v6.2.0.bin`, which `./package/install` downloads in a later step
+  — so a build that failed leaves you with a Whisper model, no VAD model, and
+  the runtime failing at `VAD model is not installed`. That message goes to
+  `$XDG_RUNTIME_DIR/asryx/error.log`, and is announced by `notify-send`: with
+  no notification daemon you see a DBus error instead and the real cause is in
+  that log.
+- **The clipboard needs the session's own `XDG_RUNTIME_DIR`.** `wl-copy` finds
+  the Wayland socket through it, so a hexe started with a custom one cannot
+  receive anything from asryx. Nothing fails loudly; the transcript is simply
+  never delivered.
+
+Timing, for reference: `base.en` transcribing 11 seconds of speech takes about
+5.5s here, comfortably inside the 30s `dictate.timeout_ms`. A slower model or a
+long dictation may want that raised.
