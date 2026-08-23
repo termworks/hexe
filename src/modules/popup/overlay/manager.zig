@@ -132,6 +132,56 @@ pub const OverlayManager = struct {
         };
     }
 
+    /// A block of text that stays until dismissed.
+    ///
+    /// The general form of "show the user this": a link, a QR code, a key, a
+    /// paragraph. hexe does not interpret it -- a QR is a grid of block
+    /// characters a plugin already rendered, and hexe has no idea it is a QR.
+    ///
+    /// Takes ownership of `text`, because the caller is usually a socket
+    /// request whose buffer is gone by the next frame.
+    pub fn showMessage(self: *OverlayManager, text: []const u8) void {
+        _ = self.dismissMessages();
+        self.overlays.append(self.allocator, .{
+            .kind = .persistent,
+            .position = .{ .corner = .{ .anchor = .center } },
+            .text = text,
+            .owned = true,
+            .expires_at = 0,
+            .fg = 0,
+            .bg = 7,
+            .bold = false,
+            .padding_x = 2,
+            .padding_y = 1,
+        }) catch |err| {
+            log.warn("failed to show message overlay: {}", .{err});
+            self.allocator.free(text);
+        };
+    }
+
+    /// Drop any message overlay. Returns whether there was one, so a keypress
+    /// that dismissed a message can be swallowed instead of reaching the pane.
+    pub fn dismissMessages(self: *OverlayManager) bool {
+        var found = false;
+        var i: usize = self.overlays.items.len;
+        while (i > 0) {
+            i -= 1;
+            const ov = self.overlays.items[i];
+            if (ov.kind != .persistent or ov.expires_at != 0) continue;
+            if (ov.owned) self.allocator.free(ov.text);
+            _ = self.overlays.orderedRemove(i);
+            found = true;
+        }
+        return found;
+    }
+
+    pub fn hasMessage(self: *const OverlayManager) bool {
+        for (self.overlays.items) |ov| {
+            if (ov.kind == .persistent and ov.expires_at == 0) return true;
+        }
+        return false;
+    }
+
     // =========================================================================
     // Resize info
     // =========================================================================

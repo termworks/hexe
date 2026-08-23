@@ -44,6 +44,12 @@ A namespace that does not exist stays nil, so `hexe.mxu.confirm = {}` raises at 
 quietly collecting settings nothing will read. A typo *inside* a namespace is caught by the
 validator, with its path: `config error: mux.confirm.exti`.
 
+## Plugins
+
+Installed, not configured: `hexe plugin install ./thing`. A plugin brings its
+own keybindings and its own declaration of what it needs, so your config never
+mentions it. See [plugins.md](plugins.md).
+
 ## Helper programs
 
 `hexe.plugin` starts something alongside the session — a recorder, a gateway

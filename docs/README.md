@@ -52,6 +52,7 @@ reading twice.
 |---|---|
 | [The command line](cli.md) | addressing sessions, panes and pods from a script |
 | [The control socket](api.md) | the live query API over a unix socket, for scripts and gateways |
+| [Plugins](plugins.md) | install, declare, approve, remove — a package, not a command string |
 | [Access](access.md) | what a plugin may do: stream, typing, keyboard, popup — declared and enforced |
 | [Streaming a pane](streaming.md) | a pane's bytes, who is watching, and how to cut them off |
 | [Recording](recording.md) | hexe writes asciicasts of itself; every film below was made that way |

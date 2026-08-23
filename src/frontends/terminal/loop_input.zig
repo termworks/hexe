@@ -1397,6 +1397,16 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (handleTabLevelPopup(state, popup_event)) return;
     if (handlePaneLevelPopup(state, popup_event)) return;
 
+    // A message overlay -- a link, a QR, whatever a plugin put up -- is
+    // dismissed by the next keypress, which is then swallowed. Anything else
+    // would mean the key that closed it also did something, and the user
+    // pressed it to close the box.
+    if (state.overlays.hasMessage()) {
+        _ = state.overlays.dismissMessages();
+        state.needs_render = true;
+        return;
+    }
+
     // ==========================================================================
     // LEVEL 2.5: Pane select mode - captures all input
     // ==========================================================================

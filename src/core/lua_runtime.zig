@@ -309,6 +309,8 @@ pub const LuaRuntime = struct {
     allocator: std.mem.Allocator,
     unsafe_mode: bool,
     last_error: ?[]const u8 = null,
+    /// Whether installed packages have already run in this runtime.
+    plugins_loaded: bool = false,
     config_builder: ?*ConfigBuilder = null,
 
     const Self = @This();
@@ -482,11 +484,83 @@ pub const LuaRuntime = struct {
             return error.LuaError;
         };
 
+        // Before the config is finished, not after: `applyReturnedConfig` calls
+        // `__finish`, which snapshots the registration tables. A plugin binding
+        // a key after that point registers into a table nobody reads again.
+        self.loadInstalledPlugins();
+
         try self.applyReturnedConfig();
     }
 
     /// Load a Lua config file and return the top-level table
     /// Returns the index of the table on the stack (always 1 after successful load)
+    /// Run every installed, approved plugin's entry file.
+    ///
+    /// After the user's config chunk and before it is finished, so a plugin's
+    /// `hexe.key(...)` lands in the same registry the user's own bindings do --
+    /// which is the whole point of a plugin being Lua rather than a command
+    /// string. A plugin's keybinding belongs to the plugin, not pasted into
+    /// somebody's config.
+    ///
+    /// Untrusted packages are skipped with a warning rather than run: the
+    /// manifest exists to be read first, and `hexe plugin allow` is how that
+    /// reading is recorded.
+    pub fn loadInstalledPlugins(self: *Self) void {
+        // A runtime loads them once. Both config paths call through here, and
+        // running a plugin's entry twice would double every binding it makes.
+        if (self.plugins_loaded) return;
+        self.plugins_loaded = true;
+
+        const pkg = @import("plugin_pkg.zig");
+        const names = pkg.list(self.allocator) catch return;
+        defer {
+            for (names) |n| self.allocator.free(n);
+            self.allocator.free(names);
+        }
+
+        for (names) |name| {
+            var manifest = pkg.readManifest(self.allocator, name) catch |err| {
+                log.warn("plugin '{s}': its manifest did not read: {s}", .{ name, @errorName(err) });
+                continue;
+            };
+            defer manifest.deinit(self.allocator);
+
+            if (!pkg.isTrusted(self.allocator, name, manifest.entry)) {
+                log.warn("plugin '{s}' is not approved; run `hexe plugin allow {s}`", .{ name, name });
+                continue;
+            }
+
+            // The helper process, if it declared one, joins the same list an
+            // inline `hexe.plugin{}` uses -- one way to start a helper, not two.
+            if (manifest.command.len > 0) {
+                if (self.getOrCreateMuxBuilder()) |mux| {
+                    mux.appendPluginWithAccess(name, manifest.command, manifest.granted) catch {};
+                } else |_| {}
+            }
+
+            const dir = pkg.pluginPath(self.allocator, name) catch continue;
+            defer self.allocator.free(dir);
+            const entry = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir, manifest.entry }) catch continue;
+            defer self.allocator.free(entry);
+            const entry_z = self.allocator.dupeZ(u8, entry) catch continue;
+            defer self.allocator.free(entry_z);
+
+            // `.text`, never bytecode: the manifest was read from source and the
+            // body has to be the same kind of thing, or the review was of
+            // something else.
+            self.lua.loadFile(entry_z, .text) catch {
+                log.warn("plugin '{s}': {s} did not load: {s}", .{ name, manifest.entry, self.getErrorMessage() });
+                self.lua.pop(1);
+                continue;
+            };
+            self.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+                log.warn("plugin '{s}' raised while loading: {s}", .{ name, self.getErrorMessage() });
+                self.lua.pop(1);
+                continue;
+            };
+        }
+    }
+
     pub fn loadConfig(self: *Self, path: []const u8) !void {
         // Clear any previous error
         if (self.last_error) |err| {
@@ -514,6 +588,7 @@ pub const LuaRuntime = struct {
             return error.LuaError;
         };
 
+        self.loadInstalledPlugins();
         try self.applyReturnedConfig();
     }
 

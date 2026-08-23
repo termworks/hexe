@@ -3,6 +3,7 @@
 A plugin says what it needs; hexe grants that and refuses the rest.
 
 ```lua
+-- In a plugin's own manifest (see plugins.md), or inline for a one-off:
 hexe.plugin("share",   { command = "my-streamer",  access = { "stream", "popup" } })
 hexe.plugin("dictate", { command = "dictate.sh",   access = { "typing" } })
 hexe.plugin("hypr",    { command = "hexe-hyprland", access = { "keyboard" } })

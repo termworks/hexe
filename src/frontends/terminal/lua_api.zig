@@ -1232,6 +1232,40 @@ fn hexe_stream(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// `popup("text")` shows a block until the user dismisses it; `popup()` clears.
+///
+/// hexe does not interpret the text. A link is a string; a QR code is a grid of
+/// block characters the caller already rendered, and hexe has no idea it is a
+/// QR. That is deliberate -- the moment hexe knows what a QR is, it owns a QR
+/// library and a set of opinions about them.
+fn hexe_popup(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+
+    if (lua.typeOf(1) != .string) {
+        _ = state.overlays.dismissMessages();
+        state.needs_render = true;
+        lua.pushBoolean(true);
+        return 1;
+    }
+    const text = lua.toString(1) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    // Copied: the request buffer this points into is gone by the next frame.
+    const owned = state.allocator.dupe(u8, text) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    state.overlays.showMessage(owned);
+    state.needs_render = true;
+    lua.pushBoolean(true);
+    return 1;
+}
+
 /// `capture(true)` says something is recording this pane; `capture(false)` stops.
 ///
 /// hexe does not know what is being captured -- a microphone, a camera, the
@@ -1733,6 +1767,7 @@ const ENTRIES = [_]Entry{
     .{ .name = "share", .func = hexe_share },
     .{ .name = "keys", .func = hexe_keys, .needs = .keyboard },
     .{ .name = "capture", .func = hexe_capture, .needs = .read },
+    .{ .name = "popup", .func = hexe_popup, .needs = .popup },
     .{ .name = "stream", .func = hexe_stream, .needs = .stream },
     .{ .name = "geometry", .func = hexe_geometry },
     .{ .name = "ratio", .func = hexe_ratio },
