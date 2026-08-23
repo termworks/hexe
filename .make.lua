@@ -7,7 +7,7 @@
 --
 -- At an oslo prompt in this directory `make` is the builtin and reads this file. Anywhere else,
 -- `oslo make <recipe>` does the same thing, and the two commands a checkout needs without oslo at
--- all are `scripts/vendor-ghostty.sh` and `zig build` — which is exactly what CI runs, so nothing
+-- all are `scripts/vendor-*.sh` and `zig build` — which is exactly what CI runs, so nothing
 -- here is on the release path.
 --
 -- The parts worth reading are the ones the Makefile could not say plainly: the smoke runner is a
@@ -38,7 +38,7 @@ local PREFIX = os.getenv("PREFIX") or "/usr"
 local BIN = "zig-out/bin/hexe"
 
 -- Where the vendored, patched ghostty lands. The revision and the fetch live in
--- scripts/vendor-ghostty.sh, which CI runs too -- CI has no oslo, so a pin kept
+-- scripts/vendor-*.sh, which CI runs too -- CI has no oslo, so a pin kept
 -- here as well would be a second copy that goes stale without anyone noticing.
 local GHOSTTY_DIR = "vendor/ghostty"
 
@@ -206,12 +206,12 @@ local function run_smokes(list)
   assert(#failures == 0, "FAILED: " .. table.concat(failures, " "))
 end
 
----------------------------------------------------------------------------- ghostty
+---------------------------------------------------------------------------- vendor
 
 make.recipe{
-  name = "ghostty",
-  desc = "fetch the pinned ghostty and apply hexe's patch",
-  run = function() sh.bash("scripts/vendor-ghostty.sh") end,
+  name = "vendor",
+  desc = "fetch the pinned dependencies and apply hexe's patches",
+  run = function() sh.bash("scripts/vendor-ghostty.sh"); sh.bash("scripts/vendor-yazap.sh") end,
 }
 
 -- Fail with an instruction rather than a compile error a reader cannot place.
@@ -221,15 +221,19 @@ make.recipe{
 -- That is fine until this repo is tagged, and then ghostty's build panics with "tagged releases
 -- must be in vX.Y.Z format", forty lines deep in a build runner and nowhere near the cause.
 make.recipe{
-  name = "ghostty-check",
-  desc = "fail early if the vendored ghostty is missing or has no .git",
+  name = "vendor-check",
+  desc = "fail early if a vendored dependency is missing or has no .git",
   quiet = true,
   run = function()
     assert(oslo.fs.stat(GHOSTTY_DIR .. "/src/terminal/style.zig"),
-           GHOSTTY_DIR .. " is missing. Run: make ghostty")
+           GHOSTTY_DIR .. " is missing. Run: make vendor")
     assert(oslo.fs.stat(GHOSTTY_DIR .. "/.git"),
            GHOSTTY_DIR .. " has no .git, so ghostty's build will read THIS repo's tags and " ..
-           "panic. Run: make ghostty")
+           "panic. Run: make vendor")
+    -- yazap is vendored for its examplesStep patch; without the directory there
+    -- is simply no dependency to resolve.
+    assert(oslo.fs.stat("vendor/yazap/build.zig"),
+           "vendor/yazap is missing. Run: make vendor")
   end,
 }
 
@@ -238,7 +242,7 @@ make.recipe{
 make.recipe{
   name = "build",
   desc = "the static release binary",
-  deps = { "ghostty-check" },
+  deps = { "vendor-check" },
   run = function()
     sh.zig("build", "-Doptimize=ReleaseFast", "-Dstrip=true", "-Dtarget=" .. TARGET)
     report()
@@ -251,7 +255,7 @@ make.alias("b", "build")
 make.recipe{
   name = "build-gnu",
   desc = "release binary against the host glibc",
-  deps = { "ghostty-check" },
+  deps = { "vendor-check" },
   run = function() sh.zig("build", "-Doptimize=ReleaseFast", "-Dstrip=true") end,
 }
 

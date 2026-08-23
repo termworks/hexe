@@ -9,7 +9,7 @@ audio stack. Dictation is a plugin, assembled from two general things:
 | `capture` | the tool may say "something is recording you", and hexe draws it |
 
 ```console
-$ hexe plugin install contrib/plugins/dictate
+$ hexe plugin install examples/plugins/dictate
 $ hexe plugin allow dictate
 ```
 

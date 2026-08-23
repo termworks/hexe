@@ -4,7 +4,7 @@ A plugin is a directory you install, not a command string you paste into your
 config.
 
 ```console
-$ hexe plugin install ./share
+$ hexe plugin install examples/plugins/share
 installed share 0.1.0
   Hand a pane to a stream backend and show the link it gives back
   it asks for: read,stream,popup
@@ -129,18 +129,14 @@ be installed.
 
 | | |
 | --- | --- |
-| [`contrib/plugins/dictate`](../contrib/plugins/dictate) | push-to-talk speech to text, from `typing` access and the capture indicator |
-| [`contrib/plugins/share`](../contrib/plugins/share) | hands a pane to a stream backend as asciicast and shows the address it returns |
+| [`examples/plugins/dictate`](../examples/plugins/dictate) | push-to-talk speech to text, from `typing` access and the capture indicator |
+| [`examples/plugins/share`](../examples/plugins/share) | hands a pane to a stream backend as asciicast and shows the address it returns |
 
 Between them they use every part of this: a keybinding, a shipped script, a
 helper process, an on-demand tool, and both halves of the access model.
 
 Everything a plugin can reach is in [api.md](api.md); what it is allowed to
 reach is in [access.md](access.md).
-
-> They live under `contrib/` rather than `examples/` because a dependency's
-> build script scans `./examples/` relative to the build root and asserts every
-> entry there is a file — a subdirectory panics the build.
 
 ## What hexe does not do
 

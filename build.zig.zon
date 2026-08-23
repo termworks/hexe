@@ -30,10 +30,10 @@
             .url = "git+https://github.com/rockorager/libvaxis#67bbc1ee072aa390838c66caf4ed47edee282dc4",
             .hash = "vaxis-0.5.1-BWNV_IxJCQC5OGNaXQfNnqgn9_Vku0PMgey-dplubcQK",
         },
-        .yazap = .{
-            .url = "git+https://github.com/PrajwalCH/yazap#a85c65beefe911db5fc17bc90e756738d742dc63",
-            .hash = "yazap-0.6.3-Z1t-EmrzAQA-8vFR-JGpI7vCSpHv5_6z6PAIDq2X4PoH",
-        },
+        // Patched by `scripts/vendor-yazap.sh` from the upstream revision
+        // pinned there plus patches/yazap-examples-cwd.patch. Run that script
+        // after a fresh clone, or to follow a newer upstream.
+        .yazap = .{ .path = "vendor/yazap" },
         .liblink = .{
             .url = "git+https://github.com/libzig/liblink#0.0.13",
             .hash = "liblink-0.0.13-gQe8cxyDCwCS346uD6q8CCpd6RHyMNhVT0od7Z1jQzsg",

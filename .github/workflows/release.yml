@@ -70,16 +70,23 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Vendor patched ghostty-vt
+      - name: Vendor patched dependencies
         # build.zig.zon points at vendor/ghostty, which is generated rather than
         # committed: it is upstream ghostty at a pinned revision plus
         # patches/ghostty-vt-ns.patch. Without this the build has no dependency
         # to resolve. The script also gives it its own .git, which keeps
         # ghostty's version detection from walking up and finding OUR tags.
         #
-        # The script rather than a build recipe: `.make.lua` needs oslo, which a
-        # runner does not have. The recipe calls this same file.
-        run: scripts/vendor-ghostty.sh
+        # yazap is vendored for a smaller reason: its `examplesStep` iterates
+        # `./examples/` through the process cwd, which for a dependency is OUR
+        # root, and asserts every entry is a file -- so hexe having an
+        # `examples/` directory panicked the build.
+        #
+        # The scripts rather than build recipes: `.make.lua` needs oslo, which a
+        # runner does not have. The recipes call these same files.
+        run: |
+          scripts/vendor-ghostty.sh
+          scripts/vendor-yazap.sh
 
       - name: Build binary
         env:

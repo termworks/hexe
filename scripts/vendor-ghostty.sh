@@ -16,7 +16,7 @@ set -euo pipefail
 GHOSTTY_REV="${GHOSTTY_REV:-4e17eee5dea3d67aa9b0fec56be7f461c496ffe4}"
 GHOSTTY_URL="${GHOSTTY_URL:-https://github.com/ghostty-org/ghostty}"
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+root="$(cd "$(dirname "$0")/.." && pwd)"
 dir="$root/vendor/ghostty"
 patch="$root/patches/ghostty-vt-ns.patch"
 
