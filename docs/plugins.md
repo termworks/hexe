@@ -111,9 +111,36 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.n }, function(ctx)
 end)
 ```
 
-`contrib/plugins/share` is a worked example that hands a pane to a stream
-backend. Everything a plugin can reach is in [api.md](api.md); what it is
-allowed to reach is in [access.md](access.md).
+### Files it ships
+
+`init.lua` receives the package's own directory as the chunk's `...`, which is
+Lua's convention for telling a chunk where it came from:
+
+```lua
+local here = ...
+local recorder = here .. "/record.sh"
+```
+
+A package's `command` is started **with the package as its working directory**,
+so a manifest can say `command = "./backend.sh"` without knowing where it will
+be installed.
+
+### Two worked examples
+
+| | |
+| --- | --- |
+| [`contrib/plugins/dictate`](../contrib/plugins/dictate) | push-to-talk speech to text, from `typing` access and the capture indicator |
+| [`contrib/plugins/share`](../contrib/plugins/share) | hands a pane to a stream backend as asciicast and shows the address it returns |
+
+Between them they use every part of this: a keybinding, a shipped script, a
+helper process, an on-demand tool, and both halves of the access model.
+
+Everything a plugin can reach is in [api.md](api.md); what it is allowed to
+reach is in [access.md](access.md).
+
+> They live under `contrib/` rather than `examples/` because a dependency's
+> build script scans `./examples/` relative to the build root and asserts every
+> entry there is a file — a subdirectory panics the build.
 
 ## What hexe does not do
 

@@ -1186,6 +1186,9 @@ pub const State = struct {
             plugin.access.format(acc_stream.writer()) catch {};
             env_map.put("HEXE_ACCESS", acc_stream.getWritten()) catch {};
             child.env_map = &env_map;
+            // A package's command runs from the package, so a manifest can say
+            // `./backend.sh` without knowing where it was installed.
+            if (plugin.dir.len > 0) child.cwd = plugin.dir;
 
             child.spawn() catch |err| {
                 core.logging.logError("terminal", "failed to start plugin", err);

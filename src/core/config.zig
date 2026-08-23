@@ -82,6 +82,10 @@ pub const PluginDef = struct {
     name: []const u8,
     /// Run through `/bin/sh -c`, detached, with stdio closed.
     command: []const u8,
+    /// The package directory it came from, if it is an installed package. Used
+    /// as the command's working directory, so a manifest can say
+    /// `command = "./backend.sh"` without knowing where it will be installed.
+    dir: []const u8 = "",
     /// What it may ask hexe to do, beyond the always-granted `read` floor.
     /// Empty means read-only: a plugin that forgot to say gets the harmless
     /// thing rather than everything, because the failure of the other default
@@ -91,6 +95,7 @@ pub const PluginDef = struct {
     pub fn deinit(self: *PluginDef, allocator: std.mem.Allocator) void {
         freeSlice(allocator, @constCast(self.name));
         freeSlice(allocator, @constCast(self.command));
+        freeSlice(allocator, @constCast(self.dir));
     }
 };
 

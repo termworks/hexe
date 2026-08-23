@@ -8,15 +8,13 @@ audio stack. Dictation is a plugin, assembled from two general things:
 | [`typing` access](access.md) | the tool may put text into a pane |
 | `capture` | the tool may say "something is recording you", and hexe draws it |
 
-```lua
-hexe.plugin("dictate", { command = "~/.config/hexe/dictate.sh", access = { "typing" } })
-
-hexe.key(chord, function() ctx.exec("~/.config/hexe/dictate.sh start") end, { on = hexe.when.press })
-hexe.key(chord, function() ctx.exec("~/.config/hexe/dictate.sh stop")  end, { on = hexe.when.release })
+```console
+$ hexe plugin install contrib/plugins/dictate
+$ hexe plugin allow dictate
 ```
 
-Hold the chord, speak, release. `contrib/dictate.sh` is a working version using
-`pw-record` and `whisper-cli`.
+Hold `ctrl+alt+d`, speak, release. The keybindings come with the package — your
+config never mentions it. See [plugins.md](plugins.md).
 
 ## Why it is not a feature
 

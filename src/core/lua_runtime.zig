@@ -532,14 +532,16 @@ pub const LuaRuntime = struct {
 
             // The helper process, if it declared one, joins the same list an
             // inline `hexe.plugin{}` uses -- one way to start a helper, not two.
-            if (manifest.command.len > 0) {
-                if (self.getOrCreateMuxBuilder()) |mux| {
-                    mux.appendPluginWithAccess(name, manifest.command, manifest.granted) catch {};
-                } else |_| {}
-            }
-
             const dir = pkg.pluginPath(self.allocator, name) catch continue;
             defer self.allocator.free(dir);
+
+            // The helper process, if it declared one, joins the same list an
+            // inline `hexe.plugin{}` uses -- one way to start a helper, not two.
+            if (manifest.command.len > 0) {
+                if (self.getOrCreateMuxBuilder()) |mux| {
+                    mux.appendPackagePlugin(name, manifest.command, dir, manifest.granted) catch {};
+                } else |_| {}
+            }
             const entry = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir, manifest.entry }) catch continue;
             defer self.allocator.free(entry);
             const entry_z = self.allocator.dupeZ(u8, entry) catch continue;
@@ -553,7 +555,13 @@ pub const LuaRuntime = struct {
                 self.lua.pop(1);
                 continue;
             };
-            self.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+            // The plugin's own directory, as the chunk's `...` -- Lua's own
+            // convention for telling a chunk where it came from. A package that
+            // ships a script beside its `init.lua` has no other way to name it,
+            // and hardcoding the install path would break the moment
+            // XDG_DATA_HOME moved.
+            _ = self.lua.pushString(dir);
+            self.lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
                 log.warn("plugin '{s}' raised while loading: {s}", .{ name, self.getErrorMessage() });
                 self.lua.pop(1);
                 continue;

@@ -40,9 +40,17 @@ return {
   access      = { "popup" },
 }
 """)
-open(os.path.join(SRC, "init.lua"), "w").write(f"""
-hexe.key({{ hexe.key.ctrl, hexe.key.g }}, function(ctx)
-  ctx.popup("{MARK}")
+# A file the package ships beside its entry. Finding it is the point: a package
+# that cannot name its own files has to hardcode an install path.
+open(os.path.join(SRC, "greeting.txt"), "w").write(MARK + "\n")
+open(os.path.join(SRC, "init.lua"), "w").write("""
+local here = ...                       -- the package's own directory
+local f = io.open(here .. "/greeting.txt", "r")
+local greeting = f and f:read("*l") or "NO-SHIPPED-FILE"
+if f then f:close() end
+
+hexe.key({ hexe.key.ctrl, hexe.key.g }, function(ctx)
+  ctx.popup(greeting)
 end)
 """)
 
@@ -212,6 +220,13 @@ if not fired:
     fail("the approved plugin's keybinding did not fire; the package's own "
          "binding is the reason it is a package and not a config snippet")
 print("run: the plugin's own keybinding works, from a config that names no plugin")
+
+# The text came from a file shipped IN the package and read via `...`, so a
+# package can carry scripts and data rather than hardcoding an install path.
+if "NO-SHIPPED-FILE" in seen_since(mark):
+    fail("the plugin could not find a file it ships beside its own entry; "
+         "without that a package cannot carry a script")
+print("shipped files: it found its own directory and read a file it ships")
 
 user_config = open(os.path.join(CF, "hexe", "init.lua")).read()
 if "greeter" in user_config or "plugin" in user_config:

@@ -199,6 +199,18 @@ pub const MuxConfigBuilder = struct {
         self.plugins.items[self.plugins.items.len - 1].access = access;
     }
 
+    /// A plugin that came from an installed package, so it knows its own home.
+    pub fn appendPackagePlugin(
+        self: *MuxConfigBuilder,
+        name: []const u8,
+        command: []const u8,
+        dir: []const u8,
+        access: config.access_mod.Set,
+    ) !void {
+        try self.appendPluginWithAccess(name, command, access);
+        self.plugins.items[self.plugins.items.len - 1].dir = try self.allocator.dupe(u8, dir);
+    }
+
     pub fn appendPlugin(self: *MuxConfigBuilder, name: []const u8, command: []const u8) !void {
         const owned_name = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned_name);
