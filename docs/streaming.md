@@ -127,6 +127,54 @@ Four limits, and each exists because of the failure it prevents:
   is somebody's live shell. Reconnecting replays the backlog, so being dropped
   costs latency, not history.
 
+## Letting hexe push it to you
+
+Everything above has your program reading hexe's own protocol. That is right for
+a recorder that wants exact bytes, and wrong for anything general: it means the
+program knows what hexe is.
+
+The other direction inverts that. hexe pushes the pane to a plugin as
+**[asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/)** — the format
+`asciinema play` reads and a `.cast` file contains — so the plugin is an ordinary
+cast consumer that happens to be fed by a pipe:
+
+```lua
+hexe.plugin("drop", { command = "drop cast", access = { "stream", "popup" } })
+```
+
+```console
+$ hexe api stream '"drop"'          # hand it the focused pane
+$ hexe api stream '"drop"' false    # stop
+```
+
+Its **stdin** gets a header line, then the pane as it looks now, then
+`[t, "o", data]` events. If it also holds `typing`, whatever it writes on
+**stdout** as `[t, "i", data]` is typed into the pane.
+
+**View-only versus read-write is the access it declared**, not a flag on the
+request: `stream` watches, `stream` + `typing` can also type. Two grants, not
+two modes — handing someone your keyboard is a different decision from showing
+them your screen, so it is a different word in your config.
+
+hexe does not know what happens next. Publishing, a QR code, a link, another
+hexe on the far end — none of that is hexe's vocabulary. A plugin that wants to
+show the user a link has `popup` access and says so itself.
+
+Password mode arrives as an asciicast marker:
+
+```json
+[1.5, "m", "password-on"]
+[4.2, "m", "password-off"]
+```
+
+**A plugin keeping its own scrollback must clear it on `password-on`, not merely
+stop appending** — the bytes that drew the prompt went out before the terminal's
+echo flag changed, so they are already in its buffer. hexe wipes its own backlog
+for that exact reason. A plugin that ignores markers is no worse off than one
+that never saw them; it just cannot offer that protection.
+
+`contrib/share-echo.py` is a working plugin in ~40 lines.
+
 ## Having hexe start it
 
 ```lua
@@ -232,12 +280,13 @@ join from a phone — the pieces above, assembled:
 ```lua
 hexe.status.socket = "/run/user/1000/painter.sock"
 hexe.decor.top = { right = "share" }              -- ● LIVE, click to stop
-hexe.plugin("share", { command = "my-streamer --port 8080" })
+hexe.plugin("drop", { command = "drop cast", access = { "stream", "popup" } })
 ```
 
-The streamer does the rest with what it was handed. On start it reads
-`HEXE_API_SOCKET`, calls `panes`, and connects to a pane's `pod_socket` as an
-observer; to show the join link it runs
+Press a key, `hexe api stream '"drop"'` hands it the pane as asciicast, and the
+plugin does the rest — it publishes, gets back whatever address it publishes to,
+and shows it through its own `popup` access. hexe never learns what the address
+is. To show a join link the plugin runs
 
 ```sh
 hexe mux float -c "qrencode -t UTF8 http://$(hostname):8080/; read" --title "scan to join"
@@ -249,5 +298,10 @@ and the switch.
 
 Four things hexe guarantees it, so it does not have to arrange them itself:
 the stream keeps flowing while you work, the badge is true because it comes from
-the pod rather than from the streamer, the stop button works even if the
-streamer is wedged, and a password prompt is never broadcast.
+the pod rather than from the plugin, the stop works even if the plugin is
+wedged, and a password prompt is never broadcast — and is announced as a marker
+so the plugin can scrub what it already had.
+
+What hexe deliberately does not know: what the stream is for. A recorder, a web
+gateway, another hexe on the far end — same pane, same bytes, same format, and
+no hexe-specific flag on either side.

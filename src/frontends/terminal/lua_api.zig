@@ -1186,6 +1186,98 @@ fn parseChord(spec: []const u8) ?struct { mods: u8, key: core.Config.BindKey } {
     return if (key) |k| .{ .mods = mods, .key = k } else null;
 }
 
+/// `stream("drop")` hands the focused pane's bytes to that plugin;
+/// `stream("drop", false)` stops.
+///
+/// hexe does not know what the plugin does with them -- publish them, record
+/// them, feed another hexe. It knows only that a pane makes bytes and this
+/// plugin was granted them. Whether the far end may type back is the plugin's
+/// `typing` access, not an argument here: view-only and read-write are
+/// different grants, not different calls.
+fn hexe_stream(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const attach_mod = @import("stream_attach.zig");
+
+    const plugin = lua.toString(1) catch {
+        lua.pushNil();
+        return 1;
+    };
+
+    if (lua.typeOf(2) == .boolean and !lua.toBoolean(2)) {
+        attach_mod.detach(state, plugin);
+        lua.createTable(0, 2);
+        setBool(lua, "attached", false);
+        setOptStr(lua, "error", null);
+        return 1;
+    }
+
+    const pane = (if (lua.typeOf(2) == .string or lua.typeOf(2) == .number)
+        resolvePane(lua, state, 2)
+    else
+        focusedPane(state)) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    const err = attach_mod.attach(state, plugin, pane);
+    state.needs_render = true;
+    lua.createTable(0, 3);
+    setBool(lua, "attached", err == null);
+    setOptStr(lua, "error", err);
+    if (err == null) setStr(lua, "pane_uuid", pane.uuid[0..]);
+    return 1;
+}
+
+/// `capture(true)` says something is recording this pane; `capture(false)` stops.
+///
+/// hexe does not know what is being captured -- a microphone, a camera, the
+/// screen -- and draws the same three bars regardless, meaning only "something
+/// is recording you right now".
+///
+/// Deliberately cheap: any plugin may claim it, because *claiming* to capture is
+/// harmless and the harm runs the other way. A claim lapses after a few seconds
+/// unless renewed, so a plugin that dies mid-capture cannot leave the light on.
+fn hexe_capture(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const capture_mod = @import("capture.zig");
+
+    const on = lua.typeOf(1) != .boolean or lua.toBoolean(1);
+    if (lua.typeOf(1) == .boolean and !on) {
+        capture_mod.release(state);
+    } else if (lua.typeOf(1) == .boolean) {
+        const pane = (if (lua.typeOf(2) == .string or lua.typeOf(2) == .number)
+            resolvePane(lua, state, 2)
+        else
+            focusedPane(state)) orelse {
+            lua.pushNil();
+            return 1;
+        };
+        const by = lua.toString(3) catch "plugin";
+        capture_mod.claim(state, pane, by);
+    }
+
+    const c = &state.capture;
+    const live = c.active(std.time.milliTimestamp());
+    lua.createTable(0, 3);
+    setBool(lua, "capturing", live);
+    if (live and c.pane != null) {
+        setStr(lua, "pane_uuid", c.pane.?[0..]);
+        setStr(lua, "by", c.owner());
+    } else {
+        setOptStr(lua, "pane_uuid", null);
+        setOptStr(lua, "by", null);
+    }
+    return 1;
+}
+
 /// `keys("ctrl+alt+d")` — press a chord *at hexe*.
 ///
 /// Not `send`: this goes through the keybinding machinery, so it fires whatever
@@ -1214,47 +1306,6 @@ fn hexe_keys(lstate: ?*LuaState) callconv(.c) c_int {
     const consumed = keybinds.handleKeyEvent(state, chord.mods, chord.key, .press, false);
     state.needs_render = true;
     lua.pushBoolean(consumed);
-    return 1;
-}
-
-/// `dictate()` reads the state; `dictate(true)` starts, `dictate(false)` stops.
-///
-/// The same three verbs the keybindings use, so a phone UI or a script can
-/// drive dictation without a keyboard in front of the session.
-fn hexe_dictate(lstate: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(lstate orelse return 0);
-    const state = liveState(lua) orelse {
-        lua.pushNil();
-        return 1;
-    };
-    const dict = @import("dictate.zig");
-
-    var err_msg: ?[]const u8 = null;
-    if (lua.typeOf(1) == .boolean) {
-        if (lua.toBoolean(1)) {
-            const pane = focusedPane(state) orelse {
-                lua.pushNil();
-                return 1;
-            };
-            err_msg = dict.start(state, pane);
-        } else {
-            dict.stop(state);
-        }
-    }
-
-    const d = &state.dictation;
-    lua.createTable(0, 3);
-    setBool(lua, "active", d.active());
-    setStr(lua, "phase", if (!d.active()) "idle" else switch (d.phase) {
-        .listening => "listening",
-        .thinking => "thinking",
-    });
-    if (d.active() and d.has_target) {
-        setStr(lua, "pane_uuid", d.target[0..]);
-    } else {
-        setOptStr(lua, "pane_uuid", null);
-    }
-    setOptStr(lua, "error", err_msg);
     return 1;
 }
 
@@ -1445,6 +1496,16 @@ fn rowsForBudget(pane: *Pane, max_bytes: usize) usize {
 /// hand: it already handles wide cells, spacer tails and graphemes. The CALLER
 /// bounds the row span, which is what keeps the allocation bounded — one row is
 /// at most `cols * 4` bytes.
+/// The pane's whole visible screen as text, caller owns it.
+///
+/// So a viewer joining a stream sees the pane as it looks now rather than a
+/// blank rectangle until something is printed next.
+pub fn paneScreenText(allocator: std.mem.Allocator, pane: *Pane) ?[]u8 {
+    const rows: usize = pane.vt.terminal.rows;
+    if (rows == 0) return null;
+    return extractRows(allocator, pane, 0, rows - 1);
+}
+
 fn extractRows(allocator: std.mem.Allocator, pane: *Pane, top: usize, bottom: usize) ?[]u8 {
     const screen = pane.vt.terminal.screens.active;
     const pages = &screen.pages;
@@ -1670,8 +1731,9 @@ const ENTRIES = [_]Entry{
     .{ .name = "rename_tab", .func = hexe_rename_tab },
     .{ .name = "rename", .func = hexe_rename },
     .{ .name = "share", .func = hexe_share },
-    .{ .name = "dictate", .func = hexe_dictate, .needs = .typing },
     .{ .name = "keys", .func = hexe_keys, .needs = .keyboard },
+    .{ .name = "capture", .func = hexe_capture, .needs = .read },
+    .{ .name = "stream", .func = hexe_stream, .needs = .stream },
     .{ .name = "geometry", .func = hexe_geometry },
     .{ .name = "ratio", .func = hexe_ratio },
     .{ .name = "close", .func = hexe_close },

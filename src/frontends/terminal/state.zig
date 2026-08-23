@@ -21,8 +21,9 @@ pub const FloatUiState = state_types.FloatUiState;
 
 const layout_mod = @import("layout.zig");
 const pane_search = @import("pane_search.zig");
-const dictate_mod = @import("dictate.zig");
+const capture_mod = @import("capture.zig");
 const api_server = @import("api_server.zig");
+const stream_attach = @import("stream_attach.zig");
 const Layout = layout_mod.Layout;
 
 const Renderer = @import("render_core.zig").Renderer;
@@ -396,9 +397,13 @@ pub const State = struct {
     api_grant: core.access.Set = core.access.Set.all,
     /// One scoped control socket per plugin, each with its own grant.
     plugin_servers: std.ArrayList(api_server.ApiServer) = .empty,
+    /// Plugins that declared `stream` and so may be handed a pane's bytes.
+    /// Kept (rather than spawned and forgotten) because their pipes are the
+    /// channel.
+    stream_plugins: std.ArrayList(stream_attach.Attachable) = .empty,
 
-    /// The speech-to-text tool, when one is running. See dictate.zig.
-    dictation: dictate_mod.Dictation,
+    /// Whether something has claimed it is capturing a pane. See capture.zig.
+    capture: capture_mod.Capture = .{},
     /// Resumable non-blocking reader for the SES VT stream. Reset whenever
     /// the VT connection is replaced (loop_watchers arms a new node).
     mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
@@ -575,7 +580,6 @@ pub const State = struct {
 
             .mux_vt_write_queue = .{},
             .async_cmds = core.async_cmd.AsyncCmdCache.init(allocator),
-            .dictation = dictate_mod.Dictation.init(allocator),
             .regions = core.regions.Registry.init(allocator),
             .region_surfaces = @import("region_render.zig").SurfaceCache.init(allocator),
             .mux_vt_write_overflow_notified = false,
@@ -1158,9 +1162,14 @@ pub const State = struct {
             };
             const sock = self.plugin_servers.items[self.plugin_servers.items.len - 1].path;
 
+            // A plugin that may be handed a stream keeps its pipes: stdin is
+            // how the bytes reach it, and stdout is how it types back if it
+            // also holds `typing`. Everything else is spawned and forgotten.
+            const wants_stream = plugin.access.has(.stream);
+
             var child = std.process.Child.init(&.{ "/bin/sh", "-c", plugin.command }, self.allocator);
-            child.stdin_behavior = .Ignore;
-            child.stdout_behavior = .Ignore;
+            child.stdin_behavior = if (wants_stream) .Pipe else .Ignore;
+            child.stdout_behavior = if (wants_stream) .Pipe else .Ignore;
             child.stderr_behavior = .Ignore;
 
             var env_map = std.process.getEnvMap(self.allocator) catch |err| {
@@ -1184,10 +1193,30 @@ pub const State = struct {
                 continue;
             };
             core.logging.warn("terminal", "started plugin '{s}' ({s}): {s}", .{ plugin.name, acc_stream.getWritten(), plugin.command });
+
+            if (wants_stream) {
+                // Non-blocking: this is read from the render loop, and a plugin
+                // that says nothing must not park every pane in the session.
+                if (child.stdout) |o| core.ipc.setNonBlocking(o.handle) catch {};
+                const owned_name = self.allocator.dupe(u8, plugin.name) catch continue;
+                self.stream_plugins.append(self.allocator, .{
+                    .name = owned_name,
+                    .child = child,
+                    .access = plugin.access,
+                }) catch {
+                    self.allocator.free(owned_name);
+                };
+            }
         }
     }
 
     pub fn deinit(self: *State) void {
+        for (self.stream_plugins.items) |*p| {
+            if (p.cast) |*c| c.deinit();
+            p.in_buf.deinit(self.allocator);
+            self.allocator.free(p.name);
+        }
+        self.stream_plugins.deinit(self.allocator);
         for (self.plugin_servers.items) |*srv| srv.deinit();
         self.plugin_servers.deinit(self.allocator);
         if (self.api_server) |*srv| srv.deinit();
@@ -1225,7 +1254,6 @@ pub const State = struct {
         self.csi_reply_buf.deinit(self.allocator);
         self.stdin_tail.deinit(self.allocator);
         self.mux_vt_write_queue.deinit(self.allocator);
-        self.dictation.deinit();
         self.async_cmds.deinit();
         self.regions.deinit();
         self.region_surfaces.deinit();

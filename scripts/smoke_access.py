@@ -213,8 +213,15 @@ refused("quiet", "send", "hello")
 refused("quiet", "keys", "ctrl+alt+d")
 print("refused: a read-only plugin can neither type nor press keys")
 
-allowed("typer", "dictate")
-print("allowed: the typing plugin may drive dictation")
+allowed("typer", "send", "")
+print("allowed: the typing plugin may type")
+
+# `capture` is deliberately open to everyone: CLAIMING to record is harmless,
+# and the harm runs the other way -- recording without claiming. Gating it
+# would only give a plugin a reason to skip the indicator.
+for name in socks:
+    allowed(name, "capture")
+print("capture: any plugin may claim the recording indicator")
 
 # `pod_socket` is the byte stream behind a field name, so `read` must not leak it.
 watcher_pane = (call(socks["watcher"], "panes").get("result") or [{}])[0]

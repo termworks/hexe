@@ -94,31 +94,6 @@ pub const PluginDef = struct {
     }
 };
 
-/// The tool that turns speech into text.
-///
-/// hexe does no audio and no transcription. It starts the tool, shows that it
-/// is listening, and types back whatever the tool prints — which keeps the
-/// choice of engine, model and language entirely outside hexe, and means a
-/// dictation setup is a program you can run and test on its own.
-pub const DictateConfig = struct {
-    /// Run through `/bin/sh -c` when dictation starts. Empty disables it.
-    ///
-    /// The contract is two lines long: record until stdin closes, then print
-    /// the text and exit. stdin-as-the-stop-signal rather than a signal so a
-    /// shell script can implement it without trapping anything.
-    command: []const u8 = "",
-
-    /// Give up on a tool that never exits after being asked to stop.
-    ///
-    /// A dictation tool that hangs would otherwise leave the indicator on
-    /// screen forever and the pane unable to start another one.
-    timeout_ms: u32 = 30_000,
-
-    pub fn enabled(self: *const DictateConfig) bool {
-        return self.command.len > 0;
-    }
-};
-
 /// Status bar config
 pub const StatusBarConfig = struct {
     enabled: bool = true,
@@ -704,9 +679,6 @@ pub const Config = struct {
         system_notify,
         keycast_toggle,
         sprite_toggle,
-        dictate_start,
-        dictate_stop,
-        dictate_toggle,
         split_h,
         split_v,
         split_resize,
@@ -748,9 +720,6 @@ pub const Config = struct {
         system_notify, // send desktop notification via terminal OSC
         keycast_toggle, // toggle keycast overlay
         sprite_toggle, // toggle pokemon sprite overlay
-        dictate_start, // start the configured speech-to-text tool
-        dictate_stop, // tell it to stop listening and hand back text
-        dictate_toggle,
         split_h,
         split_v,
         split_resize: BindKeyKind, // up/down/left/right (resize divider)
@@ -882,7 +851,6 @@ pub const Config = struct {
 
     // Helper programs hexe starts for you.
     plugins: []const PluginDef = &.{},
-    dictate: DictateConfig = .{},
 
     // Internal
     _allocator: ?std.mem.Allocator = null,
@@ -1045,7 +1013,6 @@ pub const Config = struct {
                 }
                 freeSlice(alloc, self.plugins);
             }
-            freeOwnedStr(alloc, self.dictate.command, "");
 
             self.float_named_defaults.deinit(alloc);
             self.float_adhoc_defaults.deinit(alloc);
@@ -1095,9 +1062,6 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "system.notify")) return .system_notify;
     if (std.mem.eql(u8, action_type, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action_type, "overlay.sprite_toggle")) return .sprite_toggle;
-    if (std.mem.eql(u8, action_type, "dictate.start")) return .dictate_start;
-    if (std.mem.eql(u8, action_type, "dictate.stop")) return .dictate_stop;
-    if (std.mem.eql(u8, action_type, "dictate.toggle")) return .dictate_toggle;
     if (std.mem.eql(u8, action_type, "split.h")) return .split_h;
     if (std.mem.eql(u8, action_type, "split.v")) return .split_v;
     if (std.mem.eql(u8, action_type, "tab.new")) return .tab_new;
@@ -1165,9 +1129,6 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "system.notify")) return .system_notify;
     if (std.mem.eql(u8, action, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action, "overlay.sprite_toggle")) return .sprite_toggle;
-    if (std.mem.eql(u8, action, "dictate.start")) return .dictate_start;
-    if (std.mem.eql(u8, action, "dictate.stop")) return .dictate_stop;
-    if (std.mem.eql(u8, action, "dictate.toggle")) return .dictate_toggle;
     if (std.mem.eql(u8, action, "split.h")) return .split_h;
     if (std.mem.eql(u8, action, "split.v")) return .split_v;
     if (std.mem.eql(u8, action, "tab.new")) return .tab_new;

@@ -1,56 +1,92 @@
 #!/bin/sh
-# A dictation tool for hexe, in the shape hexe expects.
+# Dictation for hexe, as an ordinary plugin.
 #
-#   hexe.dictate = { command = "~/.config/hexe/dictate.sh" }
+#   hexe.plugin("dictate", { command = "~/.config/hexe/dictate.sh",
+#                            access = { "typing" } })
 #
-# The whole contract:
+# hexe has no dictation feature and no `hexe.dictate` setting. It has `typing`
+# access and a capture indicator, and this script is what makes those into
+# dictation. Swap whisper for anything else and hexe does not change.
 #
-#   1. record until stdin closes  -- hexe closes it when you stop dictating;
-#   2. print the text to stdout   -- hexe types it into the pane you started in;
-#   3. exit.
+# Push-to-talk: hold the key, speak, release.
 #
-# Nothing here is hexe-specific except that. Anything obeying it works: a
-# whisper.cpp wrapper, a cloud API, a local server, or `echo` while testing.
-# Diagnostics go to stderr, which hexe ignores -- only stdout is the transcript.
+#   hexe.key(chord, function() ctx.exec("~/.config/hexe/dictate.sh start") end,
+#            { on = hexe.when.press })
+#   hexe.key(chord, function() ctx.exec("~/.config/hexe/dictate.sh stop") end,
+#            { on = hexe.when.release })
 set -eu
 
 : "${HEXE_DICTATE_MODEL:=$HOME/.local/share/whisper/ggml-base.en.bin}"
-WAV=$(mktemp -t hexe-dictate-XXXXXX.wav)
-trap 'rm -f "$WAV"' EXIT INT TERM
+STATE="${XDG_RUNTIME_DIR:-/tmp}/hexe-dictate"
+mkdir -p "$STATE"
+WAV="$STATE/rec.wav"
+PIDFILE="$STATE/recorder.pid"
+PANEFILE="$STATE/pane"
 
-# Whisper wants 16 kHz mono. pw-record for PipeWire, arecord as the fallback --
-# picked at run time so one script works on both.
-if command -v pw-record >/dev/null 2>&1; then
-    pw-record --rate 16000 --channels 1 --format s16 "$WAV" &
-elif command -v arecord >/dev/null 2>&1; then
-    arecord -q -f S16_LE -r 16000 -c 1 "$WAV" &
-else
-    echo "dictate: neither pw-record nor arecord is installed" >&2
-    exit 1
-fi
-RECORDER=$!
+# Talking to hexe is one socket and one JSON line. `hexe api` does it for us,
+# and reads HEXE_API_SOCKET itself.
+hexe_api() { hexe api "$@" >/dev/null 2>&1 || true; }
 
-# Block until hexe closes stdin. `read` returning EOF is the stop signal, which
-# is why this needs no signal handler: releasing the key ends the recording.
-read -r _ignored || true
+start() {
+    [ -f "$PIDFILE" ] && stop_recorder
+    # Remember which pane asked, so the text lands where it was started even if
+    # focus moves while whisper is thinking.
+    hexe api pane 2>/dev/null | sed -n 's/.*"uuid":"\([0-9a-f]*\)".*/\1/p' > "$PANEFILE" || true
 
-kill "$RECORDER" 2>/dev/null || true
-wait "$RECORDER" 2>/dev/null || true
+    if command -v pw-record >/dev/null 2>&1; then
+        pw-record --rate 16000 --channels 1 --format s16 "$WAV" &
+    elif command -v arecord >/dev/null 2>&1; then
+        arecord -q -f S16_LE -r 16000 -c 1 "$WAV" &
+    else
+        echo "dictate: neither pw-record nor arecord is installed" >&2
+        exit 1
+    fi
+    echo $! > "$PIDFILE"
 
-if [ ! -s "$WAV" ]; then
-    echo "dictate: nothing was recorded" >&2
-    exit 1
-fi
+    # Light the indicator. hexe draws it, so it cannot be styled away or
+    # forgotten -- and it lapses on its own if this script dies, which is why
+    # the loop below keeps renewing it.
+    hexe_api capture true
+    while [ -f "$PIDFILE" ]; do
+        sleep 2
+        [ -f "$PIDFILE" ] || break
+        hexe_api capture true
+    done &
+}
 
-# Transcribe. Swap this block for whatever engine you prefer; everything above
-# it is just "record until told to stop".
-if ! command -v whisper-cli >/dev/null 2>&1; then
-    echo "dictate: whisper-cli not found; printing nothing" >&2
-    exit 1
-fi
+stop_recorder() {
+    [ -f "$PIDFILE" ] || return 0
+    kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    wait "$(cat "$PIDFILE")" 2>/dev/null || true
+    rm -f "$PIDFILE"
+}
 
-# --no-timestamps so the output is the sentence and nothing else: every byte on
-# stdout is typed into the user's shell.
-whisper-cli -m "$HEXE_DICTATE_MODEL" -f "$WAV" --no-timestamps --no-prints 2>/dev/null |
-    tr '\n' ' ' |
-    sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+stop() {
+    stop_recorder
+    hexe_api capture false
+
+    [ -s "$WAV" ] || { echo "dictate: nothing was recorded" >&2; exit 1; }
+    command -v whisper-cli >/dev/null 2>&1 || {
+        echo "dictate: whisper-cli not found" >&2; exit 1; }
+
+    # --no-timestamps so the output is the sentence and nothing else: every byte
+    # of this is about to be typed into a shell.
+    text=$(whisper-cli -m "$HEXE_DICTATE_MODEL" -f "$WAV" --no-timestamps --no-prints 2>/dev/null |
+        tr '\n' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -n "$text" ] || exit 0
+
+    pane=$(cat "$PANEFILE" 2>/dev/null || true)
+    if [ -n "$pane" ]; then
+        hexe api send "\"$pane\"" "$(printf '%s' "$text" | sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/"/')"
+    else
+        hexe api send "$(printf '%s' "$text" | sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/"/')"
+    fi
+    rm -f "$WAV"
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    cancel) stop_recorder; hexe_api capture false; rm -f "$WAV" ;;
+    *) echo "usage: dictate.sh start|stop|cancel" >&2; exit 2 ;;
+esac
