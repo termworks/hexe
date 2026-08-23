@@ -338,7 +338,7 @@ local SMOKES = {
   "smoke_palette_fuzz.py", "smoke_palette_cells.py", "smoke_names.py",
   "smoke_decor.py", "smoke_float_state.py", "smoke_api_socket.py",
   "smoke_api_events.py", "smoke_stale_daemon.py", "smoke_api_geometry.py",
-  "smoke_inherit_env.py", "smoke_access.py", "smoke_capture.py", "smoke_plugin_pkg.py", "smoke_popup.py", "smoke_plugin_stream.py", "smoke_share_indicator.py", "smoke_stream_attach.py", "smoke_status_zones.py",
+  "smoke_inherit_env.py", "smoke_access.py", "smoke_capture.py", "smoke_lua_client.py", "smoke_plugin_pkg.py", "smoke_popup.py", "smoke_plugin_stream.py", "smoke_share_indicator.py", "smoke_stream_attach.py", "smoke_status_zones.py",
 }
 
 -- Heavy-load scenario: splits + floats + fullscreen apps + huge buffers + pastes, then chaos

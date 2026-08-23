@@ -40,6 +40,12 @@ because the pane's program receives the bytes and hexe never looks at them.
 `ctrl+alt+d` is bound to — a split, a detach, a Lua function. The pane may never
 see it at all.
 
+Say the consequence out loud: **`keyboard` reaches everything you have bound.**
+If a chord runs a shell command, a plugin holding `keyboard` can run it. That is
+not remote code execution — the caller supplies no code, only a chord you chose
+the meaning of — but it is broader than `typing`, and it is the reason the two
+are separate words rather than one.
+
 That is why a compositor bridge wants `keyboard` and nothing else:
 
 ```lua
@@ -83,6 +89,11 @@ nothing. Authority is a property of the door.
 
 **It is not a sandbox.** A plugin runs as you, with your filesystem, so nothing
 here stops a determined program from opening the unscoped socket itself.
+
+What *is* enforced below the grant: the socket is `0600`, and every connection's
+uid is checked against the owner's using `SO_PEERCRED` — the kernel's answer,
+not anything the peer said. A different user cannot reach it even if the runtime
+directory is more permissive than it should be.
 
 What it does buy is real anyway: least privilege by default, a plugin that
 cannot type into your shell *by accident*, a refusal that says which power was

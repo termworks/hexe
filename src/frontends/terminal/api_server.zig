@@ -197,6 +197,18 @@ pub const ApiServer = struct {
                 error.WouldBlock => break,
                 else => break,
             };
+            // Who connected, from the kernel rather than from anything the
+            // peer said. The socket is already 0600 in a 0700 directory, so
+            // this should be unreachable -- which is exactly why it is cheap
+            // insurance against a runtime directory that is not what we assume.
+            if (core.ipc.getPeerCredentials(cfd)) |peer| {
+                if (peer.uid != std.os.linux.getuid()) {
+                    log.warn("refused a control connection from uid {d}", .{peer.uid});
+                    posix.close(cfd);
+                    continue;
+                }
+            }
+
             const c = self.slot() orelse {
                 // Full. Refusing is better than queueing: the client learns now
                 // instead of waiting on a reply that is not coming.

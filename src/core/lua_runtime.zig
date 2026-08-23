@@ -1405,15 +1405,59 @@ fn setupUnsafeRequire(lua: *Lua, allocator: std.mem.Allocator) !void {
         if (lua.typeOf(-1) == .table) {
             lua.pushFunction(hexeLoader);
             lua.setField(-2, "hexe");
+            // The same client library another program gets from `hexe lua-api`,
+            // reachable in here as `require("hexe.client")`. One file, so a
+            // session talking to another session and a script talking to one
+            // cannot drift apart.
+            lua.pushFunction(hexeClientLoader);
+            lua.setField(-2, "hexe.client");
         }
         lua.pop(1); // preload
     }
     lua.pop(1); // package
 }
 
+/// `require("hexe.client")` -- the shipped client library, handed the host's
+/// own socket primitive so it needs no argument in here.
+fn hexeClientLoader(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const source = @import("lua_client.zig").SOURCE;
+
+    const z = std.heap.page_allocator.dupeZ(u8, source) catch return 0;
+    defer std.heap.page_allocator.free(z);
+    lua.loadString(z) catch {
+        log.warn("failed to load the bundled Lua client library", .{});
+        return 0;
+    };
+    // Its transport, as the chunk's argument -- exactly what a foreign host
+    // would pass.
+    if (lua.getGlobal("hexe") catch null) |_| {
+        if (lua.typeOf(-1) == .table) {
+            _ = lua.getField(-1, "stream");
+            lua.remove(-2);
+        } else {
+            lua.pop(1);
+            lua.pushNil();
+        }
+    } else {
+        lua.pushNil();
+    }
+    lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
+        log.warn("the bundled Lua client library raised while loading", .{});
+        return 0;
+    };
+    return 1;
+}
+
 fn injectSetupHelpers(lua: *Lua) void {
+    // The socket primitive the client library borrows. Registered like every
+    // other native, so `hexe.lua` runs unchanged inside hexe itself -- which is
+    // what lets one session talk to another without a second implementation.
+    @import("lua_stream.zig").install(lua);
+
     const code =
         "if type(hexe)=='table' then " ++
+        @import("lua_stream.zig").BOOTSTRAP ++
         "hexe.__internal=nil; " ++
         "local __theme_styles={}; " ++
         "local function mark(t, kind) if type(t)~='table' then t={} end; rawset(t,'__hexe_type',kind); return t end; " ++

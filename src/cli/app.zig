@@ -523,6 +523,10 @@ pub fn main() !void {
 
     // hexe's own subcommand, not a plugin's: nothing a plugin declares is
     // reachable from here.
+    // Not a subcommand of anything: it is hexe handing out a file, and the
+    // program that wants it is not hexe.
+    const lua_api_cmd = app.createCommand("lua-api", "Print the Lua client library other programs require");
+
     var plugin_cmd = app.createCommand("plugin", "Install, list, remove and approve plugins");
     var plugin_list = app.createCommand("list", "What is installed, what it may do, and whether it changed");
     try plugin_list.addArg(Arg.booleanOption("json", null, null));
@@ -790,7 +794,7 @@ pub fn main() !void {
 
     try palette_cmd.addSubcommands(&[_]yazap.Command{ palette_list, palette_get, palette_set, palette_use, palette_end, palette_drop, palette_reset });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd, api_cmd, plugin_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd, api_cmd, plugin_cmd, lua_api_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -853,6 +857,11 @@ pub fn main() !void {
             return true;
         }
     }.check;
+
+    if (matches.subcommandMatches("lua-api")) |_| {
+        try cli_cmds.runLuaApi();
+        return;
+    }
 
     if (matches.subcommandMatches("plugin")) |plugin_matches| {
         if (plugin_matches.subcommandMatches("list")) |m| {

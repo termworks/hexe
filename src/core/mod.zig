@@ -23,6 +23,7 @@ pub const pod_protocol = @import("pod_protocol.zig");
 pub const pod_meta = @import("pod_meta.zig");
 pub const pod_share = @import("pod_share.zig");
 pub const plugin_pkg = @import("plugin_pkg.zig");
+pub const lua_client = @import("lua_client.zig");
 pub const access = @import("access.zig");
 pub const lua_runtime = @import("lua_runtime.zig");
 pub const config_builder = @import("config_builder.zig");

@@ -1118,6 +1118,7 @@ pub const State = struct {
             core.logging.logError("terminal", "control socket unavailable", err);
             return;
         };
+        self.publishSelfSocket();
     }
 
     /// Start the helper programs the config declared, once.
@@ -1129,6 +1130,23 @@ pub const State = struct {
     /// Detached, stdio closed, and not supervised. Restarting one that exits
     /// deliberately is a fork loop with a delay; one that wants to survive its
     /// own crashes knows better than hexe how to.
+    /// Tell our own Lua which socket is ours, so the client library can refuse
+    /// a connection to it.
+    ///
+    /// Calling your own session from inside its event loop cannot be answered:
+    /// the frontend is busy running the caller. It looks like a hang and ends
+    /// in a socket timeout, which says nothing about the cause.
+    fn publishSelfSocket(self: *State) void {
+        const srv = if (self.api_server) |*s| s else return;
+        const rt = self.config._lua_runtime orelse return;
+        _ = rt.lua.getGlobal("hexe") catch return;
+        if (rt.lua.typeOf(-1) == .table) {
+            _ = rt.lua.pushString(srv.path);
+            rt.lua.setField(-2, "__self_socket");
+        }
+        rt.lua.pop(1);
+    }
+
     pub fn startPlugins(self: *State) void {
         if (self.plugins_started) return;
         if (self.config.plugins.len == 0) {

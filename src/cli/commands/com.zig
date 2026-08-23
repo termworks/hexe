@@ -19,6 +19,7 @@ pub const runPluginList = @import("plugin.zig").runList;
 pub const runPluginInstall = @import("plugin.zig").runInstall;
 pub const runPluginRemove = @import("plugin.zig").runRemove;
 pub const runPluginAllow = @import("plugin.zig").runAllow;
+pub const runLuaApi = @import("lua_api.zig").runLuaApi;
 pub const runPodGc = @import("pod_gc.zig").runPodGc;
 pub const runRecordStart = @import("record_ctl.zig").runRecordStart;
 pub const runRecordStop = @import("record_ctl.zig").runRecordStop;
