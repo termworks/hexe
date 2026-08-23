@@ -26,10 +26,13 @@ start)
     stop_recorder
     printf '%s' "${2:-}" > "$PANEFILE"
 
+    # stdout and stderr closed on every background job: `start` must return at
+    # once, and a caller reading its output must not be left waiting on a pipe
+    # the recorder is still holding open.
     if command -v pw-record >/dev/null 2>&1; then
-        pw-record --rate 16000 --channels 1 --format s16 "$WAV" &
+        pw-record --rate 16000 --channels 1 --format s16 "$WAV" >/dev/null 2>&1 &
     elif command -v arecord >/dev/null 2>&1; then
-        arecord -q -f S16_LE -r 16000 -c 1 "$WAV" &
+        arecord -q -f S16_LE -r 16000 -c 1 "$WAV" >/dev/null 2>&1 &
     else
         echo "dictate: neither pw-record nor arecord is installed" >&2
         exit 1
@@ -42,7 +45,7 @@ start)
     ( while [ -f "$PIDFILE" ]; do
         hexe api capture true >/dev/null 2>&1 || true
         sleep 2
-      done ) &
+      done ) >/dev/null 2>&1 &
     ;;
 
 stop)

@@ -27,6 +27,17 @@ translator; `capture` is equally a screen recorder.
 export HEXE_DICTATE_MODEL=~/.local/share/whisper/ggml-base.en.bin
 ```
 
+`whisper-cli` is a target of whisper.cpp, not something most package managers
+ship on its own:
+
+```sh
+cmake -S whisper.cpp -B build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON
+cmake --build build --target whisper-cli
+```
+
+Any GGML Whisper model works, including one another tool already downloaded —
+asryx keeps its under `~/.local/share/asryx/models/`.
+
 Swap `whisper-cli` in `record.sh` for any other engine — a cloud API, a local
 server, `asryx` — and nothing else changes. That file is the half hexe has no
 opinion about.
