@@ -12,7 +12,33 @@
 const std = @import("std");
 const core = @import("core");
 
-pub fn runLuaApi() !void {
+/// Where `--install` puts it. A path on `package.path` is the only way a host
+/// that refuses `io.popen` -- oslo's VM does -- can get at the file at all.
+pub fn installedPath(allocator: std.mem.Allocator) ![]u8 {
+    if (std.posix.getenv("XDG_DATA_HOME")) |xdg| {
+        return std.fmt.allocPrint(allocator, "{s}/hexe/lua/hexe.lua", .{xdg});
+    }
+    const home = std.posix.getenv("HOME") orelse return error.NoHome;
+    return std.fmt.allocPrint(allocator, "{s}/.local/share/hexe/lua/hexe.lua", .{home});
+}
+
+pub fn runLuaApi(allocator: std.mem.Allocator, install: bool) !void {
+    if (!install) {
+        var out = std.fs.File.stdout().deprecatedWriter();
+        try out.writeAll(core.lua_client.SOURCE);
+        return;
+    }
+
+    const path = try installedPath(allocator);
+    defer allocator.free(path);
+    if (std.fs.path.dirname(path)) |dir| try std.fs.cwd().makePath(dir);
+
+    var file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(core.lua_client.SOURCE);
+
     var out = std.fs.File.stdout().deprecatedWriter();
-    try out.writeAll(core.lua_client.SOURCE);
+    try out.print("{s}\n", .{path});
+    try out.print("\nAdd its directory to package.path and `require \"hexe\"`:\n", .{});
+    try out.print("  package.path = package.path .. \";{s}/?.lua\"\n", .{std.fs.path.dirname(path) orelse "."});
 }

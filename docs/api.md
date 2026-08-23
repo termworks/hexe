@@ -134,6 +134,37 @@ ever second, so `ratio(2)` selects pane 2 rather than setting a ratio of 2.
 arguments, so the same `[a-z0-9][a-z0-9._-]*` rule the name pool uses applies
 here; an invalid name is refused and the old one is kept.
 
+## Calling it from another Lua
+
+`hexe lua-api` prints a plain-Lua client library; `--install` writes it to
+`~/.local/share/hexe/lua/hexe.lua` for a host that cannot shell out to get it —
+oslo's VM refuses `io.popen`, so it reads the file:
+
+```lua
+local src  = io.open(os.getenv("HOME") .. "/.local/share/hexe/lua/hexe.lua"):read("a")
+local hexe = load(src)(oslo.stream)      -- the one thing it cannot do itself
+local mux  = hexe.connect()
+for _, pane in ipairs(mux.panes()) do print(pane.name, pane.cwd) end
+```
+
+The library is copied between siblings rather than ported — it is oslo's
+`client.lua` with hexe's vocabulary — so a fix to the framing reaches both.
+Inside hexe itself it is `require("hexe.client")`; plain `require("hexe")` there
+is the *config* module, which is a different thing with the same name.
+
+`connect()` takes nothing (`$HEXE_API_SOCKET`, else the newest socket), a
+session name, or `{ path = "…", timeout_ms = 5000 }`.
+
+**A name is matched against what a session calls itself, not only against the
+file.** The socket is named when it binds, so a session renamed or reattached
+afterwards keeps the old file: `api@pi.sock` can be session `upsilon`. Passing
+`"upsilon"` scans and asks each candidate its own name. `session()` reports its
+`socket` for the same reason.
+
+Connecting to your **own** session from inside its event loop is refused: the
+frontend cannot answer while it is busy running the caller, so it would hang
+until the socket timed out. In there, `ctx.*` already reaches everything.
+
 ## Events
 
 Instead of polling, keep a connection open and be told:

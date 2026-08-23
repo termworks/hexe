@@ -625,6 +625,15 @@ fn hexe_session(lstate: ?*LuaState) callconv(.c) c_int {
     };
     lua.createTable(0, 8);
     setStr(lua, "name", state.runtime.sessionName());
+    // The socket this session is reachable on. Not derivable from `name`: the
+    // path is fixed when the control socket binds, and a session that is later
+    // renamed or reattached keeps the old file. A caller that read `name` and
+    // built `api@<name>.sock` from it would miss exactly those sessions.
+    if (state.api_server) |*srv| {
+        setStr(lua, "socket", srv.path);
+    } else {
+        setOptStr(lua, "socket", null);
+    }
     const uuid = state.runtime.sessionUuid();
     setStr(lua, "uuid", uuid[0..]);
     setStr(lua, "root", state.runtime.baseRoot());

@@ -306,28 +306,27 @@ end
 --- Answers a *list* of candidates, newest first, because a socket file is not a running session:
 --- one left behind by a frontend that was killed looks exactly like a live one until something
 --- connects. Trying them in turn is the only staleness check that cannot be raced.
-local function find(where)
-  if type(where) == "table" and where.path then return { { path = where.path } } end
-  local named = type(where) == "string" and where or nil
+--- Every `api@*.sock` under `dir`, newest first. Empty when nothing can list it.
+---
+--- Plain Lua cannot list a directory, so this asks the host two ways and gives up rather than
+--- guessing.
+---
+--- **`io.popen` is the fallback, not the first choice.** It shells out, and a sandboxed host may
+--- refuse it outright, so a host that can list a directory itself is asked first and the shell-out
+--- is wrapped where it might not exist at all.
+---
+--- Whichever sibling we are running inside: this file is meant to be copied between them, so it
+--- looks for any of the family's globals rather than only its own. Inside oslo `_G.hexe` does not
+--- exist, and checking only for that sent discovery straight to the `io.popen` oslo refuses —
+--- which looked exactly like "no session is running".
+local function list_candidates(dir)
+  local host
+  for _, name in ipairs({ "hexe", "oslo" }) do
+    local candidate = _G[name]
+    if candidate and candidate.fs and candidate.fs.ls then host = candidate; break end
+  end
 
-  local env = os.getenv("HEXE_API_SOCKET")
-  if not named and env and env ~= "" then return { { path = env } } end
-
-  local runtime = os.getenv("XDG_RUNTIME_DIR")
-  local profile = os.getenv("HEXE_INSTANCE") or os.getenv("HEXE_PROFILE") or "default"
-  local dir = (runtime and runtime ~= "")
-    and (runtime .. "/hexe/" .. profile)
-    or ("/tmp/hexe-" .. (os.getenv("UID") or "0") .. "/" .. profile)
-  if named then return { { path = dir .. "/api@" .. named .. ".sock" } } end
-
-  -- No name and no env var: the newest socket in the directory. Plain Lua cannot list one, so this
-  -- asks the host two ways and gives up rather than guessing.
-  --
-  -- **`io.popen` is the fallback, not the first choice.** It shells out, and a sandboxed host may
-  -- refuse it outright, so a host that can list a directory itself is asked first and the
-  -- shell-out is wrapped where it might not exist at all.
-  local host = _G.hexe
-  if host and host.fs and host.fs.ls then
+  if host then
     local found = {}
     for _, entry in ipairs(host.fs.ls(dir) or {}) do
       if entry.name:sub(1, 4) == "api@" and entry.name:sub(-5) == ".sock" then
@@ -346,7 +345,55 @@ local function find(where)
     ls:close()
     return out
   end)
-  return ok and found or nil
+  return (ok and found) or {}
+end
+
+--- The directory hexe binds its control sockets in.
+---
+--- Mirrors hexe's own `getSocketDir`: the default profile binds straight under `<runtime>/hexe`,
+--- and only a NAMED instance gets a subdirectory. Appending "default" unconditionally looked
+--- reasonable and found nothing at all.
+local function socket_dir()
+  local runtime = os.getenv("XDG_RUNTIME_DIR")
+  local base = (runtime and runtime ~= "")
+    and (runtime .. "/hexe")
+    or ("/tmp/hexe-" .. (os.getenv("UID") or "0"))
+  local instance = os.getenv("HEXE_INSTANCE")
+  return (instance and instance ~= "") and (base .. "/" .. instance) or base
+end
+
+--- Where a session's socket is, given what little the caller said.
+---
+--- `$HEXE_API_SOCKET` first, because a program hexe started inherits it and means *that* session —
+--- a plugin never has to guess. A name picks one. With neither, the newest socket wins, which is
+--- right for the common case of one session and honest about being a guess when there are several.
+---
+--- Answers a *list*, newest first, because a socket file is not a running session: one left behind
+--- by a frontend that was killed looks exactly like a live one until something connects. Trying
+--- them in turn is the only staleness check that cannot be raced.
+---
+--- A name is tried as the file first, then against what each session CALLS itself. Those differ
+--- more often than you would think: the file is named when the socket binds, and a session renamed
+--- or reattached afterwards keeps the old file — so the name a caller read from `session().name`
+--- may name no file at all.
+local function find(where)
+  if type(where) == "table" and where.path then return { { path = where.path } } end
+  local named = type(where) == "string" and where or nil
+
+  local env = os.getenv("HEXE_API_SOCKET")
+  if not named and env and env ~= "" then return { { path = env } } end
+
+  local dir = socket_dir()
+  if not named then return list_candidates(dir) end
+
+  local direct = dir .. "/api@" .. named .. ".sock"
+  local out = { { path = direct } }
+  for _, candidate in ipairs(list_candidates(dir)) do
+    if candidate.path ~= direct then
+      out[#out + 1] = { path = candidate.path, must_be_named = named }
+    end
+  end
+  return out
 end
 
 --- Open a connection to a running hexe.
@@ -378,9 +425,21 @@ function M.connect(where)
     local handle, why = transport.connect(candidate.path, timeout)
     if handle then
       handle:close()
-      return attach(setmetatable({ path = candidate.path, timeout_ms = timeout }, Session))
+      local session = attach(setmetatable({ path = candidate.path, timeout_ms = timeout }, Session))
+      -- A candidate reached by scanning has to prove it is the one asked for.
+      -- Asking it its own name is the only way: the file name is a snapshot
+      -- from when it bound, and this is what it answers to now.
+      if candidate.must_be_named then
+        local live = session.session()
+        if not (live and live.name == candidate.must_be_named) then
+          last = "no session answers to '" .. candidate.must_be_named .. "'"
+          goto continue
+        end
+      end
+      return session
     end
     last = why
+    ::continue::
   end
   return nil, last or "nothing was listening"
 end
