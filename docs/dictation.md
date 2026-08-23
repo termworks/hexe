@@ -95,3 +95,38 @@ pedal, or a plugin that wants to start dictation on some other cue.
   and block the next attempt.
 - **Never starts** — the keybinding reports why rather than doing nothing
   silently, which is indistinguishable from a broken key.
+
+## Using asryx
+
+[asryx](https://github.com/rccyx/asryx) fits, through an adapter. It disagrees
+with the contract above in two ways, and `contrib/dictate-asryx.sh` is the whole
+of the disagreement:
+
+| | asryx | hexe wants |
+|---|---|---|
+| lifetime | a **toggle**: one call starts, the next stops, each exits at once | one process that lives for the dictation |
+| delivery | the **clipboard** (plus an optional `--pipe-to`) | stdout |
+
+So the adapter *is* the long-lived process: it calls `asryx` to start, blocks on
+stdin, calls `asryx` again to stop, waits for `asryx status` to go back to
+`idle`, and prints what landed on the clipboard.
+
+```lua
+hexe.dictate = { command = "~/.config/hexe/dictate-asryx.sh" }
+```
+
+Three things to know before you rely on it:
+
+- **Dictating replaces your clipboard.** That is asryx's design, not the
+  adapter's: `--pipe-to` still copies first, so there is no path that avoids it.
+  Set `HEXE_ASRYX_RESTORE_CLIPBOARD=1` to put the old contents back afterwards.
+- **It needs a graphical session.** The transcript travels through the X11 or
+  Wayland clipboard, so asryx cannot deliver anything to a hexe running over SSH
+  or on a bare TTY. A tool that prints to stdout — like `contrib/dictate.sh` —
+  has no such limit.
+- **Do not also bind asryx to a compositor hotkey.** Two toggles driving one
+  state machine will fight, and you get a recording nobody stops.
+
+The adapter waits for `idle` rather than assuming the stop call blocks, because
+asryx documents a `transcribing` state but does not say whether the second
+invocation returns before or after it. Waiting is correct either way.
