@@ -147,6 +147,11 @@ local mux  = hexe.connect()
 for _, pane in ipairs(mux.panes()) do print(pane.name, pane.cwd) end
 ```
 
+Discovery needs to list a directory, which plain Lua cannot and which
+`io.popen` does only where a host permits it — hexe's safe mode removes `io`
+entirely. So hexe lends `hexe.fs.ls`, and a client library asks whichever
+sibling it is running inside before falling back to shelling out.
+
 The library is copied between siblings rather than ported — it is oslo's
 `client.lua` with hexe's vocabulary — so a fix to the framing reaches both.
 Inside hexe itself it is `require("hexe.client")`; plain `require("hexe")` there

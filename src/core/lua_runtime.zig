@@ -1454,10 +1454,14 @@ fn injectSetupHelpers(lua: *Lua) void {
     // other native, so `hexe.lua` runs unchanged inside hexe itself -- which is
     // what lets one session talk to another without a second implementation.
     @import("lua_stream.zig").install(lua);
+    // Listing a directory, for the same reason: a client library discovering
+    // sockets cannot do it in plain Lua, and `io.popen` is gone in safe mode.
+    @import("lua_fs.zig").install(lua);
 
     const code =
         "if type(hexe)=='table' then " ++
         @import("lua_stream.zig").BOOTSTRAP ++
+        @import("lua_fs.zig").BOOTSTRAP ++
         "hexe.__internal=nil; " ++
         "local __theme_styles={}; " ++
         "local function mark(t, kind) if type(t)~='table' then t={} end; rawset(t,'__hexe_type',kind); return t end; " ++
