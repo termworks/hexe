@@ -29,6 +29,8 @@ os.makedirs(RUN, exist_ok=True)
 os.makedirs(SRC, exist_ok=True)
 INST = f"smk{os.getpid()}"
 MARK = f"pkgmark{os.getpid()}"
+PRESSED = os.path.join(WD, "pressed")
+RELEASED = os.path.join(WD, "released")
 
 # The package. Note what is NOT in the user's config: this keybinding.
 open(os.path.join(SRC, "plugin.lua"), "w").write("""
@@ -43,15 +45,25 @@ return {
 # A file the package ships beside its entry. Finding it is the point: a package
 # that cannot name its own files has to hardcode an install path.
 open(os.path.join(SRC, "greeting.txt"), "w").write(MARK + "\n")
-open(os.path.join(SRC, "init.lua"), "w").write("""
+open(os.path.join(SRC, "init.lua"), "w").write(f"""
 local here = ...                       -- the package's own directory
 local f = io.open(here .. "/greeting.txt", "r")
 local greeting = f and f:read("*l") or "NO-SHIPPED-FILE"
 if f then f:close() end
 
-hexe.key({ hexe.key.ctrl, hexe.key.g }, function(ctx)
+hexe.key({{ hexe.key.ctrl, hexe.key.g }}, function(ctx)
   ctx.popup(greeting)
 end)
+
+-- Push-to-talk shape: one chord, two moments. Each must fire at its own
+-- moment -- a press that waits for the release is a recorder that never
+-- records, and a release that never fires is one that never stops.
+hexe.key({{ hexe.key.ctrl, hexe.key.alt, hexe.key.p }}, function(ctx)
+  ctx.exec("touch {PRESSED}")
+end, {{ on = hexe.when.press }})
+hexe.key({{ hexe.key.ctrl, hexe.key.alt, hexe.key.p }}, function(ctx)
+  ctx.exec("touch {RELEASED}")
+end, {{ on = hexe.when.release }})
 """)
 
 # The user's config names no plugin whatsoever.
@@ -227,6 +239,26 @@ if "NO-SHIPPED-FILE" in seen_since(mark):
     fail("the plugin could not find a file it ships beside its own entry; "
          "without that a package cannot carry a script")
 print("shipped files: it found its own directory and read a file it ships")
+
+# Push-to-talk: press and release are separate moments and both must land.
+# `keys` presses the chord; `keys(chord, "release")` lets go of it.
+subprocess.run([HEXE, "api", "keys", '"ctrl+alt+p"'], env=env, cwd=WD,
+               capture_output=True, timeout=25)
+time.sleep(1.5)
+if not os.path.exists(PRESSED):
+    fail("a press-bound action did not fire on press; for push-to-talk that is "
+         "a recorder that never starts")
+if os.path.exists(RELEASED):
+    fail("the release action fired on press")
+subprocess.run([HEXE, "api", "keys", '"ctrl+alt+p"', '"release"'], env=env, cwd=WD,
+               capture_output=True, timeout=25)
+deadline = time.time() + 15
+while time.time() < deadline and not os.path.exists(RELEASED):
+    time.sleep(0.3)
+if not os.path.exists(RELEASED):
+    fail("a release-bound action never fired; push-to-talk would start and "
+         "never stop")
+print("push-to-talk: press fires on press, release fires on release")
 
 user_config = open(os.path.join(CF, "hexe", "init.lua")).read()
 if "greeter" in user_config or "plugin" in user_config:

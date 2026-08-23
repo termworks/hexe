@@ -1312,7 +1312,13 @@ fn hexe_capture(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
-/// `keys("ctrl+alt+d")` — press a chord *at hexe*.
+/// `keys("ctrl+alt+d")` — press a chord *at hexe*; `keys(chord, "release")`
+/// releases it.
+///
+/// Both halves are needed, not just the first. A chord that has a release
+/// binding cannot be resolved on press alone -- hexe has to wait to see whether
+/// it was a tap -- so a bridge that can only press can never drive
+/// push-to-talk, which is the main thing a bridge is for.
 ///
 /// Not `send`: this goes through the keybinding machinery, so it fires whatever
 /// the user bound rather than reaching the program inside the pane. That is the
@@ -1336,8 +1342,16 @@ fn hexe_keys(lstate: ?*LuaState) callconv(.c) c_int {
         return 1;
     };
 
+    // Which moment this is. Named rather than a boolean because hexe already
+    // has four, and a bridge sending `repeat` should not have to lie about it.
+    var phase: core.Config.BindWhen = .press;
+    if (lua.typeOf(2) == .string) {
+        const word = lua.toString(2) catch "press";
+        phase = std.meta.stringToEnum(core.Config.BindWhen, word) orelse .press;
+    }
+
     const keybinds = @import("keybinds.zig");
-    const consumed = keybinds.handleKeyEvent(state, chord.mods, chord.key, .press, false);
+    const consumed = keybinds.handleKeyEvent(state, chord.mods, chord.key, phase, false);
     state.needs_render = true;
     lua.pushBoolean(consumed);
     return 1;

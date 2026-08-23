@@ -66,11 +66,21 @@ drift out of step with the first.
 | share | `share` |
 | keyboard | `keys` |
 
-`keys(chord)` presses a chord **at hexe** — `"ctrl+alt+d"`, `"super+left"`,
-`"space"` — so it fires whatever you bound rather than reaching the program in
-the pane. It returns whether a binding consumed it. That is the opposite of
-`send`, which writes bytes into the pane and which hexe never interprets; see
-[access.md](access.md) for why they are separate powers.
+`keys(chord [, phase])` presses a chord **at hexe** — `"ctrl+alt+d"`,
+`"super+left"`, `"space"` — so it fires whatever you bound rather than reaching
+the program in the pane. It returns whether a binding consumed it.
+
+`phase` is `press` (the default), `release`, `repeat` or `hold`. Both halves
+matter: a chord bound on press *and* release is the push-to-talk shape, and a
+bridge that can only press can never let go of it.
+
+```console
+$ hexe api keys '"ctrl+alt+d"'               # hold it down
+$ hexe api keys '"ctrl+alt+d"' '"release"'   # let go
+```
+
+That is the opposite of `send`, which writes bytes into the pane and which hexe
+never interprets; see [access.md](access.md) for why they are separate powers.
 
 A pane record carries what you would expect to have to ask several commands
 for: `uuid`, `name`, geometry, `cwd`, `process`, `alive`, `alt_screen`, cursor
