@@ -161,6 +161,12 @@ pub const MuxConfigBuilder = struct {
             }
         }
         self.float_matches.deinit(self.allocator);
+        // A bind owns its callback reference strings -- `build()` deep-copies
+        // them, so these are the builder's own and nothing else frees them.
+        for (self.binds.items) |bind| {
+            if (bind.when) |code| self.allocator.free(code);
+            if (bind.action == .lua) self.allocator.free(bind.action.lua);
+        }
         self.binds.deinit(self.allocator);
     }
 
