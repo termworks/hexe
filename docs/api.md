@@ -83,7 +83,7 @@ of it.
 
 | access | verbs |
 | --- | --- |
-| `read` | `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `config`, `capture`, `client` |
+| `read` | `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `config`, `capture`, `client`, `verbs` |
 | `screen` | `env`, `line`, `cursor_line`, `screen_text`, `find`, `selection`, `selection_range` |
 | `typing` | `send` |
 | `keyboard` | `keys` |
@@ -93,6 +93,21 @@ of it.
 
 `control` is the default: a verb that changes the session's shape needs the
 whole session, and there is no smaller honest name for that.
+
+**`verbs()` answers this table for the door you asked on**, so a peer need not
+have read this page — and, on a plugin's or a pane's socket, lists only what
+that door may actually call:
+
+```console
+$ hexe api verbs
+{"ok":true,"result":[{"name":"verbs","about":"this list","access":"read"}, ...]}
+```
+
+Listing a verb the gate would refuse is worse than listing nothing, because a
+client believes it and acts on it. What is missing stays discoverable — a
+refusal names the access it wanted — it is simply not promised. `name` and
+`about` are the family's shape; `access` is hexe's own, added rather than
+substituted so a sibling's client reads it unchanged.
 
 The four newer ones are each a general power rather than a named feature:
 

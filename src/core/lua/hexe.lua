@@ -288,7 +288,7 @@ end
 -- of the vocabulary because a sibling reshaping your window layout is rarely what either of you
 -- wanted.
 local SURFACE = {
-  "panes", "pane", "tabs", "session", "ui", "count",
+  "panes", "pane", "tabs", "session", "ui", "count", "verbs",
   "screen_text", "line",
   "send", "keys",
   "notify", "popup", "capture",

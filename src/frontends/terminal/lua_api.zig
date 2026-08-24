@@ -1785,6 +1785,40 @@ fn hexe_selection_range(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// `hexe.verbs()` — every name THIS caller may call, with what each answers.
+///
+/// Filtered by the door the request arrived on, not the whole table: on a
+/// plugin's socket or a pane's socket, a verb the grant refuses is not a name
+/// this peer will answer, and listing it would be a lie a client then acts on.
+/// What is missing is still discoverable -- a refusal names the access it
+/// wanted -- so nothing is hidden, it is just not promised.
+///
+/// The record is `{name, about, access}`: the first two are the family's shape,
+/// and the third is hexe's own, added rather than substituted so a sibling's
+/// client reads this unchanged.
+fn hexe_verbs(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.createTable(0, 0);
+        return 1;
+    };
+    lua.createTable(ENTRIES.len, 0);
+    var n: i32 = 0;
+    inline for (ENTRIES) |e| {
+        const allowed = state.api_grant.has(e.needs) and
+            (state.api_pane_scope == null or e.pane_local);
+        if (allowed) {
+            n += 1;
+            lua.createTable(0, 3);
+            setStr(lua, "name", std.mem.span(e.name.ptr));
+            setStr(lua, "about", e.about);
+            setStr(lua, "access", e.needs.name());
+            lua.rawSetIndex(-2, n);
+        }
+    }
+    return 1;
+}
+
 // ─── installation ───────────────────────────────────────────────────────────
 
 /// A verb, and the one access kind it needs.
@@ -1797,6 +1831,10 @@ fn hexe_selection_range(lstate: ?*LuaState) callconv(.c) c_int {
 const Entry = struct {
     name: [:0]const u8,
     func: *const fn (?*LuaState) callconv(.c) c_int,
+    /// One line, for `verbs()`. A peer asks what this session answers rather
+    /// than being assumed to have read the docs, so the answer lives beside the
+    /// verb and cannot describe one that was renamed.
+    about: []const u8 = "",
     needs: core.access.Kind = .control,
     /// Answerable for one pane alone, so a pane's own socket may serve it.
     /// Everything else describes or changes the session and is refused there.
@@ -1820,39 +1858,40 @@ pub fn accessFor(call: []const u8) ?core.access.Kind {
 }
 
 const ENTRIES = [_]Entry{
-    .{ .name = "pane", .func = hexe_pane, .needs = .read, .pane_local = true },
-    .{ .name = "panes", .func = hexe_panes, .needs = .read },
-    .{ .name = "floats", .func = hexe_floats, .needs = .read },
-    .{ .name = "splits", .func = hexe_splits, .needs = .read },
-    .{ .name = "tabs", .func = hexe_tabs, .needs = .read },
-    .{ .name = "session", .func = hexe_session, .needs = .read },
-    .{ .name = "ui", .func = hexe_ui, .needs = .read },
-    .{ .name = "count", .func = hexe_count, .needs = .read },
-    .{ .name = "env", .func = hexe_env, .needs = .screen, .pane_local = true },
-    .{ .name = "act", .func = hexe_act },
-    .{ .name = "notify", .func = hexe_notify, .needs = .popup },
-    .{ .name = "send", .func = hexe_send, .needs = .typing, .pane_local = true },
-    .{ .name = "focus", .func = hexe_focus },
-    .{ .name = "tab_select", .func = hexe_tab_select },
-    .{ .name = "rename_tab", .func = hexe_rename_tab },
-    .{ .name = "rename", .func = hexe_rename },
-    .{ .name = "share", .func = hexe_share },
-    .{ .name = "keys", .func = hexe_keys, .needs = .keyboard },
-    .{ .name = "capture", .func = hexe_capture, .needs = .read, .pane_local = true },
-    .{ .name = "client", .func = hexe_client, .needs = .read, .pane_local = true },
-    .{ .name = "popup", .func = hexe_popup, .needs = .popup },
-    .{ .name = "stream", .func = hexe_stream, .needs = .stream },
-    .{ .name = "geometry", .func = hexe_geometry },
-    .{ .name = "ratio", .func = hexe_ratio },
-    .{ .name = "close", .func = hexe_close },
-    .{ .name = "scroll", .func = hexe_scroll },
-    .{ .name = "selection", .func = hexe_selection, .needs = .screen, .pane_local = true },
-    .{ .name = "config", .func = hexe_config, .needs = .read },
-    .{ .name = "line", .func = hexe_line, .needs = .screen, .pane_local = true },
-    .{ .name = "cursor_line", .func = hexe_cursor_line, .needs = .screen, .pane_local = true },
-    .{ .name = "screen_text", .func = hexe_screen_text, .needs = .screen, .pane_local = true },
-    .{ .name = "find", .func = hexe_find, .needs = .screen, .pane_local = true },
-    .{ .name = "selection_range", .func = hexe_selection_range, .needs = .screen, .pane_local = true },
+    .{ .name = "verbs", .func = hexe_verbs, .about = "this list", .needs = .read, .pane_local = true },
+    .{ .name = "pane", .func = hexe_pane, .about = "one pane, by selector, uuid or index", .needs = .read, .pane_local = true },
+    .{ .name = "panes", .func = hexe_panes, .about = "every pane in the session", .needs = .read },
+    .{ .name = "floats", .func = hexe_floats, .about = "the floating panes", .needs = .read },
+    .{ .name = "splits", .func = hexe_splits, .about = "the split tree of the current tab", .needs = .read },
+    .{ .name = "tabs", .func = hexe_tabs, .about = "every tab", .needs = .read },
+    .{ .name = "session", .func = hexe_session, .about = "identity and shape of this session", .needs = .read },
+    .{ .name = "ui", .func = hexe_ui, .about = "what the frontend is showing", .needs = .read },
+    .{ .name = "count", .func = hexe_count, .about = "how many of a thing there are", .needs = .read },
+    .{ .name = "env", .func = hexe_env, .about = "a pane's environment", .needs = .screen, .pane_local = true },
+    .{ .name = "act", .func = hexe_act, .about = "perform a bound action by name" },
+    .{ .name = "notify", .func = hexe_notify, .about = "put a line in front of the user", .needs = .popup },
+    .{ .name = "send", .func = hexe_send, .about = "write bytes into a pane, uninterpreted", .needs = .typing, .pane_local = true },
+    .{ .name = "focus", .func = hexe_focus, .about = "move focus to a pane" },
+    .{ .name = "tab_select", .func = hexe_tab_select, .about = "switch to a tab" },
+    .{ .name = "rename_tab", .func = hexe_rename_tab, .about = "name a tab" },
+    .{ .name = "rename", .func = hexe_rename, .about = "name a pane" },
+    .{ .name = "share", .func = hexe_share, .about = "who is watching a pane, and cut them off" },
+    .{ .name = "keys", .func = hexe_keys, .about = "press a chord at hexe, firing whatever it is bound to", .needs = .keyboard },
+    .{ .name = "capture", .func = hexe_capture, .about = "claim or release the recording indicator", .needs = .read, .pane_local = true },
+    .{ .name = "client", .func = hexe_client, .about = "this library's own source", .needs = .read, .pane_local = true },
+    .{ .name = "popup", .func = hexe_popup, .about = "show a block until it is dismissed", .needs = .popup },
+    .{ .name = "stream", .func = hexe_stream, .about = "hand a pane's bytes to a plugin", .needs = .stream },
+    .{ .name = "geometry", .func = hexe_geometry, .about = "read or set where a pane is" },
+    .{ .name = "ratio", .func = hexe_ratio, .about = "read or set a divider" },
+    .{ .name = "close", .func = hexe_close, .about = "close a pane" },
+    .{ .name = "scroll", .func = hexe_scroll, .about = "scroll a pane" },
+    .{ .name = "selection", .func = hexe_selection, .about = "the current selection", .needs = .screen, .pane_local = true },
+    .{ .name = "config", .func = hexe_config, .about = "the resolved configuration", .needs = .read },
+    .{ .name = "line", .func = hexe_line, .about = "one line of a pane", .needs = .screen, .pane_local = true },
+    .{ .name = "cursor_line", .func = hexe_cursor_line, .about = "the line the cursor is on", .needs = .screen, .pane_local = true },
+    .{ .name = "screen_text", .func = hexe_screen_text, .about = "a pane's visible text", .needs = .screen, .pane_local = true },
+    .{ .name = "find", .func = hexe_find, .about = "search a pane's scrollback", .needs = .screen, .pane_local = true },
+    .{ .name = "selection_range", .func = hexe_selection_range, .about = "where the selection is", .needs = .screen, .pane_local = true },
 };
 
 /// Registry slot holding the accessor table, so a callback invocation can push

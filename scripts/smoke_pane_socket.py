@@ -263,6 +263,37 @@ if r.get("ok"):
          "pane socket holds no `keyboard` access")
 print("access: a verb needing access it does not hold is refused")
 
+# --- verbs() tells the truth about THIS door ---------------------------------
+#
+# A list that disagrees with the gate is worse than no list: a client believes
+# it and acts on it. So every name offered must actually get past the gate, and
+# every name withheld must actually be refused.
+GATE = ("access, which this", "is about the whole session")
+sess_verbs = {v["name"] for v in (call(sess_sock, "verbs").get("result") or [])}
+pane_verbs = {v["name"] for v in (call(pane_sock, "verbs").get("result") or [])}
+if not sess_verbs:
+    fail("`verbs` is not answered at all; a family where one tool has the handshake and "
+         "another does not is not one family")
+if not pane_verbs < sess_verbs:
+    fail(f"the pane socket's verbs are not a strict subset of the session's: "
+         f"{sorted(pane_verbs - sess_verbs)} extra")
+disagree = []
+for name in sorted(sess_verbs):
+    err = (call(pane_sock, name).get("error") or "")
+    gated = any(g in err for g in GATE)
+    if name in pane_verbs and gated:
+        disagree.append(f"offered but refused: {name}")
+    if name not in pane_verbs and not gated:
+        disagree.append(f"withheld but callable: {name}")
+if disagree:
+    fail("`verbs` disagrees with the gate — " + "; ".join(disagree))
+sample = next(iter(call(sess_sock, "verbs")["result"]))
+for field in ("name", "about", "access"):
+    if field not in sample:
+        fail(f"a verbs entry is missing `{field}`: {sample}")
+print(f"verbs: {len(pane_verbs)} of {len(sess_verbs)} offered here, and every one agrees with "
+      "the gate")
+
 # --- the session socket is untouched -----------------------------------------
 
 r = call(sess_sock, "panes")
