@@ -257,6 +257,38 @@ session name, or `{ path = "…", timeout_ms = 5000 }`. `connect_pane()` takes
 nothing at all and opens the socket of the pane the caller is running in — see
 [A pane's own socket](#a-panes-own-socket).
 
+### One question, nothing held
+
+`connect()` is a channel with a lifetime: it can drop, it can subscribe, you
+close it. When all you want is an answer, `fetch` skips the handle entirely:
+
+```lua
+local panes = hexe.fetch("work", "panes")          -- a socket, asked and released
+local hosts = hexe.fetch({ tool = "wing" }, "machines")   -- a tool with no daemon
+```
+
+`fetch(where, verb, ...)` is `Session:call` without the session. It tries a
+socket first, and failing that the tool's own one-shot mode — request in argv,
+the same `{"ok":…,"n":…,"result":[…]}` on stdout — found through a descriptor
+the tool leaves beside the sockets:
+
+```
+$XDG_RUNTIME_DIR/<tool>/<tool>.tool
+{"exec": "/absolute/path/to/tool", "args": ["api"], "stateless": true}
+```
+
+**The verb says what the caller wanted, not what the tool is.** A tool that
+later grows a daemon breaks no call site, and `fetch` uses its socket once one
+exists. The spawn half needs a *synchronous* runner from the host, and **hexe
+lends none on purpose** — a spawn inside the frontend loop suspends every pane
+in the session — so from inside hexe `fetch` works over sockets and says so
+plainly otherwise. Elsewhere it does both.
+
+Which half a tool can serve is decided by where its state lives: on disk, and a
+fresh process answers the same as a live one; *in the process*, and spawning
+gets you something that knows about none of it. hexe is the second kind, which
+is why it has a daemon and never writes a descriptor.
+
 **A name is matched against what a session calls itself, not only against the
 file.** The socket is named when it binds, so a session renamed or reattached
 afterwards keeps the old file: `api@pi.sock` can be session `upsilon`. Passing

@@ -137,7 +137,7 @@ Exactly one, by name:
 | `~/.config/hexe/init.lua` | **hexe**. The config. The only file it looks for. |
 | `~/.config/hexe/layout.lua` | **your init.lua**, if it chooses to `require("layout")`. hexe never looks for this name — split your layouts out or inline them, as you like. |
 | `~/.config/hexe/lua/…` | **you**, via `require()`. A search path for modules you write; empty by default and needed by nobody. |
-| `./.hexe.lua` | **hexe**, per directory, sandboxed unless trusted. |
+| `./.hexe.lua` | **hexe**, per directory, sandboxed unless it asks or you allow it. |
 
 So there is one config file. `layout.lua` is a convention this repo's example follows, not a
 second config format, and `lua/` is optional.

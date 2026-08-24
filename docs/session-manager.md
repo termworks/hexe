@@ -95,6 +95,37 @@ allowing one repository's `.hexe.lua` would silently bless a byte-identical file
 checkout you ever open. Legacy bare-hash lines are not honoured, but they are recognised, so the
 answer is "run `hexe allow` again" rather than "your hooks stopped working".
 
+### Three tiers, not two
+
+The ledger is the top tier, not the only one. A `.hexe.lua` is loaded at one of three levels:
+
+| | what it can do | how it gets there |
+|---|---|---|
+| **sandboxed** | declare a layout, and nothing else | the default, for any file you have not allowed |
+| **declared** | that, plus reach the family's other tools | it asks, and you say yes at the startup prompt |
+| **trusted** | everything your own config can, hooks included | `hexe allow` |
+
+The middle tier exists because the prompt already there is a consent: bare `hexe` asks *"Load local
+.hexe.lua layout?"* before executing a line of it. A file that wants more says so, and the prompt
+says it back:
+
+```lua
+hexe.needs { "tools" }
+```
+```
+Load local .hexe.lua layout? It also wants to call your other tools
+```
+
+Saying yes grants exactly that — `hexe.fs`, `hexe.stream`, `require("hexe.client")` — for that load
+only, and nothing persists. `tools` is not a shell: `io`, `os.execute` and `hexe.exec` need the
+ledger however loudly a file asks. And the grant is the *intersection* of what was asked and what
+was approved, so a non-interactive `hexe layout list` over the same file grants nothing at all.
+
+Why a declaration rather than hexe working it out: detecting what Lua does is undecidable, and a
+detector that misses something reports "safe" about a file that is not. A declaration this misses
+grants **less**, and the file fails on the call it wanted. See
+[the Lua runtime](config.md#the-lua-runtime).
+
 Two environment variables cover the rest:
 
 | | |
