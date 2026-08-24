@@ -847,6 +847,62 @@ test "loadProjectConfig sandboxes an UNTRUSTED project file" {
     try std.testing.expectError(error.FileNotFound, tmp.dir.access("pwned", .{}));
 }
 
+test "the sandbox revokes fs and stream, and their natives" {
+    // These two exist for the CLIENT LIBRARY -- discovering a peer's socket and
+    // opening it. They are not part of declaring a layout, and left reachable
+    // they undo the rest of the sandbox: `fs.read` reads any file despite
+    // `io = nil`, and `stream.connect` takes any unix socket path, including the
+    // session's own control socket, which is full authority over the mux.
+    //
+    // Probed through tab names for the same reason the test above does: it is
+    // the one channel a sandboxed file has, and it reports what the file could
+    // actually reach rather than what its source appears to say.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    const prev_ledger = std.posix.getenv("HEXE_TRUST_LEDGER");
+    defer trust.restoreEnvForTest("HEXE_TRUST_LEDGER", prev_ledger);
+    const ledger_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/empty-ledger", .{dir_path});
+    defer std.testing.allocator.free(ledger_path);
+    trust.setenvForTest("HEXE_TRUST_LEDGER", ledger_path);
+
+    const code =
+        \\local hexe = require('hexe')
+        \\local read_back = pcall(function() return hexe.fs.read('/etc/hostname') end)
+        \\local listed = pcall(function() return hexe.fs.ls('/') end)
+        \\local dialled = pcall(function() return hexe.stream.connect('/dev/log') end)
+        \\local raw_read = (rawget(_G, '__fs_read') ~= nil)
+        \\local raw_dial = (rawget(_G, '__stream_connect') ~= nil)
+        \\return hexe.setup({ ses = { layouts = { hexe.layout('probe', {
+        \\  root = '.',
+        \\  tabs = {
+        \\    hexe.tab(read_back and 'READ-ESCAPED' or 'read-blocked', { root = hexe.pane({ command = 'sh' }) }),
+        \\    hexe.tab(listed and 'LS-ESCAPED' or 'ls-blocked', { root = hexe.pane({ command = 'sh' }) }),
+        \\    hexe.tab(dialled and 'DIAL-ESCAPED' or 'dial-blocked', { root = hexe.pane({ command = 'sh' }) }),
+        \\    hexe.tab(raw_read and 'RAWREAD-ESCAPED' or 'rawread-blocked', { root = hexe.pane({ command = 'sh' }) }),
+        \\    hexe.tab(raw_dial and 'RAWDIAL-ESCAPED' or 'rawdial-blocked', { root = hexe.pane({ command = 'sh' }) }),
+        \\  },
+        \\}) } } })
+    ;
+
+    try tmp.dir.writeFile(.{ .sub_path = "layout.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.lua");
+    defer std.testing.allocator.free(path);
+
+    var layout = try parseSessionLayoutLua(std.testing.allocator, path);
+    defer layout.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 5), layout.tabs.len);
+    try std.testing.expectEqualStrings("read-blocked", layout.tabs[0].name);
+    try std.testing.expectEqualStrings("ls-blocked", layout.tabs[1].name);
+    try std.testing.expectEqualStrings("dial-blocked", layout.tabs[2].name);
+    try std.testing.expectEqualStrings("rawread-blocked", layout.tabs[3].name);
+    try std.testing.expectEqualStrings("rawdial-blocked", layout.tabs[4].name);
+}
+
 test "loadProjectConfig refuses a precompiled bytecode chunk" {
     // The sandbox above is enforced at the SOURCE level: it nils io/os/package
     // and friends in the Lua state. Lua 5.4 ships no bytecode verifier, so a

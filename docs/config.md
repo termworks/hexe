@@ -185,6 +185,14 @@ Setting `HEXE_UNRESTRICTED_CONFIG` to anything other than `1` revokes that: `io`
 unconditionally to a project-local `.hexe.lua`, whatever your setting — a file that arrives with a
 git clone does not get your capabilities.
 
+`hexe.fs` and `hexe.stream` go with them, natives included. They exist so the *client library* can
+find a peer's socket and open it, and the client library cannot run in there anyway — `load` is gone
+and `require` resolves only `"hexe"`. Left reachable they would undo the rest of the list: `fs.read`
+reads any file despite `io = nil`, `fs.ls` enumerates the runtime directory, and `stream.connect`
+takes **any** unix socket path — an ssh-agent, a container daemon, or the session's own control
+socket, which is full authority over the mux. Confining them to hexe's own runtime directory would
+not fix that last one, so an untrusted file gets none of it.
+
 Note what that does *not* stop: a layout's `command =` strings and `on_start`/`on_stop` hooks are
 shell commands by definition. Those are gated separately, by the trust ledger — see
 [project sessions](session-manager.md).

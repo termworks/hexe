@@ -1309,6 +1309,15 @@ pub const LuaRuntime = struct {
 /// `os` keeps its pure clock/formatting helpers, which config legitimately
 /// uses; `os.execute`, `os.getenv`, `os.remove`, `os.rename` and `os.tmpname`
 /// go with the rest.
+/// `hexe.fs` and `hexe.stream` go too, with their natives. They exist so the
+/// CLIENT LIBRARY can find and reach a peer, and the client library cannot run
+/// here anyway -- safe-mode `require` resolves only "hexe" and `load` is gone.
+/// Left in place they undo the rest of this: `fs.read` reads any file despite
+/// `io = nil`, `fs.ls` enumerates the runtime directory, and `stream.connect`
+/// takes ANY unix socket path -- an ssh-agent, a container daemon, or the
+/// session's own control socket, which is full authority over the mux. Confining
+/// them to hexe's own runtime directory would not be enough for that last
+/// reason, so an untrusted file gets none of it and asks instead.
 /// `require` is NOT dropped here — `require('hexe')` is the documented way for
 /// a project file to reach the API, and safe-mode `require` (installed by
 /// `revokeUnsafeCapabilities`) already refuses everything else.
@@ -1318,7 +1327,12 @@ const REVOKE_UNSAFE_CAPABILITIES_LUA =
     "if type(os) == 'table' then " ++
     "os = { time = os.time, date = os.date, clock = os.clock, difftime = os.difftime } " ++
     "end; " ++
-    "if type(hexe) == 'table' then hexe.exec = nil end;";
+    "if type(hexe) == 'table' then hexe.exec = nil; hexe.fs = nil; hexe.stream = nil end; " ++
+    // The natives behind those two, which are GLOBALS: dropping `hexe.fs` alone
+    // leaves `__fs_read` sitting in _G, and an untrusted file that knows the
+    // name has the capability back.
+    "__fs_ls = nil; __fs_read = nil; " ++
+    "__stream_connect = nil; __stream_send = nil; __stream_recv = nil; __stream_close = nil;";
 
 fn setupSafeRequire(lua: *Lua) !void {
     // In safe mode, only allow require("hexe")
