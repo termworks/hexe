@@ -69,6 +69,7 @@ Each plugin gets **its own socket**, and the socket knows its authority:
 ```
 $XDG_RUNTIME_DIR/hexe/<profile>/api@<session>.sock          the owner: everything
 $XDG_RUNTIME_DIR/hexe/<profile>/plug@<session>.<name>.sock  one plugin: its grant
+$XDG_RUNTIME_DIR/hexe/<profile>/pane@<uuid>.sock            one pane: itself only
 ```
 
 Its path arrives as `HEXE_API_SOCKET`, and what it holds as `HEXE_ACCESS`
@@ -84,6 +85,16 @@ A refusal names the kind, so the fix is obvious:
 A separate socket rather than a token on the shared one, because a token the
 caller supplies is a token the caller can omit — and then the grant means
 nothing. Authority is a property of the door.
+
+**A pane's socket narrows the same way, in a second dimension.** It holds
+`read`, `screen` and `typing`, and it answers for one pane: a session-wide verb
+is refused by name, and a selector naming another pane resolves to nothing
+rather than to the caller's own. Its path is `$HEXE_PANE_API_SOCKET`, exported
+into every pane's shell, so a program in a pane finally has something it can be
+handed. See [api.md](api.md#a-panes-own-socket).
+
+It grants nothing to whoever is already in that pane — it *is* the process
+there. The point is the opposite: it is narrow enough to hand out.
 
 ## What this is not
 

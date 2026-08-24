@@ -452,6 +452,30 @@ function M.connect(where)
   return nil, last or "nothing was listening"
 end
 
+--- Open a connection to the pane this code is running in.
+---
+--- A different door, not a filtered view of `connect()`: the pane's socket answers only for that
+--- pane, and refuses by name anything about the session. A client cannot widen it, because the
+--- narrowing is the listener's, decided when hexe bound it.
+---
+--- Grants nothing to the caller it did not already have -- it IS the process in that pane -- but it
+--- lets it ask hexe precisely instead of parsing its own terminal, and it means a program handed
+--- this path can be trusted with it.
+---
+--- `$HEXE_PANE_API_SOCKET` is exported into every pane's shell. Nothing is listening on it while no
+--- frontend is attached, which is the truth about a live API rather than a fault to hide.
+function M.connect_pane(opts)
+  local path = os.getenv("HEXE_PANE_API_SOCKET")
+  if not path or path == "" then
+    return nil, "not inside a hexe pane ($HEXE_PANE_API_SOCKET is unset)"
+  end
+  local session, why = M.connect({ path = path, timeout_ms = type(opts) == "table" and opts.timeout_ms or nil })
+  if not session then
+    return nil, (why or "nothing was listening") .. " — is a frontend attached to this session?"
+  end
+  return session
+end
+
 --- The socket path that would be tried first, without connecting. For a diagnostic.
 function M.where(name)
   local candidates = find(name)

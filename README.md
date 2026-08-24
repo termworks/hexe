@@ -1,4 +1,4 @@
-# Hexa
+# hexe
 
 A session-based terminal workspace where the frontend is disposable and your
 shells are not.
@@ -10,7 +10,7 @@ running exactly where you left them.
 
 ## How it works
 
-Hexa splits into four layers:
+hexe splits into four layers:
 
 - **`hexe terminal`** — the terminal UI frontend (aliases: `hexe mux`, `hexe multiplexer`).
 - **shared frontend runtime** — attach lifecycle, transport, and the frontend-side session projection.
@@ -59,6 +59,50 @@ See [the palette protocol](docs/palette.md) for the sequences to emit.
 
 ---
 
+## Anything can drive it
+
+Everything hexe knows about its panes, floats, tabs and session has one definition — the live Lua
+API — and a socket hands that same API to any program that can open one. There is no second list of
+fields to drift out of step with the first, and nothing has to scrape formatted output for facts
+hexe holds exactly.
+
+```sh
+hexe api panes                      # every pane, as JSON
+hexe api count '"panes"'
+hexe api act '{"type":"split.v"}'
+hexe api send '"904dd85…"' '"make test\n"'
+```
+
+`hexe api` is a thin client; the socket is the interface. Frames are a 4-byte big-endian length and
+a JSON body, so a gateway, a phone client behind one, or a shell script are all the same amount of
+work. Instead of polling, a client can subscribe and be told.
+
+**Three doors, each with its own authority**, because a grant a caller can decline is not a grant:
+
+| socket | who holds it | may do |
+|---|---|---|
+| `api@<session>.sock` | you | everything |
+| `plug@<session>.<name>.sock` | one plugin | only what it declared |
+| `pane@<uuid>.sock` | whatever runs in that pane | read and type into *that pane* |
+
+A plugin is a package that declares what it needs — `stream`, `typing`, `keyboard`, `popup` — and is
+handed a socket carrying exactly that; a verb it did not ask for is refused by name. A pane's socket
+is exported to its shell as `$HEXE_PANE_API_SOCKET`, so a program in a pane finally has something it
+can safely be given: a session-wide call is refused, and a selector naming another pane resolves to
+nothing rather than to the caller's own.
+
+For another Lua — a shell, an editor, a sibling tool — `hexe lua-api` prints a plain-Lua client, and
+the `client` verb returns the same source over the socket for a host that cannot shell out:
+
+```lua
+local mux = hexe.connect()            -- or connect_pane(), inside a pane
+for _, pane in ipairs(mux.panes()) do print(pane.name, pane.cwd) end
+```
+
+See [the control socket](docs/api.md), [access](docs/access.md) and [plugins](docs/plugins.md).
+
+---
+
 ## Docs
 
 One document per feature in [`docs/`](docs/README.md), each opening with a recording of it running:
@@ -84,13 +128,20 @@ hexe itself — see [recording](docs/recording.md).
 | [Project sessions](docs/session-manager.md) | `.hexe.lua`, freezing a session, and the trust ledger |
 | [Isolation](docs/isolation.md) | namespaces and cgroups per pane — and what it needs from the kernel |
 | [The command line](docs/cli.md) | addressing sessions, panes and pods from a script |
+| [The control socket](docs/api.md) | the live API over a socket: what any program can ask and do |
+| [Access](docs/access.md) | what a helper may do — stream, typing, keyboard, popup — declared and enforced |
+| [Plugins](docs/plugins.md) | install, declare, approve, remove — a package, not a command string |
+| [Streaming a pane](docs/streaming.md) | a pane's bytes, who is watching, and how to cut them off |
+| [Dictation](docs/dictation.md) | speech to text as a tool hexe drives, and the sign that a mic is open |
+| [Names](docs/names.md) | how panes and sessions get names, and what a name is allowed to be |
+| [Decorations](docs/decor.md) | borders, titles and what a pane is allowed to draw around itself |
 | [Recording](docs/recording.md) | hexe writes asciicasts of itself; every film in the docs was made that way |
 
 ---
 
 ## Quick start
 
-**Build** (requires Zig). A static musl binary:
+**Build.** Needs Zig 0.15.2. A static musl binary:
 
 ```sh
 scripts/vendor-ghostty.sh                                  # once: fetch + patch ghostty-vt
@@ -98,14 +149,21 @@ scripts/vendor-yazap.sh                                    # once: fetch + patch
 zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=x86_64-linux-musl
 ```
 
-Those two commands are the whole build, and they are what CI runs. With [oslo](https://github.com/bresilla/oslo)
-the recipes in `.make.lua` wrap them:
+That is the whole build, and it is what CI runs — CI has no oslo, so the pins live in the
+scripts rather than in a recipe. With [oslo](https://github.com/bresilla/oslo) the recipes in
+`.make.lua` wrap them. There is no `Makefile`; the targets come from oslo:
 
 ```sh
-make build       # the above, then reports size and which hexe is on $PATH
-make install     # …and copies it everywhere hexe already is
-make smoke       # the live end-to-end suite
+oslo make vendor    # fetch the pinned dependencies and apply hexe's patches
+oslo make build     # the build above, then size and which hexe is on $PATH
+oslo make install   # …and copy it everywhere hexe already is
+oslo make test      # the Zig unit tests
+oslo make smoke     # the live end-to-end suite
+oslo make           # every target, with a line each
 ```
+
+Build with `oslo make build` rather than a bare `zig build`: the default is a Debug binary, which
+is slow enough to look like a bug.
 
 **Run:**
 
@@ -119,7 +177,7 @@ hexe                          # bare: attach to a session rooted here, or load .
 built-in chord:
 
 ```lua
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.d }, hexe.action.detach()),
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.d }, hexe.action.detach())
 ```
 
 ```sh
@@ -148,6 +206,9 @@ Then Ghostty came out. Saw what Mitchell was doing with Zig and decided to start
 - [ghostty-vt](https://github.com/ghostty-org/ghostty) — terminal emulation
 - [libvaxis](https://github.com/rockorager/libvaxis) — TUI rendering
 - [libxev](https://github.com/mitchellh/libxev) — event loop
+- [ziglua](https://github.com/natecraddock/ziglua) — the Lua binding the config and live API run on
 - [yazap](https://github.com/PrajwalCH/yazap) — CLI argument parser
 - [libvoid](https://github.com/bresilla/libvoid) — process isolation
+- [liblink](https://github.com/libzig/liblink) — the remote-frontend transport behind `hexe syslink`
+- [logly](https://github.com/muhammad-fiaz/logly.zig) — logging
 - [krabby](https://github.com/yannjor/krabby) — Pokemon sprites

@@ -101,22 +101,48 @@ pub const ApiServer = struct {
     /// What callers on THIS socket may do. The session's own socket holds
     /// everything; a plugin's socket holds what it asked for.
     granted: core.access.Set = core.access.Set.all,
+    /// The one pane this socket may speak about, if it is a pane's own socket.
+    /// Set at bind time and never from the wire, so a caller cannot widen it.
+    pane_scope: ?[32]u8 = null,
 
     /// Bind the socket for `session`, replacing a stale one left by a crash.
     pub fn init(allocator: std.mem.Allocator, session: []const u8) !ApiServer {
-        return initScoped(allocator, session, null, core.access.Set.all);
+        return initScoped(allocator, session, .session, core.access.Set.all);
     }
 
-    /// A second socket for one plugin, carrying only what that plugin declared.
+    /// One pane's own socket, for whatever is running inside that pane.
+    ///
+    /// Named from the uuid alone, with no session in the path: a pane outlives
+    /// the name of the session showing it, and a shell that read the path at
+    /// spawn must not be holding a stale one after a rename. The frontend binds
+    /// it, so it exists only while a frontend is attached -- which is the truth
+    /// about the live API, not a limitation worth papering over.
+    pub fn initPane(allocator: std.mem.Allocator, uuid: []const u8) !ApiServer {
+        var srv = try initScoped(allocator, uuid, .pane, core.access.Set.pane_local);
+        srv.pane_scope = @splat(0);
+        @memcpy(srv.pane_scope.?[0..@min(uuid.len, 32)], uuid[0..@min(uuid.len, 32)]);
+        return srv;
+    }
+
+    /// Which door this is. The prefix is load-bearing: session discovery globs
+    /// `api@*.sock`, so anything that is not a session must not be named that
+    /// way or three plugins look like three more sessions.
+    pub const Door = union(enum) {
+        session,
+        plugin: []const u8,
+        pane,
+    };
+
+    /// Bind one door, carrying only what that door was given.
     ///
     /// A separate socket rather than a token on the shared one: a token the
     /// caller supplies is a token the caller can omit, and then the grant means
-    /// nothing. A path the plugin is handed, and a listener that knows its own
+    /// nothing. A path the caller is handed, and a listener that knows its own
     /// authority, cannot be talked out of it.
     pub fn initScoped(
         allocator: std.mem.Allocator,
         session: []const u8,
-        plugin: ?[]const u8,
+        door: Door,
         granted: core.access.Set,
     ) !ApiServer {
         const dir = try core.ipc.getSocketDir(allocator);
@@ -126,11 +152,13 @@ pub const ApiServer = struct {
         // `plug@` and not `api@`: session discovery globs `api@*.sock` to find
         // what is listening, so naming a plugin's socket that way made three
         // plugins look like three more sessions and `hexe api` refused to pick
-        // one. Different prefix, same directory, no ambiguity.
-        const path = if (plugin) |p|
-            try std.fmt.allocPrint(allocator, "{s}/plug@{s}.{s}.sock", .{ dir, session, p })
-        else
-            try std.fmt.allocPrint(allocator, "{s}/api@{s}.sock", .{ dir, session });
+        // one. Different prefix, same directory, no ambiguity. `pane@` is the
+        // same rule again, and takes the uuid where the others take a session.
+        const path = switch (door) {
+            .plugin => |p| try std.fmt.allocPrint(allocator, "{s}/plug@{s}.{s}.sock", .{ dir, session, p }),
+            .pane => try std.fmt.allocPrint(allocator, "{s}/pane@{s}.sock", .{ dir, session }),
+            .session => try std.fmt.allocPrint(allocator, "{s}/api@{s}.sock", .{ dir, session }),
+        };
         errdefer allocator.free(path);
         if (path.len >= 108) return error.NameTooLong;
 
@@ -461,6 +489,13 @@ pub const ApiServer = struct {
             }
         }
 
+        // A pane's socket answers only for that pane. Refused by name here
+        // rather than quietly returning one pane's worth of a session-wide
+        // answer, which would read as hexe having lost the other panes.
+        if (self.pane_scope != null and !lua_api.isPaneLocal(call)) {
+            return self.fail(c, "call `{s}` is about the whole session; this is a pane's socket", .{call});
+        }
+
         const rt = state.config._lua_runtime orelse {
             return self.fail(c, "no Lua runtime; the live API is unavailable", .{});
         };
@@ -473,6 +508,10 @@ pub const ApiServer = struct {
         // is the whole byte stream behind a field name.
         state.api_grant = self.granted;
         defer state.api_grant = core.access.Set.all;
+        // Reaches the accessors, so a selector naming another pane resolves to
+        // nothing instead of to that pane.
+        state.api_pane_scope = self.pane_scope;
+        defer state.api_pane_scope = null;
 
         const scope = lua_api.pushLiveState(rt, state, .handler);
         defer lua_api.popLiveState(rt, scope);
