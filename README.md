@@ -158,6 +158,7 @@ oslo make vendor    # fetch the pinned dependencies and apply hexe's patches
 oslo make build     # the build above, then size and which hexe is on $PATH
 oslo make install   # …and copy it everywhere hexe already is
 oslo make test      # the Zig unit tests
+oslo make configs   # install config/ into ~/.config/hexe, then check it loads
 oslo make smoke     # the live end-to-end suite
 oslo make           # every target, with a line each
 ```
