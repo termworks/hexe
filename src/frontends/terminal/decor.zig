@@ -182,6 +182,21 @@ fn extraJson(buf: []u8, state: *State, pane: *const Pane, edge: Edge, slot: Slot
         w.writeAll(",\"pane_name\":") catch return "";
         core.regions.writeJsonString(w, name) catch return "";
     }
+    // What a share indicator is drawn from. Handed to every slot rather than
+    // fetched by the painter, because the painter has no way to ask: the
+    // observer sockets are open in a different process.
+    const proc = state.getPaneProc(pane.uuid);
+    const observers: u16 = if (proc) |p| p.observers else 0;
+    const blocked = if (proc) |p| p.share_blocked else false;
+    w.print(",\"observers\":{d},\"shared\":{s},\"share_blocked\":{s}", .{
+        observers,
+        if (observers > 0) "true" else "false",
+        if (blocked) "true" else "false",
+    }) catch return "";
+    // The pane's own uuid, so a button can name its target instead of relying
+    // on whichever pane happens to be focused when the click lands.
+    w.writeAll(",\"pane_uuid\":") catch return "";
+    core.regions.writeJsonString(w, pane.uuid[0..]) catch return "";
     return stream.getWritten();
 }
 
@@ -199,7 +214,7 @@ pub fn draw(state: *State, renderer: *Renderer, pane: *Pane, stdout: std.fs.File
 
             var key_buf: [64]u8 = undefined;
             const key = slotKey(&key_buf, pane, edge, slot);
-            var extra_buf: [512]u8 = undefined;
+            var extra_buf: [768]u8 = undefined;
             const extra = extraJson(&extra_buf, state, pane, edge, slot);
             const ctx = contextFor(extra);
 
@@ -262,7 +277,7 @@ pub fn hitTestAction(state: *State, pane: *Pane, px: u16, py: u16, button: u8) ?
 
     var key_buf: [64]u8 = undefined;
     const key = slotKey(&key_buf, pane, hit.edge, hit.slot);
-    var extra_buf: [512]u8 = undefined;
+    var extra_buf: [768]u8 = undefined;
     const extra = extraJson(&extra_buf, state, pane, hit.edge, hit.slot);
     const spec = specFor(&state.config.tabs.status, hit.view, .surface, hit.rect.w, hit.rect.h, key);
     const snap = registry.snapshot(spec, contextFor(extra));

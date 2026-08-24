@@ -44,6 +44,35 @@ A namespace that does not exist stays nil, so `hexe.mxu.confirm = {}` raises at 
 quietly collecting settings nothing will read. A typo *inside* a namespace is caught by the
 validator, with its path: `config error: mux.confirm.exti`.
 
+## Plugins
+
+Installed, not configured: `hexe plugin install ./thing`. A plugin brings its
+own keybindings and its own declaration of what it needs, so your config never
+mentions it. See [plugins.md](plugins.md).
+
+## Helper programs
+
+`hexe.plugin` starts something alongside the session — a recorder, a gateway
+streaming panes to a browser, anything that wants the session's data and has to
+be running for it to be there:
+
+```lua
+hexe.plugin("share", { command = "my-streamer --port 8080" })
+```
+
+```lua
+hexe.plugin("share", { command = "my-streamer --port 8080", access = { "stream", "popup" } })
+```
+
+`access` says what it may do — `read`, `screen`, `typing`, `keyboard`, `stream`,
+`popup`, `control`. Declaring nothing means read-only. See
+[access.md](access.md).
+
+It gets `HEXE_API_SOCKET` (its own scoped socket), `HEXE_ACCESS` and
+`HEXE_SESSION` in its environment, so it never has to guess where hexe is.
+Started once, detached, and **not supervised** — see
+[streaming.md](streaming.md) for what it can then read.
+
 ## Splitting the config up
 
 A file you split out **registers what it declares and returns nothing**, and the config loads it for
@@ -272,3 +301,4 @@ Tooling:
 | `src/cli/commands/config_validate.zig` | `config check` / `validate` |
 | `src/frontends/terminal/keybinds_actions.zig` | `performConfigReload` |
 | `config/init.lua`, `config/layout.lua` | the author's own config, which is the repo's live example |
+

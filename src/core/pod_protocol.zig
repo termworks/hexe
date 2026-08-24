@@ -11,6 +11,23 @@ pub const FrameType = enum(u8) {
     resize = 3,
     backlog_end = 4,
     password_mode = 5,
+    /// The pod is not going to serve this observer, and why. Sent immediately
+    /// before the connection closes.
+    ///
+    /// Without it every refusal looks the same as a pod that died: connect,
+    /// handshake, EOF. A streamer that reconnects on loss -- which it should --
+    /// then turns "stop sharing" into a reconnect loop that quietly defeats it.
+    /// One byte is enough to tell "give up" from "try again later".
+    refused = 6,
+};
+
+/// Why the pod refused an observer. The distinction a client actually needs is
+/// whether waiting could help.
+pub const Refusal = enum(u8) {
+    /// Sharing is switched off for this pane. Waiting will not help; stop.
+    blocked = 1,
+    /// Every observer slot is taken. Waiting might help.
+    at_capacity = 2,
 };
 
 pub fn writeFrame(conn: *ipc.Connection, frame_type: FrameType, payload: []const u8) !void {

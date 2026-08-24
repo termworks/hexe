@@ -513,10 +513,36 @@ pub fn main() !void {
     try pod_kill.addArg(Arg.singleValueOption("signal", 's', null));
     try pod_kill.addArg(Arg.booleanOption("force", 'f', null));
 
+    var pod_share = app.createCommand("share", "Show or cut the observers watching a pane");
+    try pod_share.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try pod_share.addArg(Arg.singleValueOption("name", 'n', null));
+    try pod_share.addArg(Arg.singleValueOption("socket", 's', null));
+    try pod_share.addArg(Arg.booleanOption("on", null, null));
+    try pod_share.addArg(Arg.booleanOption("off", null, null));
+    try pod_share.addArg(Arg.booleanOption("json", null, null));
+
+    // hexe's own subcommand, not a plugin's: nothing a plugin declares is
+    // reachable from here.
+    // Not a subcommand of anything: it is hexe handing out a file, and the
+    // program that wants it is not hexe.
+    const lua_api_cmd = app.createCommand("lua-api", "Print the Lua client library other programs require");
+
+    var plugin_cmd = app.createCommand("plugin", "Install, list, remove and approve plugins");
+    var plugin_list = app.createCommand("list", "What is installed, what it may do, and whether it changed");
+    try plugin_list.addArg(Arg.booleanOption("json", null, null));
+    var plugin_install = app.createCommand("install", "Install a plugin directory");
+    try plugin_install.addArg(Arg.positional("source", null, null));
+    try plugin_install.addArg(Arg.booleanOption("yes", 'y', null));
+    var plugin_remove = app.createCommand("remove", "Remove an installed plugin");
+    try plugin_remove.addArg(Arg.positional("name", null, null));
+    var plugin_allow = app.createCommand("allow", "Approve a plugin's current contents");
+    try plugin_allow.addArg(Arg.positional("name", null, null));
+    try plugin_cmd.addSubcommands(&[_]yazap.Command{ plugin_list, plugin_install, plugin_remove, plugin_allow });
+
     var pod_gc = app.createCommand("gc", "Garbage-collect stale pod metadata");
     try pod_gc.addArg(Arg.booleanOption("dry-run", 'n', null));
 
-    try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_record, pod_kill, pod_gc });
+    try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_record, pod_kill, pod_share, pod_gc });
 
     // MUX subcommands
     var mux_new = app.createCommand("new", "Create new terminal session");
@@ -768,7 +794,7 @@ pub fn main() !void {
 
     try palette_cmd.addSubcommands(&[_]yazap.Command{ palette_list, palette_get, palette_set, palette_use, palette_end, palette_drop, palette_reset });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd, api_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd, api_cmd, plugin_cmd, lua_api_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -831,6 +857,32 @@ pub fn main() !void {
             return true;
         }
     }.check;
+
+    if (matches.subcommandMatches("lua-api")) |_| {
+        try cli_cmds.runLuaApi();
+        return;
+    }
+
+    if (matches.subcommandMatches("plugin")) |plugin_matches| {
+        if (plugin_matches.subcommandMatches("list")) |m| {
+            try cli_cmds.runPluginList(allocator, m.containsArg("json"));
+            return;
+        }
+        if (plugin_matches.subcommandMatches("install")) |m| {
+            try cli_cmds.runPluginInstall(allocator, m.getSingleValue("source") orelse "", m.containsArg("yes"));
+            return;
+        }
+        if (plugin_matches.subcommandMatches("remove")) |m| {
+            try cli_cmds.runPluginRemove(allocator, m.getSingleValue("name") orelse "");
+            return;
+        }
+        if (plugin_matches.subcommandMatches("allow")) |m| {
+            try cli_cmds.runPluginAllow(allocator, m.getSingleValue("name") orelse "");
+            return;
+        }
+        try cli_cmds.runPluginList(allocator, false);
+        return;
+    }
 
     if (matches.subcommandMatches("api")) |m| {
         return api_cmd_impl.run(
@@ -1103,6 +1155,18 @@ pub fn main() !void {
                 m.getSingleValue("name") orelse "",
                 m.getSingleValue("signal") orelse "",
                 m.containsArg("force"),
+            );
+            return;
+        }
+        if (pod_matches.subcommandMatches("share")) |m| {
+            try cli_cmds.runPodShare(
+                allocator,
+                m.getSingleValue("uuid") orelse "",
+                m.getSingleValue("name") orelse "",
+                m.getSingleValue("socket") orelse "",
+                m.containsArg("on"),
+                m.containsArg("off"),
+                m.containsArg("json"),
             );
             return;
         }

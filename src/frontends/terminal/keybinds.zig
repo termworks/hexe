@@ -454,6 +454,12 @@ fn handleReleaseEvent(state: *State, cfg: *const core.Config, mods_eff: u8, key:
                 forwardKeyToPane(state, mods_eff, key);
             }
         }
+        // A chord can carry a hold bind AND a release bind. Returning here
+        // meant the release one was never reached, so `on = release` silently
+        // did nothing for any chord that also had a press or hold binding.
+        if (findBestBind(state, mods_eff, key, .release, allow_only_tabs)) |rb| {
+            _ = dispatchBindWithMode(state, rb, mods_eff, key);
+        }
         return true;
     }
 
@@ -559,7 +565,12 @@ fn handlePressEvent(state: *State, cfg: *const core.Config, mods_eff: u8, key: B
         if (!has_press and !has_hold and !has_release) return false;
 
         if (press_bind) |pb| {
-            if (!has_hold and !has_release) {
+            // Only a HOLD bind is a reason to wait. A release bind creates no
+            // ambiguity -- the user said what they want at each moment -- and
+            // deferring for it broke push-to-talk: the press action fired at
+            // release time, so "start recording" and "stop recording" happened
+            // together and nothing was ever recorded.
+            if (!has_hold) {
                 return dispatchBindWithMode(state, pb, mods_eff, key);
             }
         }

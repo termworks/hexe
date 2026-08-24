@@ -1,5 +1,6 @@
 const std = @import("std");
 pub const names_mod = @import("names.zig");
+pub const access_mod = @import("access.zig");
 const posix = std.posix;
 const lua_runtime = @import("lua_runtime.zig");
 const LuaRuntime = lua_runtime.LuaRuntime;
@@ -65,6 +66,38 @@ fn freeOwnedStr(a: std.mem.Allocator, slice: []const u8, comptime default: []con
     if (slice.ptr == default.ptr) return; // still the comptime default: not ours
     a.free(@constCast(slice));
 }
+
+/// A helper program the session runs alongside itself.
+///
+/// The painter is started this way already, by `status.command`, but that hook
+/// belongs to the bar. A plugin is the general form: something that wants the
+/// session's data -- a recorder, a web gateway streaming panes to a browser --
+/// and needs to be running for it to be there.
+///
+/// hexe starts it once and does not supervise it. Restarting a helper that
+/// exits on purpose is a fork loop with a delay, and a helper that wants to
+/// survive its own crashes knows better than hexe does how to.
+pub const PluginDef = struct {
+    /// Only so a message can say which one failed.
+    name: []const u8,
+    /// Run through `/bin/sh -c`, detached, with stdio closed.
+    command: []const u8,
+    /// The package directory it came from, if it is an installed package. Used
+    /// as the command's working directory, so a manifest can say
+    /// `command = "./backend.sh"` without knowing where it will be installed.
+    dir: []const u8 = "",
+    /// What it may ask hexe to do, beyond the always-granted `read` floor.
+    /// Empty means read-only: a plugin that forgot to say gets the harmless
+    /// thing rather than everything, because the failure of the other default
+    /// is a helper quietly able to type into your shell.
+    access: access_mod.Set = access_mod.Set.baseline,
+
+    pub fn deinit(self: *PluginDef, allocator: std.mem.Allocator) void {
+        freeSlice(allocator, @constCast(self.name));
+        freeSlice(allocator, @constCast(self.command));
+        freeSlice(allocator, @constCast(self.dir));
+    }
+};
 
 /// Status bar config
 pub const StatusBarConfig = struct {
@@ -821,6 +854,9 @@ pub const Config = struct {
     // Notifications
     notifications: NotificationConfig = .{},
 
+    // Helper programs hexe starts for you.
+    plugins: []const PluginDef = &.{},
+
     // Internal
     _allocator: ?std.mem.Allocator = null,
     _lua_runtime: ?*LuaRuntime = null,
@@ -973,6 +1009,14 @@ pub const Config = struct {
                 rt.deinit();
                 alloc.destroy(rt);
                 self._lua_runtime = null;
+            }
+
+            if (self.plugins.len > 0) {
+                for (self.plugins) |*plugin| {
+                    var mutable_plugin = @constCast(plugin);
+                    mutable_plugin.deinit(alloc);
+                }
+                freeSlice(alloc, self.plugins);
             }
 
             self.float_named_defaults.deinit(alloc);

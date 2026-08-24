@@ -63,6 +63,9 @@ pub const MuxConfigBuilder = struct {
     names_order: ?config.names_mod.Order = null,
     names_suffix: ?[]const u8 = null,
 
+    /// Helper programs the session starts alongside itself, in declared order.
+    plugins: std.ArrayList(config.PluginDef) = .empty,
+
     // Decoration slots around every pane.
     decor: ?config.DecorConfig = null,
     mouse_selection_override_mods: ?u8 = null,
@@ -145,6 +148,11 @@ pub const MuxConfigBuilder = struct {
     }
 
     pub fn deinit(self: *MuxConfigBuilder) void {
+        for (self.plugins.items) |*plugin| {
+            var p = plugin.*;
+            p.deinit(self.allocator);
+        }
+        self.plugins.deinit(self.allocator);
         if (self.float_defaults) |*defaults| defaults.deinit(self.allocator);
         if (self.float_adhoc) |*adhoc| adhoc.deinit(self.allocator);
         if (self.float_matches.items.len > 0) {
@@ -153,6 +161,12 @@ pub const MuxConfigBuilder = struct {
             }
         }
         self.float_matches.deinit(self.allocator);
+        // A bind owns its callback reference strings -- `build()` deep-copies
+        // them, so these are the builder's own and nothing else frees them.
+        for (self.binds.items) |bind| {
+            if (bind.when) |code| self.allocator.free(code);
+            if (bind.action == .lua) self.allocator.free(bind.action.lua);
+        }
         self.binds.deinit(self.allocator);
     }
 
@@ -179,6 +193,38 @@ pub const MuxConfigBuilder = struct {
         return style;
     }
 
+    /// Record one plugin. Strings are copied: the Lua values they came from are
+    /// collected as soon as the config chunk is done with them.
+    pub fn appendPluginWithAccess(
+        self: *MuxConfigBuilder,
+        name: []const u8,
+        command: []const u8,
+        access: config.access_mod.Set,
+    ) !void {
+        try self.appendPlugin(name, command);
+        self.plugins.items[self.plugins.items.len - 1].access = access;
+    }
+
+    /// A plugin that came from an installed package, so it knows its own home.
+    pub fn appendPackagePlugin(
+        self: *MuxConfigBuilder,
+        name: []const u8,
+        command: []const u8,
+        dir: []const u8,
+        access: config.access_mod.Set,
+    ) !void {
+        try self.appendPluginWithAccess(name, command, access);
+        self.plugins.items[self.plugins.items.len - 1].dir = try self.allocator.dupe(u8, dir);
+    }
+
+    pub fn appendPlugin(self: *MuxConfigBuilder, name: []const u8, command: []const u8) !void {
+        const owned_name = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(owned_name);
+        const owned_cmd = try self.allocator.dupe(u8, command);
+        errdefer self.allocator.free(owned_cmd);
+        try self.plugins.append(self.allocator, .{ .name = owned_name, .command = owned_cmd });
+    }
+
     pub fn build(self: *MuxConfigBuilder) !config.Config {
         var result = config.Config{};
         result._allocator = self.allocator;
@@ -195,6 +241,11 @@ pub const MuxConfigBuilder = struct {
         if (self.names_pane) |v| result.names.pane = v;
         if (self.names_order) |v| result.names.order = v;
         if (self.names_suffix) |v| result.names.suffix = try self.allocator.dupe(u8, v);
+
+        // Ownership moves to the Config, which frees them.
+        if (self.plugins.items.len > 0) {
+            result.plugins = try self.plugins.toOwnedSlice(self.allocator);
+        }
         if (self.decor) |d| result.decor = d;
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 

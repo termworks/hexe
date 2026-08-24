@@ -170,9 +170,13 @@ def api(name, *args, timeout=10):
 
 
 def ok(r, what):
+    """`result` is the list of return values; every verb here returns one."""
     if not r or not r.get("ok"):
         fail(f"{what} failed: {r}")
-    return r["result"]
+    vals = r["result"]
+    if not isinstance(vals, list):
+        fail(f"{what}: `result` is {type(vals).__name__}, not a list of return values")
+    return vals[0] if (r.get("n") or len(vals)) == 1 else vals
 
 
 def panes():

@@ -702,6 +702,10 @@ pub const FrontendRuntime = struct {
         self.projection.setPaneProc(uuid, name, pid);
     }
 
+    pub fn setPaneObservers(self: *FrontendRuntime, uuid: [32]u8, observers: u16, blocked: bool) void {
+        self.projection.setPaneObservers(uuid, observers, blocked);
+    }
+
     pub fn getPaneShell(self: *const FrontendRuntime, uuid: [32]u8) ?@import("session_projection.zig").PaneShellInfo {
         return self.projection.getPaneShell(uuid);
     }

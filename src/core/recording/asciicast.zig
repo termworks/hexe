@@ -10,8 +10,21 @@ pub const AsciicastOptions = struct {
 pub const AsciicastWriter = struct {
     file: std.fs.File,
     start_ms: i64,
+    /// stdout is not ours to close, and closing it would take the rest of the
+    /// program's output with it.
+    owns_file: bool = true,
+    /// Whether `flush` may fsync. A pipe cannot: fsync answers EINVAL, and
+    /// Zig's wrapper treats that as unreachable, so it PANICS rather than
+    /// returning an error -- `flush() catch {}` does not save you. Decided once
+    /// here instead of at each call site, which is where it was missed.
+    syncable: bool = true,
 
+    /// `-` means stdout, so a pane's stream can be piped into any program that
+    /// reads asciicast. That is the whole reason this exists: a consumer should
+    /// need to know the format, not the producer.
     pub fn init(path: []const u8, opts: AsciicastOptions) !AsciicastWriter {
+        if (std.mem.eql(u8, path, "-")) return initFile(std.fs.File.stdout(), false, opts);
+
         if (std.fs.path.dirname(path)) |dir| {
             if (dir.len > 0) {
                 try std.fs.cwd().makePath(dir);
@@ -20,18 +33,39 @@ pub const AsciicastWriter = struct {
 
         const file = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o600 });
         errdefer file.close();
+        return initFile(file, true, opts);
+    }
 
+    pub fn initFile(file: std.fs.File, owns: bool, opts: AsciicastOptions) !AsciicastWriter {
+        // One fstat at open time rather than a guess per write. A caller can
+        // hand us a file, a pipe or a socket, and only the first can be synced.
+        const syncable = blk: {
+            const st = std.posix.fstat(file.handle) catch break :blk false;
+            break :blk std.posix.S.ISREG(st.mode);
+        };
         var writer = AsciicastWriter{
             .file = file,
             .start_ms = std.time.milliTimestamp(),
+            .owns_file = owns,
+            .syncable = syncable,
         };
         try writer.writeHeader(opts);
         return writer;
     }
 
     pub fn deinit(self: *AsciicastWriter) void {
-        self.file.close();
+        if (self.owns_file) self.file.close();
         self.* = undefined;
+    }
+
+    /// An asciicast v2 marker: `[t, "m", label]`.
+    ///
+    /// How password mode leaves hexe's own framing and becomes something any
+    /// asciicast reader can see. A player that does not know the label ignores
+    /// it, which is exactly right -- and one that keeps its own scrollback can
+    /// use it to scrub, which is the thing that actually matters.
+    pub fn writeMarker(self: *AsciicastWriter, label: []const u8) !void {
+        try self.writeEvent('m', label);
     }
 
     pub fn writeOutput(self: *AsciicastWriter, bytes: []const u8) !void {
@@ -45,6 +79,9 @@ pub const AsciicastWriter = struct {
     }
 
     pub fn flush(self: *AsciicastWriter) !void {
+        // Events are written straight to the fd, so there is nothing buffered
+        // here to push; this only asks the kernel to commit a real file.
+        if (!self.syncable) return;
         try self.file.sync();
     }
 

@@ -94,6 +94,7 @@ hexe itself — see [recording](docs/recording.md).
 
 ```sh
 scripts/vendor-ghostty.sh                                  # once: fetch + patch ghostty-vt
+scripts/vendor-yazap.sh                                    # once: fetch + patch yazap
 zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=x86_64-linux-musl
 ```
 

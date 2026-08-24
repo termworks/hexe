@@ -19,9 +19,18 @@ pub fn runMuxRecord(session: []const u8, out_path: []const u8, capture_input: bo
     // The attach command has to name a session. It used to be the literal
     // string "hexe terminal attach", which prints "session name required" and
     // exits — so a recording contained nothing but that error message.
-    var cmd_buf: [512]u8 = undefined;
-    const attach_cmd = std.fmt.bufPrint(&cmd_buf, "hexe terminal attach {s}", .{session}) catch {
-        print("Error: session name too long\n", .{});
+    //
+    // It also has to be THIS binary, not whatever `hexe` resolves to. A machine
+    // with an older hexe earlier on PATH recorded that one instead, which fails
+    // the moment the two builds disagree about the wire protocol: the cast then
+    // contains the daemon-mismatch notice rather than the session. `hexe record
+    // start` already resolved itself this way; this path did not.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = std.fs.selfExePath(&exe_buf) catch "hexe";
+
+    var cmd_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
+    const attach_cmd = std.fmt.bufPrint(&cmd_buf, "'{s}' terminal attach {s}", .{ exe, session }) catch {
+        print("Error: attach command too long\n", .{});
         std.process.exit(1);
     };
 

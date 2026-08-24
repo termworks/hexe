@@ -294,6 +294,11 @@ pub fn validateLoaded(runtime: *LuaRuntime, ctx: *ValidationContext) ValidationE
     var pushed_module = false;
     if (runtime.typeOf(-1) != .table) {
         if (!runtime.pushFinishedModuleConfig()) {
+            // `__finish` raises on a mistyped key or a bad value, and that
+            // message names the exact setting. Reporting "declared no
+            // settings" instead told a user with one typo to go looking for a
+            // config that hexe could see perfectly well.
+            if (runtime.last_error) |err| return ctx.failPath("", err);
             return ctx.failPath("", "config declared no settings");
         }
         pushed_module = true;

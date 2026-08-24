@@ -83,6 +83,10 @@ one view can serve several slots and still know which one it is drawing:
 | `decor_edge` | `top`, `bottom`, `left`, `right` |
 | `decor_slot` | `start`, `center`, `end` |
 | `pane_name` | the pane's name, if it has one |
+| `pane_uuid` | which pane this slot belongs to, so an action can name it |
+| `observers` | how many programs are watching this pane's output |
+| `shared` | `observers > 0`, as one question rather than two |
+| `share_blocked` | the pane is refusing observers |
 
 Requests are keyed per pane and per slot, so two panes showing the same view do
 not share one cached answer.
@@ -91,3 +95,25 @@ not share one cached answer.
 
 hexe's own chrome resolves through palette slot 1, including everything drawn
 in these slots. See [palette.md](palette.md).
+
+## A worked slot: the share badge
+
+`contrib/painter.py` ships a `share` view, which is a complete example of the
+three things a slot view does — read its context, draw, and be clickable:
+
+```lua
+hexe.decor.top = { right = "share" }
+```
+
+It draws `● LIVE 2` when somebody is watching the pane and nothing at all when
+nobody is, because an indicator that is always present is one nobody reads. Its
+region's left action stops the sharing and its right action allows it again, so
+the badge is also the button.
+
+The part worth copying is how it names its target. A decor action runs as a
+shell command with `HEXE_PANE_UUID` set to the **focused** pane, which is not
+necessarily the pane the badge is attached to — so the view builds its command
+from `pane_uuid` in its own context instead. A badge on an unfocused pane that
+used the environment would stop the wrong stream.
+
+See [streaming.md](streaming.md) for what it is reporting on.

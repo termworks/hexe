@@ -11,7 +11,13 @@
 //! (4-byte big-endian length, then the body):
 //!
 //!     -> {"call":"panes","arg":{"visible":true}}
-//!     <- {"ok":true,"result":[ ... ]}
+//!     <- {"ok":true,"n":1,"result":[ ... ]}
+//!
+//! `result` is a LIST of return values and `n` says how many, which is the
+//! convention oslo's server already uses. One shape across the family means one
+//! client library reads either tool; before this, hexe answered with the value
+//! itself and oslo's client -- which unpacks -- silently lost every record,
+//! string and number it was told.
 //!
 //! `call` names any function on `hexe.live`, so this surface grows whenever
 //! that one does and cannot describe a pane differently from the way Lua does.
@@ -92,14 +98,39 @@ pub const ApiServer = struct {
     fd: posix.socket_t = -1,
     path: []u8 = &.{},
     conns: [MAX_CONNS]Conn = @splat(.{}),
+    /// What callers on THIS socket may do. The session's own socket holds
+    /// everything; a plugin's socket holds what it asked for.
+    granted: core.access.Set = core.access.Set.all,
 
     /// Bind the socket for `session`, replacing a stale one left by a crash.
     pub fn init(allocator: std.mem.Allocator, session: []const u8) !ApiServer {
+        return initScoped(allocator, session, null, core.access.Set.all);
+    }
+
+    /// A second socket for one plugin, carrying only what that plugin declared.
+    ///
+    /// A separate socket rather than a token on the shared one: a token the
+    /// caller supplies is a token the caller can omit, and then the grant means
+    /// nothing. A path the plugin is handed, and a listener that knows its own
+    /// authority, cannot be talked out of it.
+    pub fn initScoped(
+        allocator: std.mem.Allocator,
+        session: []const u8,
+        plugin: ?[]const u8,
+        granted: core.access.Set,
+    ) !ApiServer {
         const dir = try core.ipc.getSocketDir(allocator);
         defer allocator.free(dir);
         std.fs.cwd().makePath(dir) catch {};
 
-        const path = try std.fmt.allocPrint(allocator, "{s}/api@{s}.sock", .{ dir, session });
+        // `plug@` and not `api@`: session discovery globs `api@*.sock` to find
+        // what is listening, so naming a plugin's socket that way made three
+        // plugins look like three more sessions and `hexe api` refused to pick
+        // one. Different prefix, same directory, no ambiguity.
+        const path = if (plugin) |p|
+            try std.fmt.allocPrint(allocator, "{s}/plug@{s}.{s}.sock", .{ dir, session, p })
+        else
+            try std.fmt.allocPrint(allocator, "{s}/api@{s}.sock", .{ dir, session });
         errdefer allocator.free(path);
         if (path.len >= 108) return error.NameTooLong;
 
@@ -122,7 +153,7 @@ pub const ApiServer = struct {
             log.warn("could not restrict control socket permissions: {s}", .{@errorName(err)});
         };
 
-        return .{ .allocator = allocator, .fd = fd, .path = path };
+        return .{ .allocator = allocator, .fd = fd, .path = path, .granted = granted };
     }
 
     pub fn deinit(self: *ApiServer) void {
@@ -172,6 +203,18 @@ pub const ApiServer = struct {
                 error.WouldBlock => break,
                 else => break,
             };
+            // Who connected, from the kernel rather than from anything the
+            // peer said. The socket is already 0600 in a 0700 directory, so
+            // this should be unreachable -- which is exactly why it is cheap
+            // insurance against a runtime directory that is not what we assume.
+            if (core.ipc.getPeerCredentials(cfd)) |peer| {
+                if (peer.uid != std.os.linux.getuid()) {
+                    log.warn("refused a control connection from uid {d}", .{peer.uid});
+                    posix.close(cfd);
+                    continue;
+                }
+            }
+
             const c = self.slot() orelse {
                 // Full. Refusing is better than queueing: the client learns now
                 // instead of waiting on a reply that is not coming.
@@ -291,9 +334,19 @@ pub const ApiServer = struct {
         }
         c.out.clearRetainingCapacity();
         c.out_sent = 0;
-        // A subscriber's connection is the point; only a one-shot call is
-        // finished when its reply has been written.
-        if (!c.subscribed) self.dropConn(c);
+        if (c.subscribed) return;
+
+        // Ready for another request on the same connection rather than closed.
+        //
+        // Closing after one reply was cheap and made hexe unreadable by a
+        // sibling: oslo's client holds one connection and reuses it, so its
+        // second call died with a broken pipe. Keeping it costs nothing that is
+        // not already bounded -- eight connections, and CONN_TIMEOUT_MS reaps
+        // one that goes quiet -- and a client that wants one-shot simply closes.
+        c.replying = false;
+        c.need = null;
+        c.buf.clearRetainingCapacity();
+        c.started_ms = std.time.milliTimestamp();
     }
 
     fn fail(self: *ApiServer, c: *Conn, comptime fmt: []const u8, args: anytype) void {
@@ -338,7 +391,7 @@ pub const ApiServer = struct {
         c.subscribed = true;
         c.buf.clearRetainingCapacity();
         c.need = null;
-        self.reply(c, "{\"ok\":true,\"result\":\"subscribed\"}");
+        self.reply(c, "{\"ok\":true,\"n\":1,\"result\":[\"subscribed\"]}");
     }
 
     /// Hand one event to every subscriber that asked for it.
@@ -399,6 +452,15 @@ pub const ApiServer = struct {
             else => return self.fail(c, "`call` must be a string", .{}),
         };
 
+        // Refused before the verb runs, and named precisely: a plugin author
+        // reading "needs typing access" knows exactly what to add to their
+        // `access` list, where "permission denied" would send them guessing.
+        if (lua_api.accessFor(call)) |needs| {
+            if (!self.granted.has(needs)) {
+                return self.fail(c, "call `{s}` needs `{s}` access, which this plugin was not granted", .{ call, needs.name() });
+            }
+        }
+
         const rt = state.config._lua_runtime orelse {
             return self.fail(c, "no Lua runtime; the live API is unavailable", .{});
         };
@@ -406,6 +468,12 @@ pub const ApiServer = struct {
         // Accessors read this pointer, exactly as they do for a keybind
         // callback. `.handler` and not `.predicate`: a control request is a
         // deliberate act, not something evaluated on every keypress.
+        // The grant has to reach the accessors too, not just the dispatch: a
+        // `read` plugin calling `panes` must not be handed `pod_socket`, which
+        // is the whole byte stream behind a field name.
+        state.api_grant = self.granted;
+        defer state.api_grant = core.access.Set.all;
+
         const scope = lua_api.pushLiveState(rt, state, .handler);
         defer lua_api.popLiveState(rt, scope);
 
@@ -454,13 +522,17 @@ pub const ApiServer = struct {
 
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
-        out.appendSlice(self.allocator, "{\"ok\":true,\"result\":") catch {
+        // A list of return values, with `n`. Every hexe verb answers with one,
+        // so `n` is always 1 today -- but the shape is what makes a sibling's
+        // client able to read this at all, and it is what a multi-return verb
+        // would need without another protocol change.
+        out.appendSlice(self.allocator, "{\"ok\":true,\"n\":1,\"result\":[") catch {
             return self.fail(c, "out of memory", .{});
         };
         api_json.write(rt.lua, -1, out.writer(self.allocator), 0) catch |err| {
             return self.fail(c, "result could not be encoded: {s}", .{@errorName(err)});
         };
-        out.appendSlice(self.allocator, "}") catch {
+        out.appendSlice(self.allocator, "]}") catch {
             return self.fail(c, "out of memory", .{});
         };
         if (out.items.len > MAX_RESPONSE) {

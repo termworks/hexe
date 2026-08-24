@@ -94,6 +94,20 @@ const SchemaProblem = struct {
 };
 
 /// Run the declared schema over the config Lua actually produced.
+/// Drop Lua's `[string "..."]:3: ` chunk prefix from an error message.
+///
+/// The chunk is hexe's own bootstrap, so the location is always the same and
+/// tells the user nothing; what follows it is the sentence they need. Left in,
+/// it pushed the actual complaint past the width of a terminal.
+fn stripChunkPrefix(message: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, message, "[string \"")) return message;
+    const close = std.mem.indexOf(u8, message, "\"]:") orelse return message;
+    var i = close + 3;
+    while (i < message.len and std.ascii.isDigit(message[i])) i += 1;
+    if (i + 2 <= message.len and std.mem.startsWith(u8, message[i..], ": ")) return message[i + 2 ..];
+    return message;
+}
+
 fn schemaError(allocator: std.mem.Allocator, path: []const u8) ?SchemaProblem {
     var runtime = core.LuaRuntime.init(allocator) catch return null;
     defer runtime.deinit();
@@ -104,8 +118,13 @@ fn schemaError(allocator: std.mem.Allocator, path: []const u8) ?SchemaProblem {
     var ctx = core.config_v2.ValidationContext{};
     core.config_v2.validateLoaded(&runtime, &ctx) catch {
         // `ctx` owns its own buffer, but it dies with this frame, so copy out.
+        // The message too: it used to be a literal in every case, but a
+        // `__finish` raise reports Lua's own error text, which the runtime
+        // frees on the deferred deinit above -- printing it borrowed showed
+        // nothing at all.
         const p = allocator.dupe(u8, ctx.path) catch "";
-        return .{ .path = p, .message = ctx.message };
+        const m = allocator.dupe(u8, stripChunkPrefix(ctx.message)) catch "config is invalid";
+        return .{ .path = p, .message = m };
     };
     return null;
 }

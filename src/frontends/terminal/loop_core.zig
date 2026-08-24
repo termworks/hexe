@@ -58,6 +58,15 @@ fn loopTimerCallback(
         _ = timer_ctx.state.runtime.sendPing();
     }
 
+    // Input typed back by a stream plugin: a pipe the render loop owns, read
+    // here so a plugin that says nothing can never block it.
+    @import("stream_attach.zig").pollInput(timer_ctx.state);
+
+    // Keeps the capture bars moving, and drops a claim whose owner stopped
+    // renewing -- an indicator left lit by a crashed plugin teaches the user to
+    // ignore it, which is worse than not having one.
+    @import("capture.zig").tick(timer_ctx.state);
+
     timer_ctx.last_fire = std.time.milliTimestamp();
     // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
     timer_ctx.ticker.run(loop, completion, tickDelayMs(), LoopTimerContext, timer_ctx, loopTimerCallback);
@@ -356,7 +365,13 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         // Control-socket requests. Bound and non-blocking: a client that stops
         // reading must never suspend the panes.
         state.startApiServer();
+        // After the socket, so HEXE_API_SOCKET is real when they read it.
+        state.startPlugins();
         if (state.api_server) |*srv| srv.service(state);
+        // Each plugin's own socket, serviced the same way. Separate listeners
+        // rather than one with per-connection grants, so authority is a
+        // property of the door rather than of what the caller claims.
+        for (state.plugin_servers.items) |*srv| srv.service(state);
 
         const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);

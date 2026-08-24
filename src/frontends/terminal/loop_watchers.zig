@@ -356,6 +356,10 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
             .output => {
                 terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ vt_event.pane_id, vt_event.payload_len });
                 pane.feedPodOutput(payload);
+                // The frontend already has these bytes, so a plugin watching
+                // this pane is fed from here rather than opening its own
+                // observer against the pod -- same data, one fewer consumer.
+                @import("stream_attach.zig").feedOutput(state, pane.uuid, payload);
                 drainPaneOscEvents(state, pane, !pane.backlog_replaying);
                 const osc_responses = pane.takeOscExpectedResponses();
                 if (osc_responses > 0) {
@@ -405,6 +409,7 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
                 // that must hard-stop on a password prompt (keycast, the Lua
                 // `password_input` field) reads this flag.
                 if (payload.len >= 1) pane.vt.terminal.flags.password_input = payload[0] != 0;
+                @import("stream_attach.zig").feedPasswordMode(state, pane.uuid, pane.vt.terminal.flags.password_input);
                 terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} password_input={}", .{ vt_event.pane_id, pane.vt.terminal.flags.password_input });
                 state.needs_render = true;
             },

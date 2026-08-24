@@ -120,6 +120,11 @@ pub const Pane = struct {
     cwd: ?[]const u8 = null,
     fg_process: ?[]const u8 = null,
     fg_pid: ?i32 = null,
+    /// How many programs are watching this pane's output, and whether the pane
+    /// is refusing new ones. Reported by the pod, which owns the observer list;
+    /// mirrored here so anything that can see a pane can see that it is shared.
+    observers: u16 = 0,
+    share_blocked: bool = false,
     layout_path: ?[]const u8 = null,
     last_cmd: ?[]const u8 = null,
     last_status: ?i32 = null,

@@ -88,6 +88,17 @@ decided on key *release*, auto-repeat is suppressed by a repeat lock rather than
 and an **unmodified** chord skips the tap/hold machinery altogether — a bare letter cannot be
 delayed waiting to see whether you are holding it.
 
+Only a `hold` bind makes a press wait. Binding `press` and `release` on one chord is the
+push-to-talk shape and each fires at its own moment:
+
+```lua
+hexe.key(chord, start_recording, { on = hexe.when.press })
+hexe.key(chord, stop_recording,  { on = hexe.when.release })
+```
+
+A release bind used to defer the press to release time, so both ran at once — a recorder that
+started and stopped in the same instant and captured nothing.
+
 ### Conditions
 
 `when` is a Lua function, evaluated when the key is pressed. It can look at any

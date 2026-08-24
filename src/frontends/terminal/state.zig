@@ -21,6 +21,9 @@ pub const FloatUiState = state_types.FloatUiState;
 
 const layout_mod = @import("layout.zig");
 const pane_search = @import("pane_search.zig");
+const capture_mod = @import("capture.zig");
+const api_server = @import("api_server.zig");
+const stream_attach = @import("stream_attach.zig");
 const Layout = layout_mod.Layout;
 
 const Renderer = @import("render_core.zig").Renderer;
@@ -386,6 +389,21 @@ pub const State = struct {
     region_surfaces: @import("region_render.zig").SurfaceCache,
     /// The control socket, once a session name exists to name it after.
     api_server: ?@import("api_server.zig").ApiServer = null,
+    /// Whether the configured plugins have been started for this session.
+    plugins_started: bool = false,
+    /// What the caller currently being served may do. Full authority except
+    /// while a scoped socket's request is in flight; the loop is single
+    /// threaded, so this is a stack discipline rather than shared state.
+    api_grant: core.access.Set = core.access.Set.all,
+    /// One scoped control socket per plugin, each with its own grant.
+    plugin_servers: std.ArrayList(api_server.ApiServer) = .empty,
+    /// Plugins that declared `stream` and so may be handed a pane's bytes.
+    /// Kept (rather than spawned and forgotten) because their pipes are the
+    /// channel.
+    stream_plugins: std.ArrayList(stream_attach.Attachable) = .empty,
+
+    /// Whether something has claimed it is capturing a pane. See capture.zig.
+    capture: capture_mod.Capture = .{},
     /// Resumable non-blocking reader for the SES VT stream. Reset whenever
     /// the VT connection is replaced (loop_watchers arms a new node).
     mux_vt_reader: @import("frontend_core").MuxVtReader = .{},
@@ -1100,9 +1118,128 @@ pub const State = struct {
             core.logging.logError("terminal", "control socket unavailable", err);
             return;
         };
+        self.publishSelfSocket();
+    }
+
+    /// Start the helper programs the config declared, once.
+    ///
+    /// After the control socket exists, so `HEXE_API_SOCKET` can point at it:
+    /// a plugin's first job is to ask hexe what the session contains, and
+    /// making it guess the path would be making it know hexe's layout.
+    ///
+    /// Detached, stdio closed, and not supervised. Restarting one that exits
+    /// deliberately is a fork loop with a delay; one that wants to survive its
+    /// own crashes knows better than hexe how to.
+    /// Tell our own Lua which socket is ours, so the client library can refuse
+    /// a connection to it.
+    ///
+    /// Calling your own session from inside its event loop cannot be answered:
+    /// the frontend is busy running the caller. It looks like a hang and ends
+    /// in a socket timeout, which says nothing about the cause.
+    fn publishSelfSocket(self: *State) void {
+        const srv = if (self.api_server) |*s| s else return;
+        const rt = self.config._lua_runtime orelse return;
+        _ = rt.lua.getGlobal("hexe") catch return;
+        if (rt.lua.typeOf(-1) == .table) {
+            _ = rt.lua.pushString(srv.path);
+            rt.lua.setField(-2, "__self_socket");
+        }
+        rt.lua.pop(1);
+    }
+
+    pub fn startPlugins(self: *State) void {
+        if (self.plugins_started) return;
+        if (self.config.plugins.len == 0) {
+            self.plugins_started = true;
+            return;
+        }
+        // Waits until the session's own socket exists, which is the signal
+        // that the frontend is far enough along to serve anyone at all.
+        if (self.api_server == null) return;
+        self.plugins_started = true;
+
+        for (self.config.plugins) |plugin| {
+            // Its own socket, carrying only what it declared. Falling back to
+            // the session socket would hand a plugin everything precisely when
+            // its narrower socket failed to open -- the wrong way round -- so a
+            // plugin whose socket cannot be made does not start.
+            const scoped = api_server.ApiServer.initScoped(
+                self.allocator,
+                self.runtime.sessionName(),
+                plugin.name,
+                plugin.access,
+            ) catch |err| {
+                core.logging.logError("terminal", "could not open a scoped socket for a plugin", err);
+                core.logging.warn("terminal", "plugin '{s}' did not start: no scoped socket", .{plugin.name});
+                continue;
+            };
+            self.plugin_servers.append(self.allocator, scoped) catch {
+                var tmp = scoped;
+                tmp.deinit();
+                continue;
+            };
+            const sock = self.plugin_servers.items[self.plugin_servers.items.len - 1].path;
+
+            // A plugin that may be handed a stream keeps its pipes: stdin is
+            // how the bytes reach it, and stdout is how it types back if it
+            // also holds `typing`. Everything else is spawned and forgotten.
+            const wants_stream = plugin.access.has(.stream);
+
+            var child = std.process.Child.init(&.{ "/bin/sh", "-c", plugin.command }, self.allocator);
+            child.stdin_behavior = if (wants_stream) .Pipe else .Ignore;
+            child.stdout_behavior = if (wants_stream) .Pipe else .Ignore;
+            child.stderr_behavior = .Ignore;
+
+            var env_map = std.process.getEnvMap(self.allocator) catch |err| {
+                core.logging.logError("terminal", "plugin env copy failed", err);
+                continue;
+            };
+            defer env_map.deinit();
+            env_map.put("HEXE_API_SOCKET", sock) catch {};
+            env_map.put("HEXE_SESSION", self.runtime.sessionName()) catch {};
+            // Told what it holds, so it can fail loudly at startup instead of
+            // discovering a missing grant halfway through doing something.
+            var acc_buf: [96]u8 = undefined;
+            var acc_stream = std.io.fixedBufferStream(&acc_buf);
+            plugin.access.format(acc_stream.writer()) catch {};
+            env_map.put("HEXE_ACCESS", acc_stream.getWritten()) catch {};
+            child.env_map = &env_map;
+            // A package's command runs from the package, so a manifest can say
+            // `./backend.sh` without knowing where it was installed.
+            if (plugin.dir.len > 0) child.cwd = plugin.dir;
+
+            child.spawn() catch |err| {
+                core.logging.logError("terminal", "failed to start plugin", err);
+                core.logging.warn("terminal", "plugin '{s}' did not start: {s}", .{ plugin.name, plugin.command });
+                continue;
+            };
+            core.logging.warn("terminal", "started plugin '{s}' ({s}): {s}", .{ plugin.name, acc_stream.getWritten(), plugin.command });
+
+            if (wants_stream) {
+                // Non-blocking: this is read from the render loop, and a plugin
+                // that says nothing must not park every pane in the session.
+                if (child.stdout) |o| core.ipc.setNonBlocking(o.handle) catch {};
+                const owned_name = self.allocator.dupe(u8, plugin.name) catch continue;
+                self.stream_plugins.append(self.allocator, .{
+                    .name = owned_name,
+                    .child = child,
+                    .access = plugin.access,
+                }) catch {
+                    self.allocator.free(owned_name);
+                };
+            }
+        }
     }
 
     pub fn deinit(self: *State) void {
+        for (self.stream_plugins.items) |*p| {
+            if (p.cast) |*c| c.deinit();
+            p.in_buf.deinit(self.allocator);
+            self.allocator.free(p.name);
+        }
+        self.stream_plugins.deinit(self.allocator);
+        for (self.plugin_servers.items) |*srv| srv.deinit();
+        self.plugin_servers.deinit(self.allocator);
         if (self.api_server) |*srv| srv.deinit();
         self.api_server = null;
         self.runtime.prepareFrontendExit(posix.STDIN_FILENO, true) catch |err| {
@@ -2181,6 +2318,10 @@ pub const State = struct {
 
     pub fn setPaneProc(self: *State, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
         self.runtime.setPaneProc(uuid, name, pid);
+    }
+
+    pub fn setPaneObservers(self: *State, uuid: [32]u8, observers: u16, blocked: bool) void {
+        self.runtime.setPaneObservers(uuid, observers, blocked);
     }
 
     pub fn getPaneShell(self: *const State, uuid: [32]u8) ?PaneShellInfo {

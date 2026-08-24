@@ -520,6 +520,9 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
             state.needs_render = true;
             return true;
         },
+        // Push-to-talk binds start on press and stop on release, so `start`
+        // must be idempotent while held: key repeat fires it many times, and
+        // spawning a second recorder per repeat would leave orphaned tools.
         .sync_toggle => {
             state.sync_input = !state.sync_input;
             state.notifications.showFor(if (state.sync_input) "Input sync: ON" else "Input sync: OFF", 1200);

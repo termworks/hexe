@@ -252,13 +252,34 @@ fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_wi
 }
 
 /// Render a generic overlay
+/// Widest line, and how many there are.
+///
+/// Overlays were one line clipped to 80 columns, which is fine for a keycast
+/// chord and useless for anything shaped like a block -- a QR code, a key, a
+/// paragraph. A newline is the obvious way to ask for more than one line, so it
+/// is the way.
+fn measureBlock(text: []const u8, cap: u16) struct { w: u16, h: u16 } {
+    var widest: u16 = 0;
+    var lines: u16 = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        lines += 1;
+        const w = statusbar.measureText(text_width.clipTextToWidth(line, cap));
+        if (w > widest) widest = w;
+    }
+    return .{ .w = widest, .h = lines };
+}
+
 fn renderOverlay(renderer: *Renderer, ov: overlay.Overlay, screen_width: u16, screen_height: u16) void {
-    const clipped = text_width.clipTextToWidth(ov.text, 80);
-    const text_len: u16 = statusbar.measureText(clipped);
+    // A block may be as wide as the screen allows; the old flat 80 truncated a
+    // QR down the middle, which is worse than not drawing it.
+    const cap: u16 = if (screen_width > 4) screen_width - 4 else 80;
+    const block = measureBlock(ov.text, cap);
+    const text_len: u16 = block.w;
     if (text_len == 0) return;
 
     const box_width = text_len + @as(u16, ov.padding_x) * 2;
-    const box_height: u16 = 1 + @as(u16, ov.padding_y) * 2;
+    const box_height: u16 = block.h + @as(u16, ov.padding_y) * 2;
 
     const pos: Pos = switch (ov.position) {
         .corner => |c| calculateCornerPosition(c.anchor, c.offset_x, c.offset_y, box_width, box_height, screen_width, screen_height),
@@ -275,10 +296,22 @@ fn renderOverlay(renderer: *Renderer, ov: overlay.Overlay, screen_width: u16, sc
         }
     }
 
-    // Draw text
+    // Draw text, one line per row. Each is drawn at the box's left edge rather
+    // than centred: a QR code or a key is a grid, and centring its rows
+    // individually would shear it.
     const text_x = pos.x + ov.padding_x;
-    const text_y = pos.y + ov.padding_y;
-    _ = statusbar.drawStyledText(renderer, text_x, text_y, clipped, textStyle(.{ .palette = ov.fg }, .{ .palette = ov.bg }, ov.bold));
+    var row: u16 = 0;
+    var it = std.mem.splitScalar(u8, ov.text, '\n');
+    while (it.next()) |line| : (row += 1) {
+        const clipped = text_width.clipTextToWidth(line, cap);
+        _ = statusbar.drawStyledText(
+            renderer,
+            text_x,
+            pos.y + ov.padding_y + row,
+            clipped,
+            textStyle(.{ .palette = ov.fg }, .{ .palette = ov.bg }, ov.bold),
+        );
+    }
 }
 
 fn calculateCornerPosition(

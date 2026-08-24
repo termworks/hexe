@@ -130,9 +130,23 @@ pub fn isTrusted(allocator: std.mem.Allocator, path: []const u8) bool {
 /// Record `path`'s current content hash in the ledger (idempotent). Creates the
 /// ledger directory and file as needed.
 pub fn allow(allocator: std.mem.Allocator, path: []const u8) !void {
-    const hash = try hashFile(allocator, path);
     if (isTrusted(allocator, path)) return;
+    try recordHash(allocator, path, &try hashFile(allocator, path));
+}
 
+/// Record a hash the caller computed, against `path`.
+///
+/// The symmetric half of `bytesAreTrustedAt`: a caller whose unit of trust is
+/// not one file on disk -- a plugin package is a manifest plus an entry -- has
+/// to be able to approve what it actually checked, or the two halves would
+/// disagree about what was approved.
+pub fn allowBytesAt(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
+    const hash = hashBytes(bytes);
+    if (lookup(allocator, &hash, path)) return;
+    try recordHash(allocator, path, &hash);
+}
+
+fn recordHash(allocator: std.mem.Allocator, path: []const u8, hash: []const u8) !void {
     const ledger = try ledgerPath(allocator);
     defer allocator.free(ledger);
     if (std.fs.path.dirname(ledger)) |dir| {
@@ -148,7 +162,7 @@ pub fn allow(allocator: std.mem.Allocator, path: []const u8) !void {
     var file = try std.fs.cwd().createFile(ledger, .{ .truncate = false, .read = false, .mode = 0o600 });
     defer file.close();
     try file.seekFromEnd(0);
-    try file.writeAll(&hash);
+    try file.writeAll(hash);
     try file.writeAll("\t");
     try file.writeAll(real_path);
     try file.writeAll("\n");

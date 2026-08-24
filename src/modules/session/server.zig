@@ -3316,6 +3316,9 @@ pub const Server = struct {
             .fg_changed => {
                 server_pod_event_handlers.handleBinaryFgChanged(self, fd, hdr.payload_len, &buf);
             },
+            .observers_changed => {
+                server_pod_event_handlers.handleBinaryObserversChanged(self, fd, hdr.payload_len);
+            },
             .shell_event => {
                 server_pod_event_handlers.handleBinaryShellEvent(self, fd, hdr.payload_len, &buf);
             },
@@ -3771,7 +3774,7 @@ pub const Server = struct {
             // channel-④ events, all dispatched elsewhere. Enumerated explicitly
             // so a new MsgType is a compile error here until categorized
             // (PLAN.md 2.1). Behavior matches the former `else`.
-            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_palette, .set_name_pool, .update_pane_name, .update_pane_shell, .get_pane_cwd, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .shell_event, .bell, .exited, .shp_shell_event => {
+            .register, .registered, .create_pane, .pane_created, .destroy_pane, .detach, .reattach, .session_state, .pop_response, .disconnect, .orphan_pane, .list_orphaned, .adopt_pane, .kill_pane, .set_sticky, .find_sticky, .update_pane_aux, .update_pane_palette, .set_name_pool, .update_pane_name, .update_pane_shell, .get_pane_cwd, .ping, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .exit_intent_result, .float_created, .float_result, .pane_exited, .replay_backlogs, .session_stolen, .session_add_tab, .session_remove_tab, .session_sync_float, .session_remove_float, .session_split_pane, .session_replace_split_pane, .session_set_split_ratio, .session_rename_tab, .cwd_changed, .fg_changed, .observers_changed, .shell_event, .bell, .exited, .shp_shell_event => {
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
                 self.closeCliRequest(fd, "unsupported cli request type");
             },

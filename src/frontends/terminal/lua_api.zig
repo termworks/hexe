@@ -334,6 +334,41 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     setOptStr(lua, "pwd_dir", state.panePwdDir(pane));
     setOptStr(lua, "exit_key", state.paneExitKey(pane));
     setOptStr(lua, "title", if (is_float) state.paneFloatTitle(pane) else null);
+
+    // Who is watching this pane, straight from the pod that holds their
+    // sockets. `shared` is the question a privacy indicator actually asks, and
+    // deriving it from a count every caller would get subtly wrong on the
+    // blocked-with-zero-observers case is worse than answering it here.
+    {
+        const proc = state.getPaneProc(pane.uuid);
+        const observers: i64 = if (proc) |p| @intCast(p.observers) else 0;
+        const blocked = if (proc) |p| p.share_blocked else false;
+        setInt(lua, "observers", observers);
+        setBool(lua, "shared", observers > 0);
+        setBool(lua, "share_blocked", blocked);
+    }
+
+    // Where this pane's bytes can be read: the pod socket, which serves
+    // scrollback and the live stream to an observer (docs/streaming.md).
+    //
+    // Reported rather than left to be derived, so a program that wants the
+    // stream does not have to know hexe's runtime layout. Built with the same
+    // helper SES used when it spawned the pod, so this is the path in use and
+    // not a guess at one.
+    if (!state.api_grant.has(.stream)) {
+        // Withheld rather than faked: a caller without stream access should
+        // learn it cannot have the bytes, not be handed a path that fails.
+        setOptStr(lua, "pod_socket", null);
+    } else {
+        var scratch: [std.fs.max_path_bytes]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&scratch);
+        if (core.ipc.getPodSocketPath(fba.allocator(), pane.uuid[0..])) |path| {
+            setStr(lua, "pod_socket", path);
+        } else |err| {
+            core.logging.logError("lua_api", "could not resolve pod socket path", err);
+            setOptStr(lua, "pod_socket", null);
+        }
+    }
 }
 
 /// Is this pane showing on the active tab right now? For a split, membership in
@@ -590,6 +625,15 @@ fn hexe_session(lstate: ?*LuaState) callconv(.c) c_int {
     };
     lua.createTable(0, 8);
     setStr(lua, "name", state.runtime.sessionName());
+    // The socket this session is reachable on. Not derivable from `name`: the
+    // path is fixed when the control socket binds, and a session that is later
+    // renamed or reattached keeps the old file. A caller that read `name` and
+    // built `api@<name>.sock` from it would miss exactly those sessions.
+    if (state.api_server) |*srv| {
+        setStr(lua, "socket", srv.path);
+    } else {
+        setOptStr(lua, "socket", null);
+    }
     const uuid = state.runtime.sessionUuid();
     setStr(lua, "uuid", uuid[0..]);
     setStr(lua, "root", state.runtime.baseRoot());
@@ -1064,6 +1108,282 @@ fn hexe_rename(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// Read or change who may watch a pane: `share(sel)`, `share(sel, false)`.
+///
+/// Goes to the pod rather than to whatever opened the observers, so it still
+/// works when that program is hung -- the case a stop button exists for. The
+/// answer is the pod's own state after the change, not an echo of the request,
+/// so a caller that is refused finds out.
+fn hexe_share(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    // `share(false)` acts on the focused pane; `share(sel, false)` names one.
+    const has_selector = lua.typeOf(1) != .boolean;
+    const enable_idx: i32 = if (has_selector) 2 else 1;
+    const cmd: core.wire.PodShareCmd = switch (lua.typeOf(enable_idx)) {
+        .boolean => if (lua.toBoolean(enable_idx)) .allow else .block,
+        else => .query,
+    };
+
+    const pane = resolvePane(lua, state, if (has_selector) 1 else 3) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    const status = core.pod_share.requestLogged(state.allocator, pane.uuid[0..], cmd) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    // Do not wait for the pod's uplink to come back around: a button whose
+    // label updates on the next event tick reads as a button that did nothing.
+    state.setPaneObservers(pane.uuid, status.observers, status.blocked);
+    state.needs_render = true;
+
+    lua.createTable(0, 3);
+    setInt(lua, "observers", @intCast(status.observers));
+    setBool(lua, "shared", status.observers > 0);
+    setBool(lua, "blocked", status.blocked);
+    return 1;
+}
+
+/// Parse `ctrl+alt+d`, `super+left`, `space` into hexe's chord representation.
+///
+/// Mod names match the ones a config writes (`hexe.key.ctrl`), because a person
+/// bridging a compositor to hexe is reading their hexe config to decide what to
+/// send, and having to translate between two spellings is a bug generator.
+fn parseChord(spec: []const u8) ?struct { mods: u8, key: core.Config.BindKey } {
+    var mods: u8 = 0;
+    var key: ?core.Config.BindKey = null;
+
+    var it = std.mem.tokenizeAny(u8, spec, "+- \t");
+    while (it.next()) |part| {
+        var lower_buf: [16]u8 = undefined;
+        if (part.len > lower_buf.len) return null;
+        const word = std.ascii.lowerString(lower_buf[0..part.len], part);
+
+        if (std.mem.eql(u8, word, "alt")) {
+            mods |= 1;
+        } else if (std.mem.eql(u8, word, "ctrl") or std.mem.eql(u8, word, "control")) {
+            mods |= 2;
+        } else if (std.mem.eql(u8, word, "shift")) {
+            mods |= 4;
+        } else if (std.mem.eql(u8, word, "super") or std.mem.eql(u8, word, "meta")) {
+            mods |= 8;
+        } else if (std.mem.eql(u8, word, "up")) {
+            key = .up;
+        } else if (std.mem.eql(u8, word, "down")) {
+            key = .down;
+        } else if (std.mem.eql(u8, word, "left")) {
+            key = .left;
+        } else if (std.mem.eql(u8, word, "right")) {
+            key = .right;
+        } else if (std.mem.eql(u8, word, "space")) {
+            key = .space;
+        } else if (word.len == 1) {
+            key = .{ .char = word[0] };
+        } else {
+            return null;
+        }
+    }
+    // A chord with only modifiers is not a chord; refusing beats pressing
+    // something the caller did not name.
+    return if (key) |k| .{ .mods = mods, .key = k } else null;
+}
+
+/// `stream("drop")` hands the focused pane's bytes to that plugin;
+/// `stream("drop", false)` stops.
+///
+/// hexe does not know what the plugin does with them -- publish them, record
+/// them, feed another hexe. It knows only that a pane makes bytes and this
+/// plugin was granted them. Whether the far end may type back is the plugin's
+/// `typing` access, not an argument here: view-only and read-write are
+/// different grants, not different calls.
+fn hexe_stream(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const attach_mod = @import("stream_attach.zig");
+
+    const plugin = lua.toString(1) catch {
+        lua.pushNil();
+        return 1;
+    };
+
+    if (lua.typeOf(2) == .boolean and !lua.toBoolean(2)) {
+        attach_mod.detach(state, plugin);
+        lua.createTable(0, 2);
+        setBool(lua, "attached", false);
+        setOptStr(lua, "error", null);
+        return 1;
+    }
+
+    const pane = (if (lua.typeOf(2) == .string or lua.typeOf(2) == .number)
+        resolvePane(lua, state, 2)
+    else
+        focusedPane(state)) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    const err = attach_mod.attach(state, plugin, pane);
+    state.needs_render = true;
+    lua.createTable(0, 3);
+    setBool(lua, "attached", err == null);
+    setOptStr(lua, "error", err);
+    if (err == null) setStr(lua, "pane_uuid", pane.uuid[0..]);
+    return 1;
+}
+
+/// `client()` — hexe's own client library, as source.
+///
+/// So a peer can obtain it **over the wire it is already speaking**, rather
+/// than shelling out to `hexe lua-api` or being handed a file. A sandboxed host
+/// -- oslo's VM removes `io.popen` -- has no other way to get it in code.
+///
+/// The bootstrap problem is smaller than it looks: any sibling that speaks
+/// 4-byte-length + JSON can already call this, and every one of them ships a
+/// client that does. It fetches the right vocabulary with the wrong one.
+///
+/// `read` access: it is a constant compiled into the binary, and a caller that
+/// can reach the socket at all can already run `hexe lua-api`.
+fn hexe_client(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    _ = lua.pushString(core.lua_client.SOURCE);
+    return 1;
+}
+
+/// `popup("text")` shows a block until the user dismisses it; `popup()` clears.
+///
+/// hexe does not interpret the text. A link is a string; a QR code is a grid of
+/// block characters the caller already rendered, and hexe has no idea it is a
+/// QR. That is deliberate -- the moment hexe knows what a QR is, it owns a QR
+/// library and a set of opinions about them.
+fn hexe_popup(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+
+    if (lua.typeOf(1) != .string) {
+        _ = state.overlays.dismissMessages();
+        state.needs_render = true;
+        lua.pushBoolean(true);
+        return 1;
+    }
+    const text = lua.toString(1) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    // Copied: the request buffer this points into is gone by the next frame.
+    const owned = state.allocator.dupe(u8, text) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    state.overlays.showMessage(owned);
+    state.needs_render = true;
+    lua.pushBoolean(true);
+    return 1;
+}
+
+/// `capture(true)` says something is recording this pane; `capture(false)` stops.
+///
+/// hexe does not know what is being captured -- a microphone, a camera, the
+/// screen -- and draws the same three bars regardless, meaning only "something
+/// is recording you right now".
+///
+/// Deliberately cheap: any plugin may claim it, because *claiming* to capture is
+/// harmless and the harm runs the other way. A claim lapses after a few seconds
+/// unless renewed, so a plugin that dies mid-capture cannot leave the light on.
+fn hexe_capture(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const capture_mod = @import("capture.zig");
+
+    const on = lua.typeOf(1) != .boolean or lua.toBoolean(1);
+    if (lua.typeOf(1) == .boolean and !on) {
+        capture_mod.release(state);
+    } else if (lua.typeOf(1) == .boolean) {
+        const pane = (if (lua.typeOf(2) == .string or lua.typeOf(2) == .number)
+            resolvePane(lua, state, 2)
+        else
+            focusedPane(state)) orelse {
+            lua.pushNil();
+            return 1;
+        };
+        const by = lua.toString(3) catch "plugin";
+        capture_mod.claim(state, pane, by);
+    }
+
+    const c = &state.capture;
+    const live = c.active(std.time.milliTimestamp());
+    lua.createTable(0, 3);
+    setBool(lua, "capturing", live);
+    if (live and c.pane != null) {
+        setStr(lua, "pane_uuid", c.pane.?[0..]);
+        setStr(lua, "by", c.owner());
+    } else {
+        setOptStr(lua, "pane_uuid", null);
+        setOptStr(lua, "by", null);
+    }
+    return 1;
+}
+
+/// `keys("ctrl+alt+d")` — press a chord *at hexe*; `keys(chord, "release")`
+/// releases it.
+///
+/// Both halves are needed, not just the first. A chord that has a release
+/// binding cannot be resolved on press alone -- hexe has to wait to see whether
+/// it was a tap -- so a bridge that can only press can never drive
+/// push-to-talk, which is the main thing a bridge is for.
+///
+/// Not `send`: this goes through the keybinding machinery, so it fires whatever
+/// the user bound rather than reaching the program inside the pane. That is the
+/// whole point of a compositor bridge — Hyprland knows the key was pressed, but
+/// only hexe knows what it means here.
+///
+/// Returns whether a binding consumed it, so a bridge can fall back to its own
+/// handling instead of silently swallowing the key.
+fn hexe_keys(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    const spec = lua.toString(1) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    const chord = parseChord(spec) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+
+    // Which moment this is. Named rather than a boolean because hexe already
+    // has four, and a bridge sending `repeat` should not have to lie about it.
+    var phase: core.Config.BindWhen = .press;
+    if (lua.typeOf(2) == .string) {
+        const word = lua.toString(2) catch "press";
+        phase = std.meta.stringToEnum(core.Config.BindWhen, word) orelse .press;
+    }
+
+    const keybinds = @import("keybinds.zig");
+    const consumed = keybinds.handleKeyEvent(state, chord.mods, chord.key, phase, false);
+    state.needs_render = true;
+    lua.pushBoolean(consumed);
+    return 1;
+}
+
 fn hexe_rename_tab(lstate: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(lstate orelse return 0);
     const state = liveState(lua) orelse {
@@ -1251,6 +1571,16 @@ fn rowsForBudget(pane: *Pane, max_bytes: usize) usize {
 /// hand: it already handles wide cells, spacer tails and graphemes. The CALLER
 /// bounds the row span, which is what keeps the allocation bounded — one row is
 /// at most `cols * 4` bytes.
+/// The pane's whole visible screen as text, caller owns it.
+///
+/// So a viewer joining a stream sees the pane as it looks now rather than a
+/// blank rectangle until something is printed next.
+pub fn paneScreenText(allocator: std.mem.Allocator, pane: *Pane) ?[]u8 {
+    const rows: usize = pane.vt.terminal.rows;
+    if (rows == 0) return null;
+    return extractRows(allocator, pane, 0, rows - 1);
+}
+
 fn extractRows(allocator: std.mem.Allocator, pane: *Pane, top: usize, bottom: usize) ?[]u8 {
     const screen = pane.vt.terminal.screens.active;
     const pages = &screen.pages;
@@ -1437,36 +1767,61 @@ fn hexe_selection_range(lstate: ?*LuaState) callconv(.c) c_int {
 
 // ─── installation ───────────────────────────────────────────────────────────
 
-const Entry = struct { name: [:0]const u8, func: *const fn (?*LuaState) callconv(.c) c_int };
+/// A verb, and the one access kind it needs.
+///
+/// Kept on the verb rather than checked at each call site so the mapping is a
+/// table someone can read top to bottom -- and so a new verb cannot be added
+/// without stating what it costs. Lua callers are unaffected: config already
+/// runs with the user's full authority. The grant is enforced at the socket,
+/// where a stranger's program is on the other end.
+const Entry = struct {
+    name: [:0]const u8,
+    func: *const fn (?*LuaState) callconv(.c) c_int,
+    needs: core.access.Kind = .control,
+};
+
+/// What `call` requires, or null if there is no such verb.
+pub fn accessFor(call: []const u8) ?core.access.Kind {
+    inline for (ENTRIES) |e| {
+        if (std.mem.eql(u8, call, std.mem.span(e.name.ptr))) return e.needs;
+    }
+    return null;
+}
 
 const ENTRIES = [_]Entry{
-    .{ .name = "pane", .func = hexe_pane },
-    .{ .name = "panes", .func = hexe_panes },
-    .{ .name = "floats", .func = hexe_floats },
-    .{ .name = "splits", .func = hexe_splits },
-    .{ .name = "tabs", .func = hexe_tabs },
-    .{ .name = "session", .func = hexe_session },
-    .{ .name = "ui", .func = hexe_ui },
-    .{ .name = "count", .func = hexe_count },
-    .{ .name = "env", .func = hexe_env },
+    .{ .name = "pane", .func = hexe_pane, .needs = .read },
+    .{ .name = "panes", .func = hexe_panes, .needs = .read },
+    .{ .name = "floats", .func = hexe_floats, .needs = .read },
+    .{ .name = "splits", .func = hexe_splits, .needs = .read },
+    .{ .name = "tabs", .func = hexe_tabs, .needs = .read },
+    .{ .name = "session", .func = hexe_session, .needs = .read },
+    .{ .name = "ui", .func = hexe_ui, .needs = .read },
+    .{ .name = "count", .func = hexe_count, .needs = .read },
+    .{ .name = "env", .func = hexe_env, .needs = .screen },
     .{ .name = "act", .func = hexe_act },
-    .{ .name = "notify", .func = hexe_notify },
-    .{ .name = "send", .func = hexe_send },
+    .{ .name = "notify", .func = hexe_notify, .needs = .popup },
+    .{ .name = "send", .func = hexe_send, .needs = .typing },
     .{ .name = "focus", .func = hexe_focus },
     .{ .name = "tab_select", .func = hexe_tab_select },
     .{ .name = "rename_tab", .func = hexe_rename_tab },
     .{ .name = "rename", .func = hexe_rename },
+    .{ .name = "share", .func = hexe_share },
+    .{ .name = "keys", .func = hexe_keys, .needs = .keyboard },
+    .{ .name = "capture", .func = hexe_capture, .needs = .read },
+    .{ .name = "client", .func = hexe_client, .needs = .read },
+    .{ .name = "popup", .func = hexe_popup, .needs = .popup },
+    .{ .name = "stream", .func = hexe_stream, .needs = .stream },
     .{ .name = "geometry", .func = hexe_geometry },
     .{ .name = "ratio", .func = hexe_ratio },
     .{ .name = "close", .func = hexe_close },
     .{ .name = "scroll", .func = hexe_scroll },
-    .{ .name = "selection", .func = hexe_selection },
-    .{ .name = "config", .func = hexe_config },
-    .{ .name = "line", .func = hexe_line },
-    .{ .name = "cursor_line", .func = hexe_cursor_line },
-    .{ .name = "screen_text", .func = hexe_screen_text },
-    .{ .name = "find", .func = hexe_find },
-    .{ .name = "selection_range", .func = hexe_selection_range },
+    .{ .name = "selection", .func = hexe_selection, .needs = .screen },
+    .{ .name = "config", .func = hexe_config, .needs = .read },
+    .{ .name = "line", .func = hexe_line, .needs = .screen },
+    .{ .name = "cursor_line", .func = hexe_cursor_line, .needs = .screen },
+    .{ .name = "screen_text", .func = hexe_screen_text, .needs = .screen },
+    .{ .name = "find", .func = hexe_find, .needs = .screen },
+    .{ .name = "selection_range", .func = hexe_selection_range, .needs = .screen },
 };
 
 /// Registry slot holding the accessor table, so a callback invocation can push

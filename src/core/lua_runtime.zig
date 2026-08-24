@@ -309,6 +309,8 @@ pub const LuaRuntime = struct {
     allocator: std.mem.Allocator,
     unsafe_mode: bool,
     last_error: ?[]const u8 = null,
+    /// Whether installed packages have already run in this runtime.
+    plugins_loaded: bool = false,
     config_builder: ?*ConfigBuilder = null,
 
     const Self = @This();
@@ -482,11 +484,91 @@ pub const LuaRuntime = struct {
             return error.LuaError;
         };
 
+        // Before the config is finished, not after: `applyReturnedConfig` calls
+        // `__finish`, which snapshots the registration tables. A plugin binding
+        // a key after that point registers into a table nobody reads again.
+        self.loadInstalledPlugins();
+
         try self.applyReturnedConfig();
     }
 
     /// Load a Lua config file and return the top-level table
     /// Returns the index of the table on the stack (always 1 after successful load)
+    /// Run every installed, approved plugin's entry file.
+    ///
+    /// After the user's config chunk and before it is finished, so a plugin's
+    /// `hexe.key(...)` lands in the same registry the user's own bindings do --
+    /// which is the whole point of a plugin being Lua rather than a command
+    /// string. A plugin's keybinding belongs to the plugin, not pasted into
+    /// somebody's config.
+    ///
+    /// Untrusted packages are skipped with a warning rather than run: the
+    /// manifest exists to be read first, and `hexe plugin allow` is how that
+    /// reading is recorded.
+    pub fn loadInstalledPlugins(self: *Self) void {
+        // A runtime loads them once. Both config paths call through here, and
+        // running a plugin's entry twice would double every binding it makes.
+        if (self.plugins_loaded) return;
+        self.plugins_loaded = true;
+
+        const pkg = @import("plugin_pkg.zig");
+        const names = pkg.list(self.allocator) catch return;
+        defer {
+            for (names) |n| self.allocator.free(n);
+            self.allocator.free(names);
+        }
+
+        for (names) |name| {
+            var manifest = pkg.readManifest(self.allocator, name) catch |err| {
+                log.warn("plugin '{s}': its manifest did not read: {s}", .{ name, @errorName(err) });
+                continue;
+            };
+            defer manifest.deinit(self.allocator);
+
+            if (!pkg.isTrusted(self.allocator, name, manifest.entry)) {
+                log.warn("plugin '{s}' is not approved; run `hexe plugin allow {s}`", .{ name, name });
+                continue;
+            }
+
+            // The helper process, if it declared one, joins the same list an
+            // inline `hexe.plugin{}` uses -- one way to start a helper, not two.
+            const dir = pkg.pluginPath(self.allocator, name) catch continue;
+            defer self.allocator.free(dir);
+
+            // The helper process, if it declared one, joins the same list an
+            // inline `hexe.plugin{}` uses -- one way to start a helper, not two.
+            if (manifest.command.len > 0) {
+                if (self.getOrCreateMuxBuilder()) |mux| {
+                    mux.appendPackagePlugin(name, manifest.command, dir, manifest.granted) catch {};
+                } else |_| {}
+            }
+            const entry = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir, manifest.entry }) catch continue;
+            defer self.allocator.free(entry);
+            const entry_z = self.allocator.dupeZ(u8, entry) catch continue;
+            defer self.allocator.free(entry_z);
+
+            // `.text`, never bytecode: the manifest was read from source and the
+            // body has to be the same kind of thing, or the review was of
+            // something else.
+            self.lua.loadFile(entry_z, .text) catch {
+                log.warn("plugin '{s}': {s} did not load: {s}", .{ name, manifest.entry, self.getErrorMessage() });
+                self.lua.pop(1);
+                continue;
+            };
+            // The plugin's own directory, as the chunk's `...` -- Lua's own
+            // convention for telling a chunk where it came from. A package that
+            // ships a script beside its `init.lua` has no other way to name it,
+            // and hardcoding the install path would break the moment
+            // XDG_DATA_HOME moved.
+            _ = self.lua.pushString(dir);
+            self.lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
+                log.warn("plugin '{s}' raised while loading: {s}", .{ name, self.getErrorMessage() });
+                self.lua.pop(1);
+                continue;
+            };
+        }
+    }
+
     pub fn loadConfig(self: *Self, path: []const u8) !void {
         // Clear any previous error
         if (self.last_error) |err| {
@@ -514,6 +596,7 @@ pub const LuaRuntime = struct {
             return error.LuaError;
         };
 
+        self.loadInstalledPlugins();
         try self.applyReturnedConfig();
     }
 
@@ -540,6 +623,7 @@ pub const LuaRuntime = struct {
         try self.applyPaletteConfigV2();
         try self.applyNamesConfigV2();
         try self.applyDecorConfigV2();
+        try self.applyPluginsConfigV2();
         try self.applyPopConfigV2();
         try self.applySesConfigV2();
     }
@@ -688,6 +772,52 @@ pub const LuaRuntime = struct {
             self.last_error = try std.fmt.allocPrint(self.allocator, "config error: failed to apply keys: {}", .{err});
             return error.LuaError;
         };
+    }
+
+    /// `plugins` — helper programs the session starts alongside itself.
+    fn applyPluginsConfigV2(self: *Self) !void {
+        if (!self.pushTable(-1, "plugins")) return;
+        defer self.pop();
+
+        const mux = try self.getOrCreateMuxBuilder();
+        const len = self.lua.rawLen(-1);
+        var i: i32 = 1;
+        while (i <= @as(i32, @intCast(len))) : (i += 1) {
+            _ = self.lua.rawGetIndex(-1, i);
+            defer self.lua.pop(1);
+            if (self.lua.typeOf(-1) != .table) continue;
+
+            // A plugin with no command is a name and nothing else; saying so
+            // beats starting nothing and leaving the user to wonder.
+            const command = self.getString(-1, "command") orelse {
+                const name = self.getString(-1, "name") orelse "?";
+                log.warn("plugin '{s}' has no command; nothing to start", .{name});
+                continue;
+            };
+            const name = self.getString(-1, "name") orelse "plugin";
+
+            // `access = { "stream", "popup" }`. Absent means read-only: a
+            // plugin that says nothing should not thereby get everything.
+            var granted: config.access_mod.Set = .{};
+            if (self.pushTable(-1, "access")) {
+                defer self.pop();
+                const n = self.lua.rawLen(-1);
+                var ai: i32 = 1;
+                while (ai <= @as(i32, @intCast(n))) : (ai += 1) {
+                    _ = self.lua.rawGetIndex(-1, ai);
+                    defer self.lua.pop(1);
+                    const word = self.lua.toString(-1) catch continue;
+                    if (config.access_mod.Kind.parse(word)) |kind| {
+                        granted = granted.with(kind);
+                    } else {
+                        log.warn("plugin '{s}': unknown access '{s}'", .{ name, word });
+                    }
+                }
+            }
+            // `read` is not something a plugin declares: it is the floor.
+            // Without it nothing can even name a pane to act on.
+            try mux.appendPluginWithAccess(name, command, granted.merge(config.access_mod.Set.baseline));
+        }
     }
 
     fn applyStatusConfigV2(self: *Self) !void {
@@ -1275,15 +1405,63 @@ fn setupUnsafeRequire(lua: *Lua, allocator: std.mem.Allocator) !void {
         if (lua.typeOf(-1) == .table) {
             lua.pushFunction(hexeLoader);
             lua.setField(-2, "hexe");
+            // The same client library another program gets from `hexe lua-api`,
+            // reachable in here as `require("hexe.client")`. One file, so a
+            // session talking to another session and a script talking to one
+            // cannot drift apart.
+            lua.pushFunction(hexeClientLoader);
+            lua.setField(-2, "hexe.client");
         }
         lua.pop(1); // preload
     }
     lua.pop(1); // package
 }
 
+/// `require("hexe.client")` -- the shipped client library, handed the host's
+/// own socket primitive so it needs no argument in here.
+fn hexeClientLoader(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const source = @import("lua_client.zig").SOURCE;
+
+    const z = std.heap.page_allocator.dupeZ(u8, source) catch return 0;
+    defer std.heap.page_allocator.free(z);
+    lua.loadString(z) catch {
+        log.warn("failed to load the bundled Lua client library", .{});
+        return 0;
+    };
+    // Its transport, as the chunk's argument -- exactly what a foreign host
+    // would pass.
+    if (lua.getGlobal("hexe") catch null) |_| {
+        if (lua.typeOf(-1) == .table) {
+            _ = lua.getField(-1, "stream");
+            lua.remove(-2);
+        } else {
+            lua.pop(1);
+            lua.pushNil();
+        }
+    } else {
+        lua.pushNil();
+    }
+    lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
+        log.warn("the bundled Lua client library raised while loading", .{});
+        return 0;
+    };
+    return 1;
+}
+
 fn injectSetupHelpers(lua: *Lua) void {
+    // The socket primitive the client library borrows. Registered like every
+    // other native, so `hexe.lua` runs unchanged inside hexe itself -- which is
+    // what lets one session talk to another without a second implementation.
+    @import("lua_stream.zig").install(lua);
+    // Listing a directory, for the same reason: a client library discovering
+    // sockets cannot do it in plain Lua, and `io.popen` is gone in safe mode.
+    @import("lua_fs.zig").install(lua);
+
     const code =
         "if type(hexe)=='table' then " ++
+        @import("lua_stream.zig").BOOTSTRAP ++
+        @import("lua_fs.zig").BOOTSTRAP ++
         "hexe.__internal=nil; " ++
         "local __theme_styles={}; " ++
         "local function mark(t, kind) if type(t)~='table' then t={} end; rawset(t,'__hexe_type',kind); return t end; " ++
@@ -1312,7 +1490,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.validate=hexe.validate or function(cfg) " ++
         "expect_table('config', cfg, false); " ++
         "scan_removed('config', cfg); " ++
-        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true, palette=true, names=true, decor=true }; " ++
+        "local allowed={ theme=true, keys=true, mux=true, status=true, pop=true, ses=true, palette=true, names=true, decor=true, plugins=true }; " ++
         "for k,_ in pairs(cfg) do if type(k)=='string' and k:sub(1,2)~='__' and not allowed[k] then error('config error: '..k..' is not a supported top-level section',2) end end; " ++
         "validate_theme('theme', cfg.theme); " ++
         "validate_keybindings('keys', cfg.keys); " ++
@@ -1377,13 +1555,16 @@ fn injectSetupHelpers(lua: *Lua) void {
         // The noun is the name of the thing that happened, which is what the
         // shared style spells this way in every tool; the older form still
         // works and both reach the same list.
+        // `hexe.plugin("name", { command = ... })` -- a registrar, so declaring a
+        // second one adds it rather than replacing the first.
+        "hexe.plugins={}; hexe.plugin=hexe.plugin or function(name, spec) local t=named('plugin', name, spec); hexe.plugins[#hexe.plugins+1]=t; return t end; " ++
         "hexe.on=setmetatable({},{__index=function(_,name) return function(fn) return hexe.events.on(name, fn) end end}); " ++
         // What the module carried before the config ran. Anything else on it
         // afterwards is a setting hexe does not have -- assignment style puts
         // settings in the same namespace as the API, so without this
         // `hexe.mxu = {...}` is accepted in silence and simply never read.
         "local __known={}; for k in pairs(hexe) do __known[k]=true end; " ++
-        "hexe.__finish=function() for k in pairs(hexe) do if type(k)=='string' and k:sub(1,1)~='_' and not __known[k] then error('config error: hexe.'..k..' is not a hexe setting', 2) end end; local cfg={}; for _,k in ipairs({'theme','keys','mux','status','pop','ses','palette','names','decor'}) do local v=rawget(hexe,k); if type(v)=='table' then cfg[k]=__solid(v) end end; " ++
+        "hexe.__finish=function() for k in pairs(hexe) do if type(k)=='string' and k:sub(1,1)~='_' and not __known[k] then error('config error: hexe.'..k..' is not a hexe setting', 2) end end; local cfg={}; for _,k in ipairs({'theme','keys','mux','status','pop','ses','palette','names','decor','plugins'}) do local v=rawget(hexe,k); if type(v)=='table' then cfg[k]=__solid(v) end end; " ++
         "hexe.validate(cfg); __theme_styles=(type(cfg.theme)=='table' and type(cfg.theme.styles)=='table') and cfg.theme.styles or {}; rawset(cfg,'__hexe_type','config'); return cfg end; " ++
         "end";
 
@@ -1536,10 +1717,6 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.pushFunction(hexe_color_bg);
     lua.setField(-2, "bg");
     lua.setField(-2, "color");
-
-    // hexe.plugin = {}
-    lua.createTable(0, 0);
-    lua.setField(-2, "plugin");
 
     // hexe.version
     _ = lua.pushString("0.1.0");
