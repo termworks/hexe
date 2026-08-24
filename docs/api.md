@@ -238,7 +238,9 @@ Inside hexe itself it is `require("hexe.client")`; plain `require("hexe")` there
 is the *config* module, which is a different thing with the same name.
 
 `connect()` takes nothing (`$HEXE_API_SOCKET`, else the newest socket), a
-session name, or `{ path = "…", timeout_ms = 5000 }`.
+session name, or `{ path = "…", timeout_ms = 5000 }`. `connect_pane()` takes
+nothing at all and opens the socket of the pane the caller is running in — see
+[A pane's own socket](#a-panes-own-socket).
 
 **A name is matched against what a session calls itself, not only against the
 file.** The socket is named when it binds, so a session renamed or reattached
@@ -249,6 +251,53 @@ afterwards keeps the old file: `api@pi.sock` can be session `upsilon`. Passing
 Connecting to your **own** session from inside its event loop is refused: the
 frontend cannot answer while it is busy running the caller, so it would hang
 until the socket timed out. In there, `ctx.*` already reaches everything.
+
+## A pane's own socket
+
+The session's socket is full control of the session, authenticated only by file
+permissions. Handing that to whatever runs inside a pane would give a shell
+script the whole mux — so a program in a pane had nothing it could safely be
+given, and scraped its own terminal instead.
+
+Every pane on screen gets its own socket, and the pane's shell is told where:
+
+```console
+$ echo $HEXE_PANE_API_SOCKET
+/run/user/1000/hexe/bcf1011708/pane@904dd85….sock
+```
+
+```lua
+local me = hexe.connect_pane()
+print(me.pane().cwd)              -- this pane, whatever has focus
+me.send("make test\n")            -- into this pane
+me.panes()                        -- refused: that is about the session
+```
+
+**The narrowing belongs to the listener, not the caller.** hexe decides it when
+it binds the socket, so a client cannot ask for more — the same reason a plugin
+gets its own socket rather than a token on the shared one. Three consequences
+worth knowing:
+
+- A **selector naming another pane resolves to nothing**, rather than quietly to
+  your own pane. Silently retargeting a `send` would put keystrokes somewhere
+  the caller did not ask for.
+- **"Current" means you.** With another pane focused, a no-selector call still
+  answers for the socket's own pane; it can see no other, so the session's focus
+  is not its business.
+- A session-wide verb is **refused by name** — `panes`, `tabs`, `session`, `ui`,
+  `floats` — instead of returning one pane's worth of a session-wide answer,
+  which would read as hexe having lost the other panes.
+
+It carries `read`, `screen` and `typing`, on that pane only. That grants nothing
+to whoever is already running there — it *is* the process in that pane and can
+read its own screen and type into itself by definition. What it adds is asking
+hexe precisely rather than guessing; what it withholds is everything else.
+
+The path is named from the pane uuid with no session in it, because a pane
+outlives the name of the session showing it and a shell that read the variable
+at spawn must not end up holding a stale path after a rename. The **frontend**
+binds it, so while nothing is attached nothing is listening — that is the truth
+about a live API rather than a fault worth hiding.
 
 ## Events
 

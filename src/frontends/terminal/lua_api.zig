@@ -410,6 +410,14 @@ fn forEachPane(state: *State, visitor: PaneVisitor) void {
 }
 
 fn focusedPane(state: *State) ?*Pane {
+    // On a pane's own socket, "the current pane" is that pane whatever holds
+    // focus. It can see no other, so the session's focus is not its business --
+    // and this is the single place every no-selector call passes through.
+    if (state.api_pane_scope) |uuid| {
+        var f = Finder{ .want_uuid = std.mem.sliceTo(uuid[0..], 0) };
+        forEachPane(state, .{ .ctx = &f, .call = Finder.visit });
+        return f.found;
+    }
     if (state.activeFloatingIndex()) |idx| {
         if (idx < state.view.float_views.items.len) return state.view.float_views.items[idx];
     }
@@ -462,6 +470,18 @@ fn indexOf(state: *State, pane: *Pane) usize {
 /// Resolve a selector argument at `idx` to a pane. Shared by every accessor
 /// and mutator that takes one, so they cannot drift apart.
 fn resolvePane(lua: *Lua, state: *State, idx: i32) ?*Pane {
+    if (state.api_pane_scope != null) {
+        const mine = focusedPane(state) orelse return null;
+        const picked = resolvePaneUnscoped(lua, state, idx) orelse return null;
+        // A selector naming somebody else resolves to nothing rather than
+        // silently to the caller's own pane: retargeting a write is worse than
+        // refusing it.
+        return if (picked == mine) mine else null;
+    }
+    return resolvePaneUnscoped(lua, state, idx);
+}
+
+fn resolvePaneUnscoped(lua: *Lua, state: *State, idx: i32) ?*Pane {
     switch (lua.typeOf(idx)) {
         .none, .nil => return focusedPane(state),
         .number => {
@@ -1778,7 +1798,18 @@ const Entry = struct {
     name: [:0]const u8,
     func: *const fn (?*LuaState) callconv(.c) c_int,
     needs: core.access.Kind = .control,
+    /// Answerable for one pane alone, so a pane's own socket may serve it.
+    /// Everything else describes or changes the session and is refused there.
+    pane_local: bool = false,
 };
+
+/// Whether `call` means something on a single pane's socket.
+pub fn isPaneLocal(call: []const u8) bool {
+    inline for (ENTRIES) |e| {
+        if (std.mem.eql(u8, call, std.mem.span(e.name.ptr))) return e.pane_local;
+    }
+    return false;
+}
 
 /// What `call` requires, or null if there is no such verb.
 pub fn accessFor(call: []const u8) ?core.access.Kind {
@@ -1789,7 +1820,7 @@ pub fn accessFor(call: []const u8) ?core.access.Kind {
 }
 
 const ENTRIES = [_]Entry{
-    .{ .name = "pane", .func = hexe_pane, .needs = .read },
+    .{ .name = "pane", .func = hexe_pane, .needs = .read, .pane_local = true },
     .{ .name = "panes", .func = hexe_panes, .needs = .read },
     .{ .name = "floats", .func = hexe_floats, .needs = .read },
     .{ .name = "splits", .func = hexe_splits, .needs = .read },
@@ -1797,31 +1828,31 @@ const ENTRIES = [_]Entry{
     .{ .name = "session", .func = hexe_session, .needs = .read },
     .{ .name = "ui", .func = hexe_ui, .needs = .read },
     .{ .name = "count", .func = hexe_count, .needs = .read },
-    .{ .name = "env", .func = hexe_env, .needs = .screen },
+    .{ .name = "env", .func = hexe_env, .needs = .screen, .pane_local = true },
     .{ .name = "act", .func = hexe_act },
     .{ .name = "notify", .func = hexe_notify, .needs = .popup },
-    .{ .name = "send", .func = hexe_send, .needs = .typing },
+    .{ .name = "send", .func = hexe_send, .needs = .typing, .pane_local = true },
     .{ .name = "focus", .func = hexe_focus },
     .{ .name = "tab_select", .func = hexe_tab_select },
     .{ .name = "rename_tab", .func = hexe_rename_tab },
     .{ .name = "rename", .func = hexe_rename },
     .{ .name = "share", .func = hexe_share },
     .{ .name = "keys", .func = hexe_keys, .needs = .keyboard },
-    .{ .name = "capture", .func = hexe_capture, .needs = .read },
-    .{ .name = "client", .func = hexe_client, .needs = .read },
+    .{ .name = "capture", .func = hexe_capture, .needs = .read, .pane_local = true },
+    .{ .name = "client", .func = hexe_client, .needs = .read, .pane_local = true },
     .{ .name = "popup", .func = hexe_popup, .needs = .popup },
     .{ .name = "stream", .func = hexe_stream, .needs = .stream },
     .{ .name = "geometry", .func = hexe_geometry },
     .{ .name = "ratio", .func = hexe_ratio },
     .{ .name = "close", .func = hexe_close },
     .{ .name = "scroll", .func = hexe_scroll },
-    .{ .name = "selection", .func = hexe_selection, .needs = .screen },
+    .{ .name = "selection", .func = hexe_selection, .needs = .screen, .pane_local = true },
     .{ .name = "config", .func = hexe_config, .needs = .read },
-    .{ .name = "line", .func = hexe_line, .needs = .screen },
-    .{ .name = "cursor_line", .func = hexe_cursor_line, .needs = .screen },
-    .{ .name = "screen_text", .func = hexe_screen_text, .needs = .screen },
-    .{ .name = "find", .func = hexe_find, .needs = .screen },
-    .{ .name = "selection_range", .func = hexe_selection_range, .needs = .screen },
+    .{ .name = "line", .func = hexe_line, .needs = .screen, .pane_local = true },
+    .{ .name = "cursor_line", .func = hexe_cursor_line, .needs = .screen, .pane_local = true },
+    .{ .name = "screen_text", .func = hexe_screen_text, .needs = .screen, .pane_local = true },
+    .{ .name = "find", .func = hexe_find, .needs = .screen, .pane_local = true },
+    .{ .name = "selection_range", .func = hexe_selection_range, .needs = .screen, .pane_local = true },
 };
 
 /// Registry slot holding the accessor table, so a callback invocation can push

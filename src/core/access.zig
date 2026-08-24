@@ -70,6 +70,16 @@ pub const Set = struct {
     /// stops being harmless.
     pub const baseline: Set = .{ .bits = @as(u8, 1) << @intFromEnum(Kind.read) };
 
+    /// What a pane's own socket carries: read it, see its screen, type into it.
+    ///
+    /// Grants nothing to whoever is already running in that pane -- it IS the
+    /// process there and can do all three by definition. What the socket adds
+    /// is a way to ask hexe precisely instead of guessing, and what it withholds
+    /// is every other pane and the session's shape.
+    pub const pane_local: Set = baseline
+        .with(.screen)
+        .with(.typing);
+
     pub const all: Set = blk: {
         var s: Set = .{};
         for (@typeInfo(Kind).@"enum".fields) |f| {

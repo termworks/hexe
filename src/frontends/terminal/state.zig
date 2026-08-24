@@ -395,8 +395,13 @@ pub const State = struct {
     /// while a scoped socket's request is in flight; the loop is single
     /// threaded, so this is a stack discipline rather than shared state.
     api_grant: core.access.Set = core.access.Set.all,
+    /// Set while serving a request that arrived on a pane's own socket: every
+    /// selector resolves to this pane or to nothing.
+    api_pane_scope: ?[32]u8 = null,
     /// One scoped control socket per plugin, each with its own grant.
     plugin_servers: std.ArrayList(api_server.ApiServer) = .empty,
+    /// One per pane on screen, bound by `syncPaneServers`.
+    pane_servers: std.ArrayList(api_server.ApiServer) = .empty,
     /// Plugins that declared `stream` and so may be handed a pane's bytes.
     /// Kept (rather than spawned and forgotten) because their pipes are the
     /// channel.
@@ -1121,6 +1126,49 @@ pub const State = struct {
         self.publishSelfSocket();
     }
 
+    /// Give every pane on screen its own socket, and take back the ones whose
+    /// pane is gone.
+    ///
+    /// Driven off the live pane set each iteration rather than hooked into
+    /// pane creation and destruction: panes appear from splits, layouts,
+    /// reattach and adoption, and a hook on each is four places to forget.
+    /// Comparing what exists against what is bound cannot drift.
+    pub fn syncPaneServers(self: *State) void {
+        if (self.api_server == null) return;
+
+        var i: usize = 0;
+        while (i < self.pane_servers.items.len) {
+            const scope = self.pane_servers.items[i].pane_scope orelse @as([32]u8, @splat(0));
+            if (self.findPaneByUuid(scope) == null) {
+                var dead = self.pane_servers.swapRemove(i);
+                dead.deinit();
+                continue;
+            }
+            i += 1;
+        }
+
+        for (self.view.tab_views.items) |*tab| {
+            var it = tab.layout.splitIterator();
+            while (it.next()) |p| self.ensurePaneServer(p.*);
+        }
+        for (self.view.float_views.items) |p| self.ensurePaneServer(p);
+    }
+
+    fn ensurePaneServer(self: *State, pane: *Pane) void {
+        for (self.pane_servers.items) |srv| {
+            const scope = srv.pane_scope orelse continue;
+            if (std.mem.eql(u8, &scope, &pane.uuid)) return;
+        }
+        const srv = api_server.ApiServer.initPane(self.allocator, pane.uuid[0..]) catch |err| {
+            core.logging.logError("terminal", "could not open a pane's own socket", err);
+            return;
+        };
+        self.pane_servers.append(self.allocator, srv) catch {
+            var tmp = srv;
+            tmp.deinit();
+        };
+    }
+
     /// Start the helper programs the config declared, once.
     ///
     /// After the control socket exists, so `HEXE_API_SOCKET` can point at it:
@@ -1166,7 +1214,7 @@ pub const State = struct {
             const scoped = api_server.ApiServer.initScoped(
                 self.allocator,
                 self.runtime.sessionName(),
-                plugin.name,
+                .{ .plugin = plugin.name },
                 plugin.access,
             ) catch |err| {
                 core.logging.logError("terminal", "could not open a scoped socket for a plugin", err);
@@ -1240,6 +1288,8 @@ pub const State = struct {
         self.stream_plugins.deinit(self.allocator);
         for (self.plugin_servers.items) |*srv| srv.deinit();
         self.plugin_servers.deinit(self.allocator);
+        for (self.pane_servers.items) |*srv| srv.deinit();
+        self.pane_servers.deinit(self.allocator);
         if (self.api_server) |*srv| srv.deinit();
         self.api_server = null;
         self.runtime.prepareFrontendExit(posix.STDIN_FILENO, true) catch |err| {

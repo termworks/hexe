@@ -544,10 +544,23 @@ const Pod = struct {
         var uuid: [32]u8 = undefined;
         @memcpy(&uuid, uuid_str[0..32]);
 
+        // The pane's own API socket. Derived from the uuid rather than passed
+        // down from the frontend: the pod outlives every frontend that shows
+        // it, so a path handed over at spawn would be stale after a reattach.
+        // The frontend binds this exact name; while none is attached there is
+        // nothing listening, which is the truth about a live API.
+        var api_buf: [128]u8 = undefined;
+        const pane_api: []const u8 = blk: {
+            const dir = core.ipc.getSocketDir(allocator) catch break :blk "";
+            defer allocator.free(dir);
+            break :blk std.fmt.bufPrint(&api_buf, "{s}/pane@{s}.sock", .{ dir, uuid_str }) catch "";
+        };
+
         const extra_env = [_][2][]const u8{
             .{ "HEXE_PANE_UUID", uuid_str },
             .{ "HEXE_POD_NAME", pod_name orelse "" },
             .{ "HEXE_POD_SOCKET", socket_path },
+            .{ "HEXE_PANE_API_SOCKET", pane_api },
         };
         var pty = try core.Pty.spawnWithEnv(shell, cwd, &extra_env);
         errdefer pty.close();

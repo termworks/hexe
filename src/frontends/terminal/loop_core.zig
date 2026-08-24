@@ -372,6 +372,9 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         // rather than one with per-connection grants, so authority is a
         // property of the door rather than of what the caller claims.
         for (state.plugin_servers.items) |*srv| srv.service(state);
+        // And one per pane, for whatever is running inside it.
+        state.syncPaneServers();
+        for (state.pane_servers.items) |*srv| srv.service(state);
 
         const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);
