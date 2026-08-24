@@ -1241,6 +1241,24 @@ fn hexe_stream(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// `client()` — hexe's own client library, as source.
+///
+/// So a peer can obtain it **over the wire it is already speaking**, rather
+/// than shelling out to `hexe lua-api` or being handed a file. A sandboxed host
+/// -- oslo's VM removes `io.popen` -- has no other way to get it in code.
+///
+/// The bootstrap problem is smaller than it looks: any sibling that speaks
+/// 4-byte-length + JSON can already call this, and every one of them ships a
+/// client that does. It fetches the right vocabulary with the wrong one.
+///
+/// `read` access: it is a constant compiled into the binary, and a caller that
+/// can reach the socket at all can already run `hexe lua-api`.
+fn hexe_client(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    _ = lua.pushString(core.lua_client.SOURCE);
+    return 1;
+}
+
 /// `popup("text")` shows a block until the user dismisses it; `popup()` clears.
 ///
 /// hexe does not interpret the text. A link is a string; a QR code is a grid of
@@ -1790,6 +1808,7 @@ const ENTRIES = [_]Entry{
     .{ .name = "share", .func = hexe_share },
     .{ .name = "keys", .func = hexe_keys, .needs = .keyboard },
     .{ .name = "capture", .func = hexe_capture, .needs = .read },
+    .{ .name = "client", .func = hexe_client, .needs = .read },
     .{ .name = "popup", .func = hexe_popup, .needs = .popup },
     .{ .name = "stream", .func = hexe_stream, .needs = .stream },
     .{ .name = "geometry", .func = hexe_geometry },

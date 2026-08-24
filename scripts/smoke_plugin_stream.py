@@ -62,7 +62,9 @@ deadline = time.time() + 30
 pane = None
 while time.time() < deadline and pane is None:
     r = api("panes")
-    for p in (r or {{}}).get("result") or []:
+    # A reply carries a list of return values; a client unwraps.
+    vals = (r or {{}}).get("result") or []
+    for p in (vals[0] if vals else []):
         if p.get("pod_socket"):
             pane = p
             break

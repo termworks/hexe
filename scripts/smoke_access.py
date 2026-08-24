@@ -113,7 +113,12 @@ def call(sock_path, name, *args):
             break
         body += c
     s.close()
-    return json.loads(body or b"{}")
+    # `result` is the list of return values; a client unwraps the single one.
+    r = json.loads(body or b"{}")
+    if r.get("ok") and isinstance(r.get("result"), list):
+        vals = r["result"]
+        r = dict(r, result=vals[0] if (r.get("n") or len(vals)) == 1 else vals)
+    return r
 
 
 def api(*args):

@@ -28,9 +28,30 @@ framing the painter protocol uses.
 
 ```
 -> {"call":"panes","arg":{"visible":true}}
-<- {"ok":true,"result":[ ... ]}
+<- {"ok":true,"n":1,"result":[ ... ]}
 <- {"ok":false,"error":"no such call: pane_list"}
 ```
+
+**`result` is a list of return values and `n` says how many** — the same shape
+oslo's server answers with. One convention across the family means one client
+library reads either tool. hexe used to answer with the value itself, and a
+sibling's client, which unpacks, silently lost every record, string and number
+it was handed: `session()` came back empty rather than wrong, which is the worst
+way for a protocol to disagree.
+
+Every hexe verb returns exactly one value, so `n` is always 1 today. `hexe api`
+is a client like any other and unwraps, so what it prints is unchanged:
+
+```console
+$ hexe api count '"panes"'
+{"ok":true,"result":1}            # the CLI unwraps
+                                  # the wire carried {"ok":true,"n":1,"result":[1]}
+```
+
+**A connection serves more than one request.** It used to close after replying,
+which made a client that holds one connection — oslo's does — fail its second
+call with a broken pipe. Connections are still capped at 8 and a quiet one is
+reaped after five seconds, so a client that wants one-shot just closes.
 
 `call` names any function on `hexe.live`. `arg` is optional and may be any JSON
 value, not only an object. For a call that takes more than one argument, use
@@ -49,22 +70,57 @@ $ hexe api geometry '"904dd85…"' '{"x":30,"y":20}'
 $ hexe api ratio '"904dd85…"' 0.25
 ```
 
-One request per connection.
-
 ## What you can call
 
 Every accessor and verb the Lua API has, because the socket calls those exact
 functions and encodes what they return. There is no second list of fields to
 drift out of step with the first.
 
-| | |
+The rows are the [access kinds](access.md), so this table is also what each
+plugin declaration buys. The dispatcher reads the same pairing off one
+`ENTRIES` list in `lua_api.zig` — that list is authoritative and this is a copy
+of it.
+
+| access | verbs |
 | --- | --- |
-| read | `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `env`, `config` |
-| screen | `line`, `cursor_line`, `screen_text`, `find`, `selection`, `selection_range` |
-| act | `act`, `send`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`, `rename`, `notify` |
-| place | `geometry`, `ratio` |
-| share | `share` |
-| keyboard | `keys` |
+| `read` | `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `config`, `capture`, `client` |
+| `screen` | `env`, `line`, `cursor_line`, `screen_text`, `find`, `selection`, `selection_range` |
+| `typing` | `send` |
+| `keyboard` | `keys` |
+| `popup` | `notify`, `popup` |
+| `stream` | `stream` |
+| `control` | `act`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`, `rename`, `share`, `geometry`, `ratio` |
+
+`control` is the default: a verb that changes the session's shape needs the
+whole session, and there is no smaller honest name for that.
+
+The four newer ones are each a general power rather than a named feature:
+
+```console
+$ hexe api capture true              # something is recording this pane
+$ hexe api popup '"scan this"'       # show a block until dismissed; popup() clears
+$ hexe api stream '"drop"'           # hand the focused pane's bytes to that plugin
+$ hexe api client                    # the client library, as source
+```
+
+`capture` draws three bars and hexe never learns whether it is a microphone, a
+camera or the screen. A claim lapses after a few seconds unless renewed, so a
+plugin that dies mid-capture cannot leave the light on — and any plugin may
+claim it, because *claiming* to be recording is harmless and the harm runs the
+other way.
+
+`popup` does not interpret its text. A link is a string; a QR code is a grid of
+block characters the caller already rendered. The moment hexe knows what a QR
+is, it owns a QR library and a set of opinions about them.
+
+`stream` says who gets the bytes, not what they are for — publishing them,
+recording them, feeding another hexe are all the plugin's business. Whether the
+far end may *type back* is that plugin's `typing` access rather than an argument
+here: view-only and read-write are different grants, not different calls.
+
+`client` is the library's own source, so a sibling that can already frame a
+request fetches the right vocabulary using the wrong one — rather than shelling
+out to `hexe lua-api`, which a sandboxed host cannot do.
 
 `keys(chord [, phase])` presses a chord **at hexe** — `"ctrl+alt+d"`,
 `"super+left"`, `"space"` — so it fires whatever you bound rather than reaching
@@ -136,18 +192,38 @@ here; an invalid name is refused and the old one is kept.
 
 ## Calling it from another Lua
 
-`hexe lua-api` prints a plain-Lua client library. A host that can shell out
-pipes it; one that cannot — oslo's VM refuses `io.popen` — reads it from
-wherever you put it:
+hexe ships a plain-Lua client library, and there are three ways to get it. None
+of them has to be a file you maintain:
+
+**With a sibling's client.** Both tools now frame and reply the same way, so
+oslo's own stub connects to a hexe socket unmodified — it scans for either
+tool's sockets and reads either tool's replies. Nothing to fetch:
+
+```lua
+local client = load(oslo.live.client())(oslo.stream)
+local mux    = client.connect("work")        -- a hexe session
+print(#mux.panes())
+```
+
+**In code, over the wire.** For hexe's own vocabulary, the `client` verb returns
+the source — a peer that can already frame a request fetches the library by
+asking for it:
+
+```lua
+local lib = load(mux.client())(oslo.stream)  -- stream: what plain Lua cannot do
+```
+
+**As a file, if you want one.** `hexe lua-api` prints it; the redirect is yours
+to write and hexe does not offer to place it for you:
 
 ```sh
 hexe lua-api > ~/.config/oslo/hexe.lua
 ```
 
+Either way the use is the same:
+
 ```lua
-local src  = io.open(os.getenv("HOME") .. "/.config/oslo/hexe.lua"):read("a")
-local hexe = load(src)(oslo.stream)      -- the one thing it cannot do itself
-local mux  = hexe.connect()
+local mux = lib.connect()
 for _, pane in ipairs(mux.panes()) do print(pane.name, pane.cwd) end
 ```
 

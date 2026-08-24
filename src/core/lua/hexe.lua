@@ -1,9 +1,12 @@
 -- hexe's client library: what another program requires to talk to a running session.
 --
---   local src  = io.popen("hexe lua-api"):read("a")
 --   local hexe = load(src)(my_transport)
 --   local mux  = hexe.connect()
 --   for _, pane in ipairs(mux.panes()) do print(pane.name, pane.cwd) end
+--
+-- Three ways to get `src`, and a sandboxed host can only use the first two: the `client` verb on
+-- an already-open connection, a sibling's own stub (the framing and reply shape are shared), or
+-- `io.popen("hexe lua-api"):read("a")` where the host permits `io`.
 --
 -- Plain Lua on purpose. It runs unchanged in hexe's own VM, in oslo's, in PUC Lua and in whatever
 -- the next sibling embeds, so it is *copied* between tools rather than ported — and a fix to the
@@ -261,7 +264,12 @@ function Session:call(name, ...)
 
   local reply = decode(reply_body)
   if not reply.ok then return nil, reply.error or "the session refused the call" end
-  return reply.result
+  -- `result` is a list of return values and `n` says how many, so one Lua call
+  -- answers with what the remote one did. The same shape oslo's server uses:
+  -- a client that unpacked hexe's old single value lost every record, string
+  -- and number it was handed.
+  local values = reply.result or {}
+  return table.unpack(values, 1, reply.n or #values)
 end
 
 function Session:close()

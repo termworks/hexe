@@ -125,6 +125,28 @@ A package's `command` is started **with the package as its working directory**,
 so a manifest can say `command = "./backend.sh"` without knowing where it will
 be installed.
 
+### A helper process talks back over a socket
+
+A plugin whose work happens outside hexe — a recorder, an uploader, a speech
+backend — is started with `$HEXE_API_SOCKET` pointing at **its own** socket,
+scoped to the access it declared. That is the whole contract: no library to
+link, no version to match, just a unix socket carrying 4-byte-length JSON.
+
+```python
+s.connect(os.environ["HEXE_API_SOCKET"])
+body = json.dumps({"call": "panes"}).encode()
+s.sendall(struct.pack(">I", len(body)) + body)
+# reply: {"ok":true,"n":1,"result":[[ ...panes... ]]}
+```
+
+`result` is a **list** of return values and `n` says how many, so a client
+unwraps rather than reading the value directly. One connection serves as many
+requests as you like.
+
+If the helper is itself Lua, ask for the library instead of writing that by
+hand — `client()` returns it as source over the same socket. See
+[api.md](api.md#calling-it-from-another-lua).
+
 ### Two worked examples
 
 | | |

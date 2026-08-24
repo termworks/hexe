@@ -159,7 +159,7 @@ def call(payload, expect_reply=True, read_reply=True):
     return json.loads(body)
 
 
-def api(name, arg=None):
+def raw_api(name, arg=None):
     req = {"call": name}
     if arg is not None:
         req["arg"] = arg
@@ -167,9 +167,63 @@ def api(name, arg=None):
     return call(struct.pack(">I", len(body)) + body)
 
 
+def api(name, arg=None):
+    """A reply carries a LIST of return values and `n`; a client unwraps."""
+    r = raw_api(name, arg)
+    if r and r.get("ok") and isinstance(r.get("result"), list):
+        vals = r["result"]
+        r = dict(r, result=vals[0] if (r.get("n") or len(vals)) == 1 else vals)
+    return r
+
+
 def alive():
     return fe.poll() is None
 
+
+# ------------------------------------------------------- the reply convention
+#
+# The family answers with a LIST of return values plus `n`. A sibling's client
+# unpacks, so a server that answered with the bare value would hand it nothing
+# for every record, string and number -- an empty answer, not an error.
+w = raw_api("count", "panes")
+if not w or not w.get("ok"):
+    fail(f"`count` did not answer: {w}")
+if not isinstance(w.get("result"), list):
+    fail(f"`result` is {type(w.get('result')).__name__}, not a list of return values: {w} "
+         "-- a client that unpacks reads this as no return value at all")
+if w.get("n") != len(w["result"]):
+    fail(f"`n` is {w.get('n')} but result carries {len(w['result'])} values: {w}")
+print(f"wire: replies carry n={w['n']} and a list of return values")
+
+# A client that holds one connection open -- the obvious way to write one --
+# must not die on its second call.
+ka = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+ka.settimeout(10)
+ka.connect(SOCK)
+for i in range(3):
+    b = json.dumps({"call": "count", "arg": "panes"}).encode()
+    try:
+        ka.sendall(struct.pack(">I", len(b)) + b)
+        hdr = b""
+        while len(hdr) < 4:
+            c = ka.recv(4 - len(hdr))
+            if not c:
+                fail(f"the connection closed after {i} request(s); a client that reuses "
+                     "one connection gets a broken pipe on its next call")
+            hdr += c
+        need = struct.unpack(">I", hdr)[0]
+        got = b""
+        while len(got) < need:
+            c = ka.recv(need - len(got))
+            if not c:
+                break
+            got += c
+        if not json.loads(got).get("ok"):
+            fail(f"request {i + 1} on a reused connection failed: {got!r}")
+    except (BrokenPipeError, ConnectionResetError) as e:
+        fail(f"request {i + 1} on a reused connection: {e}")
+ka.close()
+print("wire: one connection serves several requests")
 
 # ------------------------------------------------------------------ reading
 r = api("session")
