@@ -38,6 +38,11 @@ end
 
 local M = { _NAME = "hexe", _VERSION = 1 }
 
+-- Every global this family answers to. The file is copied between siblings, so a lookup that knew
+-- only its own name would send discovery down the `io.popen` path on exactly the hosts that refuse
+-- it -- which reads as "nothing is running".
+local HOSTS = { "hexe", "oslo" }
+
 -- ---------------------------------------------------------------- JSON, in Lua
 
 -- Carried rather than required. The library runs inside somebody else's VM, so it cannot reach
@@ -329,7 +334,7 @@ end
 --- which looked exactly like "no session is running".
 local function list_candidates(dir)
   local host
-  for _, name in ipairs({ "hexe", "oslo" }) do
+  for _, name in ipairs(HOSTS) do
     local candidate = _G[name]
     if candidate and candidate.fs and candidate.fs.ls then host = candidate; break end
   end
@@ -474,6 +479,114 @@ function M.connect_pane(opts)
     return nil, (why or "nothing was listening") .. " — is a frontend attached to this session?"
   end
   return session
+end
+
+-- ---------------------------------------------------------------- one question
+
+--- A SYNCHRONOUS command runner, from whichever sibling we are loaded into.
+---
+--- `run(cmd, opts) -> { ok, code, stdout, stderr }`, answered before it returns. Deliberately not
+--- the same thing as a statusbar's `exec`: that kind is asynchronous and cached -- it answers
+--- `pending` first and the real result later -- which is right for painting a prompt and useless
+--- for a request that has to be answered now.
+---
+--- A host that must not block is entitled to lend nothing here. A terminal multiplexer is the
+--- clearest case: a spawn inside its frontend loop suspends every pane in the session for as long
+--- as the child takes, so it lends no `run` and `fetch` over a spawn simply is not available in it.
+--- Sockets still are.
+local function host_run()
+  for _, name in ipairs(HOSTS) do
+    local h = _G[name]
+    if h and type(h.run) == "function" then return h.run end
+  end
+  return nil
+end
+
+--- A spawnable tool's descriptor, if it left one beside the sockets.
+---
+--- Discovery stays implicit, but what it finds is an ABSOLUTE path the tool wrote about itself --
+--- never a name resolved through `$PATH`. Executing whatever answers to a name, on the failure path
+--- where nothing was listening, is not the same risk as opening a socket something chose to create.
+--- A tool whose state IS its process simply never writes one of these, so "do not spawn me" is a
+--- fact this can check rather than a rule someone has to remember.
+--- Where a named tool keeps its runtime files. The same shape as `socket_dir`, for a sibling
+--- rather than for us -- a descriptor has to be findable by whoever is asking, not only by its
+--- author, so it lives under the tool's own name and not under ours.
+local function tool_dir(tool)
+  local runtime = os.getenv("XDG_RUNTIME_DIR")
+  if runtime and runtime ~= "" then return runtime .. "/" .. tool end
+  return "/tmp/" .. tool .. "-" .. (os.getenv("UID") or "0")
+end
+
+local function descriptor(tool)
+  if type(tool) ~= "string" or tool == "" or tool:find("[^%w._-]") then return nil end
+  local host, path = nil, tool_dir(tool) .. "/" .. tool .. ".tool"
+  for _, name in ipairs(HOSTS) do
+    local h = _G[name]
+    if h and h.fs and h.fs.ls then host = h; break end
+  end
+  if not host or not host.fs.read then return nil end
+  local body = host.fs.read(path)
+  if not body then return nil end
+  local ok, d = pcall(decode, body)
+  if not ok or type(d) ~= "table" or type(d.exec) ~= "string" then return nil end
+  return d
+end
+
+--- Ask one question and take the answer. No handle, nothing held, nothing to close.
+---
+--- `connect()` is a channel with a lifetime; this is not, and the difference is not an
+--- implementation detail worth hiding behind one name. The verb says what the CALLER wanted, so a
+--- tool that later grows a daemon breaks no call site.
+---
+--- Two ways to be answered, tried in that order:
+---   * a socket, when one is listening -- ask without holding it;
+---   * the tool's own `api` subcommand, for a tool that has no daemon and never will.
+---
+--- `where` is a session name, `{ tool = "name" }`, or nothing.
+function M.fetch(where, verb, ...)
+  if type(verb) ~= "string" then return nil, "fetch needs a verb: fetch(where, 'name', ...)" end
+
+  -- Only OUR sockets answer our verbs. Asking for a different tool must not resolve to one of
+  -- ours and call a name it has never heard of -- an error at the far end reads as the tool being
+  -- broken rather than as the wrong peer being asked.
+  local asked = type(where) == "table" and where.tool or nil
+  local session = (asked == nil or asked == M._NAME) and M.connect(where) or nil
+  if session then
+    local out = table.pack(session:call(verb, ...))
+    session:close()
+    return table.unpack(out, 1, out.n)
+  end
+
+  local tool = type(where) == "table" and where.tool or (type(where) == "string" and where or M._NAME)
+  local d = descriptor(tool)
+  if not d then
+    return nil, "nothing is listening for '" .. tostring(tool) .. "', and it left no .tool descriptor"
+  end
+  local exec = host_run()
+  if not exec then
+    return nil, "'" .. tool .. "' has no socket and this host lends no synchronous runner, so it "
+      .. "cannot be spawned from in here — ask from a host that can block, or give it a daemon"
+  end
+
+  -- The request is argv and the reply is stdout: one question needs no framing, and asking for one
+  -- costs a primitive that takes stdin, which not every host lends.
+  local argv = { d.exec }
+  for _, a in ipairs(d.args or {}) do argv[#argv + 1] = a end
+  argv[#argv + 1] = verb
+  for i = 1, select("#", ...) do argv[#argv + 1] = encode((select(i, ...))) end
+  local quoted = {}
+  for i, a in ipairs(argv) do quoted[i] = "'" .. tostring(a):gsub("'", "'\\''") .. "'" end
+
+  local r = exec(table.concat(quoted, " "), { timeout_ms = (type(where) == "table" and where.timeout_ms) or 5000 })
+  if not r or not r.ok then
+    return nil, "'" .. tool .. "' failed: " .. tostring(r and (r.stderr ~= "" and r.stderr or r.code) or "no result")
+  end
+  local decoded, why = pcall(decode, r.stdout or "")
+  if not decoded then return nil, "'" .. tool .. "' did not answer in the family's shape: " .. tostring(why) end
+  local reply = why
+  if not reply.ok then return nil, reply.error or "the tool refused the call" end
+  return table.unpack(reply.result or {}, 1, reply.n or #(reply.result or {}))
 end
 
 --- The socket path that would be tried first, without connecting. For a diagnostic.
