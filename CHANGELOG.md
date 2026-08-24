@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.4.7] - 2026-08-24
+
+### <!-- 0 -->⛰️  Features
+
+- Family reply convention on the wire
+- Lend fs.ls so a client can find sockets
+- Connect by the name a session answers to
+- Ship the client library other programs require
+- Dictate and share example packages
+- Packages with a manifest, and a popup verb
+- Hand a pane to a plugin as asciicast
+- Tell a refused observer why
+- Declared capabilities for plugins
+- Add an asryx adapter
+- Drive a speech tool and show a live meter
+- Report pane observers and add a kill switch
+- Pane pod_socket, plugin hook, streaming protocol
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Free bind callback refs on teardown
+- Press and release both fire on one chord
+- Detach background jobs from stdout
+
+### <!-- 3 -->📚 Documentation
+
+- Asryx install gotchas
+- Note asryx stop is synchronous
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Cleanup
+
+### <!-- 9 -->◀️ Revert
+
+- Drop the --install flag
+
+### Build
+
+- Vendor yazap so examples/ can exist
+
 ## [0.4.6] - 2026-08-22
 
 ### <!-- 0 -->⛰️  Features
