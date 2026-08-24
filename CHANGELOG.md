@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.8] - 2026-08-24
+
+### <!-- 0 -->⛰️  Features
+
+- Give each pane its own scoped socket
+
+### <!-- 3 -->📚 Documentation
+
+- Correct the name, build and surface
+
 ## [0.4.7] - 2026-08-24
 
 ### <!-- 0 -->⛰️  Features
