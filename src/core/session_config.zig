@@ -393,8 +393,20 @@ pub const ParsedSessionLua = union(enum) {
 /// same runtime. The old two-parser fallback re-ran the whole file for the
 /// legacy attempt, so any Lua side effects executed twice.
 pub fn parseSessionLuaOnce(allocator: std.mem.Allocator, path: []const u8) !ParsedSessionLua {
+    return parseSessionLuaOnceApproving(allocator, path, .{});
+}
+
+/// The same, granting whatever the file declared -- for the caller that showed
+/// the request to a person and got a yes. The grant is still the intersection:
+/// approving `tools` gives nothing to a file that never asked.
+pub fn parseSessionLuaOnceApproving(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    approved: lua_runtime.Needs,
+) !ParsedSessionLua {
     var runtime = try LuaRuntime.init(allocator);
     defer runtime.deinit();
+    runtime.approved_needs = approved;
 
     // Project-local file: sandboxed unless `hexe allow`ed. Loading EXECUTES
     // it, so this must gate the load itself, not just the hooks it declares.
@@ -477,8 +489,20 @@ fn extractLegacyFromRuntime(allocator: std.mem.Allocator, runtime: *LuaRuntime, 
 /// auto-loaded layouts, instead of drifting through the legacy SessionConfig
 /// split parser.
 pub fn parseSessionLayoutLua(allocator: std.mem.Allocator, path: []const u8) !config_mod.LayoutDef {
+    return parseSessionLayoutLuaApproving(allocator, path, .{});
+}
+
+/// The same, granting a project file what it declared -- for the caller that
+/// SHOWED the request to a person and got a yes. Everything else uses the form
+/// above and grants nothing.
+pub fn parseSessionLayoutLuaApproving(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    approved: lua_runtime.Needs,
+) !config_mod.LayoutDef {
     var runtime = try LuaRuntime.init(allocator);
     defer runtime.deinit();
+    runtime.approved_needs = approved;
 
     // Project-local file: sandboxed unless `hexe allow`ed. Loading EXECUTES
     // it, so this must gate the load itself, not just the hooks it declares.
@@ -874,7 +898,7 @@ test "the sandbox revokes fs and stream, and their natives" {
         \\local read_back = pcall(function() return hexe.fs.read('/etc/hostname') end)
         \\local listed = pcall(function() return hexe.fs.ls('/') end)
         \\local dialled = pcall(function() return hexe.stream.connect('/dev/log') end)
-        \\local raw_read = (rawget(_G, '__fs_read') ~= nil)
+        \\local raw_read = (rawget(_G, '__fs_read') ~= nil) or (rawget(_G, '__fs_dir') ~= nil)
         \\local raw_dial = (rawget(_G, '__stream_connect') ~= nil)
         \\return hexe.setup({ ses = { layouts = { hexe.layout('probe', {
         \\  root = '.',
@@ -901,6 +925,90 @@ test "the sandbox revokes fs and stream, and their natives" {
     try std.testing.expectEqualStrings("dial-blocked", layout.tabs[2].name);
     try std.testing.expectEqualStrings("rawread-blocked", layout.tabs[3].name);
     try std.testing.expectEqualStrings("rawdial-blocked", layout.tabs[4].name);
+}
+
+test "a declaration is granted only when it is BOTH asked for and approved" {
+    // The middle tier: an untrusted file that says what it wants, and a caller
+    // that showed the request to a person. Asking is not enough and approving
+    // something unasked-for is not either -- the grant is the intersection.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+
+    const prev_ledger = std.posix.getenv("HEXE_TRUST_LEDGER");
+    defer trust.restoreEnvForTest("HEXE_TRUST_LEDGER", prev_ledger);
+    const ledger_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/empty-ledger", .{dir_path});
+    defer std.testing.allocator.free(ledger_path);
+    trust.setenvForTest("HEXE_TRUST_LEDGER", ledger_path);
+
+    const code =
+        \\hexe.needs { "tools" }
+        \\local hexe = require('hexe')
+        \\local reach = (type(hexe.stream) == 'table') and (type(hexe.fs) == 'table')
+        \\local lib = pcall(function() return require('hexe.client') end)
+        \\-- Never granted, whatever is asked for: these are not what `tools` means.
+        \\local shell = (type(hexe.exec) == 'function') or (type(io) == 'table')
+        \\return hexe.setup({ ses = { layouts = { hexe.layout('probe', {
+        \\  root = '.',
+        \\  tabs = {
+        \\    hexe.tab(reach and 'reach-yes' or 'reach-no', { root = hexe.pane({ command = 'sh' }) }),
+        \\    hexe.tab(lib and 'lib-yes' or 'lib-no', { root = hexe.pane({ command = 'sh' }) }),
+        \\    hexe.tab(shell and 'SHELL-ESCAPED' or 'shell-no', { root = hexe.pane({ command = 'sh' }) }),
+        \\  },
+        \\}) } } })
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "layout.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.lua");
+    defer std.testing.allocator.free(path);
+
+    // Asked for, and approved.
+    {
+        var layout = try parseSessionLayoutLuaApproving(std.testing.allocator, path, .{ .tools = true });
+        defer layout.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("reach-yes", layout.tabs[0].name);
+        try std.testing.expectEqualStrings("lib-yes", layout.tabs[1].name);
+        // `tools` is not a shell. Approving it must not hand back the rest.
+        try std.testing.expectEqualStrings("shell-no", layout.tabs[2].name);
+    }
+
+    // Asked for, NOT approved: the default every non-interactive caller gets.
+    {
+        var layout = try parseSessionLayoutLua(std.testing.allocator, path);
+        defer layout.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("reach-no", layout.tabs[0].name);
+        try std.testing.expectEqualStrings("lib-no", layout.tabs[1].name);
+        try std.testing.expectEqualStrings("shell-no", layout.tabs[2].name);
+    }
+}
+
+test "approval without a declaration grants nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir_path = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(dir_path);
+    const prev_ledger = std.posix.getenv("HEXE_TRUST_LEDGER");
+    defer trust.restoreEnvForTest("HEXE_TRUST_LEDGER", prev_ledger);
+    const ledger_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/empty-ledger", .{dir_path});
+    defer std.testing.allocator.free(ledger_path);
+    trust.setenvForTest("HEXE_TRUST_LEDGER", ledger_path);
+
+    const code =
+        \\local hexe = require('hexe')
+        \\local reach = (type(hexe.stream) == 'table')
+        \\return hexe.setup({ ses = { layouts = { hexe.layout('probe', {
+        \\  root = '.',
+        \\  tabs = { hexe.tab(reach and 'REACH-ESCAPED' or 'reach-no', { root = hexe.pane({ command = 'sh' }) }) },
+        \\}) } } })
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "layout.lua", .data = code });
+    const path = try tmp.dir.realpathAlloc(std.testing.allocator, "layout.lua");
+    defer std.testing.allocator.free(path);
+
+    var layout = try parseSessionLayoutLuaApproving(std.testing.allocator, path, .{ .tools = true });
+    defer layout.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("reach-no", layout.tabs[0].name);
 }
 
 test "loadProjectConfig refuses a precompiled bytecode chunk" {

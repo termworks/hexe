@@ -367,6 +367,15 @@ end
 --- and only a NAMED instance gets a subdirectory. Appending "default" unconditionally looked
 --- reasonable and found nothing at all.
 local function socket_dir()
+  -- The host's own answer first: a sandboxed file has no `os.getenv`, and this is a path it can be
+  -- handed rather than a reason to grant it every environment variable.
+  for _, name in ipairs(HOSTS) do
+    local h = _G[name]
+    if h and h.fs and h.fs.dir then
+      local d = h.fs.dir()
+      if d and d ~= "" then return d end
+    end
+  end
   local runtime = os.getenv("XDG_RUNTIME_DIR")
   local base = (runtime and runtime ~= "")
     and (runtime .. "/hexe")

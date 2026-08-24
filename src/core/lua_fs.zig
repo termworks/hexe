@@ -95,12 +95,31 @@ fn fsRead(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// `hexe.fs.dir()` -- where this instance keeps its sockets.
+///
+/// Answered by the host rather than rebuilt in Lua from `$XDG_RUNTIME_DIR` and
+/// `$HEXE_INSTANCE`: a sandboxed file has no `os.getenv`, and granting it one
+/// to compute a path it could be handed would leak every other variable with it.
+fn fsDir(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    var buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const dir = @import("ipc.zig").getSocketDir(fba.allocator()) catch {
+        lua.pushNil();
+        return 1;
+    };
+    _ = lua.pushString(dir);
+    return 1;
+}
+
 pub fn install(lua: *Lua) void {
     lua.pushFunction(fsLs);
     lua.setGlobal("__fs_ls");
     lua.pushFunction(fsRead);
     lua.setGlobal("__fs_read");
+    lua.pushFunction(fsDir);
+    lua.setGlobal("__fs_dir");
 }
 
 /// Hung on `hexe.fs` where a client library looks for it.
-pub const BOOTSTRAP = "hexe.fs = hexe.fs or { ls = __fs_ls, read = __fs_read }; ";
+pub const BOOTSTRAP = "hexe.fs = hexe.fs or { ls = __fs_ls, read = __fs_read, dir = __fs_dir }; ";

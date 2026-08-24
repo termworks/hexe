@@ -398,7 +398,15 @@ fn runLayoutOpenDetached(state: *State) void {
 fn replaceFromLocalLayout(state: *State) void {
     // Single-execution parse: the old canonical-then-legacy fallback ran the
     // .hexe.lua file twice, so its Lua side effects fired twice.
-    const parsed = core.session_config.parseSessionLuaOnce(state.allocator, ".hexe.lua") catch {
+    //
+    // This is the one path that grants what a file declared, because it is the
+    // one reached by a person answering a prompt that named the request. Every
+    // other caller parses the same file with nothing granted.
+    const parsed = core.session_config.parseSessionLuaOnceApproving(
+        state.allocator,
+        ".hexe.lua",
+        .{ .tools = true },
+    ) catch {
         state.notifications.showFor("failed to parse .hexe.lua", 1500);
         return;
     };
