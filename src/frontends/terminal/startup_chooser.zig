@@ -151,9 +151,30 @@ pub fn levelTwo(state: *State) void {
         finishPlain(state);
         return;
     }
-    if (!state.showConfirmOrNotify(.startup_layout_confirm, "Load local .hexe.lua layout?")) {
+    // What the file ASKS for, read from its own bytes before any of it runs.
+    // Shown here because this prompt is the consent, and consent has to name
+    // what it is for -- a yes to "load the layout?" is not a yes to "reach your
+    // other tools". A file that asks for nothing prompts exactly as before.
+    var question_buf: [96]u8 = undefined;
+    const question = blk: {
+        const needs = declaredNeeds(state.allocator) orelse break :blk "Load local .hexe.lua layout?";
+        if (!needs.any()) break :blk "Load local .hexe.lua layout?";
+        break :blk std.fmt.bufPrint(
+            &question_buf,
+            "Load local .hexe.lua layout? It also wants to call your other tools",
+            .{},
+        ) catch "Load local .hexe.lua layout? It also wants to call your other tools";
+    };
+    if (!state.showConfirmOrNotify(.startup_layout_confirm, question)) {
         finishPlain(state);
     }
+}
+
+/// What `./.hexe.lua` declared, or null if it cannot be read.
+fn declaredNeeds(allocator: std.mem.Allocator) ?core.lua_runtime.Needs {
+    const bytes = std.fs.cwd().readFileAlloc(allocator, ".hexe.lua", 1 << 20) catch return null;
+    defer allocator.free(bytes);
+    return core.lua_runtime.Needs.parse(bytes);
 }
 
 /// Everything declined (or unavailable): plain new session.

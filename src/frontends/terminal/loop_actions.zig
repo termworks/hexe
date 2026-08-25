@@ -70,7 +70,7 @@ fn floatDestroysOnHide(state: *State, pane: *const Pane) bool {
 }
 
 /// Destroy a float pane, answering a blocking CLI caller if one is waiting.
-fn destroyFloatPane(state: *State, pane: *Pane) void {
+pub fn destroyFloatPane(state: *State, pane: *Pane) void {
     // Send completion with exit code 130 (like Ctrl+C cancellation).
     if (state.pending_float_requests.fetchRemove(pane.uuid)) |entry| {
         if (entry.value.result_path) |path| {

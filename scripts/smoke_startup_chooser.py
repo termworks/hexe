@@ -358,6 +358,40 @@ if not shell_works(e_master, "E"):
 print("E: NO -> plain session")
 
 kill_fe(e_fe, e_master)
+
+# F2) The prompt is the consent, so it has to NAME what it is for. A file that
+# declares `hexe.needs { "tools" }` gets a prompt saying so; one that declares
+# nothing gets the plain question. A yes to "load the layout?" is not a yes to
+# "reach your other tools", and the only way that holds is if the prompt says it.
+DIR_N = os.path.join(SCRATCH, f"chooser-n-{os.getpid()}")
+os.makedirs(DIR_N, exist_ok=True)
+with open(os.path.join(DIR_N, ".hexe.lua"), "w") as f:
+    f.write('hexe.needs { "tools" }\n' + (LAYOUT_LUA % ("needslay", DIR_N, "ntab")))
+
+n_fe, n_master = spawn([HEXE], DIR_N)
+ok, text = wait_for_text(n_master, ".hexe.lua", 15)
+if not ok:
+    fail(f"F2: no layout popup for a declaring file; saw: {text[-400:]!r}")
+if "other tools" not in text.replace("\n", " ").replace("  ", " "):
+    fail("F2: a file declaring `tools` got the plain prompt — the consent does not name "
+         f"what it is for; saw: {text[-400:]!r}")
+print("F2: a declaring file's prompt says it wants to call other tools")
+os.write(n_master, b"n")
+time.sleep(1.5)
+kill_fe(n_fe, n_master)
+
+# ...and a file that declares nothing must NOT be described as wanting tools,
+# or the warning means nothing.
+if "other tools" in open(os.path.join(DIR_C, ".hexe.lua")).read():
+    fail("F2: the control fixture accidentally declares tools")
+c_fe, c_master = spawn([HEXE], DIR_C)
+ok, text = wait_for_text(c_master, ".hexe.lua", 15)
+if ok and "other tools" in text:
+    fail("F2: a file declaring NOTHING was described as wanting other tools")
+print("F2: a file declaring nothing gets the plain prompt")
+os.write(c_master, b"n")
+time.sleep(1.5)
+kill_fe(c_fe, c_master)
 time.sleep(1.0)
 
 # ---------------------------------------------------------------- case G

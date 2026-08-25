@@ -309,6 +309,54 @@ if by_uuid(a["uuid"]).get("name") != "workbench":
     fail("a refused rename still changed the name")
 print("rename: applied, and an invalid name is refused without clobbering")
 
+# --------------------------------------------------- closing a float, honestly
+#
+# A float is not in the split tree, so the close used to ask the tree about a
+# uuid it had never heard of and answer `false` -- while `killPane`, which runs
+# first, made the float vanish anyway. A caller that believed the answer saw a
+# failure that had in fact succeeded, and with `kill = false` got a silent
+# no-op. Worse: nothing answered a `hexe terminal float` waiting on its result,
+# so that CLI hung for ever.
+cli = subprocess.Popen([HEXE, "terminal", "float", "-c", "sleep 600", "--title", "waiter"],
+                       env=dict(env, HEXE_SESSION=SESSION), cwd=WD,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       start_new_session=True)
+procs.append(cli)
+deadline = time.time() + 20
+waiter = None
+while time.time() < deadline and waiter is None:
+    for f in (ok(api("floats"), "floats") or []):
+        if f.get("title") == "waiter" or f.get("name") == "waiter":
+            waiter = f
+            break
+    time.sleep(0.4)
+if waiter is None:
+    fail("the blocking `terminal float` never appeared, so the close below would prove nothing")
+if cli.poll() is not None:
+    fail("the blocking `terminal float` exited on its own before the close")
+
+closed = ok(api("close", waiter["uuid"]), "close a float")
+if closed is not True:
+    fail(f"closing a float answered {closed!r}; a float is not in the split tree and the answer "
+         "used to come from asking the tree about it")
+deadline = time.time() + 10
+while time.time() < deadline:
+    if not [f for f in (ok(api("floats"), "floats") or []) if f["uuid"] == waiter["uuid"]]:
+        break
+    time.sleep(0.3)
+else:
+    fail("the float is still listed after close said it closed it")
+
+# The half nothing else covers: the CLI that was waiting on this float gets its
+# result. Leaving it is not a cosmetic bug -- that process never returns.
+deadline = time.time() + 10
+while time.time() < deadline and cli.poll() is None:
+    time.sleep(0.3)
+if cli.poll() is None:
+    fail("`hexe terminal float` is still hanging after its float was closed through the API; "
+         "the waiting caller was never answered")
+print(f"close: a float closes, says so, and its waiting CLI is answered (rc={cli.returncode})")
+
 if fe.poll() is not None:
     fail("the frontend died during the checks")
 

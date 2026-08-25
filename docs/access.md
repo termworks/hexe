@@ -96,6 +96,12 @@ handed. See [api.md](api.md#a-panes-own-socket).
 It grants nothing to whoever is already in that pane — it *is* the process
 there. The point is the opposite: it is narrow enough to hand out.
 
+**A project file's `hexe.needs` is a different thing with a similar shape.** The kinds above govern
+a *plugin* — a package you installed, holding a socket. `hexe.needs { "tools" }` governs a
+`.hexe.lua` that arrived with a `git clone`, and grants Lua capabilities inside hexe's own VM rather
+than verbs on a socket. Same principle, different boundary: see
+[project sessions](session-manager.md#three-tiers-not-two).
+
 ## What this is not
 
 **It is not a sandbox.** A plugin runs as you, with your filesystem, so nothing

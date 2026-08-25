@@ -83,7 +83,7 @@ of it.
 
 | access | verbs |
 | --- | --- |
-| `read` | `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `config`, `capture`, `client` |
+| `read` | `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `config`, `capture`, `client`, `verbs` |
 | `screen` | `env`, `line`, `cursor_line`, `screen_text`, `find`, `selection`, `selection_range` |
 | `typing` | `send` |
 | `keyboard` | `keys` |
@@ -93,6 +93,21 @@ of it.
 
 `control` is the default: a verb that changes the session's shape needs the
 whole session, and there is no smaller honest name for that.
+
+**`verbs()` answers this table for the door you asked on**, so a peer need not
+have read this page — and, on a plugin's or a pane's socket, lists only what
+that door may actually call:
+
+```console
+$ hexe api verbs
+{"ok":true,"result":[{"name":"verbs","about":"this list","access":"read"}, ...]}
+```
+
+Listing a verb the gate would refuse is worse than listing nothing, because a
+client believes it and acts on it. What is missing stays discoverable — a
+refusal names the access it wanted — it is simply not promised. `name` and
+`about` are the family's shape; `access` is hexe's own, added rather than
+substituted so a sibling's client reads it unchanged.
 
 The four newer ones are each a general power rather than a named feature:
 
@@ -186,6 +201,14 @@ in 0..1, clamped to 0.05..0.95 — a divider at either end leaves a pane with no
 width to grab it back by. The selector always comes first and the value only
 ever second, so `ratio(2)` selects pane 2 rather than setting a ratio of 2.
 
+`close([selector] [, {kill=false}])` closes a pane — and a **float** goes through
+the same path a keybinding uses, so closing one from the socket does what
+closing it by hand does. That matters for a float a CLI is waiting on
+(`hexe terminal float`): it is destroyed *and its caller is answered*, rather
+than left hanging for ever. `kill = false` respects what the float declared —
+a sticky one hides, a transient one is still destroyed, because leaving it
+alive strands the process waiting on it.
+
 `rename(selector, name)` names a pane. Names reach socket paths and CLI
 arguments, so the same `[a-z0-9][a-z0-9._-]*` rule the name pool uses applies
 here; an invalid name is refused and the old one is kept.
@@ -241,6 +264,38 @@ is the *config* module, which is a different thing with the same name.
 session name, or `{ path = "…", timeout_ms = 5000 }`. `connect_pane()` takes
 nothing at all and opens the socket of the pane the caller is running in — see
 [A pane's own socket](#a-panes-own-socket).
+
+### One question, nothing held
+
+`connect()` is a channel with a lifetime: it can drop, it can subscribe, you
+close it. When all you want is an answer, `fetch` skips the handle entirely:
+
+```lua
+local panes = hexe.fetch("work", "panes")          -- a socket, asked and released
+local hosts = hexe.fetch({ tool = "wing" }, "machines")   -- a tool with no daemon
+```
+
+`fetch(where, verb, ...)` is `Session:call` without the session. It tries a
+socket first, and failing that the tool's own one-shot mode — request in argv,
+the same `{"ok":…,"n":…,"result":[…]}` on stdout — found through a descriptor
+the tool leaves beside the sockets:
+
+```
+$XDG_RUNTIME_DIR/<tool>/<tool>.tool
+{"exec": "/absolute/path/to/tool", "args": ["api"], "stateless": true}
+```
+
+**The verb says what the caller wanted, not what the tool is.** A tool that
+later grows a daemon breaks no call site, and `fetch` uses its socket once one
+exists. The spawn half needs a *synchronous* runner from the host, and **hexe
+lends none on purpose** — a spawn inside the frontend loop suspends every pane
+in the session — so from inside hexe `fetch` works over sockets and says so
+plainly otherwise. Elsewhere it does both.
+
+Which half a tool can serve is decided by where its state lives: on disk, and a
+fresh process answers the same as a live one; *in the process*, and spawning
+gets you something that knows about none of it. hexe is the second kind, which
+is why it has a daemon and never writes a descriptor.
 
 **A name is matched against what a session calls itself, not only against the
 file.** The socket is named when it binds, so a session renamed or reattached

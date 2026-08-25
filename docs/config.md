@@ -137,7 +137,7 @@ Exactly one, by name:
 | `~/.config/hexe/init.lua` | **hexe**. The config. The only file it looks for. |
 | `~/.config/hexe/layout.lua` | **your init.lua**, if it chooses to `require("layout")`. hexe never looks for this name — split your layouts out or inline them, as you like. |
 | `~/.config/hexe/lua/…` | **you**, via `require()`. A search path for modules you write; empty by default and needed by nobody. |
-| `./.hexe.lua` | **hexe**, per directory, sandboxed unless trusted. |
+| `./.hexe.lua` | **hexe**, per directory, sandboxed unless it asks or you allow it. |
 
 So there is one config file. `layout.lua` is a convention this repo's example follows, not a
 second config format, and `lua/` is optional.
@@ -184,6 +184,42 @@ Setting `HEXE_UNRESTRICTED_CONFIG` to anything other than `1` revokes that: `io`
 `clock` and `difftime`, and `require` accepts nothing but `"hexe"`. The same revocation is applied
 unconditionally to a project-local `.hexe.lua`, whatever your setting — a file that arrives with a
 git clone does not get your capabilities.
+
+### Asking for more
+
+A project file that genuinely needs to reach the family's other tools says so, on its own line:
+
+```lua
+hexe.needs { "tools" }
+```
+
+That restores `hexe.fs`, `hexe.stream` and `require("hexe.client")` — and nothing else. `tools` is
+not a shell: `io`, `os.execute` and `hexe.exec` stay gone however loudly a file asks.
+
+**Declared, never detected.** The request is read from the file's own bytes before any of it runs.
+Detecting what Lua *does* is undecidable — `hexe["ex".."ec"]` defeats any scan — and a scan that
+misses something reports "safe" about a file that is not, which is worse than no report because
+people believe it. Reading a declaration is sound for the opposite reason: one this misses grants
+**less**, and the file then fails on the call it wanted. It fails closed.
+
+**Asking is only half.** The grant is the intersection of what the file asked for and what the
+caller approved, and the only caller that approves anything is the startup chooser — the prompt you
+already answer, which now names the request:
+
+```
+Load local .hexe.lua layout? It also wants to call your other tools
+```
+
+So `hexe api`, `hexe layout list` and every other non-interactive path parse the same file with
+nothing granted, and approving `tools` gives nothing to a file that never asked.
+
+`hexe.fs` and `hexe.stream` go with them, natives included. They exist so the *client library* can
+find a peer's socket and open it, and the client library cannot run in there anyway — `load` is gone
+and `require` resolves only `"hexe"`. Left reachable they would undo the rest of the list: `fs.read`
+reads any file despite `io = nil`, `fs.ls` enumerates the runtime directory, and `stream.connect`
+takes **any** unix socket path — an ssh-agent, a container daemon, or the session's own control
+socket, which is full authority over the mux. Confining them to hexe's own runtime directory would
+not fix that last one, so an untrusted file gets none of it.
 
 Note what that does *not* stop: a layout's `command =` strings and `on_start`/`on_stop` hooks are
 shell commands by definition. Those are gated separately, by the trust ledger — see

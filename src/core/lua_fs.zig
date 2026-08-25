@@ -1,9 +1,10 @@
-//! `hexe.fs.ls` — list a directory, for a Lua that cannot.
+//! `hexe.fs` — the two filesystem reads a client library cannot do without.
 //!
-//! One entry, added for one reason: a client library discovering sockets has to
-//! read a directory, and plain Lua cannot. Its only alternative is `io.popen`,
-//! which shells out and which hexe's own safe mode removes — so a project
-//! config using the client library could not find a session at all.
+//! Two entries, added for one reason: a client library discovering peers has to
+//! list a directory and read a small descriptor, and plain Lua cannot. Its only
+//! alternative is `io.popen`, which shells out and which hexe's own safe mode
+//! removes — so a project config using the client library could not find a
+//! session at all.
 //!
 //! Read-only and non-recursive on purpose. This is not the beginning of a
 //! filesystem API; it is the one call the client library needs, and anything
@@ -18,6 +19,10 @@ const LuaState = zlua.LuaState;
 /// Entries returned at most. A socket directory holds a handful; this is the
 /// ceiling that stops a pathological directory allocating without end.
 const MAX_ENTRIES: usize = 4096;
+
+/// Ceiling on one `read`. A descriptor is a few dozen bytes; anything at this
+/// size is not what this call is for, and is refused rather than truncated.
+const MAX_READ: usize = 64 * 1024;
 
 /// `hexe.fs.ls(path) -> { { name, type, mtime }, ... }` or nil.
 ///
@@ -64,10 +69,57 @@ fn fsLs(lstate: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+/// `hexe.fs.read(path) -> contents` or nil. Bounded, because the caller is a
+/// client library reading a descriptor, not a file viewer.
+fn fsRead(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const path = lua.toString(1) catch {
+        lua.pushNil();
+        return 1;
+    };
+    const f = std.fs.cwd().openFile(path, .{}) catch {
+        lua.pushNil();
+        return 1;
+    };
+    defer f.close();
+    var buf: [MAX_READ]u8 = undefined;
+    const n = f.readAll(&buf) catch {
+        lua.pushNil();
+        return 1;
+    };
+    if (n >= MAX_READ) {
+        lua.pushNil();
+        return 1;
+    }
+    _ = lua.pushString(buf[0..n]);
+    return 1;
+}
+
+/// `hexe.fs.dir()` -- where this instance keeps its sockets.
+///
+/// Answered by the host rather than rebuilt in Lua from `$XDG_RUNTIME_DIR` and
+/// `$HEXE_INSTANCE`: a sandboxed file has no `os.getenv`, and granting it one
+/// to compute a path it could be handed would leak every other variable with it.
+fn fsDir(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    var buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const dir = @import("ipc.zig").getSocketDir(fba.allocator()) catch {
+        lua.pushNil();
+        return 1;
+    };
+    _ = lua.pushString(dir);
+    return 1;
+}
+
 pub fn install(lua: *Lua) void {
     lua.pushFunction(fsLs);
     lua.setGlobal("__fs_ls");
+    lua.pushFunction(fsRead);
+    lua.setGlobal("__fs_read");
+    lua.pushFunction(fsDir);
+    lua.setGlobal("__fs_dir");
 }
 
 /// Hung on `hexe.fs` where a client library looks for it.
-pub const BOOTSTRAP = "hexe.fs = hexe.fs or { ls = __fs_ls }; ";
+pub const BOOTSTRAP = "hexe.fs = hexe.fs or { ls = __fs_ls, read = __fs_read, dir = __fs_dir }; ";

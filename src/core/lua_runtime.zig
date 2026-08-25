@@ -312,6 +312,13 @@ pub const LuaRuntime = struct {
     /// Whether installed packages have already run in this runtime.
     plugins_loaded: bool = false,
     config_builder: ?*ConfigBuilder = null,
+    /// What the caller is willing to grant a project file that asks. Empty by
+    /// default: only an interactive path that showed the request to a person
+    /// sets it.
+    approved_needs: Needs = .{},
+    /// What the last project file actually asked for, for a caller that wants
+    /// to report it.
+    declared_needs: Needs = .{},
 
     const Self = @This();
 
@@ -397,6 +404,28 @@ pub const LuaRuntime = struct {
     ///
     /// Idempotent, and safe to call after `init`: the bootstrap chunk that
     /// asserts `hexe.exec` is bound has already run by then.
+    /// Revoke, keeping only what `granted` allows. `Needs.none` is the full
+    /// sandbox and is what every non-interactive caller gets.
+    pub fn revokeUnsafeCapabilitiesWith(self: *Self, granted: Needs) void {
+        self.revokeUnsafeCapabilities();
+        if (!granted.tools) return;
+
+        // Put back exactly what the client library needs to find a peer and
+        // open it -- and mark the state so `require` will resolve the library
+        // itself. Nothing else comes back: no `io`, no `os.execute`, no
+        // `hexe.exec`.
+        self.lua.pushBoolean(true);
+        self.lua.setField(zlua.registry_index, NEEDS_TOOLS_KEY);
+        const restore = "if type(hexe) == 'table' then " ++
+            @import("lua_stream.zig").BOOTSTRAP ++
+            @import("lua_fs.zig").BOOTSTRAP ++
+            "end;";
+        self.lua.loadString(restore) catch return;
+        self.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+            self.lua.pop(1);
+        };
+    }
+
     pub fn revokeUnsafeCapabilities(self: *Self) void {
         self.lua.loadString(REVOKE_UNSAFE_CAPABILITIES_LUA) catch |err| {
             log.warn("failed to compile capability revocation chunk: {}", .{err});
@@ -453,7 +482,11 @@ pub const LuaRuntime = struct {
         defer self.allocator.free(bytes);
 
         if (!trust.bytesAreTrustedAt(self.allocator, path, bytes)) {
-            self.revokeUnsafeCapabilities();
+            // What it asked for, intersected with what the caller approved.
+            // `approved_needs` is empty unless something interactive set it, so
+            // a CLI path that parses a project file grants nothing.
+            self.declared_needs = Needs.parse(bytes);
+            self.revokeUnsafeCapabilitiesWith(self.declared_needs.intersect(self.approved_needs));
         }
         return self.loadConfigBuffer(bytes, path);
     }
@@ -1309,16 +1342,96 @@ pub const LuaRuntime = struct {
 /// `os` keeps its pure clock/formatting helpers, which config legitimately
 /// uses; `os.execute`, `os.getenv`, `os.remove`, `os.rename` and `os.tmpname`
 /// go with the rest.
+/// `hexe.fs` and `hexe.stream` go too, with their natives. They exist so the
+/// CLIENT LIBRARY can find and reach a peer, and the client library cannot run
+/// here anyway -- safe-mode `require` resolves only "hexe" and `load` is gone.
+/// Left in place they undo the rest of this: `fs.read` reads any file despite
+/// `io = nil`, `fs.ls` enumerates the runtime directory, and `stream.connect`
+/// takes ANY unix socket path -- an ssh-agent, a container daemon, or the
+/// session's own control socket, which is full authority over the mux. Confining
+/// them to hexe's own runtime directory would not be enough for that last
+/// reason, so an untrusted file gets none of it and asks instead.
 /// `require` is NOT dropped here — `require('hexe')` is the documented way for
 /// a project file to reach the API, and safe-mode `require` (installed by
 /// `revokeUnsafeCapabilities`) already refuses everything else.
+/// What a project file asked for, and was granted.
+///
+/// A *declaration*, never a detection. Static detection of what Lua does is
+/// undecidable -- `hexe["ex".."ec"]` defeats any scan -- and a scan that misses
+/// something reports "safe" about a file that is not, which is worse than no
+/// report because people trust it.
+///
+/// Reading a declaration textually is sound for the opposite reason: a
+/// declaration this misses grants LESS, and the file then fails on the call it
+/// wanted. It fails closed, so the scan being imperfect costs capability rather
+/// than safety.
+pub const Needs = struct {
+    /// Reach the family's other tools: `hexe.fs`, `hexe.stream`, and
+    /// `require("hexe.client")` -- what the client library needs to find a
+    /// peer's socket and open it.
+    tools: bool = false,
+
+    pub const none: Needs = .{};
+
+    pub fn any(self: Needs) bool {
+        return self.tools;
+    }
+
+    /// What the file may actually have: what it asked for, and no more.
+    pub fn intersect(asked: Needs, approved: Needs) Needs {
+        return .{ .tools = asked.tools and approved.tools };
+    }
+
+    /// Read `hexe.needs { "tools" }` out of a project file's own bytes.
+    ///
+    /// Strict on purpose: the literal call, then a brace, then quoted names.
+    /// Anything cleverer than that is not recognised and grants nothing.
+    pub fn parse(bytes: []const u8) Needs {
+        var out: Needs = .{};
+        var at: usize = 0;
+        while (std.mem.indexOfPos(u8, bytes, at, "hexe.needs")) |found| {
+            at = found + "hexe.needs".len;
+            // Past the call punctuation to the opening brace, and no further:
+            // a newline before it means this was not a declaration.
+            var i = at;
+            while (i < bytes.len and (bytes[i] == ' ' or bytes[i] == '\t' or bytes[i] == '(')) i += 1;
+            if (i >= bytes.len or bytes[i] != '{') continue;
+            const close = std.mem.indexOfScalarPos(u8, bytes, i, '}') orelse continue;
+            const body = bytes[i + 1 .. close];
+            if (std.mem.indexOf(u8, body, "\"tools\"") != null or
+                std.mem.indexOf(u8, body, "'tools'") != null) out.tools = true;
+        }
+        return out;
+    }
+};
+
+test "a declaration is read, and only in its literal form" {
+    try std.testing.expect(Needs.parse("hexe.needs { \"tools\" }").tools);
+    try std.testing.expect(Needs.parse("hexe.needs{'tools'}").tools);
+    try std.testing.expect(Needs.parse("hexe.needs({ \"tools\" })").tools);
+    // Not declarations: nothing is granted, and the file fails on the call.
+    try std.testing.expect(!Needs.parse("-- hexe.needs\n").tools);
+    try std.testing.expect(!Needs.parse("hexe.needs { \"other\" }").tools);
+    try std.testing.expect(!Needs.parse("local n = 'tools'").tools);
+    try std.testing.expect(!Needs.parse("hexe.needs\n{ \"tools\" }").tools);
+}
+
 const REVOKE_UNSAFE_CAPABILITIES_LUA =
     "io = nil; package = nil; dofile = nil; loadfile = nil; " ++
     "load = nil; loadstring = nil; debug = nil; " ++
     "if type(os) == 'table' then " ++
     "os = { time = os.time, date = os.date, clock = os.clock, difftime = os.difftime } " ++
     "end; " ++
-    "if type(hexe) == 'table' then hexe.exec = nil end;";
+    "if type(hexe) == 'table' then hexe.exec = nil; hexe.fs = nil; hexe.stream = nil end; " ++
+    // The natives behind those two, which are GLOBALS: dropping `hexe.fs` alone
+    // leaves `__fs_read` sitting in _G, and an untrusted file that knows the
+    // name has the capability back.
+    "__fs_ls = nil; __fs_read = nil; __fs_dir = nil; " ++
+    "__stream_connect = nil; __stream_send = nil; __stream_recv = nil; __stream_close = nil;";
+
+/// Registry flag: this state was granted `tools`, so `require` resolves the
+/// client library as well as the module.
+const NEEDS_TOOLS_KEY = "_hexe_needs_tools";
 
 fn setupSafeRequire(lua: *Lua) !void {
     // In safe mode, only allow require("hexe")
@@ -1337,6 +1450,26 @@ fn safeRequire(state: ?*LuaState) callconv(.c) c_int {
         // Return the hexe module from registry
         _ = lua.getField(zlua.registry_index, "_hexe_module");
         return 1;
+    }
+
+    // The client library, but only for a file that asked for `tools` and was
+    // granted it. It is plain Lua and holds no authority of its own -- the
+    // authority is `hexe.stream`, restored beside it or not at all.
+    if (std.mem.eql(u8, name, "hexe.client")) {
+        const kind = lua.getField(zlua.registry_index, NEEDS_TOOLS_KEY);
+        const granted = kind == .boolean and lua.toBoolean(-1);
+        lua.pop(1);
+        if (granted) {
+            if (lua.loadString(@import("lua_client.zig").SOURCE)) |_| {
+                lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+                    _ = lua.pushString("require('hexe.client'): the library failed to load");
+                    lua.raiseError();
+                };
+                return 1;
+            } else |_| {}
+        }
+        _ = lua.pushString("require('hexe.client') needs `hexe.needs { \"tools\" }` and your approval");
+        lua.raiseError();
     }
 
     _ = lua.pushString("require() not allowed in safe mode");
@@ -1463,6 +1596,12 @@ fn injectSetupHelpers(lua: *Lua) void {
         @import("lua_stream.zig").BOOTSTRAP ++
         @import("lua_fs.zig").BOOTSTRAP ++
         "hexe.__internal=nil; " ++
+        // `hexe.needs { "tools" }` -- a declaration, and at RUNTIME a no-op.
+        // It is read from the file's own bytes before any of it executes,
+        // because by the time this ran the grant has already been decided.
+        // Present so a declaring file loads anywhere, including where the
+        // request was refused.
+        "hexe.needs = function() end; " ++
         "local __theme_styles={}; " ++
         "local function mark(t, kind) if type(t)~='table' then t={} end; rawset(t,'__hexe_type',kind); return t end; " ++
         "local function named(kind, name, spec) if type(name)=='string' then spec=spec or {}; spec.name=name; return mark(spec,kind) end; return mark(name,kind) end; " ++
