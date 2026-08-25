@@ -3,6 +3,13 @@
 
 const std = @import("std");
 const core = @import("core");
+const prompt_navigation = @import("prompt_navigation.zig");
+
+/// The private DSR a shell uses to ask where its own prompt block begins.
+///
+/// Its own number rather than a standard one: no DSR asks this question, and the answer means
+/// nothing except between a shell that marks its prompt and a terminal that kept the mark.
+const PROMPT_ANCHOR: []const u8 = "?1440";
 
 pub const Disposition = union(enum) {
     ignore,
@@ -47,6 +54,13 @@ pub fn csiDisposition(vt: *core.VT, final: u8, params: []const u8, reply_buf: []
                 std.fmt.bufPrint(reply_buf, "\x1b[?{d};{d}R", .{ row, column }) catch return .ignore
             else
                 std.fmt.bufPrint(reply_buf, "\x1b[{d};{d}R", .{ row, column }) catch return .ignore;
+            return .{ .reply = reply };
+        }
+        if (std.mem.eql(u8, params, PROMPT_ANCHOR)) {
+            const reply = std.fmt.bufPrint(reply_buf, "\x1b[{s};{d}n", .{
+                PROMPT_ANCHOR,
+                prompt_navigation.rowsAboveCursor(vt),
+            }) catch return .ignore;
             return .{ .reply = reply };
         }
     }
@@ -107,6 +121,24 @@ test "CSI routing keeps emulation and appearance ownership explicit" {
     try std.testing.expect(csiDisposition(&vt, 'c', "", &reply) == .forward_to_host);
     try std.testing.expect(csiDisposition(&vt, 'c', ">0", &reply) == .forward_to_host);
     try expectReply(csiDisposition(&vt, 'p', "?2026$", &reply), "\x1b[?2026;2$y");
+}
+
+// **A shell asking where its prompt is gets an answer or a zero, never silence.** It asks between
+// finishing a command and drawing the next prompt, on a round trip it has to time out — so a
+// terminal that knows the question but has no mark to answer with has to say so, or every prompt
+// after a `clear` pays the timeout for nothing.
+test "the prompt anchor is measured from the mark, not counted" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 80, 24);
+    defer vt.deinit();
+    var reply: [128]u8 = undefined;
+
+    try expectReply(csiDisposition(&vt, 'n', "?1440", &reply), "\x1b[?1440;0n");
+
+    // A prompt three rows tall, then the output of what was run from it. The mark stays on the row
+    // it was stamped on however far the cursor has since travelled, which is the whole point.
+    try vt.feed("\x1b]133;A\x07one\r\ntwo\r\n$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a\r\nb\r\n");
+    try expectReply(csiDisposition(&vt, 'n', "?1440", &reply), "\x1b[?1440;6n");
 }
 
 test "Kitty keyboard query reports the active flag stack" {

@@ -75,6 +75,30 @@ output ends — then hexe can navigate by *command* rather than by line:
 output — finds the boundary of the last command's output, selects it, and copies it. No mouse, no
 scrolling, no accidentally including the prompt line.
 
+### Answering where the prompt is
+
+The marks are also readable back, by the shell that wrote them:
+
+```
+CSI ? 1440 n              →  shell asks how far up its own prompt begins
+CSI ? 1440 ; <rows> n     ←  hexe answers, counted from one; 0 means no mark
+```
+
+**A shell cannot work this out for itself.** Redrawing a prompt in place means going back up to the
+block's first row, and the only thing a shell has to go on is a count it kept while drawing — which
+stops being true the moment anything else writes to the screen. A float opening over the pane, a
+program that scrolled, a prompt with rows added above it or below it: the count is a guess, and a
+guess one row out either erases somebody else's line or leaves a stale copy of the prompt behind.
+
+`OSC 133;A` already stamped the row and hexe still has it, so hexe answers and the shell draws. It
+is the same division of labour kitty settled on for redrawing prompts across a resize — the party
+that can see the screen owns the position — except pulled rather than pushed, which needs no signal
+and cannot race the redraw it is for.
+
+The reply counts from one so that zero can mean *no prompt is marked*. A shell asks this between
+finishing a command and drawing the next prompt, on a round trip it has to time out; a terminal
+that knows the question but has nothing to measure from owes it a no rather than silence.
+
 ## What makes it different
 
 tmux's copy-mode is the ancestor of the keyboard half here, and hexe's is deliberately smaller:
@@ -142,6 +166,7 @@ trap 'printf "\033]133;C\007"' DEBUG
 | `src/frontends/terminal/state.zig` | copy-mode: `enterCopyMode`, `copyMove`, `copyToggleSelect`, `copyYank` |
 | `src/frontends/terminal/loop_input.zig` | the modal key routing for search and copy-mode |
 | `src/frontends/terminal/mouse_selection.zig`, `loop_mouse.zig` | mouse selection and the override chord |
-| `src/frontends/terminal/prompt_navigation.zig` | OSC 133 jumping and `lastOutputAlloc` |
+| `src/frontends/terminal/prompt_navigation.zig` | OSC 133 jumping, `lastOutputAlloc`, `rowsAboveCursor` |
+| `src/frontends/terminal/pane_respond.zig` | the `CSI ? 1440 n` prompt-anchor reply |
 | `src/frontends/terminal/mouse_protocol.zig` | forwarding mouse events to applications that want them |
 | `src/core/constants.zig` | `max_clipboard_bytes`, `max_clipboard_osc_bytes` |
