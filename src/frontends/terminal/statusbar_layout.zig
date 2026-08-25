@@ -33,9 +33,12 @@ pub fn zoneFromName(name: []const u8) ?Zone {
     return null;
 }
 
-/// Left at 0, right flush to the far edge, center centered but never overlapping
-/// either. When the three do not fit, zones are dropped in `shrink` order; the
-/// last survivor is clipped rather than dropped.
+/// Left at 0, right flush to the far edge, center on the bar's own midpoint.
+///
+/// The centre's position depends on the bar and on its own width, and on
+/// nothing else -- a neighbour changing width must never move it. When the
+/// three do not fit, zones are dropped in `shrink` order; the last survivor is
+/// clipped rather than dropped.
 pub fn place(bar_width: u16, widths: [3]u16, shrink: [3]Zone) Placement {
     var keep = [3]bool{ widths[0] > 0, widths[1] > 0, widths[2] > 0 };
     var w = widths;
@@ -61,9 +64,29 @@ pub fn place(bar_width: u16, widths: [3]u16, shrink: [3]Zone) Placement {
     if (keep[0]) out.slots[0] = .{ .x = 0, .width = l, .drawn = true };
     if (keep[2]) out.slots[2] = .{ .x = bar_width -| r, .width = r, .drawn = true };
     if (keep[1]) {
-        const ideal: u16 = (bar_width -| c) / 2;
-        const highest: u16 = @max(bar_width -| r -| c, l);
-        out.slots[1] = .{ .x = std.math.clamp(ideal, l, highest), .width = c, .drawn = true };
+        // Anchored to the BAR, never to its neighbours.
+        //
+        // This used to be clamped to the left zone's width, so a left zone wider
+        // than the midpoint shoved the centre right by exactly that width -- and
+        // since a clock, a spinner and a name all change width as they run, the
+        // centre slid a column back and forth on almost every frame. The centre
+        // is where the pane list lives, and a pane list that moves whenever
+        // something else redraws is the flicker you actually see.
+        const cx: u16 = (bar_width -| c) / 2;
+        out.slots[1] = .{ .x = cx, .width = c, .drawn = true };
+
+        // Whoever would overlap gives up columns instead. The centre holds its
+        // ground because it is the one thing here worth reading continuously.
+        if (keep[0] and l > cx) {
+            out.slots[0] = .{ .x = 0, .width = cx, .drawn = cx > 0 };
+        }
+        if (keep[2]) {
+            const room: u16 = bar_width -| (cx + c);
+            if (r > room) {
+                // Still flush right: it loses its head, not its tail.
+                out.slots[2] = .{ .x = cx + c, .width = room, .drawn = room > 0 };
+            }
+        }
     }
     return out;
 }
@@ -99,18 +122,40 @@ test "all three fit: left flush, right flush, center centered" {
     try std.testing.expectEqual(@as(u16, 40), p.get(.center).x);
 }
 
-test "center is pushed off true centre rather than overlapping a wide left" {
-    const p = place(50, .{ 30, 10, 5 }, DEFAULT_SHRINK);
-    try std.testing.expectEqual(@as(u16, 30), p.get(.center).x);
-    // Still clear of the right zone.
-    try std.testing.expect(p.get(.center).x + p.get(.center).width <= p.get(.right).x);
+test "the centre does not move when a neighbour changes width" {
+    // The invariant, stated directly: a clock, a spinner and a name all change
+    // width as they run, and none of them may shift the pane list. Anything
+    // else here is negotiable; this is not.
+    const bar: u16 = 100;
+    const c: u16 = 20;
+    var expected: ?u16 = null;
+    for ([_]u16{ 0, 1, 5, 10, 30, 39, 40, 41, 50, 70, 95 }) |left| {
+        for ([_]u16{ 0, 3, 15, 40 }) |right| {
+            const p = place(bar, .{ left, c, right }, DEFAULT_SHRINK);
+            if (!p.get(.center).drawn) continue;
+            if (expected) |want| {
+                try std.testing.expectEqual(want, p.get(.center).x);
+            } else {
+                expected = p.get(.center).x;
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(u16, 40), expected.?);
 }
 
-test "center is pushed left rather than overlapping a wide right" {
+test "a wide left loses columns rather than pushing the centre" {
+    const p = place(50, .{ 30, 10, 5 }, DEFAULT_SHRINK);
+    try std.testing.expectEqual(@as(u16, 20), p.get(.center).x); // (50 - 10) / 2
+    try std.testing.expectEqual(@as(u16, 0), p.get(.left).x);
+    try std.testing.expectEqual(@as(u16, 20), p.get(.left).width); // clipped, not shifted
+    try std.testing.expect(p.get(.left).width <= p.get(.center).x);
+}
+
+test "a wide right stays flush and loses its head" {
     const p = place(50, .{ 5, 10, 30 }, DEFAULT_SHRINK);
-    try std.testing.expectEqual(@as(u16, 10), p.get(.center).x);
-    try std.testing.expect(p.get(.center).x >= p.get(.left).width);
+    try std.testing.expectEqual(@as(u16, 20), p.get(.center).x);
     try std.testing.expect(p.get(.center).x + p.get(.center).width <= p.get(.right).x);
+    try std.testing.expectEqual(@as(u16, 50), p.get(.right).x + p.get(.right).width);
 }
 
 test "overflow drops zones in shrink order" {

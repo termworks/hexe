@@ -44,10 +44,18 @@ painter needs no new capability — only three selectors instead of one.
 
 Each zone is asked at the **full bar width** and composes freely; hexe places
 what comes back. Left sits flush at column 0, right flush against the far edge,
-center as near the middle as it can get without overlapping either. When the
-three do not fit, zones are dropped in `shrink` order — the last name in the
-list is the one kept longest — and a single zone still too wide is clipped
-rather than dropped.
+center on the bar's own midpoint. When the three do not fit, zones are dropped
+in `shrink` order — the last name in the list is the one kept longest — and a
+single zone still too wide is clipped rather than dropped.
+
+**The centre never moves for a neighbour.** Its position depends on the bar
+width and on its own content, and on nothing else. A left zone wide enough to
+reach the midpoint loses columns off its tail; a right zone loses columns off
+its head and stays flush. The centre used to be pushed aside instead, which
+meant a clock ticking from `9:59` to `10:00`, or a spinner one cell wider on
+this frame than the last, slid the whole centre sideways — and the centre is
+where a pane list lives, so that read as the bar flickering every time
+something else redrew.
 
 That costs a little painter work at narrow widths, in exchange for one round of
 requests per frame. The alternative — measure, then re-request with real
