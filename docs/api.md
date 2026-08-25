@@ -201,6 +201,14 @@ in 0..1, clamped to 0.05..0.95 — a divider at either end leaves a pane with no
 width to grab it back by. The selector always comes first and the value only
 ever second, so `ratio(2)` selects pane 2 rather than setting a ratio of 2.
 
+`close([selector] [, {kill=false}])` closes a pane — and a **float** goes through
+the same path a keybinding uses, so closing one from the socket does what
+closing it by hand does. That matters for a float a CLI is waiting on
+(`hexe terminal float`): it is destroyed *and its caller is answered*, rather
+than left hanging for ever. `kill = false` respects what the float declared —
+a sticky one hides, a transient one is still destroyed, because leaving it
+alive strands the process waiting on it.
+
 `rename(selector, name)` names a pane. Names reach socket paths and CLI
 arguments, so the same `[a-z0-9][a-z0-9._-]*` rule the name pool uses applies
 here; an invalid name is refused and the old one is kept.

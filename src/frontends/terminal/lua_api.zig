@@ -38,6 +38,7 @@ const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const api_bridge = core.api_bridge;
 const keybinds_actions = @import("keybinds_actions.zig");
+const loop_actions = @import("loop_actions.zig");
 const mouse_selection = @import("mouse_selection.zig");
 const ghostty = @import("ghostty-vt");
 const tab_switch = @import("tab_switch.zig");
@@ -1441,6 +1442,14 @@ fn hexe_rename_tab(lstate: ?*LuaState) callconv(.c) c_int {
 /// state, telling the shared view the pane went away, and re-syncing focus.
 /// Skipping it left the shared projection pointing at a pane that no longer
 /// existed.
+/// Whether this pane is a float rather than a member of the split tree.
+fn isFloat(state: *State, pane: *Pane) bool {
+    for (state.view.float_views.items) |p| {
+        if (p == pane) return true;
+    }
+    return false;
+}
+
 fn hexe_close(lstate: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(lstate orelse return 0);
     const state = liveState(lua) orelse {
@@ -1460,6 +1469,29 @@ fn hexe_close(lstate: ?*LuaState) callconv(.c) c_int {
     if (kill and !inHandlerScope(lua)) {
         log.warn("ctx.close with kill=true is not allowed in a predicate", .{});
         lua.pushBoolean(false);
+        return 1;
+    }
+
+    // A float is not in the split tree, so the close below has never been able
+    // to find one: it returned false while `killPane` made the float vanish
+    // anyway, and a caller that believed the answer saw a failure that had in
+    // fact succeeded. Worse, nothing answered a `hexe terminal float` waiting on
+    // its result, so that CLI hung for ever.
+    //
+    // Floats go through the same path a keybinding uses, so closing one from
+    // here does what closing one by hand does -- including sending the waiting
+    // caller its result.
+    if (isFloat(state, pane)) {
+        const tab = state.activeTabIndex();
+        if (kill) {
+            loop_actions.destroyFloatPane(state, pane);
+        } else {
+            // Respect what the float declared: sticky ones hide, transient ones
+            // are destroyed because leaving one alive strands its CLI caller.
+            loop_actions.hideOrDestroyFloat(state, pane, tab);
+        }
+        state.needs_render = true;
+        lua.pushBoolean(true);
         return 1;
     }
 
