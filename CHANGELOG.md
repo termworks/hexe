@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.9] - 2026-08-25
+
+### <!-- 0 -->⛰️  Features
+
+- Hexe.needs, declared and approved at the prompt
+- Fetch() for a peer with no daemon
+- Verbs() handshake, scoped to the door
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Close a float through the float path
+- Revoke fs and stream for untrusted files
+
+### <!-- 3 -->📚 Documentation
+
+- Fetch, the three tiers, and hexe.needs
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- A configs recipe, like oslo's
+
+### Config
+
+- Adopt the live layout, without the hard paths
+
 ## [0.4.8] - 2026-08-24
 
 ### <!-- 0 -->⛰️  Features
