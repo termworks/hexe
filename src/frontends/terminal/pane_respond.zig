@@ -135,10 +135,34 @@ test "the prompt anchor is measured from the mark, not counted" {
 
     try expectReply(csiDisposition(&vt, 'n', "?1440", &reply), "\x1b[?1440;0n");
 
-    // A prompt three rows tall, then the output of what was run from it. The mark stays on the row
-    // it was stamped on however far the cursor has since travelled, which is the whole point.
-    try vt.feed("\x1b]133;A\x07one\r\ntwo\r\n$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a\r\nb\r\n");
-    try expectReply(csiDisposition(&vt, 'n', "?1440", &reply), "\x1b[?1440;6n");
+    // A prompt three rows tall -- a blank row the block opens with, then two rows of prompt -- with
+    // a line typed at it. The mark stays on the row it was stamped on however much has been drawn
+    // over the block since, which is the whole point: the shell asks after something else has had
+    // the screen.
+    try vt.feed("\x1b]133;A\x07\r\nbranch\r\n$ \x1b]133;B\x07ls");
+    try expectReply(csiDisposition(&vt, 'n', "?1440", &reply), "\x1b[?1440;3n");
+}
+
+// **The answer is never a mark belonging to an older prompt.** A shell that took one would go back
+// to where the previous command's block began and erase from there -- that command's frame and all
+// of its output, gone, for a prompt one line tall.
+//
+// It is reachable because a shell may un-mark its own prompt without meaning to: `OSC 133;C` stamps
+// whatever row the cursor is on as output, and a key that *is* a command parks the cursor back at
+// the top of its own block before running. That is exactly the row `133;A` had marked.
+test "the prompt anchor never reaches back past a command's output" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 80, 24);
+    defer vt.deinit();
+    var reply: [128]u8 = undefined;
+
+    // One whole command: a prompt, the line typed at it, and two rows of output.
+    try vt.feed("\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07one\r\ntwo\r\n");
+    // The next prompt, drawn and then parked back on top of itself the way `erase` leaves it -- so
+    // the `133;C` that follows lands on the row `133;A` marked, and the mark is spent.
+    try vt.feed("\x1b]133;A\x07$ \x1b]133;B\x07nav\x1b[1A\r\x1b]133;C\x07");
+
+    try expectReply(csiDisposition(&vt, 'n', "?1440", &reply), "\x1b[?1440;0n");
 }
 
 test "Kitty keyboard query reports the active flag stack" {

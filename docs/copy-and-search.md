@@ -99,6 +99,14 @@ The reply counts from one so that zero can mean *no prompt is marked*. A shell a
 finishing a command and drawing the next prompt, on a round trip it has to time out; a terminal
 that knows the question but has nothing to measure from owes it a no rather than silence.
 
+**The search stops at the first row marked as output, and that is the whole safety of it.** A prompt
+mark further up the screen belongs to an older prompt, and a shell told its block began there goes
+back that far and erases from there — taking the previous command's frame and all of its output with
+it. It is reachable, because a shell can un-mark its own prompt without meaning to: `OSC 133;C`
+stamps whatever row the cursor is on as output, and a key bound to run a command without showing it
+parks the cursor back on the block's first row before the command starts — the very row `133;A`
+marked. So reaching output means *this* block has no mark of its own, which is a zero.
+
 ## What makes it different
 
 tmux's copy-mode is the ancestor of the keyboard half here, and hexe's is deliberately smaller:

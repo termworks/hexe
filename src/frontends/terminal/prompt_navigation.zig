@@ -61,13 +61,34 @@ pub fn lastOutputAlloc(allocator: std.mem.Allocator, vt: *core.VT) !?[:0]const u
 ///
 /// Offset by one so that `0` is a real answer meaning *no prompt is marked* — a shell that gets it
 /// falls back to its own count instead of waiting out a timeout for silence.
+///
+/// # The walk stops at output, and that is the whole safety of it
+///
+/// **A prompt mark further up the screen is not this prompt's.** Searching until *some* `.prompt`
+/// turned up looked right, and was the worst answer possible when it was wrong: the shell was told
+/// its block began where the *previous* command's block began, went back that far, and erased from
+/// there — taking that command's frame and the whole of its output with it.
+///
+/// It is wrong more often than it looks, because a shell may legitimately un-mark its own prompt.
+/// `OSC 133;C` stamps the row the cursor is on as output, and a key bound with `erase` — a key that
+/// *is* a command — deliberately parks the cursor back at the top of its block before the command
+/// starts. That row is the one `133;A` marked, so the block still on screen has no mark left by the
+/// time anybody asks about it.
+///
+/// So what the walk goes back through is the block's own: `.input` and continuation rows are its,
+/// and unmarked rows may be. A row marked as output is not, and reaching one means this block has
+/// no mark of its own — which is a `0`, and a shell that counts for itself.
 pub fn rowsAboveCursor(vt: *core.VT) u32 {
     const screen = vt.terminal.screens.active;
     const cursor_y = vt.getCursor().y;
     var y: u32 = cursor_y;
     while (true) : (y -= 1) {
         const pin = screen.pages.pin(.{ .active = .{ .x = 0, .y = y } }) orelse return 0;
-        if (pin.rowAndCell().row.semantic_prompt == .prompt) return cursor_y - y + 1;
+        switch (pin.rowAndCell().row.semantic_prompt) {
+            .prompt => return cursor_y - y + 1,
+            .command => return 0,
+            .unknown, .prompt_continuation, .input => {},
+        }
         if (y == 0) return 0;
     }
 }
