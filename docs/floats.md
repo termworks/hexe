@@ -83,6 +83,12 @@ Resolved by walking up for `.git` rather than by running `git rev-parse`: this h
 frontend's thread every time you press the key, and a process spawn there stalls every pane in the
 session for as long as it takes.
 
+**Directional navigation skips floats**, because they have dedicated toggle keys: with a float
+focused, left/right switches tabs and up/down does nothing. `navigatable = true` opts a float back
+in — `focus.move` then treats it like any other pane, moving to whatever is actually beside it and
+only falling back to a tab switch at the edge. Useful for a float you live in, like a file
+explorer pinned to one side.
+
 **Which tab.** A `global` float belongs to no tab; its visibility is tracked per tab with a
 bitmask, so the same instance can be shown on one tab and hidden on another. A tab-bound float
 (the default) dies with its tab, and pressing its key on a *different* tab creates a second
@@ -186,6 +192,7 @@ floats that *persist*, and persist with a scope you choose:
 |---|---|
 | `per_cwd` | one instance per working directory; implies `global` |
 | `per_git` | one instance per git repository — a workspace float; implies `global` |
+| `navigatable` | join directional navigation instead of being skipped by it |
 | `sticky` | ses keeps the pod alive across frontend exits; reclaimed on reattach |
 | `global` | not owned by a tab; visibility tracked per tab |
 | `exclusive` | hides the other floats on the tab when shown (one-way: they are not restored) |

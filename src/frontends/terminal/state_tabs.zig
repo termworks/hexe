@@ -486,6 +486,12 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
         .pad_x = @intCast(pad_x_cfg),
         .pad_y = @intCast(pad_y_cfg),
         .pwd_dir = if (float_def.attributes.keyedByDir()) cwd else null,
+        // Carried here as well as at creation. `PaneFloatUiConfig` fills every
+        // field it is not given from its DEFAULTS, so a restore that omits this
+        // does not leave the old value alone -- it silently sets it back to
+        // false. That is why `navigatable` looked wired end to end and still
+        // never did anything: it was set once and cleared by the next restore.
+        .navigatable = float_def.attributes.navigatable,
         .float_style = visuals.float_style,
         .float_title = float_def.title,
     })) return error.OutOfMemory;
