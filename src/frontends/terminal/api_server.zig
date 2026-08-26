@@ -483,7 +483,13 @@ pub const ApiServer = struct {
         // Refused before the verb runs, and named precisely: a plugin author
         // reading "needs typing access" knows exactly what to add to their
         // `access` list, where "permission denied" would send them guessing.
-        if (lua_api.accessFor(call)) |needs| {
+        //
+        // A pane's own socket is asked the scoped price. `resolvePane` confines its
+        // selector to the caller, so a verb that is `control` over the session can cost
+        // less over the caller's own rectangle -- moving your own float is not the power
+        // `control` names.
+        const required = if (self.pane_scope != null) lua_api.scopedAccessFor(call) else lua_api.accessFor(call);
+        if (required) |needs| {
             if (!self.granted.has(needs)) {
                 return self.fail(c, "call `{s}` needs `{s}` access, which this plugin was not granted", .{ call, needs.name() });
             }

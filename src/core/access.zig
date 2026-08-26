@@ -163,3 +163,36 @@ test "all holds every kind" {
         try std.testing.expect(Set.all.has(@enumFromInt(f.value)));
     }
 }
+
+/// What a verb costs on the door being asked.
+///
+/// A pane's own socket pays the scoped price where a verb names one. That is not a
+/// discount on the power: the pane-scoped resolver confines every selector to the
+/// caller, so the authority actually being exercised is over the caller's own
+/// rectangle. `geometry` is the case that motivates it -- moving your own float is
+/// not the session-wide power `control` names.
+///
+/// Both the dispatcher and `verbs()` ask here, so the list cannot advertise a price
+/// the gate does not charge.
+pub fn priceOf(needs: Kind, scoped_needs: ?Kind, pane_scoped: bool) Kind {
+    if (!pane_scoped) return needs;
+    return scoped_needs orelse needs;
+}
+
+test "a pane pays the scoped price, and every other door pays the full one" {
+    // geometry's shape: `control` over the session, `read` over your own rectangle.
+    try std.testing.expectEqual(Kind.control, priceOf(.control, .read, false));
+    try std.testing.expectEqual(Kind.read, priceOf(.control, .read, true));
+
+    // A verb with no scoped price costs the same at every door, so adding the field
+    // changed nothing for the verbs that did not ask for it.
+    try std.testing.expectEqual(Kind.typing, priceOf(.typing, null, false));
+    try std.testing.expectEqual(Kind.typing, priceOf(.typing, null, true));
+}
+
+test "a pane's grant covers the scoped price of moving itself" {
+    // The point of the exercise: the pane socket holds read/screen/typing, and that
+    // is enough for geometry once the price is the scoped one.
+    try std.testing.expect(Set.pane_local.has(priceOf(.control, .read, true)));
+    try std.testing.expect(!Set.pane_local.has(priceOf(.control, .read, false)));
+}
