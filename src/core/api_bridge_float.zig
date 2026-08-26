@@ -213,6 +213,10 @@ pub fn applyFloatVisualOptions(comptime allow_attributes: bool, lua: *Lua, idx: 
             if (lua.typeOf(-1) == .boolean) target.attributes.?.per_cwd = lua.toBoolean(-1);
             lua.pop(1);
 
+            _ = lua.getField(-1, "per_git");
+            if (lua.typeOf(-1) == .boolean) target.attributes.?.per_git = lua.toBoolean(-1);
+            lua.pop(1);
+
             _ = lua.getField(-1, "navigatable");
             if (lua.typeOf(-1) == .boolean) target.attributes.?.navigatable = lua.toBoolean(-1);
             lua.pop(1);

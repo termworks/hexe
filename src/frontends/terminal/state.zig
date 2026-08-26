@@ -143,6 +143,7 @@ pub fn resolveLayoutFloats(
                 merged.attributes.destroy = cfg.float_default_attributes.destroy or float_def.attributes.destroy;
                 merged.attributes.isolated = cfg.float_default_attributes.isolated or float_def.attributes.isolated;
                 merged.attributes.per_cwd = cfg.float_default_attributes.per_cwd or float_def.attributes.per_cwd;
+                merged.attributes.per_git = cfg.float_default_attributes.per_git or float_def.attributes.per_git;
                 merged.attributes.inherit_env = cfg.float_default_attributes.inherit_env or float_def.attributes.inherit_env;
             }
             floats_with_defaults[i] = merged;

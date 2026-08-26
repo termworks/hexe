@@ -673,7 +673,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
         // created — not its shell's live cwd. Resolve it authoritatively first.
         // getReliableCwd is only correct as the *origin* cwd when launching a
         // fresh per-CWD float from a non per-CWD pane.
-        if (float_def.attributes.per_cwd and state.paneIsPwd(focused)) {
+        if (float_def.attributes.keyedByDir() and state.paneIsPwd(focused)) {
             current_dir = state.stickyFloatDir(focused);
         }
         if (current_dir == null) {
@@ -688,6 +688,20 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
         };
     }
 
+    // `per_git` is `per_cwd` with a different key: the repository containing
+    // the directory, so every path inside one working tree shares a float and
+    // it behaves like a workspace rather than a directory. Substituted HERE,
+    // once, because everything downstream matches on `pwd_dir` and none of it
+    // needs to know which of the two attributes chose the value.
+    //
+    // Not in a repository: the directory stands as its own key, so a stray path
+    // gets its own float instead of joining whichever repo happens to be above
+    // it in the filesystem.
+    var git_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (float_def.attributes.per_git and current_dir != null) {
+        if (core.config.gitRootOf(current_dir.?, &git_buf)) |root| current_dir = root;
+    }
+
     // per_cwd floats are unique per *split cwd*, not per tab.
     // So when toggling we only match an existing float if its stored cwd matches
     // the cwd of the currently focused split pane.
@@ -699,7 +713,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
         if (state.paneFloatKey(pane) == float_def.key) {
             // Only tab-bound floats use parent_tab filtering.
             // per_cwd/global floats are shared across tabs.
-            if (!float_def.attributes.per_cwd and !float_def.attributes.global) {
+            if (!float_def.attributes.keyedByDir() and !float_def.attributes.global) {
                 if (state.paneParentTab(pane)) |parent| {
                     if (parent != state.activeTabIndex()) {
                         existing_idx += 1;
@@ -709,7 +723,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
             }
 
             // For per_cwd floats, also check directory match.
-            if (float_def.attributes.per_cwd and state.paneIsPwd(pane)) {
+            if (float_def.attributes.keyedByDir() and state.paneIsPwd(pane)) {
                 // Both dirs must exist and match, or both be null. Identity is
                 // the SES sticky_pwd, never the float shell's live cwd.
                 const pane_dir_opt = state.stickyFloatDir(pane);
@@ -816,7 +830,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
             // hideOrDestroyFloat, so the attribute has to be honoured here too
             // — this is the path that made the attribute look inert.
             if (state.paneVisibleOnTab(pane, state.activeTabIndex()) and
-                float_def.attributes.destroy and !float_def.attributes.per_cwd)
+                float_def.attributes.destroy and !float_def.attributes.keyedByDir())
             {
                 if (state.activeFloatingIndex()) |afi| {
                     if (afi == existing_idx) {
@@ -925,7 +939,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
     applyFloatExclusivity(state, float_def);
 
     // For pwd floats, hide other instances of same float (different dirs) on this tab.
-    if (float_def.attributes.per_cwd) {
+    if (float_def.attributes.keyedByDir()) {
         const new_idx = state.view.float_views.items.len - 1;
         var to_hide: std.ArrayList([32]u8) = .empty;
         defer to_hide.deinit(state.allocator);
@@ -1129,7 +1143,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     // fields must be set together: every SES park path and sticky lookup
     // requires both, so a key without a pwd (cwd resolution failed) would
     // create a float that is never parked and never findable — set neither.
-    const sticky_pwd: ?[]const u8 = if ((float_def.attributes.sticky or float_def.attributes.per_cwd) and current_dir != null)
+    const sticky_pwd: ?[]const u8 = if ((float_def.attributes.sticky or float_def.attributes.keyedByDir()) and current_dir != null)
         current_dir.?
     else
         null;
@@ -1139,7 +1153,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         null;
     // For global/per-CWD floats, visibility is per tab. Tab-bound floats use
     // their parent_tab and simple visible flag.
-    const parent_tab: ?usize = if (!float_def.attributes.global and !float_def.attributes.per_cwd)
+    const parent_tab: ?usize = if (!float_def.attributes.global and !float_def.attributes.keyedByDir())
         state.activeTabIndex()
     else
         null;
@@ -1296,7 +1310,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
             .pos_y_pct = pos_y_pct_u8,
             .pad_x = @intCast(pad_x_cfg),
             .pad_y = @intCast(pad_y_cfg),
-            .pwd_dir = if (float_def.attributes.per_cwd) current_dir else null,
+            .pwd_dir = if (float_def.attributes.keyedByDir()) current_dir else null,
             .navigatable = float_def.attributes.navigatable,
             .float_style = style,
             .float_title = float_def.title,
@@ -1307,7 +1321,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
             true,
             next_tab_visible,
             float_def.attributes.sticky,
-            float_def.attributes.per_cwd,
+            float_def.attributes.keyedByDir(),
             float_def.key,
             width_pct_u8,
             height_pct_u8,
@@ -1364,7 +1378,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         .pos_y_pct = pos_y_pct_u8,
         .pad_x = @intCast(pad_x_cfg),
         .pad_y = @intCast(pad_y_cfg),
-        .pwd_dir = if (float_def.attributes.per_cwd) current_dir else null,
+        .pwd_dir = if (float_def.attributes.keyedByDir()) current_dir else null,
         .navigatable = float_def.attributes.navigatable,
         .float_style = style,
         .float_title = float_def.title,
@@ -1381,7 +1395,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         true,
         tab_visible,
         float_def.attributes.sticky,
-        float_def.attributes.per_cwd,
+        float_def.attributes.keyedByDir(),
         float_def.key,
         width_pct_u8,
         height_pct_u8,

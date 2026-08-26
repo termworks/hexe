@@ -1579,6 +1579,7 @@ fn hexe_config(lstate: ?*LuaState) callconv(.c) c_int {
         setOptInt(lua, "pos_y_pct", if (f.pos_y) |v| @intCast(v) else null);
         setBool(lua, "sticky", f.attributes.sticky);
         setBool(lua, "per_cwd", f.attributes.per_cwd);
+        setBool(lua, "per_git", f.attributes.per_git);
         setBool(lua, "global", f.attributes.global);
         setBool(lua, "exclusive", f.attributes.exclusive);
         setBool(lua, "isolated", f.attributes.isolated);

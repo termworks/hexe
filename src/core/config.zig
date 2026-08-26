@@ -226,6 +226,12 @@ pub const FloatAttributes = struct {
     /// Create one instance per current working directory.
     /// A per-cwd float is always treated as "global" (not tab-bound).
     per_cwd: bool = false,
+    /// Create one instance per git repository: every directory inside the same
+    /// working tree shares it, which is what makes it a workspace rather than a
+    /// directory. Outside a repository it falls back to per-directory, so a
+    /// stray path gets its own rather than joining somebody else's.
+    /// Like `per_cwd`, always treated as "global" (not tab-bound).
+    per_git: bool = false,
     /// Preserve by ses daemon across mux restarts.
     sticky: bool = false,
     /// If true, the float is global (not tab-bound).
@@ -241,6 +247,16 @@ pub const FloatAttributes = struct {
     navigatable: bool = false,
     /// Inherit environment variables from the parent pane's shell process.
     inherit_env: bool = false,
+
+    /// Whether this float's identity includes a directory rather than a tab.
+    ///
+    /// `per_cwd` and `per_git` differ only in WHICH directory is the key -- the
+    /// cwd itself, or the repository containing it. Everything downstream
+    /// (matching, stickiness, not being tab-bound) is the same for both, so it
+    /// asks this rather than naming one of them and quietly forgetting the other.
+    pub fn keyedByDir(self: FloatAttributes) bool {
+        return self.per_cwd or self.per_git;
+    }
 };
 
 pub const FloatDef = struct {
@@ -1155,4 +1171,102 @@ fn constrainPercent(val: u8, min: u8, max: u8) u8 {
     if (val < min) return min;
     if (val > max) return max;
     return val;
+}
+
+/// The working tree containing `dir`, or null if it is not in one.
+///
+/// Walks up looking for `.git`, and accepts a FILE as well as a directory: a
+/// linked worktree and a submodule both keep a `.git` file pointing elsewhere,
+/// and treating those as "not a repository" would give every worktree its own
+/// float while claiming to give one per repository.
+///
+/// Written here rather than shelling out to `git rev-parse`: this runs on the
+/// frontend's thread every time a float is toggled, and a process spawn there
+/// stalls every pane in the session for as long as it takes.
+pub fn gitRootOf(dir: []const u8, buf: []u8) ?[]const u8 {
+    if (dir.len == 0 or dir[0] != '/') return null;
+    var end = dir.len;
+    while (end > 0) {
+        // Trim a trailing slash so "/a/b/" and "/a/b" walk identically.
+        while (end > 1 and dir[end - 1] == '/') end -= 1;
+        const candidate = dir[0..end];
+        var probe_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const probe = std.fmt.bufPrint(&probe_buf, "{s}/.git", .{candidate}) catch return null;
+        if (std.fs.cwd().statFile(probe)) |_| {
+            if (candidate.len > buf.len) return null;
+            @memcpy(buf[0..candidate.len], candidate);
+            return buf[0..candidate.len];
+        } else |_| {}
+        if (end <= 1) break;
+        end = std.mem.lastIndexOfScalar(u8, dir[0..end], '/') orelse break;
+        if (end == 0) break;
+    }
+    return null;
+}
+
+test "gitRootOf finds the tree from a nested directory, and a worktree's .git file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(root);
+
+    try tmp.dir.makePath("repo/.git");
+    try tmp.dir.makePath("repo/a/b/c");
+    try tmp.dir.makePath("plain/x");
+    // A linked worktree keeps a `.git` FILE, not a directory.
+    try tmp.dir.makePath("linked/deep");
+    try tmp.dir.writeFile(.{ .sub_path = "linked/.git", .data = "gitdir: /elsewhere\n" });
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    const nested = try std.fmt.allocPrint(std.testing.allocator, "{s}/repo/a/b/c", .{root});
+    defer std.testing.allocator.free(nested);
+    const want = try std.fmt.allocPrint(std.testing.allocator, "{s}/repo", .{root});
+    defer std.testing.allocator.free(want);
+    try std.testing.expectEqualStrings(want, gitRootOf(nested, &buf).?);
+
+    // The root itself is in its own tree.
+    try std.testing.expectEqualStrings(want, gitRootOf(want, &buf).?);
+
+    // A trailing slash must not change the answer, or one shell's cwd and
+    // another's would key the same repository as two.
+    const slashed = try std.fmt.allocPrint(std.testing.allocator, "{s}/repo/a/", .{root});
+    defer std.testing.allocator.free(slashed);
+    try std.testing.expectEqualStrings(want, gitRootOf(slashed, &buf).?);
+
+    const linked = try std.fmt.allocPrint(std.testing.allocator, "{s}/linked/deep", .{root});
+    defer std.testing.allocator.free(linked);
+    const linked_want = try std.fmt.allocPrint(std.testing.allocator, "{s}/linked", .{root});
+    defer std.testing.allocator.free(linked_want);
+    try std.testing.expectEqualStrings(linked_want, gitRootOf(linked, &buf).?);
+
+    // A directory with no `.git` of its own is not its own tree -- it belongs to
+    // whichever repository contains it, or to none.
+    //
+    // Asserted relatively, not as `== null`: this test runs from a temporary
+    // directory under the checkout, so walking up finds hexe's OWN `.git` and a
+    // null assertion would be testing where the suite happens to run.
+    const plain = try std.fmt.allocPrint(std.testing.allocator, "{s}/plain/x", .{root});
+    defer std.testing.allocator.free(plain);
+    const plain_parent = try std.fmt.allocPrint(std.testing.allocator, "{s}/plain", .{root});
+    defer std.testing.allocator.free(plain_parent);
+    if (gitRootOf(plain, &buf)) |found| {
+        try std.testing.expect(!std.mem.eql(u8, found, plain));
+        try std.testing.expect(!std.mem.eql(u8, found, plain_parent));
+        // Whatever it found is an ancestor, not a sibling of the fixture.
+        try std.testing.expect(std.mem.startsWith(u8, plain, found));
+    }
+
+    // A nested repository wins over the one containing it: the nearest `.git`
+    // is the tree you are in, which is what `git` itself answers.
+    try tmp.dir.makePath("repo/inner/.git");
+    try tmp.dir.makePath("repo/inner/deep");
+    const inner = try std.fmt.allocPrint(std.testing.allocator, "{s}/repo/inner/deep", .{root});
+    defer std.testing.allocator.free(inner);
+    const inner_want = try std.fmt.allocPrint(std.testing.allocator, "{s}/repo/inner", .{root});
+    defer std.testing.allocator.free(inner_want);
+    try std.testing.expectEqualStrings(inner_want, gitRootOf(inner, &buf).?);
+
+    try std.testing.expect(gitRootOf("relative/path", &buf) == null);
+    try std.testing.expect(gitRootOf("", &buf) == null);
 }
