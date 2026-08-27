@@ -1,0 +1,19 @@
+.{
+    .name = .liblink,
+    .version = "0.0.13",
+    .dependencies = .{
+        .libfast = .{
+            .url = "git+https://github.com/bresilla/libfast#0.0.16",
+            .hash = "libfast-0.0.16-BoxUpZaTDAClNv5M5VImaQ06w2vVSI5HSbOADKDNqIXq",
+            // .path = "../libfast",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "bin",
+        "examples",
+        "lib",
+    },
+    .fingerprint = 0xa9bc5bd73bc0781,
+}

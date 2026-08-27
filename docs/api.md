@@ -343,6 +343,17 @@ worth knowing:
   `floats` — instead of returning one pane's worth of a session-wide answer,
   which would read as hexe having lost the other panes.
 
+`geometry` is the one verb that costs less here than elsewhere. It is `control` over
+the session, because moving somebody else's pane is; but the pane-scoped resolver
+confines every selector to the caller, so over your own rectangle it is `read`. A
+program in a float can therefore step aside to make room for something — which is the
+whole reason a pane would ask about geometry at all — and still cannot touch a pane it
+does not occupy.
+
+```console
+$ hexe api geometry '{"x":15,"width":30}'    # from inside a pane: moves that pane
+```
+
 It carries `read`, `screen` and `typing`, on that pane only. That grants nothing
 to whoever is already running there — it *is* the process in that pane and can
 read its own screen and type into itself by definition. What it adds is asking

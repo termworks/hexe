@@ -212,10 +212,24 @@ fn recyclePaneForSplit(self: anytype, tab: *TabView, pane: *Pane, pane_id: u16, 
 }
 
 fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, actual_focus_uuid: ?[32]u8) void {
+    // Attributes that came from the local config, not from SES.
+    //
+    // `SessionFloat` is the daemon's record and knows nothing about
+    // `navigatable`, while `PaneFloatUiConfig` fills anything it is not given
+    // from its defaults -- so writing this record back does not leave the
+    // attribute alone, it silently clears it. This runs on every session-state
+    // sync, which is why `navigatable` was set once at creation and false
+    // forever after.
+    const keep_navigatable = blk: {
+        if (self.floatUiByUuid(float_state.pane_uuid)) |ui| break :blk ui.navigatable;
+        if (self.floatUiConst(pane)) |ui| break :blk ui.navigatable;
+        break :blk false;
+    };
     self.clearFloatUi(pane.uuid);
     pane.adoptIdentity(float_state.pane_uuid);
     pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid) else false;
     _ = self.setPaneFloatUi(float_state.pane_uuid, .{
+        .navigatable = keep_navigatable,
         .width_pct = float_state.width_pct,
         .height_pct = float_state.height_pct,
         .pos_x_pct = float_state.pos_x_pct,

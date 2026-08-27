@@ -3,6 +3,13 @@
 
 const std = @import("std");
 const core = @import("core");
+const prompt_navigation = @import("prompt_navigation.zig");
+
+/// The private DSR a shell uses to ask where its own prompt block begins.
+///
+/// Its own number rather than a standard one: no DSR asks this question, and the answer means
+/// nothing except between a shell that marks its prompt and a terminal that kept the mark.
+const PROMPT_ANCHOR: []const u8 = "?1440";
 
 pub const Disposition = union(enum) {
     ignore,
@@ -47,6 +54,13 @@ pub fn csiDisposition(vt: *core.VT, final: u8, params: []const u8, reply_buf: []
                 std.fmt.bufPrint(reply_buf, "\x1b[?{d};{d}R", .{ row, column }) catch return .ignore
             else
                 std.fmt.bufPrint(reply_buf, "\x1b[{d};{d}R", .{ row, column }) catch return .ignore;
+            return .{ .reply = reply };
+        }
+        if (std.mem.eql(u8, params, PROMPT_ANCHOR)) {
+            const reply = std.fmt.bufPrint(reply_buf, "\x1b[{s};{d}n", .{
+                PROMPT_ANCHOR,
+                prompt_navigation.rowsAboveCursor(vt),
+            }) catch return .ignore;
             return .{ .reply = reply };
         }
     }
@@ -107,6 +121,48 @@ test "CSI routing keeps emulation and appearance ownership explicit" {
     try std.testing.expect(csiDisposition(&vt, 'c', "", &reply) == .forward_to_host);
     try std.testing.expect(csiDisposition(&vt, 'c', ">0", &reply) == .forward_to_host);
     try expectReply(csiDisposition(&vt, 'p', "?2026$", &reply), "\x1b[?2026;2$y");
+}
+
+// **A shell asking where its prompt is gets an answer or a zero, never silence.** It asks between
+// finishing a command and drawing the next prompt, on a round trip it has to time out — so a
+// terminal that knows the question but has no mark to answer with has to say so, or every prompt
+// after a `clear` pays the timeout for nothing.
+test "the prompt anchor is measured from the mark, not counted" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 80, 24);
+    defer vt.deinit();
+    var reply: [128]u8 = undefined;
+
+    try expectReply(csiDisposition(&vt, 'n', "?1440", &reply), "\x1b[?1440;0n");
+
+    // A prompt three rows tall -- a blank row the block opens with, then two rows of prompt -- with
+    // a line typed at it. The mark stays on the row it was stamped on however much has been drawn
+    // over the block since, which is the whole point: the shell asks after something else has had
+    // the screen.
+    try vt.feed("\x1b]133;A\x07\r\nbranch\r\n$ \x1b]133;B\x07ls");
+    try expectReply(csiDisposition(&vt, 'n', "?1440", &reply), "\x1b[?1440;3n");
+}
+
+// **The answer is never a mark belonging to an older prompt.** A shell that took one would go back
+// to where the previous command's block began and erase from there -- that command's frame and all
+// of its output, gone, for a prompt one line tall.
+//
+// It is reachable because a shell may un-mark its own prompt without meaning to: `OSC 133;C` stamps
+// whatever row the cursor is on as output, and a key that *is* a command parks the cursor back at
+// the top of its own block before running. That is exactly the row `133;A` had marked.
+test "the prompt anchor never reaches back past a command's output" {
+    var vt: core.VT = .{};
+    try vt.init(std.testing.allocator, 80, 24);
+    defer vt.deinit();
+    var reply: [128]u8 = undefined;
+
+    // One whole command: a prompt, the line typed at it, and two rows of output.
+    try vt.feed("\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07one\r\ntwo\r\n");
+    // The next prompt, drawn and then parked back on top of itself the way `erase` leaves it -- so
+    // the `133;C` that follows lands on the row `133;A` marked, and the mark is spent.
+    try vt.feed("\x1b]133;A\x07$ \x1b]133;B\x07nav\x1b[1A\r\x1b]133;C\x07");
+
+    try expectReply(csiDisposition(&vt, 'n', "?1440", &reply), "\x1b[?1440;0n");
 }
 
 test "Kitty keyboard query reports the active flag stack" {

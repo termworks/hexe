@@ -1,0 +1,19 @@
+.{
+    .name = .libfast,
+    .version = "0.0.16",
+    .dependencies = .{
+        .libsafe = .{
+            .url = "git+https://github.com/libzig/libsafe#0.0.8",
+            .hash = "libsafe-0.0.8-ucZASOEfBAC7l7_bvYjAjNV_u9VeWVNiH-IF1EQVsDZm",
+            // .path = "../libsafe",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "bin",
+        "examples",
+        "lib",
+    },
+    .fingerprint = 0x19511588a5548c06,
+}

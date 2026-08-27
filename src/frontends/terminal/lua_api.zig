@@ -1579,6 +1579,7 @@ fn hexe_config(lstate: ?*LuaState) callconv(.c) c_int {
         setOptInt(lua, "pos_y_pct", if (f.pos_y) |v| @intCast(v) else null);
         setBool(lua, "sticky", f.attributes.sticky);
         setBool(lua, "per_cwd", f.attributes.per_cwd);
+        setBool(lua, "per_git", f.attributes.per_git);
         setBool(lua, "global", f.attributes.global);
         setBool(lua, "exclusive", f.attributes.exclusive);
         setBool(lua, "isolated", f.attributes.isolated);
@@ -1837,14 +1838,17 @@ fn hexe_verbs(lstate: ?*LuaState) callconv(.c) c_int {
     lua.createTable(ENTRIES.len, 0);
     var n: i32 = 0;
     inline for (ENTRIES) |e| {
-        const allowed = state.api_grant.has(e.needs) and
-            (state.api_pane_scope == null or e.pane_local);
+        // The same price the dispatcher will charge, so the list cannot promise a verb
+        // the gate refuses -- or withhold one it would allow.
+        const scoped = state.api_pane_scope != null;
+        const needs = core.access.priceOf(e.needs, e.needs_scoped, scoped);
+        const allowed = state.api_grant.has(needs) and (!scoped or e.pane_local);
         if (allowed) {
             n += 1;
             lua.createTable(0, 3);
             setStr(lua, "name", std.mem.span(e.name.ptr));
             setStr(lua, "about", e.about);
-            setStr(lua, "access", e.needs.name());
+            setStr(lua, "access", needs.name());
             lua.rawSetIndex(-2, n);
         }
     }
@@ -1871,6 +1875,11 @@ const Entry = struct {
     /// Answerable for one pane alone, so a pane's own socket may serve it.
     /// Everything else describes or changes the session and is refused there.
     pane_local: bool = false,
+    /// What the verb costs on a pane's own socket, when that is less than
+    /// `needs`. A pane moving *itself* is not the power `control` names: the
+    /// selector is confined to the caller either way, so the authority being
+    /// asked for is over its own rectangle and nothing else.
+    needs_scoped: ?core.access.Kind = null,
 };
 
 /// Whether `call` means something on a single pane's socket.
@@ -1885,6 +1894,17 @@ pub fn isPaneLocal(call: []const u8) bool {
 pub fn accessFor(call: []const u8) ?core.access.Kind {
     inline for (ENTRIES) |e| {
         if (std.mem.eql(u8, call, std.mem.span(e.name.ptr))) return e.needs;
+    }
+    return null;
+}
+
+/// What `call` requires on a pane's own socket, where the selector cannot
+/// reach past the caller.
+pub fn scopedAccessFor(call: []const u8) ?core.access.Kind {
+    inline for (ENTRIES) |e| {
+        if (std.mem.eql(u8, call, std.mem.span(e.name.ptr))) {
+            return core.access.priceOf(e.needs, e.needs_scoped, true);
+        }
     }
     return null;
 }
@@ -1913,7 +1933,7 @@ const ENTRIES = [_]Entry{
     .{ .name = "client", .func = hexe_client, .about = "this library's own source", .needs = .read, .pane_local = true },
     .{ .name = "popup", .func = hexe_popup, .about = "show a block until it is dismissed", .needs = .popup },
     .{ .name = "stream", .func = hexe_stream, .about = "hand a pane's bytes to a plugin", .needs = .stream },
-    .{ .name = "geometry", .func = hexe_geometry, .about = "read or set where a pane is" },
+    .{ .name = "geometry", .func = hexe_geometry, .about = "read or set where a pane is", .pane_local = true, .needs_scoped = .read },
     .{ .name = "ratio", .func = hexe_ratio, .about = "read or set a divider" },
     .{ .name = "close", .func = hexe_close, .about = "close a pane" },
     .{ .name = "scroll", .func = hexe_scroll, .about = "scroll a pane" },

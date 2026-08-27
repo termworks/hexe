@@ -199,6 +199,13 @@ run_query(master, "KITTY", "\\033[?u", b"\x1b[?0u")
 run_query(master, "DECRQM", "\\033[?2026$p", b"\x1b[?2026;2$y")
 run_query(master, "DSR", "\\033[10;20H\\033[6n", b"\x1b[10;20R")
 
+# The prompt anchor, which is a shell asking a question about its own screen that it cannot answer
+# from anything it kept itself. With no mark on screen the answer is a zero rather than silence --
+# the shell is on a round trip it has to time out, and a terminal that knows the question owes it a
+# no. With a mark on the cursor's own row the answer is that row, counted from one.
+run_query(master, "ANCHORNONE", "\\033[2J\\033[H\\033[?1440n", b"\x1b[?1440;0n")
+run_query(master, "ANCHORHERE", "\\033]133;A\\007\\033[?1440n", b"\x1b[?1440;1n")
+
 with open(os.path.join(REPO, "build.zig.zon"), encoding="utf-8") as manifest_file:
     manifest = manifest_file.read()
 match = re.search(r'\.version\s*=\s*"([^"]+)"', manifest)

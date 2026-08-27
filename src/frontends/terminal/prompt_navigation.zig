@@ -48,6 +48,51 @@ pub fn lastOutputAlloc(allocator: std.mem.Allocator, vt: *core.VT) !?[:0]const u
     return null;
 }
 
+/// How many rows above the cursor this pane's prompt block begins, `+ 1`.
+///
+/// **The answer a shell cannot work out for itself.** A shell redraws its prompt by going back up
+/// to the block's first row and writing it again, and the only thing it has to go on is a count it
+/// kept while drawing. That count is a guess the moment anything else moves the cursor — a float
+/// opening over the pane, a program that scrolled, a prompt with rows added above or below it — and
+/// a guess that is one out deletes somebody else's line or leaves a stale copy of its own.
+///
+/// The mux is the one party that does not have to guess: `OSC 133;A` already stamped the row, and
+/// it is still stamped however much has happened since. So it answers, and the shell asks.
+///
+/// Offset by one so that `0` is a real answer meaning *no prompt is marked* — a shell that gets it
+/// falls back to its own count instead of waiting out a timeout for silence.
+///
+/// # The walk stops at output, and that is the whole safety of it
+///
+/// **A prompt mark further up the screen is not this prompt's.** Searching until *some* `.prompt`
+/// turned up looked right, and was the worst answer possible when it was wrong: the shell was told
+/// its block began where the *previous* command's block began, went back that far, and erased from
+/// there — taking that command's frame and the whole of its output with it.
+///
+/// It is wrong more often than it looks, because a shell may legitimately un-mark its own prompt.
+/// `OSC 133;C` stamps the row the cursor is on as output, and a key bound with `erase` — a key that
+/// *is* a command — deliberately parks the cursor back at the top of its block before the command
+/// starts. That row is the one `133;A` marked, so the block still on screen has no mark left by the
+/// time anybody asks about it.
+///
+/// So what the walk goes back through is the block's own: `.input` and continuation rows are its,
+/// and unmarked rows may be. A row marked as output is not, and reaching one means this block has
+/// no mark of its own — which is a `0`, and a shell that counts for itself.
+pub fn rowsAboveCursor(vt: *core.VT) u32 {
+    const screen = vt.terminal.screens.active;
+    const cursor_y = vt.getCursor().y;
+    var y: u32 = cursor_y;
+    while (true) : (y -= 1) {
+        const pin = screen.pages.pin(.{ .active = .{ .x = 0, .y = y } }) orelse return 0;
+        switch (pin.rowAndCell().row.semantic_prompt) {
+            .prompt => return cursor_y - y + 1,
+            .command => return 0,
+            .unknown, .prompt_continuation, .input => {},
+        }
+        if (y == 0) return 0;
+    }
+}
+
 fn setSemantic(vt: *core.VT, y: u32, semantic: anytype) !void {
     const pin = vt.terminal.screens.active.pages.pin(.{ .screen = .{ .x = 0, .y = y } }) orelse return error.UnknownPoint;
     pin.rowAndCell().row.semantic_prompt = semantic;

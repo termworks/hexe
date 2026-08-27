@@ -143,7 +143,14 @@ pub fn resolveLayoutFloats(
                 merged.attributes.destroy = cfg.float_default_attributes.destroy or float_def.attributes.destroy;
                 merged.attributes.isolated = cfg.float_default_attributes.isolated or float_def.attributes.isolated;
                 merged.attributes.per_cwd = cfg.float_default_attributes.per_cwd or float_def.attributes.per_cwd;
+                merged.attributes.per_git = cfg.float_default_attributes.per_git or float_def.attributes.per_git;
                 merged.attributes.inherit_env = cfg.float_default_attributes.inherit_env or float_def.attributes.inherit_env;
+                // Every attribute a float can declare has to be listed here: the merge
+                // starts from the defaults, so one left out is silently replaced by the
+                // default and the float's own value never reaches it. `navigatable` was
+                // missing, which is why it looked parsed, stored and reported while doing
+                // nothing at all.
+                merged.attributes.navigatable = cfg.float_default_attributes.navigatable or float_def.attributes.navigatable;
             }
             floats_with_defaults[i] = merged;
         }
@@ -2453,6 +2460,12 @@ pub const State = struct {
 
     pub fn floatUiConst(self: *const State, pane: *const Pane) ?*const FloatUiState {
         return self.float_ui.getPtr(pane.uuid);
+    }
+
+    /// By uuid, for a caller that is about to change which uuid a pane carries
+    /// and needs what the target already had.
+    pub fn floatUiByUuid(self: *const State, uuid: [32]u8) ?*const FloatUiState {
+        return self.float_ui.getPtr(uuid);
     }
 
     pub fn ensureFloatUi(self: *State, pane_uuid: [32]u8) ?*FloatUiState {

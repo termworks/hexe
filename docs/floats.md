@@ -63,11 +63,37 @@ and all. This is the attribute that makes a `lazygit` or a REPL key useful — i
 means "the one for here". It depends on the pane's cwd being known, which is OSC 7, which is what
 `hexe shell init <shell>` emits.
 
+**`per_git` is the same idea keyed on the repository.** A `per_cwd` float in `~/work/proj` and one
+in `~/work/proj/src` are two processes, which is right for a scratch shell and wrong for anything
+belonging to the project — you walk into a subdirectory and your editor, your REPL or your agent is
+suddenly a different one. `per_git` resolves the working tree containing the pane's cwd and keys on
+that, so every path inside one checkout shares a float:
+
+```lua
+hexe.float("agent", { key = "a", command = "claude", attrs = { per_git = true } })
+```
+
+The **nearest** `.git` wins, so a submodule or a nested checkout is its own workspace — the same
+answer `git` itself gives. A linked worktree counts: its `.git` is a file rather than a directory,
+and treating that as "no repository" would hand every worktree a separate float while claiming to
+give one per repository. Outside any repository the directory stands as its own key, so a stray
+path gets its own float instead of joining whichever repo happens to sit above it.
+
+Resolved by walking up for `.git` rather than by running `git rev-parse`: this happens on the
+frontend's thread every time you press the key, and a process spawn there stalls every pane in the
+session for as long as it takes.
+
+**Directional navigation skips floats**, because they have dedicated toggle keys: with a float
+focused, left/right switches tabs and up/down does nothing. `navigatable = true` opts a float back
+in — `focus.move` then treats it like any other pane, moving to whatever is actually beside it and
+only falling back to a tab switch at the edge. Useful for a float you live in, like a file
+explorer pinned to one side.
+
 **Which tab.** A `global` float belongs to no tab; its visibility is tracked per tab with a
 bitmask, so the same instance can be shown on one tab and hidden on another. A tab-bound float
 (the default) dies with its tab, and pressing its key on a *different* tab creates a second
 instance rather than moving the first — there is no way to move a tab-bound float between tabs.
-`per_cwd` implies global regardless of what you wrote.
+`per_cwd` and `per_git` imply global regardless of what you wrote.
 
 That bitmask is a `u64` (`state.zig:2539`), so a global float's visibility can only be tracked for
 the first 64 tabs: on tab 65 and beyond it can never be shown.
@@ -165,6 +191,8 @@ floats that *persist*, and persist with a scope you choose:
 | | |
 |---|---|
 | `per_cwd` | one instance per working directory; implies `global` |
+| `per_git` | one instance per git repository — a workspace float; implies `global` |
+| `navigatable` | join directional navigation instead of being skipped by it |
 | `sticky` | ses keeps the pod alive across frontend exits; reclaimed on reattach |
 | `global` | not owned by a tab; visibility tracked per tab |
 | `exclusive` | hides the other floats on the tab when shown (one-way: they are not restored) |

@@ -87,7 +87,8 @@ caller supplies is a token the caller can omit — and then the grant means
 nothing. Authority is a property of the door.
 
 **A pane's socket narrows the same way, in a second dimension.** It holds
-`read`, `screen` and `typing`, and it answers for one pane: a session-wide verb
+`read`, `screen` and `typing` — plus `geometry` over its own rectangle, which is
+`control` anywhere else — and it answers for one pane: a session-wide verb
 is refused by name, and a selector naming another pane resolves to nothing
 rather than to the caller's own. Its path is `$HEXE_PANE_API_SOCKET`, exported
 into every pane's shell, so a program in a pane finally has something it can be

@@ -727,6 +727,12 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         }
         lua.pop(1);
 
+        _ = lua.getField(-1, "per_git");
+        if (lua.typeOf(-1) == .boolean) {
+            float_def.attributes.per_git = lua.toBoolean(-1);
+        }
+        lua.pop(1);
+
         _ = lua.getField(-1, "global");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.global = lua.toBoolean(-1);
@@ -1043,7 +1049,7 @@ test "parseLayoutFloat reads canonical attrs table" {
         "float = {" ++
         "key='g'," ++
         "command='lazygit'," ++
-        "attrs={ global=true, per_cwd=true, inherit_env=true }" ++
+        "attrs={ global=true, per_cwd=true, per_git=true, inherit_env=true }" ++
         "}";
     const z = try std.testing.allocator.dupeZ(u8, chunk);
     defer std.testing.allocator.free(z);
@@ -1060,6 +1066,7 @@ test "parseLayoutFloat reads canonical attrs table" {
     try std.testing.expect(float.has_custom_attributes);
     try std.testing.expect(float.attributes.global);
     try std.testing.expect(float.attributes.per_cwd);
+    try std.testing.expect(float.attributes.per_git);
     try std.testing.expect(float.attributes.inherit_env);
 }
 

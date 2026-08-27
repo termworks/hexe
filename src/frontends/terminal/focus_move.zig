@@ -23,24 +23,40 @@ fn coreDirectionFromLayout(dir: layout_mod.Layout.Direction) frontend_core.Direc
 ///   Floats have dedicated toggle keys so directional nav skips them.
 /// - Split: directional navigation among splits, tab switch at edge.
 pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
-    // Floats have dedicated toggle keys — directional navigation skips them.
-    // Left/right switches tabs, up/down ignored.
+    // Floats have dedicated toggle keys, so directional navigation skips them by
+    // default: left/right switches tabs, up/down does nothing.
+    //
+    // Unless the float asked to be navigable. `focus_nav.focusDirectionAny`
+    // below already treats a focused float as the origin and lets floats and
+    // splits compete equally -- this early return was the only thing standing
+    // between the `navigatable` attribute and the behaviour it names.
+    var origin_is_navigable_float = false;
     if (state.activeFloatingIndex()) |idx| {
         if (idx < state.view.float_views.items.len) {
-            state.cursor_needs_restore = true;
-            switch (dir) {
-                .left => actions.switchToPrevTab(state),
-                .right => actions.switchToNextTab(state),
-                .up, .down => {},
+            const fp = state.view.float_views.items[idx];
+            const navigable = if (state.floatUiConst(fp)) |ui| ui.navigatable else false;
+            if (navigable) {
+                origin_is_navigable_float = true;
+            } else {
+                state.cursor_needs_restore = true;
+                switch (dir) {
+                    .left => actions.switchToPrevTab(state),
+                    .right => actions.switchToNextTab(state),
+                    .up, .down => {},
+                }
+                state.needs_render = true;
+                return true;
             }
-            state.needs_render = true;
-            return true;
         }
     }
 
     // Split navigation
     const old_uuid = state.getCurrentFocusedUuid();
     const cursor = blk: {
+        // Navigating FROM a float: let `focusDirectionAny` take the origin from
+        // the float itself. The layout's focused pane is a tiled one, and
+        // steering by its cursor would measure the move from the wrong place.
+        if (origin_is_navigable_float) break :blk @as(?layout_mod.CursorPos, null);
         if (state.currentLayout().getFocusedPane()) |pane| {
             const pos = pane.getCursorPos();
             break :blk @as(?layout_mod.CursorPos, .{ .x = pos.x, .y = pos.y });
