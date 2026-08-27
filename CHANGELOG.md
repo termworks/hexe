@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.10] - 2026-08-27
+
+### <!-- 0 -->⛰️  Features
+
+- Per_git, one float for a whole repo
+- Let a pane move its own float
+- Answer where a shell's prompt begins
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Make navigatable actually navigate
+- An older prompt's mark is not this one's
+- The statusbar in three zones
+- Anchor the centre zone to the bar
+
 ## [0.4.9] - 2026-08-25
 
 ### <!-- 0 -->⛰️  Features
