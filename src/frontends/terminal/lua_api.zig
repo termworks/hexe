@@ -1923,7 +1923,10 @@ const ENTRIES = [_]Entry{
     .{ .name = "act", .func = hexe_act, .about = "perform a bound action by name" },
     .{ .name = "notify", .func = hexe_notify, .about = "put a line in front of the user", .needs = .popup },
     .{ .name = "send", .func = hexe_send, .about = "write bytes into a pane, uninterpreted", .needs = .typing, .pane_local = true },
-    .{ .name = "focus", .func = hexe_focus, .about = "move focus to a pane" },
+    // Scoped, this is "focus me" -- the selector cannot name another pane, so what a
+    // pane buys is the ability to ask for the cursor back after it opened something
+    // that took it.
+    .{ .name = "focus", .func = hexe_focus, .about = "move focus to a pane", .pane_local = true, .needs_scoped = .read },
     .{ .name = "tab_select", .func = hexe_tab_select, .about = "switch to a tab" },
     .{ .name = "rename_tab", .func = hexe_rename_tab, .about = "name a tab" },
     .{ .name = "rename", .func = hexe_rename, .about = "name a pane" },
