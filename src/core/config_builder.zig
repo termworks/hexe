@@ -435,12 +435,6 @@ pub const PopConfigBuilder = struct {
         pokemon_position: ?[]const u8 = null,
         pokemon_shiny_chance: ?f32 = null,
 
-        keycast_enabled: ?bool = null,
-        keycast_position: ?[]const u8 = null,
-        keycast_duration_ms: ?i64 = null,
-        keycast_max_entries: ?u8 = null,
-        keycast_grouping_timeout_ms: ?i64 = null,
-
         digits_enabled: ?bool = null,
         digits_position: ?[]const u8 = null,
         digits_size: ?[]const u8 = null,
@@ -473,7 +467,6 @@ pub const PopConfigBuilder = struct {
         }
         // Widget strings cleanup
         if (self.widgets.pokemon_position) |p| self.allocator.free(p);
-        if (self.widgets.keycast_position) |p| self.allocator.free(p);
         if (self.widgets.digits_position) |p| self.allocator.free(p);
         if (self.widgets.digits_size) |s| self.allocator.free(s);
     }

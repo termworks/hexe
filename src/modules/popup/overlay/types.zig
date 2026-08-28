@@ -33,7 +33,7 @@ pub const Corner = enum {
 pub const OverlayKind = enum {
     /// Auto-expires after duration (resize coordinates)
     info,
-    /// Stays until explicitly dismissed (keycast entries)
+    /// Stays until explicitly dismissed
     persistent,
     /// Captures input, optional dimming (swap mode)
     modal,

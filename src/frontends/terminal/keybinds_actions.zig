@@ -515,11 +515,6 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
             state.needs_render = true;
             return true;
         },
-        .keycast_toggle => {
-            state.overlays.toggleKeycast();
-            state.needs_render = true;
-            return true;
-        },
         // Push-to-talk binds start on press and stop on release, so `start`
         // must be idempotent while held: key repeat fires it many times, and
         // spawning a second recorder per repeat would leave orphaned tools.

@@ -116,11 +116,6 @@ pub fn renderOverlays(
         renderResizeInfo(renderer, overlays);
     }
 
-    // Render keycast
-    if (overlays.keycast.hasContent()) {
-        renderKeycast(renderer, overlays, screen_width, content_height);
-    }
-
     // Render generic overlays
     for (overlays.getOverlays()) |ov| {
         renderOverlay(renderer, ov, screen_width, content_height);
@@ -211,44 +206,6 @@ fn renderResizeInfo(renderer: *Renderer, overlays: *OverlayManager) void {
 
     // Draw text
     _ = statusbar.drawStyledText(renderer, box_x + padding, box_y, text, textStyle(.{ .palette = 0 }, .{ .palette = 1 }, false));
-}
-
-/// Render keycast history in bottom-right corner
-fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_width: u16, content_height: u16) void {
-    const keycast_state = &overlays.keycast;
-    const entries = keycast_state.getEntries();
-    if (entries.len == 0) return;
-
-    const margin: u16 = 2;
-    var y: u16 = switch (overlays.keycast_position) {
-        .topleft, .topright => margin,
-        .center => content_height / 2 -| @as(u16, @intCast(entries.len / 2)),
-        .bottomleft, .bottomright => content_height -| margin -| @as(u16, @intCast(entries.len)),
-    };
-
-    for (entries) |entry| {
-        const text = entry.getText();
-        const text_len: u16 = statusbar.measureText(text);
-        const padding: u16 = 1;
-        const box_width = text_len + padding * 2;
-
-        const box_x: u16 = switch (overlays.keycast_position) {
-            .topleft, .bottomleft => margin,
-            .center => screen_width / 2 -| box_width / 2,
-            .topright, .bottomright => screen_width -| margin -| box_width,
-        };
-
-        // Draw background
-        for (0..box_width) |dx| {
-            const x = box_x + @as(u16, @intCast(dx));
-            putChar(renderer, x, y, ' ', .{ .palette = 15 }, .{ .palette = 238 }, false);
-        }
-
-        // Draw text
-        _ = statusbar.drawStyledText(renderer, box_x + padding, y, text, textStyle(.{ .palette = 15 }, .{ .palette = 238 }, true));
-
-        y += 1;
-    }
 }
 
 /// Render a generic overlay
