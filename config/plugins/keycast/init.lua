@@ -8,13 +8,38 @@
 --
 -- So hexe reports `key_pressed` and this draws. Turning it off is uninstalling
 -- it, or not allowing it -- there is no toggle to carry.
+--
+-- **It draws itself.** `draw` also takes a `view` for the painter to render,
+-- which keeps styling with the rest of a theme -- but it makes the plugin need
+-- a painter, and a painter's config, to show you a keystroke. This ships its
+-- own bytes instead: what it needs is a background, a foreground and some text,
+-- and that is three escape codes. Change them here.
 
 local KEEP = 8            -- chords kept on screen
 local LINGER_MS = 2500    -- how long after the last key the panel stays
 local WIDTH = 34
 local CORNER = "bottomright"
 
+local FG = 15             -- 256-colour foreground
+local BG = 237            -- 256-colour background
+local BOLD = true
+
+local ESC = string.char(27)
+
 local recent = {}
+
+-- Padded to the full width so the panel is a solid block rather than a ragged
+-- one that changes shape with every key.
+local function panel(text)
+  if #text > WIDTH - 2 then
+    text = text:sub(#text - (WIDTH - 3))
+  end
+  local body = " " .. text
+  body = body .. string.rep(" ", WIDTH - #body)
+
+  local style = ESC .. "[" .. (BOLD and "1;" or "") .. "38;5;" .. FG .. ";48;5;" .. BG .. "m"
+  return style .. body .. ESC .. "[0m"
+end
 
 -- **The panel expires itself.**
 --
@@ -23,16 +48,8 @@ local recent = {}
 -- typing stops. The same mechanism covers this plugin crashing -- what it left
 -- on the screen goes away on its own rather than staying until hexe restarts.
 local function show()
-  local text = table.concat(recent, " ")
-  if #text > WIDTH - 2 then
-    text = text:sub(#text - (WIDTH - 3))
-  end
   hexe.live.draw("keycast", {
-    -- Rendered by the painter, so the styling lives with the rest of the
-    -- theme rather than as escape codes in here. A painter that does not
-    -- define the view simply draws nothing, which is the right failure.
-    view = "plug.keycast",
-    values = { keys = text },
+    content = panel(table.concat(recent, " ")),
     corner = CORNER,
     width = WIDTH,
     height = 1,
