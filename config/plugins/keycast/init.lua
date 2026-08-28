@@ -6,14 +6,18 @@
 -- which of them are safe to show; drawing a list of them in a corner is
 -- something anything can do, given that.
 --
--- So hexe reports `key_pressed` and this draws. Turning it off is uninstalling
--- it, or not allowing it -- there is no toggle to carry.
+-- So hexe reports `key_pressed` and this draws, with its own chord to turn it
+-- on and off.
 --
 -- **It draws itself.** `draw` also takes a `view` for the painter to render,
 -- which keeps styling with the rest of a theme -- but it makes the plugin need
 -- a painter, and a painter's config, to show you a keystroke. This ships its
 -- own bytes instead: what it needs is a background, a foreground and some text,
 -- and that is three escape codes. Change them here.
+
+-- The chord that turns it on and off. `act_and_consume` so the toggle itself
+-- does not also reach the pane underneath.
+local TOGGLE = { hexe.key.ctrl, hexe.key.alt, hexe.key.k }
 
 local KEEP = 8            -- chords kept on screen
 local LINGER_MS = 2500    -- how long after the last key the panel stays
@@ -26,6 +30,9 @@ local BOLD = true
 
 local ESC = string.char(27)
 
+-- Off until asked for. A plugin that starts drawing the moment it is allowed
+-- gives you no way to look at it first.
+local on = false
 local recent = {}
 
 -- Padded to the full width so the panel is a solid block rather than a ragged
@@ -57,7 +64,21 @@ local function show()
   })
 end
 
+hexe.key(TOGGLE, function()
+  on = not on
+  if on then
+    -- Say so immediately: a toggle whose only feedback is the next keystroke
+    -- leaves you pressing keys to find out whether it worked.
+    recent = {}
+    show()
+  else
+    recent = {}
+    hexe.live.undraw("keycast")
+  end
+end, { mode = hexe.mode.act_and_consume })
+
 hexe.on.key_pressed(function(ev)
+  if not on then return end
   local key = ev and ev.key
   if not key or key == "" then return end
 
