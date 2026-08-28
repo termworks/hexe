@@ -510,19 +510,57 @@ make.recipe{
     -- One entry at a time, each mirrored with --delete, rather than one --delete over the whole
     -- tree: the destination is where anything else you keep beside init.lua lives, and a tree-wide
     -- mirror would take it with it.
+    -- **Plugins do not live with the config.** hexe reads them from the data directory, so
+    -- syncing `config/plugins` into `~/.config/hexe` would put them somewhere nothing looks. They
+    -- go to their own destination below, and are skipped here.
     local synced = 0
     for _, path in ipairs(oslo.fs.glob(source .. "/*")) do
       local name = oslo.path.name(path)
-      if oslo.fs.stat(path .. "/") then
+      if name == "plugins" then
+        goto continue
+      elseif oslo.fs.stat(path .. "/") then
         sh.mkdir("-p", dest .. "/" .. name)
         sh.rsync("-a", "--delete", path .. "/", dest .. "/" .. name .. "/")
       else
         sh.rsync("-a", path, dest .. "/" .. name)
       end
       synced = synced + 1
+      ::continue::
     end
     print(oslo.ui.style("✓ ", { fg = "green" }) ..
           ("%d entr%s -> %s"):format(synced, synced == 1 and "y" or "ies", dest))
+
+    -- The plugins hexe ships, into the directory hexe reads them from.
+    --
+    -- **Installed is not approved**, and deliberately: nothing here has run, and `hexe plugin
+    -- allow <name>` is the separate step that lets it. Copying a plugin in and enabling it in one
+    -- move would make "see what it asks for before running any of it" impossible.
+    local plugin_src = source .. "/plugins"
+    if oslo.fs.stat(plugin_src .. "/") then
+      -- `--dest` redirects everything, plugins included: a run pointed somewhere else must not
+      -- reach into the real plugin directory.
+      local plugin_dest
+      if a.dest then
+        plugin_dest = a.dest .. "/plugins"
+      else
+        local data = os.getenv("XDG_DATA_HOME")
+        if not data or data == "" then data = os.getenv("HOME") .. "/.local/share" end
+        plugin_dest = data .. "/" .. NAME .. "/plugins"
+      end
+      sh.mkdir("-p", plugin_dest)
+      local names = {}
+      for _, path in ipairs(oslo.fs.glob(plugin_src .. "/*")) do
+        local name = oslo.path.name(path)
+        sh.mkdir("-p", plugin_dest .. "/" .. name)
+        sh.rsync("-a", "--delete", path .. "/", plugin_dest .. "/" .. name .. "/")
+        names[#names + 1] = name
+      end
+      if #names > 0 then
+        print(oslo.ui.style("✓ ", { fg = "green" }) ..
+              ("%d plugin%s -> %s"):format(#names, #names == 1 and "" or "s", plugin_dest))
+        print(oslo.ui.subtitle("  not approved yet:  hexe plugin allow " .. table.concat(names, " ")))
+      end
+    end
 
     -- Installed, then checked. hexe can read its own config back, so a file that will not load is
     -- worth knowing about now rather than the next time a mux starts and degrades to defaults.
