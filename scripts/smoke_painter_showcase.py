@@ -108,7 +108,16 @@ fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
 # Nothing to start here: the painter is hexe's child, named by `status.exec`,
 # so it comes up with the frontend below and goes down with it.
-print("painter: hexe spawns it")
+def spawn_seen():
+    """Did any painter run at all? Checked through the view log it writes,
+    since a one-shot cannot be caught alive."""
+    try:
+        return os.path.getsize(PLOG) > 0
+    except OSError:
+        return False
+
+
+print("painter: hexe spawns one per fetch")
 
 fe = subprocess.Popen([HEXE, "mux", "new", "-n", "painter"], stdin=slave, stdout=slave,
                       stderr=slave, env=env, cwd=WD, start_new_session=True)
@@ -209,13 +218,13 @@ print(f"config: hexe asked for the configured view names {sorted(asked)!r}")
 #    that looks live, and stale_ms is inert config.
 # hexe owns the painter, so stopping it means killing that child. Matched on
 # the script path in its argv, which no other process on the machine carries.
-# hexe restarts a child that dies, so killing this one is not enough to make
-# the painter stay gone -- the copy is replaced with a program that exits at
-# once, and then every restart dies too.
+# Nothing is resident to kill: a painter runs for one request and exits. Making
+# it STAY dead means breaking the program, so every fetch from here on fails and
+# the region has to go stale.
+if not spawn_seen():
+    fail("no painter ever ran, so this proves nothing about staleness")
 with open(PAINTER, "w") as fh:
     fh.write("import sys\nsys.exit(1)\n")
-if subprocess.run(["pkill", "-f", PAINTER], capture_output=True).returncode != 0:
-    fail("no painter child was running to stop -- hexe never spawned one")
 del raw[:]
 deadline = time.time() + 12
 dimmed = False

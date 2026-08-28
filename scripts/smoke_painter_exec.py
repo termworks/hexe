@@ -31,10 +31,19 @@ open(W+"/cfg/hexe/init.lua","w").write(f"""
 local hexe = require("hexe")
 hexe.status = {{
   enabled = true, refresh_ms = 250,
-  exec = "{PIXY} serve --stdio --config {PCFG}",
+  exec = "{W}/spawn.sh",
   zones = {{ left = {{ view = "status.left" }}, center = {{ view = "status.center" }}, right = {{ view = "status.right" }} }},
 }}
 """)
+open(W+"/spawn.sh","w").write(f"""#!/bin/sh
+# One line per start. A one-shot painter lives about two milliseconds, so
+# sampling for a live process almost never catches one -- what is worth
+# asserting is that painters keep being STARTED, and that none is left over.
+echo start >> {W}/spawns
+exec {PIXY} serve --stdio --config {PCFG}
+""")
+os.chmod(W+"/spawn.sh", 0o755)
+
 e=dict(os.environ); e.update({"HEXE_INSTANCE":"exec","XDG_RUNTIME_DIR":W+"/run","XDG_CONFIG_HOME":W+"/cfg",
  "XDG_STATE_HOME":W+"/state","XDG_DATA_HOME":W+"/data","TERM":"xterm-256color","SHELL":"/bin/sh",
  "HEXE_SKIP_LOCAL_CONFIG":"1"})
@@ -52,21 +61,52 @@ def dr():
 threading.Thread(target=dr,daemon=True).start()
 time.sleep(9)
 txt=re.sub(r'\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)','',buf.decode('utf8','replace'))
+def ppid_of(q):
+    try:
+        return open(f"/proc/{q}/stat").read().rsplit(")", 1)[1].split()[1]
+    except (OSError, IndexError):
+        return None
+
+
 def painter_pids():
+    """Painters under THIS test's frontend, and no other.
+
+    Scoped by walking each candidate's ancestry up to our own frontend, because
+    the machine may be running hexe for real: a bare `pgrep` for the painter
+    command counts the user's live session as leftovers from this test, and the
+    test then fails for something it did not do.
+    """
     out=subprocess.run(["pgrep","-f","[p]ixy serve"],capture_output=True,text=True).stdout.split()
-    # only children of THIS test's frontend tree, never our own shell
-    return [q for q in out if os.path.exists(f"/proc/{q}/cmdline") and
-            b"--stdio" in open(f"/proc/{q}/cmdline","rb").read()]
+    mine=[]
+    for q in out:
+        if not os.path.exists(f"/proc/{q}/cmdline"): continue
+        if b"--stdio" not in open(f"/proc/{q}/cmdline","rb").read(): continue
+        up, hops = q, 0
+        while up and up != "1" and hops < 6:
+            if up == str(p.pid): mine.append(q); break
+            up, hops = ppid_of(up), hops + 1
+    return mine
+def spawn_count():
+    try:
+        return sum(1 for _ in open(W+"/spawns"))
+    except OSError:
+        return 0
 kids=painter_pids()
+spawns=spawn_count()
 socks=subprocess.run(["find",W+"/run","-name","painter.sock"],capture_output=True,text=True).stdout.strip()
 def fail(msg):
     print(f"FAIL: {msg}")
     p.terminate()
     raise SystemExit(1)
 
-if not kids:
-    fail("no painter child was spawned; `status.exec` did not start one")
-print(f"child: spawned, pid {kids[0]}")
+if spawns == 0:
+    fail("no painter was ever started; `status.exec` ran nothing")
+print(f"spawned: {spawns} one-shot painters in 9s")
+# Nothing may be RESIDENT: a painter that is still there between fetches is a
+# server, which is the thing this transport exists to not be.
+if kids:
+    fail(f"a painter is resident between fetches (pids {kids}) — that is a server")
+print("resident: none — every painter answers and exits")
 if socks:
     fail(f"a painter socket was created at {socks}; `exec` must share nothing")
 print("socket: none created — the painter is this frontend's alone")
@@ -78,7 +118,6 @@ if not clock:
 print(f"content: the bar is painted by the child ({clock.group(0)})")
 if p.poll() is not None:
     fail(f"the frontend exited rc={p.returncode} while using an exec painter")
-kid_pid = kids[0] if kids else None
 p.terminate()
 try: p.wait(timeout=8)
 except Exception: p.kill(); p.wait(timeout=5)
@@ -89,8 +128,7 @@ for i in range(20):
     if not alive: break
     time.sleep(0.5)
 if alive:
-    fail(f"the painter outlived the frontend (pids {alive}) — an exec painter must "
-         "die with what it draws for, or it is a stale daemon by another name")
-print("lifetime: the child exits with the frontend")
-print("PASS: hexe paints through a painter it owns, over a pipe, sharing nothing")
+    fail(f"a painter outlived the frontend (pids {alive}) — nothing may be left running")
+print("lifetime: nothing left behind")
+print("PASS: hexe paints through one-shot painters, sharing nothing, leaving nothing")
 

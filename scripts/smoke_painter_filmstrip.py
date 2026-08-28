@@ -29,15 +29,26 @@ for d in (W + "/run/hexe", W + "/cfg/hexe"):
 # keeps a tally on disk, so the test can count fetches from outside.
 TALLY = W + "/fetches"
 open(W + "/painter.py", "w").write(f'''
-import sys, struct, json
-tally = 0
+import sys, struct, json, os
+# Counted on disk, not in a variable: the painter is a fresh process per fetch
+# now, so a counter in memory would restart at zero every time and the test
+# would measure 1 for ever -- passing while asserting nothing.
+def bump():
+    try:
+        n = int(open({TALLY!r}).read())
+    except (OSError, ValueError):
+        n = 0
+    tmp = {TALLY!r} + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write(str(n + 1))
+    os.replace(tmp, {TALLY!r})
+
 while True:
     head = sys.stdin.buffer.read(4)
     if len(head) < 4: break
     n = struct.unpack(">I", head)[0]
     sys.stdin.buffer.read(n)
-    tally += 1
-    open({TALLY!r}, "w").write(str(tally))
+    bump()
     # Every cell differs between frames: the renderer diffs, so a frame that
     # changed one character would be emitted as that character alone and the
     # test could not tell it from no repaint at all.

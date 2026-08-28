@@ -296,12 +296,24 @@ pub const Registry = struct {
 
     /// End the current request. A socket connection is per-request and closed;
     /// a child's pipes are the point of having a child and stay open.
+    /// End the fetch and reap the painter. It answered; it has no reason to
+    /// still exist, and leaving it would be keeping a server by accident.
     fn closeConn(self: *Registry, r: *Region) void {
         _ = self;
-        if (r.child == null) {
-            if (r.fd) |fd| posix.close(fd);
-            r.fd = null;
-            r.wfd = null;
+        if (r.fd) |fd| posix.close(fd);
+        if (r.wfd) |fd| posix.close(fd);
+        r.fd = null;
+        r.wfd = null;
+        if (r.child) |*c| {
+            c.stdin = null;
+            c.stdout = null;
+            // Collected without waiting. Closing stdin already told it to go, so
+            // it is normally gone before this runs -- but `wait()` on one that
+            // is not would block the render loop, which is the single thing
+            // this module must never do. A straggler is killed instead.
+            const res = posix.waitpid(c.id, posix.W.NOHANG);
+            if (res.pid == 0) _ = c.kill() catch {};
+            r.child = null;
         }
         r.phase = .idle;
         r.req_off = 0;
@@ -537,6 +549,15 @@ pub const Registry = struct {
                 }
                 r.req_off += n;
             }
+            // The request is out; closing stdin is what tells the painter there
+            // is no second one, so it answers and exits rather than waiting.
+            if (r.wfd) |w| {
+                if (r.child != null) {
+                    posix.close(w);
+                    r.wfd = null;
+                    if (r.child) |*c| c.stdin = null;
+                }
+            }
             r.phase = .reading;
         }
 
@@ -629,6 +650,23 @@ pub const Registry = struct {
     /// that stops reading must cost a stale region, never a stalled frame. The
     /// child is `/bin/sh -c` like the detached spawner, so a configured command
     /// means the same thing in both transports.
+    /// Run the painter for ONE request, then let it go.
+    ///
+    /// Nothing stays resident between fetches. A painter kept alive is a server,
+    /// and a server is what all of this was for getting rid of -- it was only
+    /// ever worth keeping because a fetch cost a process start per FRAME. A
+    /// filmstrip buys a whole animation cycle per fetch, so the start is paid
+    /// once a refresh instead of twenty-five times a second, and at that rate a
+    /// fresh process is cheaper than the daemon it replaces.
+    ///
+    /// It also makes a wedged painter cost only the region that asked: there is
+    /// no shared pipe to hold and nothing alive to hold it.
+    ///
+    /// Run through `sh -c` verbatim -- NOT `exec sh -c`. Prefixing with `exec`
+    /// saves a fork, and silently breaks every command that opens with an
+    /// environment assignment: `exec FOO=bar cmd` makes the shell look for a
+    /// program called `FOO=bar`. The fork it saved was only ever worth having
+    /// when the shell stayed resident, and nothing stays resident now.
     fn startChild(self: *Registry, r: *Region) !void {
         const cmd = r.exec orelse return error.NoCommand;
         var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd }, self.allocator);

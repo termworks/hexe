@@ -91,24 +91,37 @@ You name it, and hexe runs it:
 hexe.status = { enabled = true, exec = "pixy serve --stdio" }
 ```
 
-That is the whole of it. The command is started through `/bin/sh -c` on the
-first fetch and **kept**, so the Lua VM, the config and whatever else it loads
-are paid for once rather than per frame. Its stdin and stdout are the wire; its
-stderr is left on the terminal that started hexe, so a painter's diagnostics
-have somewhere to go. Say nothing and nothing is drawn.
+That is the whole of it. On each fetch the command is run through `/bin/sh -c`,
+written one request, and its stdin closed; it answers and exits. Its stdout is
+the wire and its stderr is left on the terminal that started hexe, so a
+painter's diagnostics have somewhere to go. Say nothing and nothing is drawn.
 
-**There is no socket, and that is deliberate.** hexe used to connect to one, at
-`$HEXE_PAINTER_SOCKET` or a path under `$XDG_RUNTIME_DIR`, optionally starting
-it detached. It meant one painter that every session on the machine shared: a
-single accept loop serialising them, one config to restart for all of them, a
-slow render everybody's, and — because nothing owned it — a painter still
-running days later from a build that was no longer installed. Every one of
-those is a property of sharing, not of painting.
+**Nothing stays running between fetches**, and that is the point.
 
-A child has none of them. It starts with the frontend, answers only it, and
-exits when the frontend does **by any route**: the kernel closes hexe's end of
-the pipe, the painter reads EOF, and it stops. Nothing has to kill it, so
-nothing is left behind when hexe is killed rather than asked to quit.
+hexe used to connect to a socket — one painter every session on the machine
+shared, with a single accept loop serialising them, one config to restart for
+all of them, a slow render that was everybody's, and, because nothing owned it,
+a painter still running days later from a build no longer installed. Every one
+of those is a property of *sharing*.
+
+Owning a long-lived child fixes the sharing and keeps the rest: it is still a
+server, still resident, still something that can wedge and has to be reaped —
+and one per region is a Lua VM per zone. It was only ever worth keeping because
+a fetch cost a process start *per frame*.
+
+A [filmstrip](#filmstrips-one-fetch-a-whole-cycle) buys a whole animation cycle
+per fetch, so that start is paid about once a refresh instead of twenty-five
+times a second — and at that rate a fresh process is cheaper than the daemon it
+replaces, with nothing resident to leak, share, or outlive anything.
+
+It also makes a wedged painter cost only the region that asked for it. There is
+no shared pipe to hold, and nothing alive to hold it.
+
+**The cost is the painter's own startup, paid per fetch.** That is around 2ms
+for a compiled painter and closer to 20ms for a Python one, so a painter that
+animates *without* answering `frames` is bounded by its own start time and will
+be asked far less often than its `next_frame_ms` asks for. Answer with a strip
+and the question does not arise.
 
 ## Views
 

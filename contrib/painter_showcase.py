@@ -210,6 +210,38 @@ def render(req):
     return None
 
 
+# How many frames one strip may carry, so a view that never repeats stops
+# rather than drawing for ever.
+MAX_FRAMES = 64
+
+
+def filmstrip(req, horizon_ms):
+    """Every picture of the next `horizon_ms`, so the caller animates from one run.
+
+    Being asked per frame is what a one-shot painter cannot afford: the caller
+    pays this program's whole startup for each picture, and at 25ms frames that
+    is forty startups a second. The pictures are a pure function of `now_ms`,
+    though, so they can all be drawn in one run and played back by the caller.
+    """
+    base = int(req.get("now_ms") or 0)
+    frames, ahead = [], 0
+    while len(frames) < MAX_FRAMES and ahead < horizon_ms:
+        step = dict(req)
+        step["now_ms"] = base + ahead
+        out = render(step)
+        if out is None:
+            return None
+        # The cycle closed: the caller loops back to the first frame itself.
+        if frames and out == frames[0]:
+            break
+        frames.append(out)
+        hold = out.get("next_frame_ms")
+        if not hold:
+            break
+        ahead += hold
+    return {"frames": frames} if frames else None
+
+
 def recv_frame():
     hdr = b""
     while len(hdr) < 4:
@@ -252,7 +284,8 @@ def main():
         except ValueError:
             send_frame({"version": 1, "ok": False, "error": "bad json"})
             continue
-        output = render(req)
+        horizon = int(req.get("frames_ms") or 0)
+        output = filmstrip(req, horizon) if horizon else render(req)
         if output is None:
             send_frame({"version": 1, "ok": False, "error": "unknown view"})
         else:
