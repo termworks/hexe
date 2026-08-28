@@ -87,7 +87,7 @@ of it.
 | `screen` | `env`, `line`, `cursor_line`, `screen_text`, `find`, `selection`, `selection_range` |
 | `typing` | `send` |
 | `keyboard` | `keys` |
-| `popup` | `notify`, `popup` |
+| `popup` | `notify`, `popup`, `draw`, `undraw` |
 | `stream` | `stream` |
 | `control` | `act`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`, `rename`, `share`, `geometry`, `ratio` |
 
@@ -212,6 +212,45 @@ alive strands the process waiting on it.
 `rename(selector, name)` names a pane. Names reach socket paths and CLI
 arguments, so the same `[a-z0-9][a-z0-9._-]*` rule the name pool uses applies
 here; an invalid name is refused and the old one is kept.
+
+## Drawing on the mux
+
+hexe has always been able to draw art at an arbitrary rectangle — a pane's
+sprite is exactly that — but only its own config could ask for one. `draw` makes
+it a verb, so a plugin can put a panel on the screen without hexe growing a
+feature per panel.
+
+```console
+$ hexe api draw '"keycast"' '{"content":"\u001b[48;5;237m ctrl+a d \u001b[0m",
+                              "corner":"bottomright","width":30,"height":1}'
+{"ok":true,"result":true}
+$ hexe api undraw '"keycast"'
+{"ok":true,"result":true}
+```
+
+A drawing is a **name**, a **rectangle** and its **bytes**.
+
+It renders nothing itself and asks nothing to render for it. An earlier version
+could also name a painter *view* — which read the **status bar's** painter and
+refresh interval to draw something unrelated to the bar, and meant a caller
+could show nothing at all without a painter configured. A caller that wants one
+runs it and sends what it draws.
+
+**Where** is `corner` (`topleft`, `topright`, `bottomleft`, `bottomright`,
+`center`) or `x` and `y`. A corner is resolved against the terminal at draw
+time, so it stays in its corner across a resize; the bar's rows are kept clear.
+
+**Naming one twice replaces it**, so a caller updating a drawing does not have
+to remove it first and flicker through the gap.
+
+**`ttl_ms` expires it.** Callers die, and a drawing whose owner is gone would
+otherwise stay on the screen until hexe restarts. A plugin that redraws on a
+timer should set a ttl a little longer than its interval, and its panel then
+disappears on its own if the plugin stops.
+
+Drawings sit above panes and the bar and below a blocking popup: a drawing is
+something a caller put there, a modal is something you have to answer. At most
+64 are live at once, and the socket's own 64 KB request cap bounds `content`.
 
 ## Calling it from another Lua
 

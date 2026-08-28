@@ -100,6 +100,31 @@ fn spritePositionName(pos: anytype) []const u8 {
     };
 }
 
+/// Composite every live drawing.
+///
+/// A drawing is bytes and a rectangle, and nothing else. It borrows no config
+/// from anywhere: an earlier version could also name a painter view, which
+/// meant reaching into the STATUS BAR's painter and refresh interval to render
+/// something that has nothing to do with the bar. A caller that wants a painter
+/// can run one and send what it draws.
+///
+/// Last, so a caller putting something on the screen puts it ON the screen --
+/// over panes, over chrome, over the bar. A drawing that has timed out is
+/// dropped here rather than on a timer: one nobody is drawing does not need
+/// collecting on schedule.
+fn drawDrawings(state: *State, renderer: anytype, stdout: std.fs.File) void {
+    if (state.drawings.count() == 0) return;
+    const cache = region_render.active orelse return;
+    state.drawings.sweep(std.time.milliTimestamp());
+
+    var it = state.drawings.iterator();
+    while (it.next()) |d| {
+        if (d.width == 0 or d.height == 0 or d.content.len == 0) continue;
+        const at = d.origin(state.term_width, state.term_height, state.status_height);
+        _ = region_render.drawSurface(renderer, cache, d.name, d.content, at.x, at.y, d.width, d.height, stdout);
+    }
+}
+
 fn drawPaneSprite(state: *State, renderer: anytype, pane: *Pane, stdout: std.fs.File) void {
     const cache = region_render.active orelse return;
     const name = pane.pokemon_state.sprite_name orelse state.paneName(pane.uuid) orelse return;
@@ -381,7 +406,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.view.tab_views, state.activeTabIndex(), state.runtime.sessionName());
     }
 
-    // Draw overlays (pane labels, resize info, keycast)
+    // Draw overlays (pane labels, resize info)
     if (state.overlays.hasContent() or state.overlays.shouldDim()) {
         // Get focused pane bounds to exclude from dimming
         // For floats: use border dimensions + shadow (1 cell right/bottom) if shadow enabled
@@ -437,6 +462,11 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // Draw MUX realm notifications overlay (top of screen).
     notification.renderFull(&state.notifications, renderer, state.term_width, state.term_height);
+
+    // Above the panes and the bar, below a blocking popup: a drawing is
+    // something a caller put on the screen, and a modal is something the user
+    // has to answer.
+    drawDrawings(state, renderer, stdout);
 
     // Draw MUX-level blocking popup overlay (on top of everything).
     if (state.popups.getActivePopup()) |popup| {

@@ -10,6 +10,7 @@ const frontend_core = @import("frontend_core");
 const wire = core.wire;
 const pop = @import("pop");
 const lua_api = @import("lua_api.zig");
+const drawings_mod = @import("drawings.zig");
 
 const state_types = @import("state_types.zig");
 pub const PendingAction = state_types.PendingAction;
@@ -339,6 +340,8 @@ pub const State = struct {
     renderer: Renderer,
     notifications: NotificationManager,
     overlays: OverlayManager,
+    /// Named rectangles anything may draw into, placed through the API.
+    drawings: drawings_mod.Registry,
     popups: pop.PopupManager,
     pending_action: ?PendingAction,
     /// Stand-in layout handed out by `currentLayout()` while the session has
@@ -559,7 +562,8 @@ pub const State = struct {
             .layout_height = layout_h,
             .renderer = try Renderer.init(allocator, width, height),
             .notifications = NotificationManager.initWithConfig(allocator, pop_cfg.carrier.notification),
-            .overlays = OverlayManager.initWithConfig(allocator, pop_cfg.widgets.keycast),
+            .overlays = OverlayManager.init(allocator),
+            .drawings = drawings_mod.Registry.init(allocator),
             .popups = pop.PopupManager.init(allocator),
             .pending_action = null,
             .empty_layout = Layout.init(allocator, 0, 0),
@@ -1339,6 +1343,7 @@ pub const State = struct {
         self.renderer.deinit();
         self.notifications.deinit();
         self.overlays.deinit();
+        self.drawings.deinit();
         self.popups.deinit();
         var req_it = self.pending_float_requests.iterator();
         while (req_it.next()) |entry| {

@@ -292,11 +292,16 @@ end
 -- the rest of the local API are reachable through `call` for anyone who means it, and are left out
 -- of the vocabulary because a sibling reshaping your window layout is rarely what either of you
 -- wanted.
+--
+-- `draw` and `undraw` are here for the same reason `notify` and `popup` are: they are how a sibling
+-- says something to the person at the terminal. A plugin whose whole job is to show you something
+-- would otherwise have to reach for `call`, and a vocabulary that omits the verb its own plugins
+-- need is not a vocabulary.
 local SURFACE = {
   "panes", "pane", "tabs", "session", "ui", "count", "verbs",
   "screen_text", "line",
   "send", "keys",
-  "notify", "popup", "capture",
+  "notify", "popup", "capture", "draw", "undraw",
   "focus",
 }
 
