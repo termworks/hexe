@@ -307,6 +307,14 @@ pub const Registry = struct {
         if (r.child) |*c| {
             c.stdin = null;
             c.stdout = null;
+            // `Child.spawn` keeps a read end of its own -- `err_pipe`, how the
+            // forked child reports a failed exec -- and closes it only inside
+            // `wait()`. Reaping by hand skips that, so it has to be closed here
+            // or every fetch leaks one descriptor: a thousand of them and the
+            // frontend can no longer spawn anything, the bar stops refreshing,
+            // and every region is drawn dimmed as stale.
+            if (c.err_pipe) |ep| posix.close(ep);
+            c.err_pipe = null;
             // Collected without waiting. Closing stdin already told it to go, so
             // it is normally gone before this runs -- but `wait()` on one that
             // is not would block the render loop, which is the single thing
@@ -1227,6 +1235,58 @@ test "fetches a run frame from its own child without blocking" {
         std.Thread.sleep(std.time.ns_per_ms);
     }
     return error.PainterFrameNeverArrived;
+}
+
+/// How many descriptors this process holds. A leak per fetch is invisible in
+/// any single render and fatal after a thousand of them.
+fn openFdCount() usize {
+    var dir = std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true }) catch return 0;
+    defer dir.close();
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (it.next() catch null) |_| n += 1;
+    return n;
+}
+
+test "fetching many times leaks no descriptors" {
+    const allocator = std.testing.allocator;
+    if (openFdCount() == 0) return error.SkipZigTest; // no /proc
+
+    const reply =
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"x"}],"width":1,"next_frame_ms":null}}
+    ;
+    const cmd = try framedEcho(allocator, reply);
+    defer allocator.free(cmd);
+
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 20, .height = 1, .exec = cmd };
+
+    // One fetch to settle, then measure across many more. Each spawns a painter,
+    // writes to it, reads its answer and reaps it -- and every descriptor that
+    // opens must close, including the one `Child.spawn` keeps for itself.
+    var warm: usize = 0;
+    while (warm < 40) : (warm += 1) {
+        _ = reg.snapshot(spec, .{ .now_ms = 1 });
+        reg.poll();
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    const before = openFdCount();
+
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        var r = reg.entries.get("status\x1frun\x1f").?;
+        r.last_done_ms = 0; // force it due again
+        r.next_try_ms = 0;
+        _ = reg.snapshot(spec, .{ .now_ms = @intCast(i) });
+        reg.poll();
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    const after = openFdCount();
+    if (after > before + 8) {
+        std.debug.print("descriptors {d} -> {d} over 200 fetches\n", .{ before, after });
+        return error.DescriptorLeak;
+    }
 }
 
 test "a painter that never answers leaves the region empty and never blocks" {
