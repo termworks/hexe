@@ -163,7 +163,7 @@ pub fn run(
     // client read hexe at all; a person or a script reading this output wants
     // the value, and has done since before the wire changed.
     var out = std.fs.File.stdout().deprecatedWriter();
-    try out.writeAll(unwrapReply(reply));
+    try writeUnwrapped(&out, reply);
     try out.writeAll("\n");
 
     // The exit code follows the call, so a script can branch on it without
@@ -177,21 +177,18 @@ pub fn run(
 /// JSON writer in the CLI, and two encoders of the same values drift the moment
 /// either is touched. Anything that does not match the exact prefix is passed
 /// through unchanged, so an error reply or a future shape is never mangled.
-fn unwrapReply(reply: []const u8) []const u8 {
+/// Written in pieces rather than assembled first. Building the unwrapped reply
+/// needed somewhere to put it, and that somewhere was a `[MAX_REPLY]u8` static
+/// -- 16 MB of `.bss` reserved for every `hexe` process ever started, to hold a
+/// reply that is usually a few dozen bytes. The output is written immediately,
+/// so there is no reason to have it contiguous anywhere.
+fn writeUnwrapped(out: anytype, reply: []const u8) !void {
     const head = "{\"ok\":true,\"n\":1,\"result\":[";
-    if (!std.mem.startsWith(u8, reply, head)) return reply;
-    if (!std.mem.endsWith(u8, reply, "]}")) return reply;
-
-    const value = reply[head.len .. reply.len - 2];
-    // The buffer is written once and printed immediately, so a static one is
-    // enough and keeps this allocation-free.
-    const S = struct {
-        var buf: [MAX_REPLY]u8 = undefined;
-    };
-    const prefix = "{\"ok\":true,\"result\":";
-    if (prefix.len + value.len + 1 > S.buf.len) return reply;
-    @memcpy(S.buf[0..prefix.len], prefix);
-    @memcpy(S.buf[prefix.len..][0..value.len], value);
-    S.buf[prefix.len + value.len] = '}';
-    return S.buf[0 .. prefix.len + value.len + 1];
+    if (!std.mem.startsWith(u8, reply, head) or !std.mem.endsWith(u8, reply, "]}")) {
+        try out.writeAll(reply);
+        return;
+    }
+    try out.writeAll("{\"ok\":true,\"result\":");
+    try out.writeAll(reply[head.len .. reply.len - 2]);
+    try out.writeAll("}");
 }
