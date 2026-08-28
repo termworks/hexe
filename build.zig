@@ -34,12 +34,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("xev");
 
-    // Get logly dependency (structured logging backend)
-    const logly_mod = b.dependency("logly", .{
-        .target = target,
-        .optimize = optimize,
-    }).module("logly");
-
     // Get libvaxis dependency (required TUI rendering library)
     const vaxis_mod = b.dependency("libvaxis", .{
         .target = target,
@@ -78,7 +72,6 @@ pub fn build(b: *std.Build) void {
     if (liblink_mod) |ll| {
         core_module.addImport("liblink", ll);
     }
-    core_module.addImport("logly", logly_mod);
 
     // Create frontend-core module (host-neutral frontend event/action boundary)
     const frontend_core_module = b.createModule(.{
@@ -271,7 +264,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    async_cmd_test_module.addImport("logly", logly_mod);
     const async_cmd_tests = b.addTest(.{
         .root_module = async_cmd_test_module,
     });
@@ -283,7 +275,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    ipc_test_module.addImport("logly", logly_mod);
     const ipc_tests = b.addTest(.{
         .root_module = ipc_test_module,
     });

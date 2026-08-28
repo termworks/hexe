@@ -38,10 +38,6 @@
             .url = "git+https://github.com/libzig/liblink#0.0.13",
             .hash = "liblink-0.0.13-gQe8cxyDCwCS346uD6q8CCpd6RHyMNhVT0od7Z1jQzsg",
         },
-        .logly = .{
-            .url = "git+https://github.com/muhammad-fiaz/logly.zig#5d356e63b5e79c1798a945cf21d89d53608ee15d",
-            .hash = "logly-0.1.6-kZjLexxIEgCMOhBA3f1bx3lzP-JrTZDAfcYc7vVrtbzV",
-        },
     },
     .fingerprint = 0x4c99ab0b473f252d,
 }
