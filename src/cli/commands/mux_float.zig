@@ -135,22 +135,17 @@ pub fn runMuxFloat(
     // stable, so fall back to it — SES maps it to the session that currently
     // owns the pane. Without this the request is untargeted and, with more than
     // one session open, the float surfaced in the wrong one.
-    // The pane uuid is asked FIRST, for the reason stated above: it is the stable one.
-    // Preferring HEXE_SESSION meant a pane that outlived the session it was started in
-    // -- a reattach, a restarted frontend -- handed SES a session uuid that no longer
-    // maps to anything, and the float was dropped with no error and a zero exit. A pane
-    // holding a stale session id is the normal case after a restart, not a rare one.
     var source_session_id: [32]u8 = .{0} ** 32;
-    if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
-        if (pane_uuid.len == 32) {
-            @memcpy(&source_session_id, pane_uuid);
+    if (std.posix.getenv("HEXE_SESSION")) |sid| {
+        if (sid.len == 32) {
+            @memcpy(&source_session_id, sid);
         }
     }
     const zero_id: [32]u8 = .{0} ** 32;
     if (std.mem.eql(u8, &source_session_id, &zero_id)) {
-        if (std.posix.getenv("HEXE_SESSION")) |sid| {
-            if (sid.len == 32) {
-                @memcpy(&source_session_id, sid);
+        if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
+            if (pane_uuid.len == 32) {
+                @memcpy(&source_session_id, pane_uuid);
             }
         }
     }
