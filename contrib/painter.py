@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """A painter for hexe: draws the status bar and pane/float titles.
 
-hexe draws no chrome of its own. It connects to a socket, asks for a named view
+hexe draws no chrome of its own. It spawns this as its own child, asks for a named view
 at a given width, and composites the styled runs that come back. This program
 answers those requests. It is stdlib-only and deliberately small — copy it and
 make the bar yours, or write your own in any language (see docs/regions.md for
 the wire format).
 
-    python3 contrib/painter.py &
-    hexe
+    hexe.status.exec = "python3 /path/to/painter.py"
 
-By default it binds $HEXE_PAINTER_SOCKET, else $XDG_RUNTIME_DIR/hexe/painter.sock,
-which is where hexe looks when its config says nothing.
+Nothing starts it by hand: hexe runs it, and it exits when hexe does.
+
 """
 import json
 import os
-import socket
+
 import struct
 import sys
 import time
@@ -270,86 +269,62 @@ VIEWS = {
 # ---------------------------------------------------------------------- serve
 
 
-def recv_frame(conn):
+def recv_frame():
+    """One request off stdin, or None when hexe has closed the pipe."""
     hdr = b""
     while len(hdr) < 4:
-        chunk = conn.recv(4 - len(hdr))
+        chunk = sys.stdin.buffer.read(4 - len(hdr))
         if not chunk:
             return None
         hdr += chunk
     need = struct.unpack(">I", hdr)[0]
     body = b""
     while len(body) < need:
-        chunk = conn.recv(need - len(body))
+        chunk = sys.stdin.buffer.read(need - len(body))
         if not chunk:
             return None
         body += chunk
     return json.loads(body)
 
 
-def send_frame(conn, obj):
+def send_frame(obj):
     body = json.dumps(obj).encode()
-    conn.sendall(struct.pack(">I", len(body)) + body)
-
-
-def socket_path():
-    if os.environ.get("HEXE_PAINTER_SOCKET"):
-        return os.environ["HEXE_PAINTER_SOCKET"]
-    rt = os.environ.get("XDG_RUNTIME_DIR")
-    if rt:
-        os.makedirs(f"{rt}/hexe", exist_ok=True)
-        return f"{rt}/hexe/painter.sock"
-    d = f"/tmp/hexe-{os.getuid()}"
-    os.makedirs(d, exist_ok=True)
-    return f"{d}/painter.sock"
+    sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+    # Without this hexe waits out its deadline for a frame sitting in a buffer,
+    # and every region goes stale while the painter believes it answered.
+    sys.stdout.buffer.flush()
 
 
 def main():
-    path = socket_path()
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
+    """Answer until hexe closes the pipe.
 
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(path)
-    os.chmod(path, 0o600)
-    srv.listen(16)
-    print(f"painter listening on {path}", file=sys.stderr)
-
+    There is no socket to bind, no path to agree on and nothing to clean up:
+    hexe spawns this as its own child, and the read below returning nothing is
+    how it learns hexe is gone. That happens whether hexe exited, crashed or was
+    killed, so this can never be left running.
+    """
     while True:
         try:
-            conn, _ = srv.accept()
-        except KeyboardInterrupt:
+            req = recv_frame()
+        except (OSError, ValueError):
             break
-        except OSError:
-            continue
+        if req is None:
+            break
         try:
-            req = recv_frame(conn)
-            if req is None:
-                continue
             name = (req.get("select") or [""])[0]
             fn = VIEWS.get(name)
             if fn is None:
-                send_frame(conn, {"version": 1, "ok": False,
-                                  "error": f"unknown view {name!r}"})
+                send_frame({"version": 1, "ok": False,
+                            "error": f"unknown view {name!r}"})
                 continue
-            send_frame(conn, {"version": 1, "ok": True, "output": fn(req)})
+            send_frame({"version": 1, "ok": True, "output": fn(req)})
         except (OSError, ValueError, KeyError):
             # A bad frame must never take the painter down; hexe keeps its last
             # good one and asks again.
-            pass
-        finally:
             try:
-                conn.close()
+                send_frame({"version": 1, "ok": False, "error": "render failed"})
             except OSError:
-                pass
-
-    srv.close()
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        pass
+                break
 
 
 if __name__ == "__main__":

@@ -25,7 +25,6 @@ import json
 import os
 import re
 import signal
-import socket
 import struct
 import subprocess
 import sys
@@ -41,7 +40,9 @@ SCRATCH = os.environ.get("HEXE_SMOKE_TMP", "/tmp/hexe-smoke")
 INST = f"smk{os.getpid()}"
 WD = os.path.join(SCRATCH, f"zones{os.getpid()}")
 CF = os.path.join(WD, "config")
-SOCK = os.path.join(WD, "painter.sock")
+CONTROL = os.path.join(WD, "control.json")
+SEEN = os.path.join(WD, "seen.json")
+PAINTER = os.path.join(WD, "painter.py")
 os.makedirs(os.path.join(CF, "hexe"), exist_ok=True)
 
 ROWS, COLS = 24, 100
@@ -55,7 +56,7 @@ with open(os.path.join(CF, "hexe", "init.lua"), "w") as fh:
         "local hexe = require('hexe')\n"
         "return hexe.setup({ status = {\n"
         "  enabled = true,\n"
-        f"  socket = '{SOCK}',\n"
+        f"  exec = 'python3 {PAINTER}',\n"
         "  refresh_ms = 120,\n"
         "  zones = {\n"
         "    left   = { view = 'status.left' },\n"
@@ -76,128 +77,115 @@ for _k in ("HEXE_SESSION", "HEXE_PANE_UUID", "HEXE_MUX_SOCKET", "HEXE_POD_SOCKET
 os.makedirs(env["XDG_STATE_HOME"], exist_ok=True)
 procs = []
 
-# ---------------------------------------------------------------- fake painter
-painter_state = {
-    "declined": {"center"},  # zones answered with ok:false, as an unimplemented
-                             # view is answered: they must take no width
-    "wedged": set(),        # selectors that accept and never answer
-    "seen": {},             # selector -> request count
-    "tick": 0,              # bumped so answers change and staleness is visible
-    "hover": {},            # selector -> last hover_region hexe reported
-}
-stop_painter = threading.Event()
+# ---------------------------------------------------------------- the painter
+#
+# A child of hexe now, not a socket everybody shares, so the state the test
+# drives it with and the observations it makes back cross a file rather than a
+# thread boundary. `control` is what the test wants it to do; `seen` is what it
+# was asked.
+def control(**kw):
+    """Change what the painter does, mid-run."""
+    cur = json.load(open(CONTROL)) if os.path.exists(CONTROL) else {}
+    cur.update(kw)
+    with open(CONTROL, "w") as fh:
+        json.dump(cur, fh)
 
 
-def frame_send(conn, obj):
-    body = json.dumps(obj).encode()
-    conn.sendall(struct.pack(">I", len(body)) + body)
-
-
-def frame_recv(conn):
-    hdr = b""
-    while len(hdr) < 4:
-        chunk = conn.recv(4 - len(hdr))
-        if not chunk:
-            return None
-        hdr += chunk
-    need = struct.unpack(">I", hdr)[0]
-    body = b""
-    while len(body) < need:
-        chunk = conn.recv(need - len(body))
-        if not chunk:
-            return None
-        body += chunk
-    return json.loads(body)
-
-
-def zone_of(selector):
-    return selector.rsplit(".", 1)[-1] if selector.startswith("status.") else None
-
-
-def painter():
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+def observed():
+    """What the painter has been asked for so far."""
     try:
-        os.unlink(SOCK)
-    except FileNotFoundError:
-        pass
-    srv.bind(SOCK)
-    srv.listen(16)
-    srv.settimeout(0.3)
-    while not stop_painter.is_set():
-        try:
-            conn, _ = srv.accept()
-        except socket.timeout:
-            continue
-        except OSError:
-            break
-        zone = None
-        try:
-            req = frame_recv(conn)
-            if req is None:
-                conn.close()
-                continue
-            # The request names its view in `select`, as an array.
-            sel_list = req.get("select") or []
-            sel = sel_list[0] if sel_list else ""
-            zone = zone_of(sel)
-            if zone is None:
-                frame_send(conn, {"version": 1, "ok": False})
-                conn.close()
-                continue
-
-            painter_state["seen"][zone] = painter_state["seen"].get(zone, 0) + 1
-            ctx = req.get("context", {})
-            # hover_region rides inside context.values, not context itself.
-            painter_state["hover"][zone] = ctx.get("values", {}).get("hover_region", "")
-
-            if zone in painter_state["declined"]:
-                frame_send(conn, {"version": 1, "ok": False})
-                conn.close()
-                continue
-
-            if zone in painter_state["wedged"]:
-                continue                      # accept, read, never answer
-
-            text = f"{MARKERS[zone]}{painter_state['tick']}"
-            frame_send(conn, {
-                "version": 1,
-                "ok": True,
-                "output": {
-                    "mode": "run",
-                    "runs": [{"text": text, "style": "fg:15 bg:237"}],
-                    "width": len(text),
-                    "next_frame_ms": None,
-                    # One clickable rectangle covering the whole zone, in
-                    # ZONE-local coordinates — the thing hexe must offset.
-                    "regions": [{
-                        "id": f"{zone}.all",
-                        "x": 0, "y": 0, "width": len(text), "height": 1,
-                        "actions": {"left": f"noop.{zone}"},
-                    }],
-                },
-            })
-        except OSError:
-            pass
-        finally:
-            if zone not in painter_state["wedged"]:
-                try:
-                    conn.close()
-                except OSError:
-                    pass
-    srv.close()
+        return json.load(open(SEEN))
+    except (OSError, ValueError):
+        return {"seen": {}, "hover": {}}
 
 
-threading.Thread(target=painter, daemon=True).start()
-time.sleep(0.4)
+TICK = [0]
+control(declined=["center"], wedged=[], tick=0)
+
+with open(PAINTER, "w") as fh:
+    fh.write(f'''#!/usr/bin/env python3
+import json, os, struct, sys
+
+CONTROL = {CONTROL!r}
+SEEN = {SEEN!r}
+MARKERS = {MARKERS!r}
+
+
+def state():
+    try:
+        return json.load(open(CONTROL))
+    except (OSError, ValueError):
+        return {{"declined": [], "wedged": [], "tick": 0}}
+
+
+def note(zone, hover):
+    try:
+        cur = json.load(open(SEEN))
+    except (OSError, ValueError):
+        cur = {{"seen": {{}}, "hover": {{}}}}
+    cur["seen"][zone] = cur["seen"].get(zone, 0) + 1
+    cur["hover"][zone] = hover
+    tmp = SEEN + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(cur, fh)
+    os.replace(tmp, SEEN)
+
+
+def recv():
+    head = sys.stdin.buffer.read(4)
+    if len(head) < 4:
+        return None
+    n = struct.unpack(">I", head)[0]
+    body = sys.stdin.buffer.read(n)
+    return json.loads(body) if len(body) == n else None
+
+
+def send(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+    sys.stdout.buffer.flush()
+
+
+while True:
+    req = recv()
+    if req is None:
+        break
+    st = state()
+    sel = (req.get("select") or [""])[0]
+    zone = sel.rsplit(".", 1)[-1] if sel.startswith("status.") else None
+    if zone is None or zone not in MARKERS:
+        send({{"version": 1, "ok": False}})
+        continue
+    ctx = req.get("context", {{}})
+    note(zone, ctx.get("values", {{}}).get("hover_region", ""))
+    if zone in st.get("declined", []):
+        send({{"version": 1, "ok": False}})
+        continue
+    if zone in st.get("wedged", []):
+        continue                      # read the request, never answer
+    text = "%s%d" % (MARKERS[zone], st.get("tick", 0))
+    send({{"version": 1, "ok": True, "output": {{
+        "mode": "run",
+        "runs": [{{"text": text, "style": "fg:15 bg:237"}}],
+        "width": len(text),
+        "next_frame_ms": None,
+        # One clickable rectangle covering the whole zone, in ZONE-local
+        # coordinates -- the thing hexe must offset.
+        "regions": [{{"id": "%s.all" % zone, "x": 0, "y": 0,
+                     "width": len(text), "height": 1,
+                     "actions": {{"left": "noop.%s" % zone}}}}],
+    }}}})
+''')
 
 
 def cleanup():
-    stop_painter.set()
     for p in procs:
         if p.poll() is None:
             p.terminate()
             try: p.wait(timeout=3)
             except subprocess.TimeoutExpired: p.kill()
+    # The painter is hexe's child, so it goes with hexe; only the frontend tree
+    # needs sweeping.
     r = subprocess.run(["pgrep", "-f", f"instance {INST}"], capture_output=True, text=True)
     if r.returncode == 0:
         for pid in r.stdout.split():
@@ -312,7 +300,7 @@ if column_of(frame, MARKERS["left"]) != 0:
     fail("left zone moved because the centre declined", frame)
 print("zones: a declined zone draws nothing")
 
-painter_state["declined"].clear()
+control(declined=[])
 deadline = time.time() + 6.0
 while time.time() < deadline:
     if MARKERS["center"].encode() in repaint(settle=1.0):
@@ -326,7 +314,8 @@ print(f"zones: a zone that starts answering appears within "
 #
 # Every marker carries the tick, so bumping it makes all three zones change and
 # guarantees a full row rather than whatever vaxis considered dirty.
-painter_state["tick"] += 1
+TICK[0] += 1
+control(tick=TICK[0])
 time.sleep(1.5)
 frame = repaint()
 for zone, marker in MARKERS.items():
@@ -340,7 +329,7 @@ right_col = column_of(frame, MARKERS["right"])
 center_col = column_of(frame, MARKERS["center"])
 if left_col != 0:
     fail(f"left zone is not flush at column 0 (drawn at {left_col})", frame)
-right_text_len = len(MARKERS["right"]) + len(str(painter_state["tick"]))
+right_text_len = len(MARKERS["right"]) + len(str(TICK[0]))
 if right_col is None or right_col + right_text_len != COLS:
     fail(f"right zone is not flush to the far edge (drawn at {right_col}, "
          f"bar is {COLS} wide)", frame)
@@ -353,22 +342,23 @@ print(f"zones: placed left={left_col} center={center_col} right={right_col} of {
 #
 # The single-view bar had one failure mode: a silent painter froze the whole
 # bar. With zones, silence has to be contained to the zone that went quiet.
-painter_state["wedged"].add("center")
-painter_state["tick"] += 1
-before = dict(painter_state["seen"])
+control(wedged=["center"])
+TICK[0] += 1
+control(tick=TICK[0])
+before = dict(observed()["seen"])
 time.sleep(2.0)
 
 frame = repaint()
-new_left = f"{MARKERS['left']}{painter_state['tick']}".encode()
-new_right = f"{MARKERS['right']}{painter_state['tick']}".encode()
+new_left = f"{MARKERS['left']}{TICK[0]}".encode()
+new_right = f"{MARKERS['right']}{TICK[0]}".encode()
 if new_left not in frame or new_right not in frame:
     fail("a wedged centre zone stopped the live zones updating — the whole "
          "point of addressing them separately", frame)
-if painter_state["seen"].get("left", 0) <= before.get("left", 0):
+if observed()["seen"].get("left", 0) <= before.get("left", 0):
     fail("the left zone stopped being asked while the centre was wedged")
 print("zones: a wedged zone does not stall the others")
 
-painter_state["wedged"].discard("center")
+control(wedged=[])
 time.sleep(1.5)
 
 # -------------------------------------------------- 4. hit-testing is offset
@@ -382,10 +372,10 @@ if right_col is None:
     fail("right zone vanished before the hover check", frame)
 
 def hover(col):
-    painter_state["hover"] = {}
+    os.path.exists(SEEN) and os.remove(SEEN)
     os.write(master, f"\x1b[<35;{col + 1};{ROWS}M".encode())
     time.sleep(2.0)
-    return {z: v for z, v in painter_state["hover"].items() if v}
+    return {z: v for z, v in observed()["hover"].items() if v}
 
 
 # The left zone sits at origin 0, so it resolves with or without the offset.

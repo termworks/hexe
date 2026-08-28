@@ -59,7 +59,7 @@ pub fn getTitleRect(state: *const State, pane: *const Pane) ?TitleRect {
     if (inner_w == 0) return null;
 
     // The clickable rect must NOT depend on the painter. titleRuns() is empty
-    // whenever no painter is listening (the default: `status.command` is unset),
+    // whenever no painter is configured (the default: `status.exec` is unset),
     // which made total_len 0 -- so dragging a float and double-clicking to
     // rename it were dead out of the box, on a float whose title is drawn.
     const is_active = blk: {

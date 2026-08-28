@@ -85,18 +85,30 @@ actually serves.
 
 ## Finding the painter
 
-In order:
+You name it, and hexe runs it:
 
-1. `socket` in the config, if set
-2. `$HEXE_PAINTER_SOCKET`
-3. `$XDG_RUNTIME_DIR/hexe/painter.sock`
-4. `/tmp/hexe-$UID/painter.sock`
+```lua
+hexe.status = { enabled = true, exec = "pixy serve --stdio" }
+```
 
-If nothing is listening and `command` is set, hexe runs it detached through
-`/bin/sh -c` and keeps retrying. It never waits on it, and never restarts it
-more than once every five seconds — a command that exits immediately must not
-become a fork loop. If `command` is unset, starting the painter is your job:
-a service unit, a shell rc line, whatever you like.
+That is the whole of it. The command is started through `/bin/sh -c` on the
+first fetch and **kept**, so the Lua VM, the config and whatever else it loads
+are paid for once rather than per frame. Its stdin and stdout are the wire; its
+stderr is left on the terminal that started hexe, so a painter's diagnostics
+have somewhere to go. Say nothing and nothing is drawn.
+
+**There is no socket, and that is deliberate.** hexe used to connect to one, at
+`$HEXE_PAINTER_SOCKET` or a path under `$XDG_RUNTIME_DIR`, optionally starting
+it detached. It meant one painter that every session on the machine shared: a
+single accept loop serialising them, one config to restart for all of them, a
+slow render everybody's, and — because nothing owned it — a painter still
+running days later from a build that was no longer installed. Every one of
+those is a property of sharing, not of painting.
+
+A child has none of them. It starts with the frontend, answers only it, and
+exits when the frontend does **by any route**: the kernel closes hexe's end of
+the pipe, the painter reads EOF, and it stops. Nothing has to kill it, so
+nothing is left behind when hexe is killed rather than asked to quit.
 
 ## Views
 
@@ -126,32 +138,19 @@ for it, and hexe draws nothing there.
 rectangle, so the painter cannot address a cell outside it no matter what it
 emits.
 
-## Two transports, one protocol
+## The wire
 
 Each message is a four-byte big-endian length followed by one UTF-8 JSON value,
-1 MiB maximum. **The frames are the same either way** — a painter writes one
-encoder, a host writes one decoder, and what changes is only which file
-descriptors carry them.
+1 MiB maximum. Requests go down the painter's stdin, answers come back up its
+stdout, and it keeps answering until stdin closes.
 
-```lua
-status = { socket = "…" }                       -- connect to a shared painter
-status = { exec = "pixy serve --stdio" }        -- run our own and talk down its pipes
-```
+Nothing about the framing depends on a pipe: it was designed against a socket
+and is unchanged. What a painter must be is a program that reads a frame and
+writes a frame — which any language does in a dozen lines, with no listener, no
+path to agree on, and no way to be left running.
 
-**`socket`** — a Unix `SOCK_STREAM` path. hexe connects, sends one request,
-reads one response, closes; connections are not reused. One painter serves every
-session on the machine.
-
-**`exec`** — hexe spawns the painter as its own child and speaks the same frames
-over its stdin and stdout, keeping it between requests so the painter's startup
-is paid once rather than per frame. Set this and `socket` is unused.
-
-The difference is ownership, not speed; both cost about the same per request. A
-shared painter has one accept loop serialising every session, a config that
-outlives the binary that made it, and a slow render that is everyone's. A child
-starts with this frontend, answers only it, and exits with it — if it dies or
-answers something unusable it is taken down and the next fetch starts a fresh
-one.
+A painter that dies, or answers something unusable, is taken down and the next
+fetch starts a fresh one.
 
 **Request**
 
@@ -281,30 +280,25 @@ unaffected — nothing hexe needs to function is painted externally.
 ## A painter, complete
 
 ```python
-import json, os, socket, struct, time
-
-sock = os.environ.get("HEXE_PAINTER_SOCKET", "/tmp/painter.sock")
-try: os.unlink(sock)
-except FileNotFoundError: pass
-
-srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-srv.bind(sock); srv.listen(8)
+#!/usr/bin/env python3
+import json, struct, sys, time
 
 while True:
-    conn, _ = srv.accept()
-    hdr = conn.recv(4)
-    req = json.loads(conn.recv(struct.unpack(">I", hdr)[0]))
+    head = sys.stdin.buffer.read(4)
+    if len(head) < 4:            # hexe closed the pipe: it is gone, so are we
+        break
+    req = json.loads(sys.stdin.buffer.read(struct.unpack(">I", head)[0]))
     text = " %s " % time.strftime("%H:%M:%S")
     body = json.dumps({"version": 1, "ok": True, "output": {
         "mode": "run",
         "runs": [{"text": text, "style": "fg:250 bg:237 bold"}],
         "width": len(text), "next_frame_ms": 1000}}).encode()
-    conn.sendall(struct.pack(">I", len(body)) + body)
-    conn.close()
+    sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+    sys.stdout.buffer.flush()    # or hexe waits for a frame sitting in a buffer
 ```
 
 ```lua
-status = { enabled = true, socket = "/tmp/painter.sock" }
+status = { enabled = true, exec = "/path/to/painter.py" }
 ```
 
 That is a working status bar. Grow it from there, in whatever language you like.

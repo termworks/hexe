@@ -38,13 +38,14 @@ HEXE = os.path.join(REPO, "zig-out/bin/hexe")
 SCRATCH = os.environ.get("HEXE_SMOKE_TMP", "/tmp/hexe-smoke")
 os.makedirs(SCRATCH, exist_ok=True)
 INST = f"smk{os.getpid()}"
-WORKDIR = os.path.join(SCRATCH, f"region-{os.getpid()}")
+# Handed to the painter, which hexe spawns in a process with its own pid and
+# so cannot derive this again.
+WORKDIR = os.environ.get("HEXE_REGION_WD") or os.path.join(SCRATCH, f"region-{os.getpid()}")
 CFGDIR = os.path.join(SCRATCH, f"cfgregion-{os.getpid()}")
 os.makedirs(WORKDIR, exist_ok=True)
 
 # Unix socket paths are capped near 108 bytes, so keep this short and in /tmp
 # rather than under the (long) scratch directory.
-SOCK = f"/tmp/hexe-rgn-{os.getpid()}.sock"
 MARKER = "RGNOK49"
 
 REAL_CFG = os.path.expanduser("~/.config/hexe")
@@ -54,8 +55,39 @@ if not os.path.isdir(REAL_CFG):
 shutil.copytree(REAL_CFG, os.path.join(CFGDIR, "hexe"), dirs_exist_ok=True)
 
 # ---------------------------------------------------------------- fake painter
-state = {"requests": 0, "mode": "answer", "widths": [], "ctx": {}}
-stop_painter = threading.Event()
+# The painter is hexe's child, so what it saw and what the test wants it to do
+# both cross a file.
+STATE_FILE = os.path.join(WORKDIR, "painter-state.json")
+MODE_FILE = os.path.join(WORKDIR, "painter-mode")
+
+
+def painter_mode(mode=None):
+    """Read the mode, or set it."""
+    if mode is not None:
+        os.makedirs(WORKDIR, exist_ok=True)
+        with open(MODE_FILE, "w") as fh:
+            fh.write(mode)
+        return mode
+    try:
+        return open(MODE_FILE).read().strip() or "answer"
+    except OSError:
+        return "answer"
+
+
+class _State:
+    """What the painter recorded, read fresh from disk on every access."""
+
+    def _load(self):
+        try:
+            return json.load(open(STATE_FILE))
+        except (OSError, ValueError):
+            return {"requests": 0, "widths": [], "ctx": {}}
+
+    def __getitem__(self, key):
+        return self._load()[key]
+
+
+state = _State()
 
 
 def frame_send(conn, obj):
@@ -80,59 +112,54 @@ def frame_recv(conn):
     return json.loads(body)
 
 
-def painter():
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        os.unlink(SOCK)
-    except FileNotFoundError:
-        pass
-    srv.bind(SOCK)
-    srv.listen(16)
-    srv.settimeout(0.3)
-    while not stop_painter.is_set():
+def serve_stdio():
+    """Answer on stdin/stdout until hexe closes the pipe."""
+    while True:
+        head = sys.stdin.buffer.read(4)
+        if len(head) < 4:
+            return
+        need = struct.unpack(">I", head)[0]
+        body = sys.stdin.buffer.read(need)
+        if len(body) < need:
+            return
+        req = json.loads(body)
+
         try:
-            conn, _ = srv.accept()
-        except socket.timeout:
-            continue
-        except OSError:
-            break
+            cur = json.load(open(STATE_FILE))
+        except (OSError, ValueError):
+            cur = {"requests": 0, "widths": [], "ctx": {}}
+        cur["requests"] += 1
+        cur["widths"].append(req.get("width"))
+        # Keep the last context so the test can assert on what hexe reports
+        # about the pane, not just that a frame came back.
         try:
-            req = frame_recv(conn)
-            if req is None:
-                conn.close()
-                continue
-            state["requests"] += 1
-            state["widths"].append(req.get("width"))
-            # Keep the last context so the test can assert on what hexe reports
-            # about the pane, not just that a frame came back.
-            try:
-                state["ctx"] = req["context"]["values"]
-            except (KeyError, TypeError):
-                pass
-            if state["mode"] == "wedge":
-                # Accept, read, then answer never. The client must not care.
-                continue
-            frame_send(conn, {
-                "version": 1,
-                "ok": True,
-                "output": {
-                    "mode": "run",
-                    "runs": [{"text": f" {MARKER} ", "style": "fg:15 bg:237 bold"}],
-                    "width": len(MARKER) + 2,
-                    "next_frame_ms": None,
-                },
-            })
-        except OSError:
+            cur["ctx"] = req["context"]["values"]
+        except (KeyError, TypeError):
             pass
-        finally:
-            if state["mode"] != "wedge":
-                conn.close()
-    srv.close()
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(cur, fh)
+        os.replace(tmp, STATE_FILE)
+
+        if painter_mode() == "wedge":
+            continue                  # read it, answer never; hexe must not care
+        out = json.dumps({"version": 1, "ok": True, "output": {
+            "mode": "run",
+            "runs": [{"text": f" {MARKER} ", "style": "fg:15 bg:237 bold"}],
+            "width": len(MARKER) + 2,
+            "next_frame_ms": None,
+        }}).encode()
+        sys.stdout.buffer.write(struct.pack(">I", len(out)) + out)
+        sys.stdout.buffer.flush()
 
 
-painter_thread = threading.Thread(target=painter, daemon=True)
-painter_thread.start()
-time.sleep(0.4)
+if "--painter" in sys.argv:
+    serve_stdio()
+    raise SystemExit(0)
+
+os.makedirs(WORKDIR, exist_ok=True)
+painter_mode("answer")
+
 
 # ------------------------------------------------------------------- hexe config
 lay_path = os.path.join(CFGDIR, "hexe", "layout.lua")
@@ -160,7 +187,7 @@ for a, b in (("exit = true", "exit = false"), ("detach = true", "detach = false"
     init = init.replace(a, b)
 
 # The whole bar is painted externally now: point it at the fake painter.
-anchor = "  status = {\n    enabled = true,\n"
+anchor = "hexe.status = {\n  enabled = true,\n"
 if anchor not in init:
     print("SKIP: could not find the statusbar config to point at the painter")
     raise SystemExit(0)
@@ -187,7 +214,11 @@ def strip_status_zones(text):
         while j < len(text) and text[j] in ",\r\n \t":
             j += 1
         text = text[:i] + text[j:]
-    return re.sub(r"^\s*shrink\s*=\s*\{[^}]*\}\s*,?.*$", "", text, flags=re.M)
+    text = re.sub(r"^\s*shrink\s*=\s*\{[^}]*\}\s*,?.*$", "", text, flags=re.M)
+    # And the config's own painter: a duplicate key in a Lua table literal is
+    # the LAST one, so leaving it would silently override the fake one injected
+    # below and the test would be watching the real painter.
+    return re.sub(r"^\s*exec\s*=\s*\"[^\"]*\"\s*,?.*$", "", text, flags=re.M)
 
 
 init = strip_status_zones(init)
@@ -195,9 +226,9 @@ init = strip_status_zones(init)
 init = init.replace(
     anchor,
     anchor + '''    view = "smoke",
-    socket = "%s",
+    exec = "%s",
     refresh_ms = 200,
-''' % SOCK,
+''' % (f"HEXE_REGION_WD={WORKDIR} python3 {os.path.abspath(__file__)} --painter"),
     1,
 )
 open(init_path, "w").write(init)
@@ -222,7 +253,6 @@ def pgrep(pattern):
 
 
 def cleanup():
-    stop_painter.set()
     for p in procs:
         if p.poll() is None:
             p.terminate()
@@ -235,10 +265,9 @@ def cleanup():
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    try:
-        os.unlink(SOCK)
-    except FileNotFoundError:
-        pass
+    # The painter goes with hexe, but a run that died between spawning it and
+    # killing hexe would leave one, so sweep by the marker in its argv.
+    subprocess.run(["pkill", "-f", f"HEXE_REGION_WD={WORKDIR}"], capture_output=True)
 
 
 atexit.register(cleanup)
@@ -289,7 +318,7 @@ def read_until(m, marker, timeout_s):
 
 
 log = open(os.path.join(SCRATCH, "smoke-region.raw"), "wb")
-print(f"instance={INST} painter={SOCK}")
+print(f"instance={INST} painter=child of hexe")
 
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
@@ -336,7 +365,7 @@ else:
 print("phase2c: progress cleared on completion")
 
 # 3. Wedge the painter: it accepts and reads, then never answers.
-state["mode"] = "wedge"
+painter_mode("wedge")
 before = state["requests"]
 t0 = time.time()
 safe_write(master, b"echo WEDGE_OK\r", "wedged painter echo")
@@ -362,12 +391,10 @@ if state["requests"] <= before:
     fail("the client stopped talking to the painter entirely — it should keep retrying")
 
 # 5. Kill the painter outright. The terminal must survive.
-stop_painter.set()
-painter_thread.join(timeout=3)
-try:
-    os.unlink(SOCK)
-except FileNotFoundError:
-    pass
+#
+# It is hexe's child, so killing it is killing that process -- and hexe must
+# start a fresh one rather than wedge on a pipe with nothing behind it.
+subprocess.run(["pkill", "-f", f"HEXE_REGION_WD={WORKDIR}"], capture_output=True)
 time.sleep(1.0)
 for i in range(4):
     t0 = time.time()

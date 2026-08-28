@@ -6,7 +6,7 @@ asks the painter what goes there and puts it where the slot says; it never
 decides the content itself.
 
 ```lua
-hexe.status.socket = "/run/user/1000/painter.sock"
+hexe.status.exec = "pixy serve --stdio"
 
 hexe.decor.left   = { width = 4, top = "dock.apps", center = "dock.tools", bottom = "dock.sys" }
 hexe.decor.right  = { width = 2, center = "dock.notify" }

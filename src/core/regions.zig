@@ -40,8 +40,6 @@ pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_RUNS: usize = 256;
 /// Upper bound on tracked regions; keys come from config, not user input.
 pub const MAX_ENTRIES: usize = 64;
-/// Minimum gap between attempts to start a painter that is not running.
-pub const SPAWN_COOLDOWN_MS: i64 = 5_000;
 
 pub const Mode = enum {
     run,
@@ -158,42 +156,36 @@ pub const Spec = struct {
     mode: Mode,
     width: u16,
     height: u16,
-    socket_path: ?[]const u8 = null,
     refresh_ms: i64 = DEFAULT_REFRESH_MS,
     stale_ms: i64 = DEFAULT_STALE_MS,
     /// Distinguishes instances of the same view fetched for different subjects
     /// (per-pane sprites, per-float titles), which otherwise share one entry.
     key_suffix: []const u8 = "",
-    /// Optional command to start the painter when nothing is listening. Run
-    /// detached through `/bin/sh -c`; hexe never waits on it.
-    command: ?[]const u8 = null,
-    /// Run this painter as our OWN child and speak the same frames over its
-    /// pipes, instead of connecting to a socket somebody else is holding.
+    /// The painter, run as hexe's own child. Null draws nothing: a region has
+    /// no other way to be filled.
     ///
-    /// A shared socket painter is one process every session on the machine
-    /// talks to: its accept loop serialises them, its config outlives the
-    /// binary that made it, and a slow render is everyone's. A child is spawned
-    /// once, answers many requests down the same pipe, and dies with us.
+    /// hexe used to connect to a socket instead, which meant one painter every
+    /// session on the machine shared -- its accept loop serialising them, its
+    /// config outliving the binary that made it, a slow render everyone's, and
+    /// nothing to kill it when the last frontend went. A child is spawned once,
+    /// answers many requests down the same pipe, and dies with us.
     exec: ?[]const u8 = null,
 };
 
-const Phase = enum { idle, connecting, writing, reading };
+const Phase = enum { idle, writing, reading };
 
 const Region = struct {
     key: []u8,
     selector: []u8,
-    socket_path: []u8,
     mode: Mode,
     refresh_ms: i64,
     stale_ms: i64,
     width: u16 = 0,
     height: u16 = 1,
 
-    /// Read side. For a socket this is the connection; for a child it is the
-    /// pipe from its stdout.
+    /// The pipe from the child's stdout.
     fd: ?posix.fd_t = null,
-    /// Write side, separate only for a child. Equal to `fd` on a socket, which
-    /// is what lets one pump serve both.
+    /// The pipe to its stdin.
     wfd: ?posix.fd_t = null,
     /// The painter we own, kept between requests so the Lua VM and config are
     /// paid for once rather than per frame.
@@ -226,11 +218,6 @@ const Region = struct {
     strip_at: usize = 0,
     strip_due_ms: i64 = 0,
 
-    command: ?[]u8 = null,
-    /// When the painter was last started, so a dead command is not respawned
-    /// on every retry.
-    spawned_ms: i64 = 0,
-
     /// The last response was a well-formed refusal (`ok:false`) rather than a
     /// transport failure, so the painter is known to be running.
     declined: bool = false,
@@ -261,20 +248,6 @@ const Region = struct {
     }
 };
 
-/// Where hexe looks for a painter when the config does not say.
-///
-/// `HEXE_PAINTER_SOCKET` first, so a painter can advertise itself without the
-/// user editing config at all.
-pub fn defaultSocketPath(allocator: std.mem.Allocator) ![]u8 {
-    if (posix.getenv("HEXE_PAINTER_SOCKET")) |path| {
-        return allocator.dupe(u8, path);
-    }
-    if (posix.getenv("XDG_RUNTIME_DIR")) |dir| {
-        return std.fmt.allocPrint(allocator, "{s}/hexe/painter.sock", .{dir});
-    }
-    return std.fmt.allocPrint(allocator, "/tmp/hexe-{d}/painter.sock", .{std.os.linux.getuid()});
-}
-
 /// The frontend's registry, published for the render path the same way
 /// `cmd.async_cache` is. Null in short-lived processes, which have no painter.
 pub var active: ?*Registry = null;
@@ -289,8 +262,6 @@ pub const Registry = struct {
     use_counter: u64 = 0,
     /// Painters this registry started. Reaped without blocking in `poll()`;
     /// unreaped they would be a zombie per spawn for the life of the process.
-    spawned: std.ArrayList(std.process.Child) = .empty,
-
     pub fn init(allocator: std.mem.Allocator) Registry {
         return .{
             .allocator = allocator,
@@ -302,23 +273,6 @@ pub const Registry = struct {
         var it = self.entries.valueIterator();
         while (it.next()) |slot| self.destroyRegion(slot.*);
         self.entries.deinit();
-        // Collect what has already exited; anything still running is reparented
-        // to init, so it cannot become a lasting zombie.
-        for (self.spawned.items) |*c| _ = posix.waitpid(c.id, posix.W.NOHANG);
-        self.spawned.deinit(self.allocator);
-    }
-
-    /// Collect exited painters. Never blocks.
-    fn reapSpawned(self: *Registry) void {
-        var i: usize = 0;
-        while (i < self.spawned.items.len) {
-            const res = posix.waitpid(self.spawned.items[i].id, posix.W.NOHANG);
-            if (res.pid != 0) {
-                _ = self.spawned.swapRemove(i);
-                continue;
-            }
-            i += 1;
-        }
     }
 
     fn destroyRegion(self: *Registry, r: *Region) void {
@@ -333,8 +287,6 @@ pub const Registry = struct {
         r.ansi.deinit(self.allocator);
         self.allocator.free(r.key);
         self.allocator.free(r.selector);
-        self.allocator.free(r.socket_path);
-        if (r.command) |c| self.allocator.free(c);
         if (r.exec) |c| self.allocator.free(c);
         // A painter we own goes when its region does, or it outlives what it
         // was drawing -- which is the shared-daemon problem in miniature.
@@ -471,42 +423,30 @@ pub const Registry = struct {
             if (self.entries.count() >= MAX_ENTRIES) return null;
         }
 
-        const socket_path = if (spec.socket_path) |p|
-            self.allocator.dupe(u8, p) catch return null
-        else
-            defaultSocketPath(self.allocator) catch return null;
+        // Nothing to draw with is not an error, it is a region that stays empty:
+        // a config with no painter must not become a failed fetch on a ladder.
+        const exec = spec.exec orelse return null;
 
-        const r = self.allocator.create(Region) catch {
-            self.allocator.free(socket_path);
-            return null;
-        };
+        const r = self.allocator.create(Region) catch return null;
         const key_owned = self.allocator.dupe(u8, key) catch {
-            self.allocator.free(socket_path);
             self.allocator.destroy(r);
             return null;
         };
         const selector_owned = self.allocator.dupe(u8, spec.selector) catch {
             self.allocator.free(key_owned);
-            self.allocator.free(socket_path);
+            self.allocator.destroy(r);
+            return null;
+        };
+        const exec_owned = self.allocator.dupe(u8, exec) catch {
+            self.allocator.free(selector_owned);
+            self.allocator.free(key_owned);
             self.allocator.destroy(r);
             return null;
         };
 
-        const command_owned: ?[]u8 = if (spec.command) |c|
-            (self.allocator.dupe(u8, c) catch null)
-        else
-            null;
-
-        const exec_owned: ?[]u8 = if (spec.exec) |c|
-            (self.allocator.dupe(u8, c) catch null)
-        else
-            null;
-
         r.* = .{
             .key = key_owned,
             .selector = selector_owned,
-            .socket_path = socket_path,
-            .command = command_owned,
             .exec = exec_owned,
             .mode = spec.mode,
             .refresh_ms = @max(spec.refresh_ms, 16),
@@ -547,56 +487,19 @@ pub const Registry = struct {
             return;
         };
 
-        // Our own painter, if this region was configured with one: spawned on
-        // the first fetch and kept, so every later request is a write and a
-        // read down a pipe that is already open.
-        if (r.exec != null) {
-            if (r.child == null) self.startChild(r, now) catch {
-                self.fail(r, now);
-                return;
-            };
-            r.started_ms = now;
-            r.phase = .writing;
-            self.pump(r, now);
-            return;
-        }
-
-        const fd = posix.socket(
-            posix.AF.UNIX,
-            posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
-            0,
-        ) catch {
+        // The painter is ours: spawned on the first fetch and kept, so every
+        // later request is a write and a read down a pipe already open.
+        if (r.child == null) self.startChild(r) catch {
             self.fail(r, now);
             return;
         };
-
-        var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = [_]u8{0} ** 108 };
-        if (r.socket_path.len >= addr.path.len) {
-            posix.close(fd);
-            self.fail(r, now);
-            return;
-        }
-        @memcpy(addr.path[0..r.socket_path.len], r.socket_path);
-
-        r.fd = fd;
         r.started_ms = now;
-        posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch |err| switch (err) {
-            error.WouldBlock => {
-                r.phase = .connecting;
-                return;
-            },
-            else => {
-                self.fail(r, now);
-                return;
-            },
-        };
         r.phase = .writing;
         self.pump(r, now);
     }
 
     /// Advance every in-flight region. Non-blocking throughout.
     pub fn poll(self: *Registry) void {
-        self.reapSpawned();
         const now = std.time.milliTimestamp();
         var it = self.entries.valueIterator();
         while (it.next()) |slot| {
@@ -616,24 +519,8 @@ pub const Registry = struct {
             self.fail(r, now);
             return;
         };
-        // The same pump serves both transports: a socket hands back one fd for
-        // each direction, a child hands back two.
+        // The child's stdin and stdout are separate descriptors.
         const wfd = r.wfd orelse fd;
-
-        if (r.phase == .connecting) {
-            var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
-            const ready = posix.poll(&pfd, 0) catch {
-                self.fail(r, now);
-                return;
-            };
-            if (ready == 0) return;
-            if (pfd[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0) {
-                self.fail(r, now);
-                return;
-            }
-            if (pfd[0].revents & posix.POLL.OUT == 0) return;
-            r.phase = .writing;
-        }
 
         if (r.phase == .writing) {
             while (r.req_off < r.req.items.len) {
@@ -718,18 +605,14 @@ pub const Registry = struct {
             return;
         }
         // A painter that answers `ok:false` is UP and simply does not implement
-        // this view. Backing off through the failure ladder also re-ran
-        // `command`, so a declining painter was relaunched forever (every
-        // SPAWN_COOLDOWN_MS, capped only by the retry ceiling). Retry on the
-        // ordinary cadence instead, and never spawn: nothing is missing.
+        // this view. Retry on the ordinary cadence rather than the failure
+        // ladder: nothing is missing.
         if (r.declined) {
             r.fail_streak = 0;
             r.next_try_ms = now + @max(r.refresh_ms, RETRY_BASE_MS);
             return;
         }
-        // A frame that parsed but carried a body this mode cannot use still
-        // proves the painter is running: back off, but do not fork another one.
-        self.backoffInner(r, now, !r.answered);
+        self.backoff(r, now);
     }
 
     fn fail(self: *Registry, r: *Region, now: i64) void {
@@ -746,7 +629,7 @@ pub const Registry = struct {
     /// that stops reading must cost a stale region, never a stalled frame. The
     /// child is `/bin/sh -c` like the detached spawner, so a configured command
     /// means the same thing in both transports.
-    fn startChild(self: *Registry, r: *Region, now: i64) !void {
+    fn startChild(self: *Registry, r: *Region) !void {
         const cmd = r.exec orelse return error.NoCommand;
         var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd }, self.allocator);
         child.stdin_behavior = .Pipe;
@@ -764,30 +647,6 @@ pub const Registry = struct {
         r.child = child;
         r.wfd = in_fd;
         r.fd = out_fd;
-        r.spawned_ms = now;
-    }
-
-    /// Start the configured painter, detached. Never waits, never retries fast:
-    /// a command that exits immediately must not become a fork loop.
-    fn spawnPainter(self: *Registry, r: *Region, now: i64) void {
-        const cmd = r.command orelse return;
-        if (r.spawned_ms != 0 and now - r.spawned_ms < SPAWN_COOLDOWN_MS) return;
-        r.spawned_ms = now;
-
-        var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd }, self.allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch |err| {
-            logging.logError("regions", "failed to start painter", err);
-            return;
-        };
-        logging.warn("regions", "started painter: {s}", .{cmd});
-        // Tracked only so poll() can reap it. Never waited on: that is exactly
-        // the stall this module exists to avoid.
-        self.spawned.append(self.allocator, child) catch {
-            _ = posix.waitpid(child.id, posix.W.NOHANG);
-        };
     }
 
     /// Milliseconds until the soonest live region is due, or null when nothing
@@ -819,20 +678,15 @@ pub const Registry = struct {
         return soonest;
     }
 
+    /// Back off after a failure. Hammering a painter that cannot serve this
+    /// view is no better than hammering a dead one, and the next fetch respawns
+    /// the child anyway if it was the child that died.
     fn backoff(self: *Registry, r: *Region, now: i64) void {
-        self.backoffInner(r, now, true);
-    }
-
-    /// `spawn` is false when the painter demonstrably answered: the retry ladder
-    /// still applies, because hammering a painter that cannot serve this view is
-    /// no better than hammering a dead one, but running `command` again would
-    /// fork a second copy of a process that is already up.
-    fn backoffInner(self: *Registry, r: *Region, now: i64, spawn: bool) void {
+        _ = self;
         r.fail_streak +|= 1;
         const shift: u6 = @intCast(@min(r.fail_streak - 1, 6));
         const delay = @min(RETRY_BASE_MS * (@as(i64, 1) << shift), RETRY_MAX_MS);
         r.next_try_ms = now + delay;
-        if (spawn) self.spawnPainter(r, now);
     }
 
     fn buildRequest(self: *Registry, r: *Region, ctx: RequestContext) !void {
@@ -1204,7 +1058,7 @@ test "run response parses into styled runs" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1 };
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     const frame =
@@ -1228,7 +1082,7 @@ test "surface response parses into ansi bytes" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "overlay.sprite", .mode = .surface, .width = 10, .height = 4 };
+    const spec = Spec{ .selector = "overlay.sprite", .mode = .surface, .width = 10, .height = 4, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     const frame =
@@ -1243,7 +1097,7 @@ test "malformed and error frames are rejected without clobbering content" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1 };
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     try std.testing.expect(reg.parseResponse(r, "{\"ok\":true,\"output\":{\"mode\":\"run\",\"runs\":[{\"text\":\"ok\"}],\"width\":2}}"));
@@ -1262,7 +1116,7 @@ test "request frame is length-prefixed and carries geometry" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "prompt.left", .mode = .run, .width = 100, .height = 1 };
+    const spec = Spec{ .selector = "prompt.left", .mode = .run, .width = 100, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
     r.width = 100;
     r.height = 1;
@@ -1284,73 +1138,23 @@ test "request frame is length-prefixed and carries geometry" {
     defer parsed.deinit();
 }
 
-/// Minimal stand-in for the painter: accepts one connection, reads the request
-/// frame, and writes back `reply` framed the same way.
-const FakePainter = struct {
-    path: []const u8,
-    reply: []const u8,
-    listen_fd: posix.fd_t,
-    thread: ?std.Thread = null,
+/// A painter as a child, framed the way the protocol says: four big-endian
+/// length bytes then the JSON. `printf` writes it in one go, so the test needs
+/// no helper process of its own.
+fn framedEcho(allocator: std.mem.Allocator, reply: []const u8) ![]u8 {
+    const n = reply.len;
+    return std.fmt.allocPrint(allocator, "printf '\\{o}\\{o}\\{o}\\{o}%s' '{s}'", .{
+        (n >> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff, reply,
+    });
+}
 
-    fn start(path: []const u8, reply: []const u8) !*FakePainter {
-        const self = try std.testing.allocator.create(FakePainter);
-        errdefer std.testing.allocator.destroy(self);
-
-        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-        var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = [_]u8{0} ** 108 };
-        @memcpy(addr.path[0..path.len], path);
-        posix.unlink(path) catch {};
-        try posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
-        try posix.listen(fd, 4);
-
-        self.* = .{ .path = path, .reply = reply, .listen_fd = fd };
-        self.thread = try std.Thread.spawn(.{}, serve, .{self});
-        return self;
-    }
-
-    fn serve(self: *FakePainter) void {
-        const conn = posix.accept(self.listen_fd, null, null, 0) catch return;
-        defer posix.close(conn);
-
-        var hdr: [4]u8 = undefined;
-        var got: usize = 0;
-        while (got < 4) {
-            const n = posix.read(conn, hdr[got..]) catch return;
-            if (n == 0) return;
-            got += n;
-        }
-        const need = std.mem.readInt(u32, &hdr, .big);
-        var sink: [65536]u8 = undefined;
-        var read_total: usize = 0;
-        while (read_total < need) {
-            const want = @min(sink.len, need - read_total);
-            const n = posix.read(conn, sink[0..want]) catch return;
-            if (n == 0) return;
-            read_total += n;
-        }
-
-        var out_hdr: [4]u8 = undefined;
-        std.mem.writeInt(u32, &out_hdr, @intCast(self.reply.len), .big);
-        _ = posix.write(conn, &out_hdr) catch return;
-        _ = posix.write(conn, self.reply) catch return;
-    }
-
-    fn stop(self: *FakePainter) void {
-        if (self.thread) |t| t.join();
-        posix.close(self.listen_fd);
-        posix.unlink(self.path) catch {};
-        std.testing.allocator.destroy(self);
-    }
-};
-
-test "fetches a run frame over a real socket without blocking" {
+test "fetches a run frame from its own child without blocking" {
     const allocator = std.testing.allocator;
-    const path = "/tmp/hexe-regions-test-run.sock";
     const reply =
         \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":" hi ","style":"fg:15 bg:237 bold"}],"width":4,"next_frame_ms":null}}
     ;
-    const painter = try FakePainter.start(path, reply);
-    defer painter.stop();
+    const cmd = try framedEcho(allocator, reply);
+    defer allocator.free(cmd);
 
     var reg = Registry.init(allocator);
     defer reg.deinit();
@@ -1360,7 +1164,7 @@ test "fetches a run frame over a real socket without blocking" {
         .mode = .run,
         .width = 80,
         .height = 1,
-        .socket_path = path,
+        .exec = cmd,
     };
 
     // First look starts the fetch and must return empty rather than wait.
@@ -1392,13 +1196,14 @@ test "a painter that never answers leaves the region empty and never blocks" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    // Nothing is listening on this path.
+    // Reads nothing and writes nothing, which is the wedged painter this
+    // module exists to survive.
     const spec = Spec{
         .selector = "status",
         .mode = .run,
         .width = 80,
         .height = 1,
-        .socket_path = "/tmp/hexe-regions-test-absent.sock",
+        .exec = "cat >/dev/null",
     };
 
     var timer = try std.time.Timer.start();
@@ -1408,8 +1213,22 @@ test "a painter that never answers leaves the region empty and never blocks" {
         try std.testing.expect(!snap.done);
         reg.poll();
     }
-    // 200 render passes against a dead painter must cost effectively nothing.
+    // 200 render passes against a wedged painter must cost effectively nothing.
     try std.testing.expect(timer.read() < 500 * std.time.ns_per_ms);
+}
+
+test "a region with no painter configured stays empty" {
+    const allocator = std.testing.allocator;
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+
+    // No `exec`: nothing to draw with is an empty region, not a failed fetch on
+    // a retry ladder.
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 80, .height = 1 };
+    const snap = reg.snapshot(spec, .{ .now_ms = 1 });
+    try std.testing.expect(!snap.done);
+    try std.testing.expectEqual(@as(usize, 0), snap.runs.len);
+    reg.poll();
 }
 
 test "backoff grows and a good frame clears it" {
@@ -1417,7 +1236,7 @@ test "backoff grows and a good frame clears it" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1 };
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     reg.backoff(r, 1000);
@@ -1438,7 +1257,7 @@ test "interactive regions parse with ids, geometry and actions" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "status", .mode = .run, .width = 100, .height = 1 };
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 100, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     const frame =

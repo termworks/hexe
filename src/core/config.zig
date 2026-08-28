@@ -69,8 +69,8 @@ fn freeOwnedStr(a: std.mem.Allocator, slice: []const u8, comptime default: []con
 
 /// A helper program the session runs alongside itself.
 ///
-/// The painter is started this way already, by `status.command`, but that hook
-/// belongs to the bar. A plugin is the general form: something that wants the
+/// The painter is started as the frontend's own child, by `status.exec`, and that
+/// hook belongs to the bar. A plugin is the general form: something that wants the
 /// session's data -- a recorder, a web gateway streaming panes to a browser --
 /// and needs to be running for it to be there.
 ///
@@ -104,18 +104,8 @@ pub const StatusBarConfig = struct {
     enabled: bool = true,
     /// Painter view drawn across the bar.
     view: []const u8 = "status",
-    /// Painter socket; null uses $HEXE_PAINTER_SOCKET, then
-    /// $XDG_RUNTIME_DIR/hexe/painter.sock.
-    socket: ?[]const u8 = null,
-    /// Optional command that starts the painter when nothing is listening.
-    command: ?[]const u8 = null,
-    /// Run the painter as hexe's OWN child, speaking the same frames over its
-    /// pipes, instead of connecting to a shared socket.
-    ///
-    /// Set this and `socket` is not used at all. What it buys is ownership: the
-    /// painter starts with this frontend, answers only it, and exits with it --
-    /// no accept loop shared with every other session on the machine, and no
-    /// painter left running from a build that is no longer installed.
+    /// The painter, run as hexe's own child: it starts with this frontend,
+    /// answers only it, and exits with it. Unset draws no bar.
     exec: ?[]const u8 = null,
     refresh_ms: u64 = 250,
     stale_ms: u64 = 10_000,
