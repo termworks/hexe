@@ -1,4 +1,20 @@
 const std = @import("std");
+
+/// Panic without unwinding the stack -- in release builds only.
+///
+/// The default handler parses DWARF to print a trace: `Dwarf.open`,
+/// `runLineNumberProgram`, `ElfModule.load`, `unwindFrameDwarf` and the rest,
+/// 179 KB of it. A release binary is stripped, so there are no symbols for any
+/// of that to resolve against and the trace it works so hard to build comes out
+/// as bare addresses. The message is the part worth keeping.
+///
+/// Debug builds keep the full handler, because there the symbols are present
+/// and the trace is the whole point.
+pub const panic = if (@import("builtin").mode == .Debug)
+    std.debug.FullPanic(std.debug.defaultPanic)
+else
+    std.debug.simple_panic;
+
 const yazap = @import("yazap");
 const core = @import("core");
 const frontend_core = @import("frontend_core");
