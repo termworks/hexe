@@ -18,7 +18,9 @@ HEXE = os.path.join(REPO, "zig-out/bin/hexe")
 SCRATCH = os.environ.get("HEXE_SMOKE_TMP", "/tmp/hexe-smoke")
 os.makedirs(SCRATCH, exist_ok=True)
 INST = f"smk{os.getpid()}"
-WD = os.path.join(SCRATCH, f"decor{os.getpid()}")
+# The painter runs as hexe's child, in a process with its own pid, so the
+# working directory has to be handed to it rather than derived again.
+WD = os.environ.get("HEXE_DECOR_WD") or os.path.join(SCRATCH, f"decor{os.getpid()}")
 CF = os.path.join(WD, "config")
 os.makedirs(os.path.join(CF, "hexe"), exist_ok=True)
 
@@ -174,7 +176,23 @@ TITLES = {("top", "start"): "TSTART", ("top", "center"): "TCENTER",
           ("bottom", "center"): "BCENTER", ("bottom", "end"): "BEND"}
 stop_painter = threading.Event()
 CLICKED = os.path.join(WD, "clicked")
+# What the painter was asked for. It is hexe's child now, so the record crosses
+# a file rather than living in this process's memory.
+ASKED = os.path.join(WD, "asked.jsonl")
 asked = []
+
+
+def note_asked(entry):
+    with open(ASKED, "a") as fh:
+        fh.write(json.dumps(entry) + "\n")
+
+
+def asked_so_far():
+    try:
+        with open(ASKED) as fh:
+            return [tuple(json.loads(line)) for line in fh if line.strip()]
+    except OSError:
+        return []
 
 
 def frame_send(conn, obj):
@@ -207,7 +225,7 @@ def answer(req):
     except (KeyError, TypeError):
         pass
     edge, slot = vals.get("decor_edge"), vals.get("decor_slot")
-    asked.append((edge, slot, req.get("width"), req.get("height")))
+    note_asked((edge, slot, req.get("width"), req.get("height")))
 
     if (edge, slot) in ICONS:
         # A surface fills its whole rect, so an icon drawn on every row proves
@@ -233,35 +251,31 @@ def answer(req):
     return {"mode": "run", "runs": [], "width": 0, "next_frame_ms": None}
 
 
-def painter():
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        os.unlink(SOCK)
-    except FileNotFoundError:
-        pass
-    srv.bind(SOCK)
-    srv.listen(16)
-    srv.settimeout(0.3)
-    while not stop_painter.is_set():
-        try:
-            conn, _ = srv.accept()
-        except socket.timeout:
-            continue
-        except OSError:
-            break
-        try:
-            req = frame_recv(conn)
-            if req is not None:
-                frame_send(conn, {"version": 1, "ok": True, "output": answer(req)})
-        except OSError:
-            pass
-        finally:
-            conn.close()
-    srv.close()
+def serve_stdio():
+    """Answer on stdin/stdout until hexe closes the pipe.
+
+    hexe spawns this file with --painter, so `answer` and its helpers are shared
+    with the test rather than duplicated into a second script.
+    """
+    while True:
+        head = sys.stdin.buffer.read(4)
+        if len(head) < 4:
+            return
+        need = struct.unpack(">I", head)[0]
+        body = sys.stdin.buffer.read(need)
+        if len(body) < need:
+            return
+        out = json.dumps({"version": 1, "ok": True,
+                          "output": answer(json.loads(body))}).encode()
+        sys.stdout.buffer.write(struct.pack(">I", len(out)) + out)
+        sys.stdout.buffer.flush()
 
 
-threading.Thread(target=painter, daemon=True).start()
-time.sleep(0.4)
+if "--painter" in sys.argv:
+    serve_stdio()
+    raise SystemExit(0)
+
+
 
 
 def write_config(with_panels):
@@ -276,7 +290,7 @@ def write_config(with_panels):
             "    bottom = { left = 'd.bs', center = 'd.bc', right = 'd.be' },\n"
             "  },\n"
         )
-    status = f"  status = {{ socket = '{SOCK}' }},\n"
+    status = f"  status = {{ exec = 'HEXE_DECOR_WD={WD} python3 {os.path.abspath(__file__)} --painter' }},\n"
     # A float, because the top and bottom slots resolve against a float's border
     # -- they are the generalisation of the single float title.
     fl = (
@@ -419,7 +433,7 @@ if os.environ.get("DECOR_DUMP"):
     with open(os.path.join(WD, "screen.txt"), "w") as fh:
         fh.write(screen.text())
     with open(os.path.join(WD, "asked.txt"), "w") as fh:
-        fh.write(repr(asked))
+        fh.write(repr(asked_so_far()))
     print("dumped to", WD)
 
 strip_rows = {}
@@ -430,7 +444,7 @@ for y, row in enumerate(screen.grid):
 
 missing = [g for g in ("L", "M", "N") if g not in strip_rows]
 if missing:
-    fail(f"the left strip's slots {missing} drew nothing. Asked for: {asked[:12]}. "
+    fail(f"the left strip's slots {missing} drew nothing. Asked for: {asked_so_far()[:12]}. "
          f"Columns were reserved but no painter content reached them")
 
 order = [min(strip_rows[g]) for g in ("L", "M", "N")]
@@ -447,6 +461,7 @@ for g, rows in strip_rows.items():
             fail(f"row {y} of the left strip holds {line[:LEFT_W]!r}, which is not "
                  f"only panel content — the strip and the pane overlap")
 
+asked = asked_so_far()
 for edge, slot, w, h in asked:
     if edge in ("left", "right") and w not in (LEFT_W, RIGHT_W):
         fail(f"the painter was asked for a {w}-wide {edge} surface, but the "

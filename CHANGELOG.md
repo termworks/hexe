@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.4.11] - 2026-08-28
+
+### <!-- 0 -->⛰️  Features
+
+- Play a filmstrip locally
+- Status.exec, a painter hexe owns
+- Let a pane ask for focus back
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Close the child's err_pipe
+- Showcase painter runs as a child
+- Route by the pane, not a stale session id
+
+### <!-- 2 -->🚜 Refactor
+
+- [**breaking**] Drop logly, a line on stderr
+- [**breaking**] One-shot, nothing resident
+- [**breaking**] Drop the socket transport
+
+### <!-- 3 -->📚 Documentation
+
+- Note what a pane may do to itself
+
+### <!-- 4 -->⚡ Performance
+
+- No 16 MB buffer to unwrap a reply
+- No DWARF unwinder in release
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Install the config with the binary
+
 ## [0.4.10] - 2026-08-27
 
 ### <!-- 0 -->⛰️  Features

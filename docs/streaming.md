@@ -227,7 +227,7 @@ view that draws `● LIVE 2` on the pane's border and nothing at all when nobody
 is watching — an indicator that is always there is one nobody reads:
 
 ```lua
-hexe.status.socket = "/run/user/1000/painter.sock"
+hexe.status.exec = "pixy serve --stdio"
 hexe.decor.top = { right = "share" }
 ```
 
@@ -278,7 +278,7 @@ A streamer, a badge that says it is on, a button that stops it, and a QR code to
 join from a phone — the pieces above, assembled:
 
 ```lua
-hexe.status.socket = "/run/user/1000/painter.sock"
+hexe.status.exec = "pixy serve --stdio"
 hexe.decor.top = { right = "share" }              -- ● LIVE, click to stop
 hexe.plugin("drop", { command = "drop cast", access = { "stream", "popup" } })
 ```

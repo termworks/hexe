@@ -90,10 +90,9 @@ pub fn specFor(cfg: *const core.config.StatusBarConfig, view: []const u8, width:
         .mode = .run,
         .width = width,
         .height = height,
-        .socket_path = cfg.socket,
         .refresh_ms = @intCast(cfg.refresh_ms),
         .stale_ms = @intCast(cfg.stale_ms),
-        .command = cfg.command,
+        .exec = cfg.exec,
     };
 }
 

@@ -26,12 +26,8 @@ const Entry = struct {
 /// `core.regions.active` is.
 pub var active: ?*SurfaceCache = null;
 
-/// Painter socket for callers that do not carry the status config (popups).
-pub var socket_path: ?[]const u8 = null;
-
-pub fn setActive(cache: *SurfaceCache, socket: ?[]const u8) void {
+pub fn setActive(cache: *SurfaceCache) void {
     active = cache;
-    socket_path = socket;
 }
 
 /// Per-region headless terminals, keyed by region identity.
@@ -179,11 +175,10 @@ pub fn drawPaneSprite(
         .mode = .surface,
         .width = w,
         .height = h,
-        .socket_path = cfg.socket,
         .refresh_ms = @intCast(cfg.refresh_ms),
         .stale_ms = @intCast(cfg.stale_ms),
         .key_suffix = name,
-        .command = cfg.command,
+        .exec = cfg.exec,
     }, .{
         .now_ms = @intCast(std.time.milliTimestamp()),
         .home = std.posix.getenv("HOME"),

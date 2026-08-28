@@ -1,5 +1,4 @@
 const std = @import("std");
-const logly = @import("logly");
 
 /// Log levels in order of severity.
 pub const Level = enum(u8) {
@@ -31,17 +30,24 @@ pub var ses_debug: bool = false;
 pub var pod_debug: bool = false;
 pub var shp_debug: bool = false;
 
-var backend_logger: ?*logly.Logger = null;
-var backend_config: logly.Config = logly.Config.default();
-const backend_allocator = std.heap.page_allocator;
+/// Whether stderr is a terminal, decided once. Colour is for a person reading
+/// along; a log being collected into a file should not carry escapes.
+var tty: ?bool = null;
 
-fn toLoglyLevel(level: Level) logly.Level {
+fn colourEnabled() bool {
+    if (tty) |t| return t;
+    const t = std.posix.isatty(std.posix.STDERR_FILENO);
+    tty = t;
+    return t;
+}
+
+fn colourFor(level: Level) []const u8 {
     return switch (level) {
-        .trace => .trace,
-        .debug => .debug,
-        .info => .info,
-        .warn => .warning,
-        .err => .err,
+        .trace => "\x1b[2m",
+        .debug => "\x1b[36m",
+        .info => "\x1b[32m",
+        .warn => "\x1b[33m",
+        .err => "\x1b[31m",
     };
 }
 
@@ -62,68 +68,12 @@ fn refreshModuleFlags() void {
     shp_debug = debug_on;
 }
 
-fn makeConfig() logly.Config {
-    var cfg = logly.Config.default();
-    cfg.level = toLoglyLevel(min_level);
-    cfg.show_time = true;
-    cfg.show_module = true;
-    cfg.show_filename = include_source;
-    cfg.show_lineno = include_source;
-    cfg.show_function = false;
-    cfg.color = std.posix.isatty(std.posix.STDERR_FILENO);
-    cfg.auto_sink = false;
-    cfg.global_console_display = false;
-    cfg.global_file_storage = false;
-    cfg.check_for_updates = false;
-    cfg.emit_system_diagnostics_on_init = false;
-    cfg.enable_callbacks = true;
-    return cfg;
-}
-
 fn writeAllStderr(bytes: []const u8) void {
     var off: usize = 0;
     while (off < bytes.len) {
         const n = std.posix.write(std.posix.STDERR_FILENO, bytes[off..]) catch return;
         if (n == 0) return;
         off += n;
-    }
-}
-
-fn callbackWriteRecord(record: *const logly.Record) anyerror!void {
-    var formatter = logly.Formatter.init(backend_allocator);
-    defer formatter.deinit();
-
-    const line = formatter.format(record, backend_config) catch {
-        std.debug.print(
-            "[{s}][{s}] {s}\n",
-            .{ record.level.asString(), record.module orelse "unknown", record.message },
-        );
-        return;
-    };
-    defer backend_allocator.free(line);
-
-    writeAllStderr(line);
-    writeAllStderr("\n");
-}
-
-fn ensureBackend() ?*logly.Logger {
-    if (backend_logger) |logger| return logger;
-
-    backend_config = makeConfig();
-    const logger = logly.Logger.initWithConfig(backend_allocator, backend_config) catch |init_err| {
-        std.debug.print("[error][logging] failed to initialize logging backend: {s}\n", .{@errorName(init_err)});
-        return null;
-    };
-    logger.setLogCallback(callbackWriteRecord);
-    backend_logger = logger;
-    return logger;
-}
-
-fn reconfigureBackend() void {
-    backend_config = makeConfig();
-    if (backend_logger) |logger| {
-        logger.configure(backend_config);
-        if (enabled) logger.enable() else logger.disable();
     }
 }
 
@@ -143,7 +93,6 @@ pub fn enableAll() void {
     min_level = .trace;
     include_source = true;
     refreshModuleFlags();
-    reconfigureBackend();
 }
 
 /// Enable logging output at a specific minimum level.
@@ -152,7 +101,6 @@ pub fn enableAtLevel(level: Level) void {
     min_level = level;
     include_source = @intFromEnum(level) <= @intFromEnum(Level.debug);
     refreshModuleFlags();
-    reconfigureBackend();
 }
 
 /// Disable logging output.
@@ -161,7 +109,6 @@ pub fn disableAll() void {
     min_level = .warn;
     include_source = false;
     refreshModuleFlags();
-    reconfigureBackend();
 }
 
 pub fn setLogLevel(level: ?Level) void {
@@ -217,13 +164,9 @@ pub fn setDebugMode(debug_enabled: bool) void {
     setLogLevel(if (debug_enabled) .debug else null);
 }
 
-/// Explicitly release logger resources.
-pub fn shutdown() void {
-    if (backend_logger) |logger| {
-        logger.deinit();
-        backend_logger = null;
-    }
-}
+/// Explicitly release logger resources. Nothing is held any more: a line is
+/// formatted on the stack and written to stderr, so there is nothing to close.
+pub fn shutdown() void {}
 
 fn logAt(
     level: Level,
@@ -245,20 +188,54 @@ fn logAt(
     emit(level, module, msg, src);
 }
 
+/// One line, formatted on the stack and written in a single call.
+///
+/// This used to go through a logging library, and the library imported a
+/// network sink -- which reached `std.http`, and through it a TLS stack, an
+/// X.509 parser and a decompressor: 668 KB of a terminal multiplexer spent on
+/// an update check it never made. What hexe needs of a logger is a level, a
+/// module name and a line on stderr.
 fn emit(level: Level, module: []const u8, msg: []const u8, src: std.builtin.SourceLocation) void {
-    const logger = ensureBackend() orelse {
-        fallbackLog(level, module, msg);
-        return;
-    };
+    var buf: [2560]u8 = undefined;
+    var end: usize = 0;
 
-    const scoped = logger.scoped(module);
-    switch (level) {
-        .trace => scoped.tracef("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
-        .debug => scoped.debugf("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
-        .info => scoped.infof("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
-        .warn => scoped.warningf("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
-        .err => scoped.errf("{s}", .{msg}, src) catch fallbackLog(level, module, msg),
+    const put = struct {
+        fn f(b: []u8, at: *usize, bytes: []const u8) void {
+            const room = b.len - at.*;
+            const n = @min(room, bytes.len);
+            @memcpy(b[at.*..][0..n], bytes[0..n]);
+            at.* += n;
+        }
+    }.f;
+
+    const colour = colourEnabled();
+    if (colour) put(&buf, &end, colourFor(level));
+
+    // Wall clock as HH:MM:SS. No date: a log read while it is being written is
+    // read within the day it was written.
+    const now = std.time.timestamp();
+    const secs: u64 = if (now > 0) @intCast(now) else 0;
+    const hh = (secs / 3600) % 24;
+    const mm = (secs / 60) % 60;
+    const ss = secs % 60;
+    var stamp: [16]u8 = undefined;
+    put(&buf, &end, std.fmt.bufPrint(&stamp, "{d:0>2}:{d:0>2}:{d:0>2} ", .{ hh, mm, ss }) catch "");
+
+    put(&buf, &end, "[");
+    put(&buf, &end, level.prefix());
+    put(&buf, &end, "][");
+    put(&buf, &end, module);
+    put(&buf, &end, "] ");
+    if (colour) put(&buf, &end, "\x1b[0m");
+    put(&buf, &end, msg);
+
+    if (include_source) {
+        var loc: [256]u8 = undefined;
+        put(&buf, &end, std.fmt.bufPrint(&loc, " ({s}:{d})", .{ src.file, src.line }) catch "");
     }
+    put(&buf, &end, "\n");
+
+    writeAllStderr(buf[0..end]);
 }
 
 /// Log a message with the given level and module prefix.

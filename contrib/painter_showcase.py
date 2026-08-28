@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A painter that draws everything hexe asks an external program to draw.
 
-hexe draws no chrome of its own. It asks a painter over a Unix socket, one
+hexe draws no chrome of its own. It asks a painter it spawns itself, one
 length-prefixed JSON request per region, and composites whatever comes back. So
 a statusbar, a spinner, a pane title and a sprite are all the same thing here:
 answer a `select` with either styled runs or a block of ANSI.
@@ -32,20 +32,14 @@ that many milliseconds, so a spinner is just a different frame each time.
 
 Run it:
     python3 contrib/painter_showcase.py &
-    hexe            # with mux.status.socket pointing at the same path
+    hexe            # with status.exec pointing at this file
 """
 
 import json
 import os
-import socket
 import struct
 import sys
 import time
-
-SOCKET_PATH = os.environ.get(
-    "HEXE_PAINTER_SOCKET",
-    os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "hexe", "painter.sock"),
-)
 
 ESC = "\x1b"
 
@@ -216,59 +210,86 @@ def render(req):
     return None
 
 
-def recv_frame(conn):
+# How many frames one strip may carry, so a view that never repeats stops
+# rather than drawing for ever.
+MAX_FRAMES = 64
+
+
+def filmstrip(req, horizon_ms):
+    """Every picture of the next `horizon_ms`, so the caller animates from one run.
+
+    Being asked per frame is what a one-shot painter cannot afford: the caller
+    pays this program's whole startup for each picture, and at 25ms frames that
+    is forty startups a second. The pictures are a pure function of `now_ms`,
+    though, so they can all be drawn in one run and played back by the caller.
+    """
+    base = int(req.get("now_ms") or 0)
+    frames, ahead = [], 0
+    while len(frames) < MAX_FRAMES and ahead < horizon_ms:
+        step = dict(req)
+        step["now_ms"] = base + ahead
+        out = render(step)
+        if out is None:
+            return None
+        # The cycle closed: the caller loops back to the first frame itself.
+        if frames and out == frames[0]:
+            break
+        frames.append(out)
+        hold = out.get("next_frame_ms")
+        if not hold:
+            break
+        ahead += hold
+    return {"frames": frames} if frames else None
+
+
+def recv_frame():
     hdr = b""
     while len(hdr) < 4:
-        chunk = conn.recv(4 - len(hdr))
+        chunk = sys.stdin.buffer.read(4 - len(hdr))
         if not chunk:
             return None
         hdr += chunk
     need = struct.unpack(">I", hdr)[0]
     body = b""
     while len(body) < need:
-        chunk = conn.recv(need - len(body))
+        chunk = sys.stdin.buffer.read(need - len(body))
         if not chunk:
             return None
         body += chunk
     return body
 
 
-def send_frame(conn, obj):
+def send_frame(obj):
     body = json.dumps(obj).encode()
-    conn.sendall(struct.pack(">I", len(body)) + body)
+    sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+    # Without the flush hexe waits out its deadline for a frame sitting in a
+    # buffer, and every region goes stale while this believes it answered.
+    sys.stdout.buffer.flush()
 
 
 def main():
-    os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
-    if os.path.exists(SOCKET_PATH):
-        os.unlink(SOCKET_PATH)
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(SOCKET_PATH)
-    os.chmod(SOCKET_PATH, 0o600)
-    srv.listen(16)
-    print("painter listening on " + SOCKET_PATH, file=sys.stderr, flush=True)
+    """Answer on stdin and stdout until hexe closes the pipe.
 
+    hexe spawns this as its own child, so there is no socket to bind and no
+    path to agree on. The read below returning nothing is how it learns hexe is
+    gone -- whether hexe exited, crashed or was killed -- so this can never be
+    left running.
+    """
     while True:
-        conn, _ = srv.accept()
+        raw = recv_frame()
+        if raw is None:
+            return
         try:
-            while True:
-                raw = recv_frame(conn)
-                if raw is None:
-                    break
-                try:
-                    req = json.loads(raw)
-                except ValueError:
-                    send_frame(conn, {"version": 1, "ok": False, "error": "bad json"})
-                    continue
-                output = render(req)
-                if output is None:
-                    send_frame(conn, {"version": 1, "ok": False, "error": "unknown view"})
-                else:
-                    send_frame(conn, {"version": 1, "ok": True, "output": output})
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        finally:
-            conn.close()
+            req = json.loads(raw)
+        except ValueError:
+            send_frame({"version": 1, "ok": False, "error": "bad json"})
+            continue
+        horizon = int(req.get("frames_ms") or 0)
+        output = filmstrip(req, horizon) if horizon else render(req)
+        if output is None:
+            send_frame({"version": 1, "ok": False, "error": "unknown view"})
+        else:
+            send_frame({"version": 1, "ok": True, "output": output})
 
 
 if __name__ == "__main__":

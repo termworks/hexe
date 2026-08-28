@@ -19,6 +19,7 @@
 const std = @import("std");
 const posix = std.posix;
 const logging = @import("logging.zig");
+const setNonBlocking = @import("ipc.zig").setNonBlocking;
 const style_mod = @import("style.zig");
 
 /// Re-run interval for a region whose config does not specify one.
@@ -27,6 +28,10 @@ pub const DEFAULT_REFRESH_MS: i64 = 1000;
 pub const DEFAULT_STALE_MS: i64 = 10_000;
 /// An in-flight fetch that overruns this is abandoned and its socket closed.
 pub const HARD_DEADLINE_MS: i64 = 2000;
+/// Longest `next_frame_ms` taken seriously. The field is a delay; a painter
+/// sending a Unix timestamp is describing a frame due in fifty years, and the
+/// honest reading of that is "this painter means something else".
+pub const MAX_FRAME_INTERVAL_MS: i64 = 60_000;
 /// Base backoff after a failed fetch, doubled per consecutive failure.
 pub const RETRY_BASE_MS: i64 = 500;
 pub const RETRY_MAX_MS: i64 = 30_000;
@@ -35,8 +40,6 @@ pub const MAX_FRAME: usize = 1024 * 1024;
 pub const MAX_RUNS: usize = 256;
 /// Upper bound on tracked regions; keys come from config, not user input.
 pub const MAX_ENTRIES: usize = 64;
-/// Minimum gap between attempts to start a painter that is not running.
-pub const SPAWN_COOLDOWN_MS: i64 = 5_000;
 
 pub const Mode = enum {
     run,
@@ -153,30 +156,41 @@ pub const Spec = struct {
     mode: Mode,
     width: u16,
     height: u16,
-    socket_path: ?[]const u8 = null,
     refresh_ms: i64 = DEFAULT_REFRESH_MS,
     stale_ms: i64 = DEFAULT_STALE_MS,
     /// Distinguishes instances of the same view fetched for different subjects
     /// (per-pane sprites, per-float titles), which otherwise share one entry.
     key_suffix: []const u8 = "",
-    /// Optional command to start the painter when nothing is listening. Run
-    /// detached through `/bin/sh -c`; hexe never waits on it.
-    command: ?[]const u8 = null,
+    /// The painter, run as hexe's own child. Null draws nothing: a region has
+    /// no other way to be filled.
+    ///
+    /// hexe used to connect to a socket instead, which meant one painter every
+    /// session on the machine shared -- its accept loop serialising them, its
+    /// config outliving the binary that made it, a slow render everyone's, and
+    /// nothing to kill it when the last frontend went. A child is spawned once,
+    /// answers many requests down the same pipe, and dies with us.
+    exec: ?[]const u8 = null,
 };
 
-const Phase = enum { idle, connecting, writing, reading };
+const Phase = enum { idle, writing, reading };
 
 const Region = struct {
     key: []u8,
     selector: []u8,
-    socket_path: []u8,
     mode: Mode,
     refresh_ms: i64,
     stale_ms: i64,
     width: u16 = 0,
     height: u16 = 1,
 
+    /// The pipe from the child's stdout.
     fd: ?posix.fd_t = null,
+    /// The pipe to its stdin.
+    wfd: ?posix.fd_t = null,
+    /// The painter we own, kept between requests so the Lua VM and config are
+    /// paid for once rather than per frame.
+    child: ?std.process.Child = null,
+    exec: ?[]u8 = null,
     phase: Phase = .idle,
     req: std.ArrayList(u8) = .empty,
     req_off: usize = 0,
@@ -194,10 +208,15 @@ const Region = struct {
     out_width: u16 = 0,
     next_frame_ms: ?u64 = null,
 
-    command: ?[]u8 = null,
-    /// When the painter was last started, so a dead command is not respawned
-    /// on every retry.
-    spawned_ms: i64 = 0,
+    /// The painter's whole reply, kept parsed for as long as its frames are
+    /// still playing: advancing a frame then costs no parse and no round trip,
+    /// which is the point of asking for a strip at all. Freed when the next
+    /// reply lands.
+    strip: ?std.json.Parsed(std.json.Value) = null,
+    /// Frames of `strip`, in order. Borrowed from its arena.
+    strip_frames: []std.json.Value = &.{},
+    strip_at: usize = 0,
+    strip_due_ms: i64 = 0,
 
     /// The last response was a well-formed refusal (`ok:false`) rather than a
     /// transport failure, so the painter is known to be running.
@@ -214,21 +233,20 @@ const Region = struct {
     fn inFlight(self: *const Region) bool {
         return self.phase != .idle;
     }
-};
 
-/// Where hexe looks for a painter when the config does not say.
-///
-/// `HEXE_PAINTER_SOCKET` first, so a painter can advertise itself without the
-/// user editing config at all.
-pub fn defaultSocketPath(allocator: std.mem.Allocator) ![]u8 {
-    if (posix.getenv("HEXE_PAINTER_SOCKET")) |path| {
-        return allocator.dupe(u8, path);
+    fn clearStrip(self: *Region) void {
+        if (self.strip) |*p| p.deinit();
+        self.strip = null;
+        self.strip_frames = &.{};
+        self.strip_at = 0;
+        self.strip_due_ms = 0;
     }
-    if (posix.getenv("XDG_RUNTIME_DIR")) |dir| {
-        return std.fmt.allocPrint(allocator, "{s}/hexe/painter.sock", .{dir});
+
+    /// A strip only animates when it has a second frame to move to.
+    fn animating(self: *const Region) bool {
+        return self.strip_frames.len > 1;
     }
-    return std.fmt.allocPrint(allocator, "/tmp/hexe-{d}/painter.sock", .{std.os.linux.getuid()});
-}
+};
 
 /// The frontend's registry, published for the render path the same way
 /// `cmd.async_cache` is. Null in short-lived processes, which have no painter.
@@ -244,8 +262,6 @@ pub const Registry = struct {
     use_counter: u64 = 0,
     /// Painters this registry started. Reaped without blocking in `poll()`;
     /// unreaped they would be a zombie per spawn for the life of the process.
-    spawned: std.ArrayList(std.process.Child) = .empty,
-
     pub fn init(allocator: std.mem.Allocator) Registry {
         return .{
             .allocator = allocator,
@@ -257,27 +273,11 @@ pub const Registry = struct {
         var it = self.entries.valueIterator();
         while (it.next()) |slot| self.destroyRegion(slot.*);
         self.entries.deinit();
-        // Collect what has already exited; anything still running is reparented
-        // to init, so it cannot become a lasting zombie.
-        for (self.spawned.items) |*c| _ = posix.waitpid(c.id, posix.W.NOHANG);
-        self.spawned.deinit(self.allocator);
-    }
-
-    /// Collect exited painters. Never blocks.
-    fn reapSpawned(self: *Registry) void {
-        var i: usize = 0;
-        while (i < self.spawned.items.len) {
-            const res = posix.waitpid(self.spawned.items[i].id, posix.W.NOHANG);
-            if (res.pid != 0) {
-                _ = self.spawned.swapRemove(i);
-                continue;
-            }
-            i += 1;
-        }
     }
 
     fn destroyRegion(self: *Registry, r: *Region) void {
         self.closeConn(r);
+        r.clearStrip();
         r.req.deinit(self.allocator);
         r.body.deinit(self.allocator);
         r.runs.deinit(self.allocator);
@@ -287,19 +287,65 @@ pub const Registry = struct {
         r.ansi.deinit(self.allocator);
         self.allocator.free(r.key);
         self.allocator.free(r.selector);
-        self.allocator.free(r.socket_path);
-        if (r.command) |c| self.allocator.free(c);
+        if (r.exec) |c| self.allocator.free(c);
+        // A painter we own goes when its region does, or it outlives what it
+        // was drawing -- which is the shared-daemon problem in miniature.
+        self.dropChild(r);
         self.allocator.destroy(r);
     }
 
+    /// End the current request. A socket connection is per-request and closed;
+    /// a child's pipes are the point of having a child and stay open.
+    /// End the fetch and reap the painter. It answered; it has no reason to
+    /// still exist, and leaving it would be keeping a server by accident.
     fn closeConn(self: *Registry, r: *Region) void {
         _ = self;
         if (r.fd) |fd| posix.close(fd);
+        if (r.wfd) |fd| posix.close(fd);
         r.fd = null;
+        r.wfd = null;
+        if (r.child) |*c| {
+            c.stdin = null;
+            c.stdout = null;
+            // `Child.spawn` keeps a read end of its own -- `err_pipe`, how the
+            // forked child reports a failed exec -- and closes it only inside
+            // `wait()`. Reaping by hand skips that, so it has to be closed here
+            // or every fetch leaks one descriptor: a thousand of them and the
+            // frontend can no longer spawn anything, the bar stops refreshing,
+            // and every region is drawn dimmed as stale.
+            if (c.err_pipe) |ep| posix.close(ep);
+            c.err_pipe = null;
+            // Collected without waiting. Closing stdin already told it to go, so
+            // it is normally gone before this runs -- but `wait()` on one that
+            // is not would block the render loop, which is the single thing
+            // this module must never do. A straggler is killed instead.
+            const res = posix.waitpid(c.id, posix.W.NOHANG);
+            if (res.pid == 0) _ = c.kill() catch {};
+            r.child = null;
+        }
         r.phase = .idle;
         r.req_off = 0;
         r.hdr_off = 0;
         r.body_need = 0;
+    }
+
+    /// Take down the painter we own. Its pipes go with it, so the next fetch
+    /// starts a fresh one -- which is the recovery for a child that died,
+    /// wedged, or answered something unparseable.
+    fn dropChild(self: *Registry, r: *Region) void {
+        if (r.child) |*c| {
+            if (r.fd) |fd| posix.close(fd);
+            if (r.wfd) |fd| posix.close(fd);
+            c.stdin = null;
+            c.stdout = null;
+            _ = c.kill() catch {};
+            r.child = null;
+            logging.warn("regions", "painter child for '{s}' was taken down; it will be restarted", .{r.selector});
+        }
+        r.fd = null;
+        r.wfd = null;
+        r.phase = .idle;
+        _ = self;
     }
 
     /// Never blocks. Returns the last completed content for this region and
@@ -313,12 +359,17 @@ pub const Registry = struct {
         r.last_used_ms = now;
         self.use_counter += 1;
         r.use_seq = self.use_counter;
+        self.advanceStrip(r, now);
 
         // Geometry changes force a refetch: the painter lays out to the width
         // it was given, so a stale frame at the old width is wrong, not merely old.
         const resized = r.width != spec.width or r.height != spec.height;
         r.width = spec.width;
         r.height = spec.height;
+        // Every frame of a strip was drawn to the old width, so playing the rest
+        // of it animates content that no longer fits. The last frame stays on
+        // screen -- stale, and dimmed as stale -- until the refetch lands.
+        if (resized) r.clearStrip();
 
         // A resize invalidates the last frame, but it must not bypass the
         // backoff: otherwise a dead painter is retried on every resize event.
@@ -338,13 +389,44 @@ pub const Registry = struct {
         };
     }
 
+    /// Step a playing filmstrip to the frame due now. Costs no round trip and
+    /// no parse: the frames are already in hand.
+    fn advanceStrip(self: *Registry, r: *Region, now: i64) void {
+        if (!r.animating()) return;
+        var guard: usize = 0;
+        while (now >= r.strip_due_ms and guard < r.strip_frames.len) : (guard += 1) {
+            r.strip_at = (r.strip_at + 1) % r.strip_frames.len;
+            const frame = switch (r.strip_frames[r.strip_at]) {
+                .object => |o| o,
+                else => {
+                    r.clearStrip();
+                    return;
+                },
+            };
+            if (!self.applyFrame(r, frame)) {
+                r.clearStrip();
+                return;
+            }
+            // A frame with no cadence of its own ends the strip rather than
+            // spinning on a deadline that never moves.
+            const hold = r.next_frame_ms orelse {
+                r.clearStrip();
+                return;
+            };
+            r.strip_due_ms = now + @as(i64, @intCast(hold));
+        }
+    }
+
     fn isDue(self: *Registry, r: *Region, now: i64) bool {
         _ = self;
         if (now < r.next_try_ms) return false;
         if (r.last_done_ms == 0) return true;
-        // The painter tells us when its own next frame is due; honour it when
-        // it asks for a shorter interval than the configured refresh.
-        const interval: i64 = if (r.next_frame_ms) |nf|
+        // A strip already holds every frame up to the next refresh, so asking
+        // again mid-cycle would only re-fetch the same pictures. The painter's
+        // own cadence drives the fetch only when it sent a single frame.
+        const interval: i64 = if (r.animating())
+            r.refresh_ms
+        else if (r.next_frame_ms) |nf|
             @min(r.refresh_ms, @as(i64, @intCast(nf)))
         else
             r.refresh_ms;
@@ -361,37 +443,31 @@ pub const Registry = struct {
             if (self.entries.count() >= MAX_ENTRIES) return null;
         }
 
-        const socket_path = if (spec.socket_path) |p|
-            self.allocator.dupe(u8, p) catch return null
-        else
-            defaultSocketPath(self.allocator) catch return null;
+        // Nothing to draw with is not an error, it is a region that stays empty:
+        // a config with no painter must not become a failed fetch on a ladder.
+        const exec = spec.exec orelse return null;
 
-        const r = self.allocator.create(Region) catch {
-            self.allocator.free(socket_path);
-            return null;
-        };
+        const r = self.allocator.create(Region) catch return null;
         const key_owned = self.allocator.dupe(u8, key) catch {
-            self.allocator.free(socket_path);
             self.allocator.destroy(r);
             return null;
         };
         const selector_owned = self.allocator.dupe(u8, spec.selector) catch {
             self.allocator.free(key_owned);
-            self.allocator.free(socket_path);
+            self.allocator.destroy(r);
+            return null;
+        };
+        const exec_owned = self.allocator.dupe(u8, exec) catch {
+            self.allocator.free(selector_owned);
+            self.allocator.free(key_owned);
             self.allocator.destroy(r);
             return null;
         };
 
-        const command_owned: ?[]u8 = if (spec.command) |c|
-            (self.allocator.dupe(u8, c) catch null)
-        else
-            null;
-
         r.* = .{
             .key = key_owned,
             .selector = selector_owned,
-            .socket_path = socket_path,
-            .command = command_owned,
+            .exec = exec_owned,
             .mode = spec.mode,
             .refresh_ms = @max(spec.refresh_ms, 16),
             .stale_ms = spec.stale_ms,
@@ -431,42 +507,19 @@ pub const Registry = struct {
             return;
         };
 
-        const fd = posix.socket(
-            posix.AF.UNIX,
-            posix.SOCK.STREAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC,
-            0,
-        ) catch {
+        // The painter is ours: spawned on the first fetch and kept, so every
+        // later request is a write and a read down a pipe already open.
+        if (r.child == null) self.startChild(r) catch {
             self.fail(r, now);
             return;
         };
-
-        var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = [_]u8{0} ** 108 };
-        if (r.socket_path.len >= addr.path.len) {
-            posix.close(fd);
-            self.fail(r, now);
-            return;
-        }
-        @memcpy(addr.path[0..r.socket_path.len], r.socket_path);
-
-        r.fd = fd;
         r.started_ms = now;
-        posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch |err| switch (err) {
-            error.WouldBlock => {
-                r.phase = .connecting;
-                return;
-            },
-            else => {
-                self.fail(r, now);
-                return;
-            },
-        };
         r.phase = .writing;
         self.pump(r, now);
     }
 
     /// Advance every in-flight region. Non-blocking throughout.
     pub fn poll(self: *Registry) void {
-        self.reapSpawned();
         const now = std.time.milliTimestamp();
         var it = self.entries.valueIterator();
         while (it.next()) |slot| {
@@ -486,25 +539,12 @@ pub const Registry = struct {
             self.fail(r, now);
             return;
         };
-
-        if (r.phase == .connecting) {
-            var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
-            const ready = posix.poll(&pfd, 0) catch {
-                self.fail(r, now);
-                return;
-            };
-            if (ready == 0) return;
-            if (pfd[0].revents & (posix.POLL.ERR | posix.POLL.HUP | posix.POLL.NVAL) != 0) {
-                self.fail(r, now);
-                return;
-            }
-            if (pfd[0].revents & posix.POLL.OUT == 0) return;
-            r.phase = .writing;
-        }
+        // The child's stdin and stdout are separate descriptors.
+        const wfd = r.wfd orelse fd;
 
         if (r.phase == .writing) {
             while (r.req_off < r.req.items.len) {
-                const n = posix.write(fd, r.req.items[r.req_off..]) catch |err| switch (err) {
+                const n = posix.write(wfd, r.req.items[r.req_off..]) catch |err| switch (err) {
                     error.WouldBlock => return,
                     else => {
                         self.fail(r, now);
@@ -516,6 +556,15 @@ pub const Registry = struct {
                     return;
                 }
                 r.req_off += n;
+            }
+            // The request is out; closing stdin is what tells the painter there
+            // is no second one, so it answers and exits rather than waiting.
+            if (r.wfd) |w| {
+                if (r.child != null) {
+                    posix.close(w);
+                    r.wfd = null;
+                    if (r.child) |*c| c.stdin = null;
+                }
             }
             r.phase = .reading;
         }
@@ -585,46 +634,65 @@ pub const Registry = struct {
             return;
         }
         // A painter that answers `ok:false` is UP and simply does not implement
-        // this view. Backing off through the failure ladder also re-ran
-        // `command`, so a declining painter was relaunched forever (every
-        // SPAWN_COOLDOWN_MS, capped only by the retry ceiling). Retry on the
-        // ordinary cadence instead, and never spawn: nothing is missing.
+        // this view. Retry on the ordinary cadence rather than the failure
+        // ladder: nothing is missing.
         if (r.declined) {
             r.fail_streak = 0;
             r.next_try_ms = now + @max(r.refresh_ms, RETRY_BASE_MS);
             return;
         }
-        // A frame that parsed but carried a body this mode cannot use still
-        // proves the painter is running: back off, but do not fork another one.
-        self.backoffInner(r, now, !r.answered);
+        self.backoff(r, now);
     }
 
     fn fail(self: *Registry, r: *Region, now: i64) void {
+        // A broken pipe means the child is gone or out of step with us, and
+        // reusing it would resynchronise onto the middle of a frame.
+        if (r.child != null) self.dropChild(r);
         self.closeConn(r);
         self.backoff(r, now);
     }
 
-    /// Start the configured painter, detached. Never waits, never retries fast:
-    /// a command that exits immediately must not become a fork loop.
-    fn spawnPainter(self: *Registry, r: *Region, now: i64) void {
-        const cmd = r.command orelse return;
-        if (r.spawned_ms != 0 and now - r.spawned_ms < SPAWN_COOLDOWN_MS) return;
-        r.spawned_ms = now;
-
+    /// Spawn the painter we own and keep its pipes.
+    ///
+    /// Both ends are non-blocking, because everything in `pump` is: a painter
+    /// that stops reading must cost a stale region, never a stalled frame. The
+    /// child is `/bin/sh -c` like the detached spawner, so a configured command
+    /// means the same thing in both transports.
+    /// Run the painter for ONE request, then let it go.
+    ///
+    /// Nothing stays resident between fetches. A painter kept alive is a server,
+    /// and a server is what all of this was for getting rid of -- it was only
+    /// ever worth keeping because a fetch cost a process start per FRAME. A
+    /// filmstrip buys a whole animation cycle per fetch, so the start is paid
+    /// once a refresh instead of twenty-five times a second, and at that rate a
+    /// fresh process is cheaper than the daemon it replaces.
+    ///
+    /// It also makes a wedged painter cost only the region that asked: there is
+    /// no shared pipe to hold and nothing alive to hold it.
+    ///
+    /// Run through `sh -c` verbatim -- NOT `exec sh -c`. Prefixing with `exec`
+    /// saves a fork, and silently breaks every command that opens with an
+    /// environment assignment: `exec FOO=bar cmd` makes the shell look for a
+    /// program called `FOO=bar`. The fork it saved was only ever worth having
+    /// when the shell stayed resident, and nothing stays resident now.
+    fn startChild(self: *Registry, r: *Region) !void {
+        const cmd = r.exec orelse return error.NoCommand;
         var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd }, self.allocator);
-        child.stdin_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
-        child.stderr_behavior = .Ignore;
-        child.spawn() catch |err| {
-            logging.logError("regions", "failed to start painter", err);
-            return;
-        };
-        logging.warn("regions", "started painter: {s}", .{cmd});
-        // Tracked only so poll() can reap it. Never waited on: that is exactly
-        // the stall this module exists to avoid.
-        self.spawned.append(self.allocator, child) catch {
-            _ = posix.waitpid(child.id, posix.W.NOHANG);
-        };
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        // Left alone: a painter's diagnostics belong on the terminal that
+        // started hexe, not swallowed into a pipe nobody drains.
+        child.stderr_behavior = .Inherit;
+        try child.spawn();
+
+        const in_fd = child.stdin.?.handle;
+        const out_fd = child.stdout.?.handle;
+        setNonBlocking(in_fd) catch {};
+        setNonBlocking(out_fd) catch {};
+
+        r.child = child;
+        r.wfd = in_fd;
+        r.fd = out_fd;
     }
 
     /// Milliseconds until the soonest live region is due, or null when nothing
@@ -635,9 +703,17 @@ pub const Registry = struct {
         var soonest: ?i64 = null;
         var it = self.entries.valueIterator();
         while (it.next()) |r| {
+            // A playing strip needs the loop awake for its next frame even
+            // while a fetch is in flight -- that is the animation itself.
+            if (r.*.animating()) {
+                const frame_delta = @max(r.*.strip_due_ms - now, 0);
+                if (soonest == null or frame_delta < soonest.?) soonest = frame_delta;
+            }
             if (r.*.inFlight()) continue;
             if (r.*.next_try_ms != 0 and now < r.*.next_try_ms) continue;
-            const interval: i64 = if (r.*.next_frame_ms) |nf|
+            const interval: i64 = if (r.*.animating())
+                r.*.refresh_ms
+            else if (r.*.next_frame_ms) |nf|
                 @min(r.*.refresh_ms, @as(i64, @intCast(nf)))
             else
                 r.*.refresh_ms;
@@ -648,20 +724,15 @@ pub const Registry = struct {
         return soonest;
     }
 
+    /// Back off after a failure. Hammering a painter that cannot serve this
+    /// view is no better than hammering a dead one, and the next fetch respawns
+    /// the child anyway if it was the child that died.
     fn backoff(self: *Registry, r: *Region, now: i64) void {
-        self.backoffInner(r, now, true);
-    }
-
-    /// `spawn` is false when the painter demonstrably answered: the retry ladder
-    /// still applies, because hammering a painter that cannot serve this view is
-    /// no better than hammering a dead one, but running `command` again would
-    /// fork a second copy of a process that is already up.
-    fn backoffInner(self: *Registry, r: *Region, now: i64, spawn: bool) void {
+        _ = self;
         r.fail_streak +|= 1;
         const shift: u6 = @intCast(@min(r.fail_streak - 1, 6));
         const delay = @min(RETRY_BASE_MS * (@as(i64, 1) << shift), RETRY_MAX_MS);
         r.next_try_ms = now + delay;
-        if (spawn) self.spawnPainter(r, now);
     }
 
     fn buildRequest(self: *Registry, r: *Region, ctx: RequestContext) !void {
@@ -671,8 +742,8 @@ pub const Registry = struct {
 
         try w.writeAll("{\"version\":1,\"select\":[");
         try writeJsonString(w, r.selector);
-        try w.print("],\"mode\":\"{s}\",\"width\":{d},\"height\":{d},\"now_ms\":{d},\"ignore_missing\":false,\"context\":{{", .{
-            r.mode.wireName(), r.width, r.height, ctx.now_ms,
+        try w.print("],\"mode\":\"{s}\",\"width\":{d},\"height\":{d},\"now_ms\":{d},\"frames_ms\":{d},\"ignore_missing\":false,\"context\":{{", .{
+            r.mode.wireName(), r.width, r.height, ctx.now_ms, r.refresh_ms,
         });
 
         var first = true;
@@ -864,7 +935,8 @@ pub const Registry = struct {
             logging.logError("regions", "painter sent invalid JSON", err);
             return false;
         };
-        defer parsed.deinit();
+        var retained = false;
+        defer if (!retained) parsed.deinit();
 
         const root = switch (parsed.value) {
             .object => |o| o,
@@ -882,9 +954,48 @@ pub const Registry = struct {
         };
         r.answered = true;
 
+        // A filmstrip: every frame of one animation cycle, so the loop plays it
+        // without asking again until the data underneath can have changed.
+        if (output.get("frames")) |fv| {
+            if (fv != .array or fv.array.items.len == 0) return false;
+            const first = switch (fv.array.items[0]) {
+                .object => |o| o,
+                else => return false,
+            };
+            if (!self.applyFrame(r, first)) return false;
+            r.clearStrip();
+            r.strip = parsed;
+            r.strip_frames = fv.array.items;
+            r.strip_at = 0;
+            r.strip_due_ms = std.time.milliTimestamp() + @as(i64, @intCast(r.next_frame_ms orelse 0));
+            retained = true;
+            return true;
+        }
+
+        r.clearStrip();
+        return self.applyFrame(r, output);
+    }
+
+    /// Draw one frame's body into the region. Shared by a plain reply and by
+    /// each frame of a filmstrip, which carry the same object.
+    fn applyFrame(self: *Registry, r: *Region, output: std.json.ObjectMap) bool {
         r.next_frame_ms = null;
         if (output.get("next_frame_ms")) |nf| {
-            if (nf == .integer and nf.integer > 0) r.next_frame_ms = @intCast(nf.integer);
+            // An INTERVAL -- "ask again in N ms" -- never a deadline.
+            //
+            // A painter that sent an absolute timestamp instead was not
+            // rejected, it was clamped: `@min(refresh_ms, 1.7e12)` is always
+            // `refresh_ms`, so the cadence request vanished and the animation
+            // quietly ran at the refresh rate. Nothing failed, nothing logged,
+            // and the only symptom was that it looked sluggish. Anything longer
+            // than a minute is not a frame interval, so say so once rather than
+            // absorb it.
+            if (nf == .integer and nf.integer > 0 and nf.integer <= MAX_FRAME_INTERVAL_MS) {
+                r.next_frame_ms = @intCast(nf.integer);
+            } else if (nf == .integer and nf.integer > MAX_FRAME_INTERVAL_MS) {
+                logging.warn("regions", "painter asked for a {d}ms frame interval; " ++
+                    "`next_frame_ms` is a delay, not a timestamp -- ignoring", .{nf.integer});
+            }
         }
         r.out_width = 0;
         if (output.get("width")) |wv| {
@@ -993,7 +1104,7 @@ test "run response parses into styled runs" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1 };
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     const frame =
@@ -1017,7 +1128,7 @@ test "surface response parses into ansi bytes" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "overlay.sprite", .mode = .surface, .width = 10, .height = 4 };
+    const spec = Spec{ .selector = "overlay.sprite", .mode = .surface, .width = 10, .height = 4, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     const frame =
@@ -1032,7 +1143,7 @@ test "malformed and error frames are rejected without clobbering content" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1 };
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     try std.testing.expect(reg.parseResponse(r, "{\"ok\":true,\"output\":{\"mode\":\"run\",\"runs\":[{\"text\":\"ok\"}],\"width\":2}}"));
@@ -1051,7 +1162,7 @@ test "request frame is length-prefixed and carries geometry" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "prompt.left", .mode = .run, .width = 100, .height = 1 };
+    const spec = Spec{ .selector = "prompt.left", .mode = .run, .width = 100, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
     r.width = 100;
     r.height = 1;
@@ -1073,73 +1184,23 @@ test "request frame is length-prefixed and carries geometry" {
     defer parsed.deinit();
 }
 
-/// Minimal stand-in for the painter: accepts one connection, reads the request
-/// frame, and writes back `reply` framed the same way.
-const FakePainter = struct {
-    path: []const u8,
-    reply: []const u8,
-    listen_fd: posix.fd_t,
-    thread: ?std.Thread = null,
+/// A painter as a child, framed the way the protocol says: four big-endian
+/// length bytes then the JSON. `printf` writes it in one go, so the test needs
+/// no helper process of its own.
+fn framedEcho(allocator: std.mem.Allocator, reply: []const u8) ![]u8 {
+    const n = reply.len;
+    return std.fmt.allocPrint(allocator, "printf '\\{o}\\{o}\\{o}\\{o}%s' '{s}'", .{
+        (n >> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff, reply,
+    });
+}
 
-    fn start(path: []const u8, reply: []const u8) !*FakePainter {
-        const self = try std.testing.allocator.create(FakePainter);
-        errdefer std.testing.allocator.destroy(self);
-
-        const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, 0);
-        var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = [_]u8{0} ** 108 };
-        @memcpy(addr.path[0..path.len], path);
-        posix.unlink(path) catch {};
-        try posix.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
-        try posix.listen(fd, 4);
-
-        self.* = .{ .path = path, .reply = reply, .listen_fd = fd };
-        self.thread = try std.Thread.spawn(.{}, serve, .{self});
-        return self;
-    }
-
-    fn serve(self: *FakePainter) void {
-        const conn = posix.accept(self.listen_fd, null, null, 0) catch return;
-        defer posix.close(conn);
-
-        var hdr: [4]u8 = undefined;
-        var got: usize = 0;
-        while (got < 4) {
-            const n = posix.read(conn, hdr[got..]) catch return;
-            if (n == 0) return;
-            got += n;
-        }
-        const need = std.mem.readInt(u32, &hdr, .big);
-        var sink: [65536]u8 = undefined;
-        var read_total: usize = 0;
-        while (read_total < need) {
-            const want = @min(sink.len, need - read_total);
-            const n = posix.read(conn, sink[0..want]) catch return;
-            if (n == 0) return;
-            read_total += n;
-        }
-
-        var out_hdr: [4]u8 = undefined;
-        std.mem.writeInt(u32, &out_hdr, @intCast(self.reply.len), .big);
-        _ = posix.write(conn, &out_hdr) catch return;
-        _ = posix.write(conn, self.reply) catch return;
-    }
-
-    fn stop(self: *FakePainter) void {
-        if (self.thread) |t| t.join();
-        posix.close(self.listen_fd);
-        posix.unlink(self.path) catch {};
-        std.testing.allocator.destroy(self);
-    }
-};
-
-test "fetches a run frame over a real socket without blocking" {
+test "fetches a run frame from its own child without blocking" {
     const allocator = std.testing.allocator;
-    const path = "/tmp/hexe-regions-test-run.sock";
     const reply =
         \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":" hi ","style":"fg:15 bg:237 bold"}],"width":4,"next_frame_ms":null}}
     ;
-    const painter = try FakePainter.start(path, reply);
-    defer painter.stop();
+    const cmd = try framedEcho(allocator, reply);
+    defer allocator.free(cmd);
 
     var reg = Registry.init(allocator);
     defer reg.deinit();
@@ -1149,7 +1210,7 @@ test "fetches a run frame over a real socket without blocking" {
         .mode = .run,
         .width = 80,
         .height = 1,
-        .socket_path = path,
+        .exec = cmd,
     };
 
     // First look starts the fetch and must return empty rather than wait.
@@ -1176,18 +1237,71 @@ test "fetches a run frame over a real socket without blocking" {
     return error.PainterFrameNeverArrived;
 }
 
+/// How many descriptors this process holds. A leak per fetch is invisible in
+/// any single render and fatal after a thousand of them.
+fn openFdCount() usize {
+    var dir = std.fs.openDirAbsolute("/proc/self/fd", .{ .iterate = true }) catch return 0;
+    defer dir.close();
+    var it = dir.iterate();
+    var n: usize = 0;
+    while (it.next() catch null) |_| n += 1;
+    return n;
+}
+
+test "fetching many times leaks no descriptors" {
+    const allocator = std.testing.allocator;
+    if (openFdCount() == 0) return error.SkipZigTest; // no /proc
+
+    const reply =
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"x"}],"width":1,"next_frame_ms":null}}
+    ;
+    const cmd = try framedEcho(allocator, reply);
+    defer allocator.free(cmd);
+
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 20, .height = 1, .exec = cmd };
+
+    // One fetch to settle, then measure across many more. Each spawns a painter,
+    // writes to it, reads its answer and reaps it -- and every descriptor that
+    // opens must close, including the one `Child.spawn` keeps for itself.
+    var warm: usize = 0;
+    while (warm < 40) : (warm += 1) {
+        _ = reg.snapshot(spec, .{ .now_ms = 1 });
+        reg.poll();
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    const before = openFdCount();
+
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        var r = reg.entries.get("status\x1frun\x1f").?;
+        r.last_done_ms = 0; // force it due again
+        r.next_try_ms = 0;
+        _ = reg.snapshot(spec, .{ .now_ms = @intCast(i) });
+        reg.poll();
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    const after = openFdCount();
+    if (after > before + 8) {
+        std.debug.print("descriptors {d} -> {d} over 200 fetches\n", .{ before, after });
+        return error.DescriptorLeak;
+    }
+}
+
 test "a painter that never answers leaves the region empty and never blocks" {
     const allocator = std.testing.allocator;
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    // Nothing is listening on this path.
+    // Reads nothing and writes nothing, which is the wedged painter this
+    // module exists to survive.
     const spec = Spec{
         .selector = "status",
         .mode = .run,
         .width = 80,
         .height = 1,
-        .socket_path = "/tmp/hexe-regions-test-absent.sock",
+        .exec = "cat >/dev/null",
     };
 
     var timer = try std.time.Timer.start();
@@ -1197,8 +1311,22 @@ test "a painter that never answers leaves the region empty and never blocks" {
         try std.testing.expect(!snap.done);
         reg.poll();
     }
-    // 200 render passes against a dead painter must cost effectively nothing.
+    // 200 render passes against a wedged painter must cost effectively nothing.
     try std.testing.expect(timer.read() < 500 * std.time.ns_per_ms);
+}
+
+test "a region with no painter configured stays empty" {
+    const allocator = std.testing.allocator;
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+
+    // No `exec`: nothing to draw with is an empty region, not a failed fetch on
+    // a retry ladder.
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 80, .height = 1 };
+    const snap = reg.snapshot(spec, .{ .now_ms = 1 });
+    try std.testing.expect(!snap.done);
+    try std.testing.expectEqual(@as(usize, 0), snap.runs.len);
+    reg.poll();
 }
 
 test "backoff grows and a good frame clears it" {
@@ -1206,7 +1334,7 @@ test "backoff grows and a good frame clears it" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1 };
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 40, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     reg.backoff(r, 1000);
@@ -1227,7 +1355,7 @@ test "interactive regions parse with ids, geometry and actions" {
     var reg = Registry.init(allocator);
     defer reg.deinit();
 
-    const spec = Spec{ .selector = "status", .mode = .run, .width = 100, .height = 1 };
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 100, .height = 1, .exec = "true" };
     const r = reg.entry(spec, 0).?;
 
     const frame =

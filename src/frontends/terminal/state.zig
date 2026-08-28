@@ -1470,7 +1470,7 @@ pub const State = struct {
         // background instead of blocking the loop.
         core.cmd.setAsyncCache(&self.async_cmds);
         core.regions.setActive(&self.regions);
-        @import("region_render.zig").setActive(&self.region_surfaces, self.config.tabs.status.socket);
+        @import("region_render.zig").setActive(&self.region_surfaces);
     }
 
     pub fn writePaneInput(self: *State, pane: *Pane, data: []const u8) void {

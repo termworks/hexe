@@ -85,18 +85,43 @@ actually serves.
 
 ## Finding the painter
 
-In order:
+You name it, and hexe runs it:
 
-1. `socket` in the config, if set
-2. `$HEXE_PAINTER_SOCKET`
-3. `$XDG_RUNTIME_DIR/hexe/painter.sock`
-4. `/tmp/hexe-$UID/painter.sock`
+```lua
+hexe.status = { enabled = true, exec = "pixy serve --stdio" }
+```
 
-If nothing is listening and `command` is set, hexe runs it detached through
-`/bin/sh -c` and keeps retrying. It never waits on it, and never restarts it
-more than once every five seconds — a command that exits immediately must not
-become a fork loop. If `command` is unset, starting the painter is your job:
-a service unit, a shell rc line, whatever you like.
+That is the whole of it. On each fetch the command is run through `/bin/sh -c`,
+written one request, and its stdin closed; it answers and exits. Its stdout is
+the wire and its stderr is left on the terminal that started hexe, so a
+painter's diagnostics have somewhere to go. Say nothing and nothing is drawn.
+
+**Nothing stays running between fetches**, and that is the point.
+
+hexe used to connect to a socket — one painter every session on the machine
+shared, with a single accept loop serialising them, one config to restart for
+all of them, a slow render that was everybody's, and, because nothing owned it,
+a painter still running days later from a build no longer installed. Every one
+of those is a property of *sharing*.
+
+Owning a long-lived child fixes the sharing and keeps the rest: it is still a
+server, still resident, still something that can wedge and has to be reaped —
+and one per region is a Lua VM per zone. It was only ever worth keeping because
+a fetch cost a process start *per frame*.
+
+A [filmstrip](#filmstrips-one-fetch-a-whole-cycle) buys a whole animation cycle
+per fetch, so that start is paid about once a refresh instead of twenty-five
+times a second — and at that rate a fresh process is cheaper than the daemon it
+replaces, with nothing resident to leak, share, or outlive anything.
+
+It also makes a wedged painter cost only the region that asked for it. There is
+no shared pipe to hold, and nothing alive to hold it.
+
+**The cost is the painter's own startup, paid per fetch.** That is around 2ms
+for a compiled painter and closer to 20ms for a Python one, so a painter that
+animates *without* answering `frames` is bounded by its own start time and will
+be asked far less often than its `next_frame_ms` asks for. Answer with a strip
+and the question does not arise.
 
 ## Views
 
@@ -126,11 +151,19 @@ for it, and hexe draws nothing there.
 rectangle, so the painter cannot address a cell outside it no matter what it
 emits.
 
-## The protocol
+## The wire
 
-A Unix `SOCK_STREAM` socket. Each message is a four-byte big-endian length
-followed by one UTF-8 JSON value, 1 MiB maximum. hexe connects, sends one
-request, reads one response, closes. Connections are not reused.
+Each message is a four-byte big-endian length followed by one UTF-8 JSON value,
+1 MiB maximum. Requests go down the painter's stdin, answers come back up its
+stdout, and it keeps answering until stdin closes.
+
+Nothing about the framing depends on a pipe: it was designed against a socket
+and is unchanged. What a painter must be is a program that reads a frame and
+writes a frame — which any language does in a dozen lines, with no listener, no
+path to agree on, and no way to be left running.
+
+A painter that dies, or answers something unusable, is taken down and the next
+fetch starts a fresh one.
 
 **Request**
 
@@ -194,6 +227,46 @@ pressed and hovered states. hexe never restyles a painter's output.
 animating view returns `75` and gets asked again in 75ms. It can only shorten
 the interval, never lengthen it.
 
+**It is a delay, never a timestamp.** A painter that sends an absolute time is
+asking for a frame decades away; hexe warns once and ignores it rather than
+clamping it silently, because the symptom of the silent version is only that the
+animation looks sluggish — it ran at `refresh_ms` and nothing said why.
+
+## Filmstrips: one fetch, a whole cycle
+
+A spinner moving every 40ms used to mean twenty-five round trips a second, even
+though what the bar *says* — the clock, the branch, the cwd — changes about
+once. The animation rate set the fetch rate, and the animation is the part that
+needs nothing from outside.
+
+So hexe sends `frames_ms` with every request: *how far ahead to draw*. A painter
+that can answer replies with a strip instead of a picture:
+
+```json
+{"ok":true,"output":{"frames":[
+  {"mode":"run","runs":[…],"width":12,"next_frame_ms":40},
+  {"mode":"run","runs":[…],"width":12,"next_frame_ms":360}
+]},"version":1}
+```
+
+Each frame is exactly the object a single reply carries, and its
+`next_frame_ms` is how long *that* frame holds. hexe plays them off its own
+timer and comes back only when `refresh_ms` says the data underneath could have
+moved. Nothing is asked in between.
+
+Two rules make it safe:
+
+**The horizon is a promise, not a suggestion.** A painter stops at `frames_ms`
+even mid-cycle. Content that is not on a cycle at all — a clock — would
+otherwise be enumerated into the future and replayed stale, which is worse than
+being a frame late.
+
+**Held pictures coalesce.** The pause at the end of a sweep is one frame with a
+longer hold, not the same cells sent nine times.
+
+A painter that ignores `frames_ms` and answers with a single frame keeps
+working exactly as before; a strip of one is the same thing.
+
 ## Guarantees
 
 **The render loop never waits on a painter.** Connect, write and read are all
@@ -220,30 +293,25 @@ unaffected — nothing hexe needs to function is painted externally.
 ## A painter, complete
 
 ```python
-import json, os, socket, struct, time
-
-sock = os.environ.get("HEXE_PAINTER_SOCKET", "/tmp/painter.sock")
-try: os.unlink(sock)
-except FileNotFoundError: pass
-
-srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-srv.bind(sock); srv.listen(8)
+#!/usr/bin/env python3
+import json, struct, sys, time
 
 while True:
-    conn, _ = srv.accept()
-    hdr = conn.recv(4)
-    req = json.loads(conn.recv(struct.unpack(">I", hdr)[0]))
+    head = sys.stdin.buffer.read(4)
+    if len(head) < 4:            # hexe closed the pipe: it is gone, so are we
+        break
+    req = json.loads(sys.stdin.buffer.read(struct.unpack(">I", head)[0]))
     text = " %s " % time.strftime("%H:%M:%S")
     body = json.dumps({"version": 1, "ok": True, "output": {
         "mode": "run",
         "runs": [{"text": text, "style": "fg:250 bg:237 bold"}],
         "width": len(text), "next_frame_ms": 1000}}).encode()
-    conn.sendall(struct.pack(">I", len(body)) + body)
-    conn.close()
+    sys.stdout.buffer.write(struct.pack(">I", len(body)) + body)
+    sys.stdout.buffer.flush()    # or hexe waits for a frame sitting in a buffer
 ```
 
 ```lua
-status = { enabled = true, socket = "/tmp/painter.sock" }
+status = { enabled = true, exec = "/path/to/painter.py" }
 ```
 
 That is a working status bar. Grow it from there, in whatever language you like.

@@ -2,7 +2,7 @@
 """Live check: an EXTERNAL program can draw hexe's chrome, sprites and animation.
 
 hexe draws no chrome of its own any more — statusbar, titles, sprites and
-spinners all come from a painter over a Unix socket. That makes the painter
+spinners all come from a painter hexe spawns itself. That makes the painter
 protocol load-bearing: if it regresses, hexe looks broken with no error anywhere.
 
 Drives the real reference painter (contrib/painter_showcase.py) and asserts the
@@ -21,14 +21,21 @@ import fcntl, os, pty, signal, struct, subprocess, sys, termios, threading, time
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HEXE = os.path.join(REPO, "zig-out/bin/hexe")
-PAINTER = os.path.join(REPO, "contrib/painter_showcase.py")
+SOURCE_PAINTER = os.path.join(REPO, "contrib/painter_showcase.py")
+# Run from a copy, so the stale check below can break the painter permanently
+# without touching the file in the repository. hexe restarts a child that dies,
+# which is right -- and means "kill it" is no longer a way to make a painter
+# stay gone.
+PAINTER = None  # set once WD exists
 SCRATCH = os.environ.get("HEXE_SMOKE_TMP", "/tmp/hexe-smoke")
 os.makedirs(SCRATCH, exist_ok=True)
 INST = f"smk{os.getpid()}"
 WD = os.path.join(SCRATCH, f"painter{os.getpid()}")
 CF = os.path.join(WD, "cfg")
 os.makedirs(os.path.join(CF, "hexe"), exist_ok=True)
-SOCK = os.path.join(WD, "painter.sock")
+import shutil
+PAINTER = os.path.join(WD, "painter_showcase.py")
+shutil.copy(SOURCE_PAINTER, PAINTER)
 ROWS, COLS = 40, 120
 
 # The spinner glyphs the showcase cycles through.
@@ -42,7 +49,7 @@ PLOG = os.path.join(WD, "selectors.log")
 open(os.path.join(CF, "hexe", "init.lua"), "w").write("""
 local hexe = require("hexe")
 return hexe.setup({
-  status = { enabled = true, socket = "%s", refresh_ms = 100, stale_ms = 1500,
+  status = { enabled = true, exec = "%s", refresh_ms = 100, stale_ms = 1500,
              view = "showcase.status",
              sprite_view = "showcase.sprite",
              float_title_view = "showcase.float.title",
@@ -52,11 +59,11 @@ return hexe.setup({
     hexe.key({ hexe.key.alt, hexe.key['s'] }, hexe.action.overlay.sprite_toggle()),
   },
 })
-""" % SOCK)
+""" % (f"{sys.executable} -u {PAINTER}"))
 
 env = os.environ.copy()
 env.update({"HEXE_INSTANCE": INST, "XDG_STATE_HOME": os.path.join(SCRATCH, "smoke-state"),
-            "XDG_CONFIG_HOME": CF, "HEXE_PAINTER_SOCKET": SOCK,
+            "XDG_CONFIG_HOME": CF,
             "HEXE_PAINTER_LOG": PLOG, "HEXE_PAINTER_FRAME_MS": "25",
             "TERM": "xterm-256color", "SHELL": "/bin/sh"})
 for _k in ("HEXE_SESSION", "HEXE_PANE_UUID", "HEXE_MUX_SOCKET", "HEXE_POD_SOCKET",
@@ -99,18 +106,18 @@ raw = bytearray()
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
-painter = subprocess.Popen([sys.executable, "-u", PAINTER], env=env, cwd=WD,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                           start_new_session=True)
-procs.append(painter)
-deadline = time.time() + 15
-while time.time() < deadline and not os.path.exists(SOCK):
-    if painter.poll() is not None:
-        fail(f"painter exited rc={painter.returncode}: {painter.stderr.read().decode()[:200]}")
-    time.sleep(0.2)
-if not os.path.exists(SOCK):
-    fail(f"painter never created its socket at {SOCK}")
-print("painter: listening")
+# Nothing to start here: the painter is hexe's child, named by `status.exec`,
+# so it comes up with the frontend below and goes down with it.
+def spawn_seen():
+    """Did any painter run at all? Checked through the view log it writes,
+    since a one-shot cannot be caught alive."""
+    try:
+        return os.path.getsize(PLOG) > 0
+    except OSError:
+        return False
+
+
+print("painter: hexe spawns one per fetch")
 
 fe = subprocess.Popen([HEXE, "mux", "new", "-n", "painter"], stdin=slave, stdout=slave,
                       stderr=slave, env=env, cwd=WD, start_new_session=True)
@@ -209,12 +216,15 @@ print(f"config: hexe asked for the configured view names {sorted(asked)!r}")
 # 5. stale_ms: when the painter stops answering, its last frame must be marked
 #    stale and drawn dimmed. Without this a dead painter leaves a frozen clock
 #    that looks live, and stale_ms is inert config.
-if painter.poll() is not None:
-    fail("painter died while serving hexe")
-
-painter.terminate()
-try: painter.wait(timeout=5)
-except subprocess.TimeoutExpired: painter.kill()
+# hexe owns the painter, so stopping it means killing that child. Matched on
+# the script path in its argv, which no other process on the machine carries.
+# Nothing is resident to kill: a painter runs for one request and exits. Making
+# it STAY dead means breaking the program, so every fetch from here on fails and
+# the region has to go stale.
+if not spawn_seen():
+    fail("no painter ever ran, so this proves nothing about staleness")
+with open(PAINTER, "w") as fh:
+    fh.write("import sys\nsys.exit(1)\n")
 del raw[:]
 deadline = time.time() + 12
 dimmed = False

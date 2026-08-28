@@ -343,15 +343,17 @@ worth knowing:
   `floats` — instead of returning one pane's worth of a session-wide answer,
   which would read as hexe having lost the other panes.
 
-`geometry` is the one verb that costs less here than elsewhere. It is `control` over
-the session, because moving somebody else's pane is; but the pane-scoped resolver
-confines every selector to the caller, so over your own rectangle it is `read`. A
-program in a float can therefore step aside to make room for something — which is the
-whole reason a pane would ask about geometry at all — and still cannot touch a pane it
-does not occupy.
+`geometry` and `focus` cost less here than elsewhere. Both are `control` over the
+session, because moving or focusing somebody else's pane is; but the pane-scoped
+resolver confines every selector to the caller, so over your own rectangle they are
+`read`. A program in a float can therefore step aside to make room for something, and
+ask for the cursor back after opening something that took it — and still cannot touch a
+pane it does not occupy. A selector naming another pane resolves to nothing, so the
+narrowing is not a convention either side has to honour.
 
 ```console
 $ hexe api geometry '{"x":15,"width":30}'    # from inside a pane: moves that pane
+$ hexe api focus                             # and takes the cursor back
 ```
 
 It carries `read`, `screen` and `typing`, on that pane only. That grants nothing

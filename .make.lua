@@ -271,7 +271,7 @@ make.alias("t", "test")
 
 make.recipe{
   name = "install",
-  desc = "install this build everywhere hexe is on $PATH",
+  desc = "install this build everywhere hexe is on $PATH, and config/ where it reads it",
   deps = { "build" },
   run = function()
     -- Both, always. A daemon is started by whichever copy $PATH found first, so updating one and
@@ -280,6 +280,10 @@ make.recipe{
     install_to(os.getenv("HOME") .. "/.local/bin/hexe")
     install_to(PREFIX .. "/bin/hexe")
     make.run("install-check")
+    -- Last, and part of the install rather than a step to remember: a binary newer than the config
+    -- it reads is how a setting that shipped together with it silently does nothing. Run alone,
+    -- `configs` still installs only the config.
+    make.run("configs")
   end,
 }
 
@@ -336,7 +340,7 @@ local SMOKES = {
   "smoke_float_destroy.py", "smoke_keypad.py", "smoke_painter_showcase.py",
   "smoke_profiles.py", "smoke_palette.py", "smoke_palette_persist.py",
   "smoke_palette_fuzz.py", "smoke_palette_cells.py", "smoke_names.py",
-  "smoke_decor.py", "smoke_float_state.py", "smoke_float_per_git.py", "smoke_float_navigatable.py", "smoke_api_socket.py",
+  "smoke_decor.py", "smoke_float_state.py", "smoke_float_per_git.py", "smoke_float_navigatable.py", "smoke_painter_exec.py", "smoke_api_socket.py",
   "smoke_api_events.py", "smoke_stale_daemon.py", "smoke_api_geometry.py",
   "smoke_inherit_env.py", "smoke_access.py", "smoke_capture.py", "smoke_lua_client.py", "smoke_pane_socket.py", "smoke_plugin_pkg.py", "smoke_popup.py", "smoke_plugin_stream.py", "smoke_share_indicator.py", "smoke_stream_attach.py", "smoke_status_zones.py",
 }

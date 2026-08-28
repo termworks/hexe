@@ -142,11 +142,10 @@ fn specFor(
         .mode = mode,
         .width = w,
         .height = h,
-        .socket_path = cfg.socket,
         .refresh_ms = @intCast(cfg.refresh_ms),
         .stale_ms = @intCast(cfg.stale_ms),
         .key_suffix = key,
-        .command = cfg.command,
+        .exec = cfg.exec,
     };
 }
 
