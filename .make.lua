@@ -271,7 +271,7 @@ make.alias("t", "test")
 
 make.recipe{
   name = "install",
-  desc = "install this build everywhere hexe is on $PATH",
+  desc = "install this build everywhere hexe is on $PATH, and config/ where it reads it",
   deps = { "build" },
   run = function()
     -- Both, always. A daemon is started by whichever copy $PATH found first, so updating one and
@@ -280,6 +280,10 @@ make.recipe{
     install_to(os.getenv("HOME") .. "/.local/bin/hexe")
     install_to(PREFIX .. "/bin/hexe")
     make.run("install-check")
+    -- Last, and part of the install rather than a step to remember: a binary newer than the config
+    -- it reads is how a setting that shipped together with it silently does nothing. Run alone,
+    -- `configs` still installs only the config.
+    make.run("configs")
   end,
 }
 
