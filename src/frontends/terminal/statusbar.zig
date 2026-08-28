@@ -94,6 +94,7 @@ pub fn specFor(cfg: *const core.config.StatusBarConfig, view: []const u8, width:
         .refresh_ms = @intCast(cfg.refresh_ms),
         .stale_ms = @intCast(cfg.stale_ms),
         .command = cfg.command,
+        .exec = cfg.exec,
     };
 }
 

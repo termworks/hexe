@@ -126,11 +126,32 @@ for it, and hexe draws nothing there.
 rectangle, so the painter cannot address a cell outside it no matter what it
 emits.
 
-## The protocol
+## Two transports, one protocol
 
-A Unix `SOCK_STREAM` socket. Each message is a four-byte big-endian length
-followed by one UTF-8 JSON value, 1 MiB maximum. hexe connects, sends one
-request, reads one response, closes. Connections are not reused.
+Each message is a four-byte big-endian length followed by one UTF-8 JSON value,
+1 MiB maximum. **The frames are the same either way** — a painter writes one
+encoder, a host writes one decoder, and what changes is only which file
+descriptors carry them.
+
+```lua
+status = { socket = "…" }                       -- connect to a shared painter
+status = { exec = "pixy serve --stdio" }        -- run our own and talk down its pipes
+```
+
+**`socket`** — a Unix `SOCK_STREAM` path. hexe connects, sends one request,
+reads one response, closes; connections are not reused. One painter serves every
+session on the machine.
+
+**`exec`** — hexe spawns the painter as its own child and speaks the same frames
+over its stdin and stdout, keeping it between requests so the painter's startup
+is paid once rather than per frame. Set this and `socket` is unused.
+
+The difference is ownership, not speed; both cost about the same per request. A
+shared painter has one accept loop serialising every session, a config that
+outlives the binary that made it, and a slow render that is everyone's. A child
+starts with this frontend, answers only it, and exits with it — if it dies or
+answers something unusable it is taken down and the next fetch starts a fresh
+one.
 
 **Request**
 
@@ -193,6 +214,11 @@ pressed and hovered states. hexe never restyles a painter's output.
 `next_frame_ms` in a response asks to be polled sooner than `refresh_ms` — an
 animating view returns `75` and gets asked again in 75ms. It can only shorten
 the interval, never lengthen it.
+
+**It is a delay, never a timestamp.** A painter that sends an absolute time is
+asking for a frame decades away; hexe warns once and ignores it rather than
+clamping it silently, because the symptom of the silent version is only that the
+animation looks sluggish — it ran at `refresh_ms` and nothing said why.
 
 ## Guarantees
 

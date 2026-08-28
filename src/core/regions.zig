@@ -19,6 +19,7 @@
 const std = @import("std");
 const posix = std.posix;
 const logging = @import("logging.zig");
+const setNonBlocking = @import("ipc.zig").setNonBlocking;
 const style_mod = @import("style.zig");
 
 /// Re-run interval for a region whose config does not specify one.
@@ -27,6 +28,10 @@ pub const DEFAULT_REFRESH_MS: i64 = 1000;
 pub const DEFAULT_STALE_MS: i64 = 10_000;
 /// An in-flight fetch that overruns this is abandoned and its socket closed.
 pub const HARD_DEADLINE_MS: i64 = 2000;
+/// Longest `next_frame_ms` taken seriously. The field is a delay; a painter
+/// sending a Unix timestamp is describing a frame due in fifty years, and the
+/// honest reading of that is "this painter means something else".
+pub const MAX_FRAME_INTERVAL_MS: i64 = 60_000;
 /// Base backoff after a failed fetch, doubled per consecutive failure.
 pub const RETRY_BASE_MS: i64 = 500;
 pub const RETRY_MAX_MS: i64 = 30_000;
@@ -162,6 +167,14 @@ pub const Spec = struct {
     /// Optional command to start the painter when nothing is listening. Run
     /// detached through `/bin/sh -c`; hexe never waits on it.
     command: ?[]const u8 = null,
+    /// Run this painter as our OWN child and speak the same frames over its
+    /// pipes, instead of connecting to a socket somebody else is holding.
+    ///
+    /// A shared socket painter is one process every session on the machine
+    /// talks to: its accept loop serialises them, its config outlives the
+    /// binary that made it, and a slow render is everyone's. A child is spawned
+    /// once, answers many requests down the same pipe, and dies with us.
+    exec: ?[]const u8 = null,
 };
 
 const Phase = enum { idle, connecting, writing, reading };
@@ -176,7 +189,16 @@ const Region = struct {
     width: u16 = 0,
     height: u16 = 1,
 
+    /// Read side. For a socket this is the connection; for a child it is the
+    /// pipe from its stdout.
     fd: ?posix.fd_t = null,
+    /// Write side, separate only for a child. Equal to `fd` on a socket, which
+    /// is what lets one pump serve both.
+    wfd: ?posix.fd_t = null,
+    /// The painter we own, kept between requests so the Lua VM and config are
+    /// paid for once rather than per frame.
+    child: ?std.process.Child = null,
+    exec: ?[]u8 = null,
     phase: Phase = .idle,
     req: std.ArrayList(u8) = .empty,
     req_off: usize = 0,
@@ -289,17 +311,45 @@ pub const Registry = struct {
         self.allocator.free(r.selector);
         self.allocator.free(r.socket_path);
         if (r.command) |c| self.allocator.free(c);
+        if (r.exec) |c| self.allocator.free(c);
+        // A painter we own goes when its region does, or it outlives what it
+        // was drawing -- which is the shared-daemon problem in miniature.
+        self.dropChild(r);
         self.allocator.destroy(r);
     }
 
+    /// End the current request. A socket connection is per-request and closed;
+    /// a child's pipes are the point of having a child and stay open.
     fn closeConn(self: *Registry, r: *Region) void {
         _ = self;
-        if (r.fd) |fd| posix.close(fd);
-        r.fd = null;
+        if (r.child == null) {
+            if (r.fd) |fd| posix.close(fd);
+            r.fd = null;
+            r.wfd = null;
+        }
         r.phase = .idle;
         r.req_off = 0;
         r.hdr_off = 0;
         r.body_need = 0;
+    }
+
+    /// Take down the painter we own. Its pipes go with it, so the next fetch
+    /// starts a fresh one -- which is the recovery for a child that died,
+    /// wedged, or answered something unparseable.
+    fn dropChild(self: *Registry, r: *Region) void {
+        if (r.child) |*c| {
+            if (r.fd) |fd| posix.close(fd);
+            if (r.wfd) |fd| posix.close(fd);
+            c.stdin = null;
+            c.stdout = null;
+            _ = c.kill() catch {};
+            r.child = null;
+            logging.warn("regions", "painter child for '{s}' was taken down; it will be restarted", .{r.selector});
+        }
+        r.fd = null;
+        r.wfd = null;
+        r.phase = .idle;
+        _ = self;
     }
 
     /// Never blocks. Returns the last completed content for this region and
@@ -387,11 +437,17 @@ pub const Registry = struct {
         else
             null;
 
+        const exec_owned: ?[]u8 = if (spec.exec) |c|
+            (self.allocator.dupe(u8, c) catch null)
+        else
+            null;
+
         r.* = .{
             .key = key_owned,
             .selector = selector_owned,
             .socket_path = socket_path,
             .command = command_owned,
+            .exec = exec_owned,
             .mode = spec.mode,
             .refresh_ms = @max(spec.refresh_ms, 16),
             .stale_ms = spec.stale_ms,
@@ -430,6 +486,20 @@ pub const Registry = struct {
             self.fail(r, now);
             return;
         };
+
+        // Our own painter, if this region was configured with one: spawned on
+        // the first fetch and kept, so every later request is a write and a
+        // read down a pipe that is already open.
+        if (r.exec != null) {
+            if (r.child == null) self.startChild(r, now) catch {
+                self.fail(r, now);
+                return;
+            };
+            r.started_ms = now;
+            r.phase = .writing;
+            self.pump(r, now);
+            return;
+        }
 
         const fd = posix.socket(
             posix.AF.UNIX,
@@ -486,6 +556,9 @@ pub const Registry = struct {
             self.fail(r, now);
             return;
         };
+        // The same pump serves both transports: a socket hands back one fd for
+        // each direction, a child hands back two.
+        const wfd = r.wfd orelse fd;
 
         if (r.phase == .connecting) {
             var pfd = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
@@ -504,7 +577,7 @@ pub const Registry = struct {
 
         if (r.phase == .writing) {
             while (r.req_off < r.req.items.len) {
-                const n = posix.write(fd, r.req.items[r.req_off..]) catch |err| switch (err) {
+                const n = posix.write(wfd, r.req.items[r.req_off..]) catch |err| switch (err) {
                     error.WouldBlock => return,
                     else => {
                         self.fail(r, now);
@@ -600,8 +673,38 @@ pub const Registry = struct {
     }
 
     fn fail(self: *Registry, r: *Region, now: i64) void {
+        // A broken pipe means the child is gone or out of step with us, and
+        // reusing it would resynchronise onto the middle of a frame.
+        if (r.child != null) self.dropChild(r);
         self.closeConn(r);
         self.backoff(r, now);
+    }
+
+    /// Spawn the painter we own and keep its pipes.
+    ///
+    /// Both ends are non-blocking, because everything in `pump` is: a painter
+    /// that stops reading must cost a stale region, never a stalled frame. The
+    /// child is `/bin/sh -c` like the detached spawner, so a configured command
+    /// means the same thing in both transports.
+    fn startChild(self: *Registry, r: *Region, now: i64) !void {
+        const cmd = r.exec orelse return error.NoCommand;
+        var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd }, self.allocator);
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        // Left alone: a painter's diagnostics belong on the terminal that
+        // started hexe, not swallowed into a pipe nobody drains.
+        child.stderr_behavior = .Inherit;
+        try child.spawn();
+
+        const in_fd = child.stdin.?.handle;
+        const out_fd = child.stdout.?.handle;
+        setNonBlocking(in_fd) catch {};
+        setNonBlocking(out_fd) catch {};
+
+        r.child = child;
+        r.wfd = in_fd;
+        r.fd = out_fd;
+        r.spawned_ms = now;
     }
 
     /// Start the configured painter, detached. Never waits, never retries fast:
@@ -884,7 +987,21 @@ pub const Registry = struct {
 
         r.next_frame_ms = null;
         if (output.get("next_frame_ms")) |nf| {
-            if (nf == .integer and nf.integer > 0) r.next_frame_ms = @intCast(nf.integer);
+            // An INTERVAL -- "ask again in N ms" -- never a deadline.
+            //
+            // A painter that sent an absolute timestamp instead was not
+            // rejected, it was clamped: `@min(refresh_ms, 1.7e12)` is always
+            // `refresh_ms`, so the cadence request vanished and the animation
+            // quietly ran at the refresh rate. Nothing failed, nothing logged,
+            // and the only symptom was that it looked sluggish. Anything longer
+            // than a minute is not a frame interval, so say so once rather than
+            // absorb it.
+            if (nf == .integer and nf.integer > 0 and nf.integer <= MAX_FRAME_INTERVAL_MS) {
+                r.next_frame_ms = @intCast(nf.integer);
+            } else if (nf == .integer and nf.integer > MAX_FRAME_INTERVAL_MS) {
+                logging.warn("regions", "painter asked for a {d}ms frame interval; " ++
+                    "`next_frame_ms` is a delay, not a timestamp -- ignoring", .{nf.integer});
+            }
         }
         r.out_width = 0;
         if (output.get("width")) |wv| {

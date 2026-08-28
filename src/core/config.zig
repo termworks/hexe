@@ -109,6 +109,14 @@ pub const StatusBarConfig = struct {
     socket: ?[]const u8 = null,
     /// Optional command that starts the painter when nothing is listening.
     command: ?[]const u8 = null,
+    /// Run the painter as hexe's OWN child, speaking the same frames over its
+    /// pipes, instead of connecting to a shared socket.
+    ///
+    /// Set this and `socket` is not used at all. What it buys is ownership: the
+    /// painter starts with this frontend, answers only it, and exits with it --
+    /// no accept loop shared with every other session on the machine, and no
+    /// painter left running from a build that is no longer installed.
+    exec: ?[]const u8 = null,
     refresh_ms: u64 = 250,
     stale_ms: u64 = 10_000,
     /// Views for pane and float chrome, also painted externally.
