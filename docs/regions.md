@@ -220,6 +220,41 @@ asking for a frame decades away; hexe warns once and ignores it rather than
 clamping it silently, because the symptom of the silent version is only that the
 animation looks sluggish — it ran at `refresh_ms` and nothing said why.
 
+## Filmstrips: one fetch, a whole cycle
+
+A spinner moving every 40ms used to mean twenty-five round trips a second, even
+though what the bar *says* — the clock, the branch, the cwd — changes about
+once. The animation rate set the fetch rate, and the animation is the part that
+needs nothing from outside.
+
+So hexe sends `frames_ms` with every request: *how far ahead to draw*. A painter
+that can answer replies with a strip instead of a picture:
+
+```json
+{"ok":true,"output":{"frames":[
+  {"mode":"run","runs":[…],"width":12,"next_frame_ms":40},
+  {"mode":"run","runs":[…],"width":12,"next_frame_ms":360}
+]},"version":1}
+```
+
+Each frame is exactly the object a single reply carries, and its
+`next_frame_ms` is how long *that* frame holds. hexe plays them off its own
+timer and comes back only when `refresh_ms` says the data underneath could have
+moved. Nothing is asked in between.
+
+Two rules make it safe:
+
+**The horizon is a promise, not a suggestion.** A painter stops at `frames_ms`
+even mid-cycle. Content that is not on a cycle at all — a clock — would
+otherwise be enumerated into the future and replayed stale, which is worse than
+being a frame late.
+
+**Held pictures coalesce.** The pause at the end of a sweep is one frame with a
+longer hold, not the same cells sent nine times.
+
+A painter that ignores `frames_ms` and answers with a single frame keeps
+working exactly as before; a strip of one is the same thing.
+
 ## Guarantees
 
 **The render loop never waits on a painter.** Connect, write and read are all

@@ -216,6 +216,16 @@ const Region = struct {
     out_width: u16 = 0,
     next_frame_ms: ?u64 = null,
 
+    /// The painter's whole reply, kept parsed for as long as its frames are
+    /// still playing: advancing a frame then costs no parse and no round trip,
+    /// which is the point of asking for a strip at all. Freed when the next
+    /// reply lands.
+    strip: ?std.json.Parsed(std.json.Value) = null,
+    /// Frames of `strip`, in order. Borrowed from its arena.
+    strip_frames: []std.json.Value = &.{},
+    strip_at: usize = 0,
+    strip_due_ms: i64 = 0,
+
     command: ?[]u8 = null,
     /// When the painter was last started, so a dead command is not respawned
     /// on every retry.
@@ -235,6 +245,19 @@ const Region = struct {
 
     fn inFlight(self: *const Region) bool {
         return self.phase != .idle;
+    }
+
+    fn clearStrip(self: *Region) void {
+        if (self.strip) |*p| p.deinit();
+        self.strip = null;
+        self.strip_frames = &.{};
+        self.strip_at = 0;
+        self.strip_due_ms = 0;
+    }
+
+    /// A strip only animates when it has a second frame to move to.
+    fn animating(self: *const Region) bool {
+        return self.strip_frames.len > 1;
     }
 };
 
@@ -300,6 +323,7 @@ pub const Registry = struct {
 
     fn destroyRegion(self: *Registry, r: *Region) void {
         self.closeConn(r);
+        r.clearStrip();
         r.req.deinit(self.allocator);
         r.body.deinit(self.allocator);
         r.runs.deinit(self.allocator);
@@ -363,12 +387,17 @@ pub const Registry = struct {
         r.last_used_ms = now;
         self.use_counter += 1;
         r.use_seq = self.use_counter;
+        self.advanceStrip(r, now);
 
         // Geometry changes force a refetch: the painter lays out to the width
         // it was given, so a stale frame at the old width is wrong, not merely old.
         const resized = r.width != spec.width or r.height != spec.height;
         r.width = spec.width;
         r.height = spec.height;
+        // Every frame of a strip was drawn to the old width, so playing the rest
+        // of it animates content that no longer fits. The last frame stays on
+        // screen -- stale, and dimmed as stale -- until the refetch lands.
+        if (resized) r.clearStrip();
 
         // A resize invalidates the last frame, but it must not bypass the
         // backoff: otherwise a dead painter is retried on every resize event.
@@ -388,13 +417,44 @@ pub const Registry = struct {
         };
     }
 
+    /// Step a playing filmstrip to the frame due now. Costs no round trip and
+    /// no parse: the frames are already in hand.
+    fn advanceStrip(self: *Registry, r: *Region, now: i64) void {
+        if (!r.animating()) return;
+        var guard: usize = 0;
+        while (now >= r.strip_due_ms and guard < r.strip_frames.len) : (guard += 1) {
+            r.strip_at = (r.strip_at + 1) % r.strip_frames.len;
+            const frame = switch (r.strip_frames[r.strip_at]) {
+                .object => |o| o,
+                else => {
+                    r.clearStrip();
+                    return;
+                },
+            };
+            if (!self.applyFrame(r, frame)) {
+                r.clearStrip();
+                return;
+            }
+            // A frame with no cadence of its own ends the strip rather than
+            // spinning on a deadline that never moves.
+            const hold = r.next_frame_ms orelse {
+                r.clearStrip();
+                return;
+            };
+            r.strip_due_ms = now + @as(i64, @intCast(hold));
+        }
+    }
+
     fn isDue(self: *Registry, r: *Region, now: i64) bool {
         _ = self;
         if (now < r.next_try_ms) return false;
         if (r.last_done_ms == 0) return true;
-        // The painter tells us when its own next frame is due; honour it when
-        // it asks for a shorter interval than the configured refresh.
-        const interval: i64 = if (r.next_frame_ms) |nf|
+        // A strip already holds every frame up to the next refresh, so asking
+        // again mid-cycle would only re-fetch the same pictures. The painter's
+        // own cadence drives the fetch only when it sent a single frame.
+        const interval: i64 = if (r.animating())
+            r.refresh_ms
+        else if (r.next_frame_ms) |nf|
             @min(r.refresh_ms, @as(i64, @intCast(nf)))
         else
             r.refresh_ms;
@@ -738,9 +798,17 @@ pub const Registry = struct {
         var soonest: ?i64 = null;
         var it = self.entries.valueIterator();
         while (it.next()) |r| {
+            // A playing strip needs the loop awake for its next frame even
+            // while a fetch is in flight -- that is the animation itself.
+            if (r.*.animating()) {
+                const frame_delta = @max(r.*.strip_due_ms - now, 0);
+                if (soonest == null or frame_delta < soonest.?) soonest = frame_delta;
+            }
             if (r.*.inFlight()) continue;
             if (r.*.next_try_ms != 0 and now < r.*.next_try_ms) continue;
-            const interval: i64 = if (r.*.next_frame_ms) |nf|
+            const interval: i64 = if (r.*.animating())
+                r.*.refresh_ms
+            else if (r.*.next_frame_ms) |nf|
                 @min(r.*.refresh_ms, @as(i64, @intCast(nf)))
             else
                 r.*.refresh_ms;
@@ -774,8 +842,8 @@ pub const Registry = struct {
 
         try w.writeAll("{\"version\":1,\"select\":[");
         try writeJsonString(w, r.selector);
-        try w.print("],\"mode\":\"{s}\",\"width\":{d},\"height\":{d},\"now_ms\":{d},\"ignore_missing\":false,\"context\":{{", .{
-            r.mode.wireName(), r.width, r.height, ctx.now_ms,
+        try w.print("],\"mode\":\"{s}\",\"width\":{d},\"height\":{d},\"now_ms\":{d},\"frames_ms\":{d},\"ignore_missing\":false,\"context\":{{", .{
+            r.mode.wireName(), r.width, r.height, ctx.now_ms, r.refresh_ms,
         });
 
         var first = true;
@@ -967,7 +1035,8 @@ pub const Registry = struct {
             logging.logError("regions", "painter sent invalid JSON", err);
             return false;
         };
-        defer parsed.deinit();
+        var retained = false;
+        defer if (!retained) parsed.deinit();
 
         const root = switch (parsed.value) {
             .object => |o| o,
@@ -985,6 +1054,31 @@ pub const Registry = struct {
         };
         r.answered = true;
 
+        // A filmstrip: every frame of one animation cycle, so the loop plays it
+        // without asking again until the data underneath can have changed.
+        if (output.get("frames")) |fv| {
+            if (fv != .array or fv.array.items.len == 0) return false;
+            const first = switch (fv.array.items[0]) {
+                .object => |o| o,
+                else => return false,
+            };
+            if (!self.applyFrame(r, first)) return false;
+            r.clearStrip();
+            r.strip = parsed;
+            r.strip_frames = fv.array.items;
+            r.strip_at = 0;
+            r.strip_due_ms = std.time.milliTimestamp() + @as(i64, @intCast(r.next_frame_ms orelse 0));
+            retained = true;
+            return true;
+        }
+
+        r.clearStrip();
+        return self.applyFrame(r, output);
+    }
+
+    /// Draw one frame's body into the region. Shared by a plain reply and by
+    /// each frame of a filmstrip, which carry the same object.
+    fn applyFrame(self: *Registry, r: *Region, output: std.json.ObjectMap) bool {
         r.next_frame_ms = null;
         if (output.get("next_frame_ms")) |nf| {
             // An INTERVAL -- "ask again in N ms" -- never a deadline.
