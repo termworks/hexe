@@ -14,7 +14,36 @@ pub const Terminal = ghostty.Terminal;
 // scrollback feels consistent with detach/reattach behavior.
 const DEFAULT_SCROLLBACK_BYTES: usize = 16 * 1024 * 1024;
 
+/// Kitty image storage per pane.
+///
+/// ghostty defaults this to 320MB PER SCREEN, which is a sane number for a
+/// terminal that is one window. A mux is not: hexe never lowered it, so twenty
+/// panes carried a 6.4GB ceiling for image data alone, and nothing but the
+/// programs' own restraint kept it down. 64MB still admits a full 4K RGBA
+/// image (33MB) — the largest thing `icat` will hand over without downscaling
+/// — and evicts oldest-first past that. It is a ceiling, not an allocation.
+const KITTY_IMAGE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 const ReadonlyStream = @TypeOf((@as(*Terminal, undefined)).vtStream());
+
+/// The host terminal's cell size in pixels.
+///
+/// A Kitty placement with no explicit `r=`/`c=` is sized by dividing the
+/// image's pixels by the cell's, so a terminal reporting nothing leaves ghostty
+/// dividing by zero: the placement collapses to zero cells and the image
+/// transmits but is never drawn. Most ptys report nothing -- hexe's own set
+/// `ws_xpixel = 0` until `setCellPixels` is called -- so this starts at a
+/// typical 8x16 cell and the frontend replaces it as soon as the host reports
+/// a real size. One terminal, one cell size, hence one global.
+pub var cell_px: struct { w: u16 = 8, h: u16 = 16 } = .{};
+
+/// Record the host's cell size. Zero in either axis means "not reported",
+/// which leaves the current value alone rather than reintroducing the divide
+/// by zero.
+pub fn setCellPixels(w: u16, h: u16) void {
+    if (w == 0 or h == 0) return;
+    cell_px = .{ .w = w, .h = h };
+}
 
 /// Thin wrapper around ghostty Terminal
 pub const VT = struct {
@@ -69,6 +98,15 @@ pub const VT = struct {
         // still allowing DECSCUSR steady-cursor sequences to disable it.
         self.terminal.modes.set(.cursor_blinking, true);
 
+        // The alternate screen inherits this when ghostty creates it, so the
+        // primary is the only one to set.
+        if (comptime @TypeOf(self.terminal.screens.active.kitty_images) != void) {
+            const primary = self.terminal.screens.get(.primary).?;
+            primary.kitty_images.setLimit(allocator, primary, KITTY_IMAGE_LIMIT_BYTES) catch |err| {
+                logging.logError("vt", "failed to cap Kitty image storage", err);
+            };
+        }
+
         self.stream = self.terminal.vtStream();
         self.render_state = .empty;
         self.kitty_image_cache = std.AutoHashMap(u32, KittyImageCache).init(allocator);
@@ -104,6 +142,15 @@ pub const VT = struct {
     /// Mark the VT as needing a fresh render snapshot.
     pub fn invalidateRenderState(self: *VT) void {
         self.render_state_dirty = true;
+    }
+
+    /// Restate the pane's size in pixels, which is what Kitty placements are
+    /// measured against. Cheap enough to call every frame, which is what the
+    /// renderer does -- the host's cell size can change under us (a font size
+    /// change) without the pane's cell dimensions moving at all.
+    pub fn applyCellPixels(self: *VT) void {
+        self.terminal.width_px = @as(u32, cell_px.w) * self.width;
+        self.terminal.height_px = @as(u32, cell_px.h) * self.height;
     }
 
     /// Resize the virtual terminal

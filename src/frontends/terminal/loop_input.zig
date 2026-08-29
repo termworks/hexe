@@ -287,6 +287,10 @@ fn finishBracketedPaste(state: *State) void {
 fn applyInBandWinsize(state: *State, ws: vaxis.Winsize) void {
     const cols = ws.cols;
     const rows = ws.rows;
+    // Kitty placements are measured in cell pixels, so a resize is also the
+    // moment the host's cell size can change under us -- a font size change
+    // moves the pixels without moving the rows and columns.
+    if (cols > 0 and rows > 0) core.vt.setCellPixels(ws.x_pixel / cols, ws.y_pixel / rows);
     state.applyTerminalResize(cols, rows);
 }
 

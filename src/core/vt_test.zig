@@ -106,3 +106,27 @@ test "the tag follows the pane across an alt-screen switch" {
     // the primary, where the shell's own output would then carry it.
     try std.testing.expectEqual(@as(u8, 0), cursorTag(&vt));
 }
+
+test "VT stores a Kitty image transmitted over APC" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 5);
+    defer vt.deinit();
+
+    // 4x4 RGBA, transmitted and displayed in one command.
+    const pixels = [_]u8{ 255, 0, 0, 255 } ** 16;
+    var b64: [128]u8 = undefined;
+    const payload = std.base64.standard.Encoder.encode(&b64, &pixels);
+
+    var seq: std.ArrayListUnmanaged(u8) = .empty;
+    defer seq.deinit(std.testing.allocator);
+    try seq.appendSlice(std.testing.allocator, "\x1b_Gf=32,s=4,v=4,i=42,a=T;");
+    try seq.appendSlice(std.testing.allocator, payload);
+    try seq.appendSlice(std.testing.allocator, "\x1b\\");
+
+    try vt.feed(seq.items);
+
+    const storage = &vt.terminal.screens.active.kitty_images;
+    try std.testing.expectEqual(@as(usize, 1), storage.images.count());
+    try std.testing.expect(storage.imageById(42) != null);
+    try std.testing.expect(storage.placements.count() > 0);
+}

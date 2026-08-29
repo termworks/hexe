@@ -51,6 +51,7 @@ pub fn drawRenderState(
     const row_cells = row_slice.items(.cells);
     const row_pins = row_slice.items(.pin);
 
+    vt.applyCellPixels();
     syncKittyImages(vt, vx, stdout, arena);
 
     const ns_table = &vt.ns_table;
@@ -204,10 +205,40 @@ fn isKittyGraphicsPlaceholder(cp: u21) bool {
 fn imageFormatToVaxis(format: anytype) ?vaxis.Image.TransmitFormat {
     return switch (format) {
         .rgb => .rgb,
-        .rgba => .rgba,
+        // Kitty carries no greyscale format, so these travel as their
+        // colour equivalents after expandGrey.
+        .gray_alpha, .rgba => .rgba,
+        .gray => .rgb,
         .png => .png,
-        else => null,
     };
+}
+
+/// Widen a greyscale payload to the RGB/RGBA the Kitty protocol can carry.
+///
+/// ghostty only produces these by decoding a PNG, and the vendored revision
+/// always decodes to RGBA — so nothing hits this today. It exists because the
+/// alternative when it does is an image that silently fails to appear, and
+/// `scripts/vendor-ghostty.sh` follows upstream.
+fn expandGrey(arena: std.mem.Allocator, format: anytype, data: []const u8) ?[]const u8 {
+    const src_bpp: usize = switch (format) {
+        .gray => 1,
+        .gray_alpha => 2,
+        else => return data,
+    };
+    const px = data.len / src_bpp;
+    const out = arena.alloc(u8, px * (src_bpp + 2)) catch |err| {
+        core.logging.logError("terminal", "failed to allocate greyscale image expansion", err);
+        return null;
+    };
+    for (0..px) |i| {
+        const v = data[i * src_bpp];
+        const o = i * (src_bpp + 2);
+        out[o] = v;
+        out[o + 1] = v;
+        out[o + 2] = v;
+        if (src_bpp == 2) out[o + 3] = data[i * 2 + 1];
+    }
+    return out;
 }
 
 fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: std.mem.Allocator) void {
@@ -245,11 +276,9 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
         const ghost_id = entry.key_ptr.*;
         const img = entry.value_ptr.*;
         const fmt = imageFormatToVaxis(img.format) orelse continue;
-        const fmt_tag: u8 = switch (fmt) {
-            .rgb => 1,
-            .rgba => 2,
-            .png => 3,
-        };
+        // Keyed on ghostty's format, not the vaxis one: two of ghostty's map
+        // onto the same wire format, and the cache must still tell them apart.
+        const fmt_tag: u8 = @intFromEnum(img.format);
 
         // Avoid re-hashing an unchanged image.
         //
@@ -285,18 +314,19 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
         const h: u16 = @intCast(@min(img.height, std.math.maxInt(u16)));
         if (w == 0 or h == 0) continue;
 
-        const enc_size = std.base64.standard.Encoder.calcSize(img.data.len);
+        const payload = expandGrey(arena, img.format, img.data) orelse continue;
+        const enc_size = std.base64.standard.Encoder.calcSize(payload.len);
         const enc_buf = arena.alloc(u8, enc_size) catch |err| {
             core.logging.logError("terminal", "failed to allocate Kitty image transfer buffer", err);
             continue;
         };
-        const b64 = std.base64.standard.Encoder.encode(enc_buf, img.data);
+        const b64 = std.base64.standard.Encoder.encode(enc_buf, payload);
 
         const vimg = vx.transmitPreEncodedImage(&writer.interface, b64, w, h, fmt) catch |err| {
             core.logging.logError("terminal", "failed to transmit Kitty image", err);
             continue;
         };
-        vt.kitty_image_cache.put(vt.allocator, ghost_id, .{
+        vt.kitty_image_cache.put(ghost_id, .{
             .vaxis_id = vimg.id,
             .width = img.width,
             .height = img.height,

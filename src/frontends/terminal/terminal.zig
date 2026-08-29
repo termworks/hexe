@@ -1,4 +1,5 @@
 const std = @import("std");
+const core = @import("core");
 const posix = std.posix;
 
 const c = @cImport({
@@ -15,6 +16,11 @@ pub const TermSize = struct {
 pub fn getTermSize() TermSize {
     var ws: c.winsize = undefined;
     if (c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &ws) == 0) {
+        // The same ioctl carries the pixel size Kitty placements are measured
+        // against. Terminals that report nothing leave the default standing.
+        if (ws.ws_col > 0 and ws.ws_row > 0) {
+            core.vt.setCellPixels(ws.ws_xpixel / ws.ws_col, ws.ws_ypixel / ws.ws_row);
+        }
         return .{
             .cols = if (ws.ws_col > 0) ws.ws_col else 80,
             .rows = if (ws.ws_row > 0) ws.ws_row else 24,
