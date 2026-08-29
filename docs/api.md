@@ -257,7 +257,9 @@ and it reaches the screen the way every other image does: as a Kitty image on a
 terminal that speaks the protocol, and as half blocks on one that does not. See
 [Images](images.md). `image` and `content` are mutually exclusive; `image` wins.
 A path that is missing, too large, or not a PNG is refused with `result:false`
-rather than drawn as garbage.
+rather than drawn as garbage. Reading the file rather than taking its bytes is
+also what makes a real picture possible at all: the socket caps a request at
+64 KB, which is a small icon after base64.
 
 **Naming one twice replaces it**, so a caller updating a drawing does not have
 to remove it first and flicker through the gap. A drawing redrawn with the same

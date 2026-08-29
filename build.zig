@@ -13,13 +13,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     })) |ghostty_dep| ghostty_dep.module("ghostty-vt") else null;
 
-    // Image decoding for formats hexe handles itself. Lazy, like the rest: a
-    // build that cannot resolve it simply has no JPEG support.
-    const wuffs_mod = if (b.lazyDependency("wuffs", .{
-        .target = target,
-        .optimize = optimize,
-    })) |dep| dep.module("wuffs") else null;
-
     // Get yazap module from dependency
     const yazap_mod = if (b.lazyDependency("yazap", .{})) |yazap_dep| yazap_dep.module("yazap") else null;
 
@@ -66,9 +59,6 @@ pub fn build(b: *std.Build) void {
     core_module.addOptions("build_options", build_options);
     if (ghostty_vt_mod) |vt| {
         core_module.addImport("ghostty-vt", vt);
-    }
-    if (wuffs_mod) |w| {
-        core_module.addImport("wuffs", w);
     }
     if (ziglua_dep) |dep| {
         const zlua_mod = dep.module("zlua");
@@ -312,30 +302,12 @@ pub fn build(b: *std.Build) void {
 
     // Encoding an image file as a Kitty placement, which is how hexe's own
     // surfaces (drawings, status zones, sprites) show a picture.
-    // Image format sniffing and JPEG decoding.
-    const image_file_test_module = b.createModule(.{
-        .root_source_file = b.path("src/core/image_file.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    if (wuffs_mod) |w| {
-        image_file_test_module.addImport("wuffs", w);
-    }
-    const image_file_tests = b.addTest(.{
-        .root_module = image_file_test_module,
-    });
-    const run_image_file_tests = b.addRunArtifact(image_file_tests);
-
-    const image_encode_test_module = b.createModule(.{
-        .root_source_file = b.path("src/core/image_encode.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    if (wuffs_mod) |w| {
-        image_encode_test_module.addImport("wuffs", w);
-    }
     const image_encode_tests = b.addTest(.{
-        .root_module = image_encode_test_module,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/image_encode.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     const run_image_encode_tests = b.addRunArtifact(image_encode_tests);
 
@@ -675,7 +647,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_image_fallback_tests.step);
     test_step.dependOn(&run_vt_bridge_tests.step);
     test_step.dependOn(&run_image_encode_tests.step);
-    test_step.dependOn(&run_image_file_tests.step);
     test_step.dependOn(&run_sixel_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
     test_step.dependOn(&run_lua_events_tests.step);

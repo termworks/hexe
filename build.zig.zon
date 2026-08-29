@@ -30,12 +30,6 @@
             .url = "git+https://github.com/rockorager/libvaxis#67bbc1ee072aa390838c66caf4ed47edee282dc4",
             .hash = "vaxis-0.5.1-BWNV_IxJCQC5OGNaXQfNnqgn9_Vku0PMgey-dplubcQK",
         },
-        // JPEG decoding, from the same vendored ghostty tree its VT comes from
-        // (`scripts/vendor-ghostty.sh` puts it there). Depending on it directly
-        // rather than through ghostty because hexe decodes an image the VT
-        // never sees: one handed to `draw`, or one arriving as an iTerm2 inline
-        // image, which is not a protocol ghostty parses.
-        .wuffs = .{ .path = "vendor/ghostty/pkg/wuffs" },
         // Patched by `scripts/vendor-yazap.sh` from the upstream revision
         // pinned there plus patches/yazap-examples-cwd.patch. Run that script
         // after a fresh clone, or to follow a newer upstream.

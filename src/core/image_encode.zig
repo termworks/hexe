@@ -13,18 +13,18 @@
 //! needs to know an image came from hexe rather than from a program.
 
 const std = @import("std");
-const image_file = @import("image_file.zig");
 
 pub const Error = error{
     NotAnImage,
     FileTooLarge,
-    DecodeFailed,
     OutOfMemory,
 };
 
 /// Largest image file to place. Well past any icon or chart, and far below the
 /// per-pane storage cap, so a mistyped path cannot read a disk image into RAM.
 pub const max_file_bytes: usize = 16 * 1024 * 1024;
+
+const png_magic = "\x89PNG\r\n\x1a\n";
 
 /// A stable image id for a named surface.
 ///
@@ -68,10 +68,10 @@ pub fn fromFile(
 /// Encode already-read image bytes. Split out from `fromFile` so the encoding
 /// can be tested without touching a filesystem.
 ///
-/// PNG is handed on as itself -- the protocol carries it and ghostty decodes it
-/// on the way in, so decoding here would swap a compressed image for a raw one
-/// several times the size. JPEG has no place in the protocol, so it is decoded
-/// to pixels first and those are sent instead.
+/// PNG only, and it is handed on as itself: the Kitty protocol carries PNG
+/// directly and ghostty decodes it on the way in, so hexe needs no decoder of
+/// its own. The protocol has no other compressed format, so anything else would
+/// mean carrying a decoder to serve this one path -- not worth it.
 pub fn encode(
     alloc: std.mem.Allocator,
     bytes: []const u8,
@@ -79,28 +79,14 @@ pub fn encode(
     rows: u16,
     id: u32,
 ) Error![]u8 {
-    const format = image_file.detect(bytes) orelse return error.NotAnImage;
-    switch (format) {
-        .png => return build(alloc, bytes, "f=100", cols, rows, id),
-        .jpeg => {
-            var px = image_file.decodeJpeg(alloc, bytes) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                else => error.DecodeFailed,
-            };
-            defer px.deinit(alloc);
-            var shape: [32]u8 = undefined;
-            const spec = std.fmt.bufPrint(&shape, "f=32,s={d},v={d}", .{ px.width, px.height }) catch
-                return error.DecodeFailed;
-            return build(alloc, px.rgba, spec, cols, rows, id);
-        },
-    }
+    if (!std.mem.startsWith(u8, bytes, png_magic)) return error.NotAnImage;
+    return build(alloc, bytes, cols, rows, id);
 }
 
 /// Wrap a payload as a Kitty transmit-and-display sized to the rectangle.
 fn build(
     alloc: std.mem.Allocator,
     payload: []const u8,
-    spec: []const u8,
     cols: u16,
     rows: u16,
     id: u32,
@@ -117,8 +103,8 @@ fn build(
     var head: [96]u8 = undefined;
     const header = std.fmt.bufPrint(
         &head,
-        "\x1b_G{s},a=T,i={d},c={d},r={d},C=1,q=2;",
-        .{ spec, id, cols, rows },
+        "\x1b_Gf=100,a=T,i={d},c={d},r={d},C=1,q=2;",
+        .{ id, cols, rows },
     ) catch return error.OutOfMemory;
     try out.appendSlice(alloc, header);
 
@@ -160,14 +146,14 @@ test "encode wraps a PNG as a sized Kitty placement" {
     try testing.expectEqualSlices(u8, &tiny_png, back);
 }
 
-test "encode refuses anything that is not an image it can read" {
+test "encode refuses anything that is not a PNG" {
     try testing.expectError(error.NotAnImage, encode(testing.allocator, "not an image", 4, 2, 1));
     // A truncated magic is still not a PNG.
     try testing.expectError(error.NotAnImage, encode(testing.allocator, "\x89PNG", 4, 2, 1));
-    // A format hexe has no decoder for is refused rather than sent as garbage.
+    // Other real image formats are refused rather than sent as garbage: the
+    // protocol cannot carry them and hexe carries no decoder.
     try testing.expectError(error.NotAnImage, encode(testing.allocator, "GIF89a....", 4, 2, 1));
-    // Recognisably a JPEG, but not a decodable one.
-    try testing.expectError(error.DecodeFailed, encode(testing.allocator, "\xff\xd8\xff nope", 4, 2, 1));
+    try testing.expectError(error.NotAnImage, encode(testing.allocator, "\xff\xd8\xff JFIF", 4, 2, 1));
 }
 
 test "a name maps to a stable non-zero id" {
