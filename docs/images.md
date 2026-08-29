@@ -1,0 +1,72 @@
+# Images
+
+A program draws an image on a terminal by writing an escape sequence full of pixels. There are three
+such sequences in circulation and no agreement on which one to use: the **Kitty graphics protocol**,
+**sixel**, and **iTerm2 inline images**. Which one a program speaks depends on when it was written;
+which one a terminal understands depends on which terminal it is.
+
+hexe sits in the middle of that, which is the useful place to stand. It **accepts all three from a
+pane and emits Kitty to the host terminal**, so what a program speaks and what your terminal speaks
+stop being the same question.
+
+## What works
+
+| From the program | How |
+|---|---|
+| Kitty graphics | Parsed by ghostty's VT into the pane's image storage |
+| Sixel | Decoded by hexe (`src/core/sixel.zig`) and handed to the same storage |
+| iTerm2 `OSC 1337 File=` | Base64 decoded by hexe, PNG payloads handed to the same storage |
+
+Everything ends up in one place — ghostty's per-screen Kitty image storage — and the renderer
+re-transmits from there to whatever terminal you are actually attached to. That is why a sixel drawn
+by `img2sixel` inside a pane arrives at your terminal as a Kitty image.
+
+## What does not
+
+- **The host terminal must speak Kitty graphics.** hexe asks at startup; if the answer is no, images
+  are not drawn at all. There is no sixel or half-block fallback yet.
+- **Animation.** Kitty animation frames are accepted and discarded, upstream and here.
+- **iTerm2 payloads that are not PNG.** JPEG and GIF would need a decoder hexe does not carry.
+- **Cell size inside a pane.** A pane's pty reports `ws_xpixel = 0`, so a program that works out its
+  cell size from `TIOCGWINSZ` gets nothing and falls back to its own default. hexe knows the real
+  figure from the host and uses it for placement; it does not yet pass it down to the pane.
+
+## How it is built
+
+The Kitty path is ghostty's, with two changes carried in `patches/ghostty-vt-kitty.patch`. Upstream
+synthesises its `kitty_graphics` build option from `oniguruma`, and the exported `ghostty-vt` module
+force-disables oniguruma — so images compiled out entirely, and every image path in hexe sat behind a
+comptime check that was false. Nothing in the graphics code uses regex; it needs wuffs, for decoding
+PNG. The patch separates the two options and adds the dependency. The second change teaches ghostty's
+readonly stream to handle APC, which is what the Kitty protocol travels in and which that stream had
+always dropped.
+
+Sixel and iTerm2 are hexe's own, in `src/core/image_import.zig`. It watches the pane's byte stream,
+lifts out the sequences carrying an image, decodes them, and injects the pixels as though the program
+had sent Kitty all along. Output carrying no image reaches the VT as the same slices it arrived in,
+and the scan for a sequence start is a vector search for `ESC` rather than a walk — this is the VT's
+hot path, and a per-byte loop there would tax every pane to catch the rare image.
+
+Placements are measured in cell pixels: `core.vt.cell_px`, read from the host's `TIOCGWINSZ` at
+startup and refreshed on every resize, because a font size change moves the pixels without moving the
+rows and columns. A terminal that reports nothing leaves a default 8×16 standing — without some
+figure the arithmetic divides by zero, the placement collapses to zero cells, and an image transmits
+but is never drawn.
+
+Image storage is capped at 64MB per pane. ghostty's own default is 320MB **per screen**, which is
+reasonable for a terminal that is one window and not for a mux with twenty panes.
+
+## Checking it
+
+Two smokes, both of which play the part of a graphics-capable terminal by answering the capability
+query:
+
+- `scripts/smoke_kitty_graphics.py` — a pane draws a Kitty image; assert hexe transmits **and places**
+  it.
+- `scripts/smoke_image_protocols.py` — a pane draws a sixel and an iTerm2 PNG; assert Kitty comes out
+  of the other side, and that the raw payloads never reach the screen as text.
+
+A third covers the failure that images made possible elsewhere:
+`scripts/smoke_reattach_image_intact.py` reattaches to a pane that displayed a megabyte-scale image.
+Backlog replay resynchronises on a newline, and an image payload is base64 with no newline in it, so
+the replay used to start inside the payload and print it as a wall of text.

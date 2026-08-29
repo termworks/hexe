@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const palette_mod = @import("palette.zig");
 const logging = @import("logging.zig");
+const image_import = @import("image_import.zig");
 
 // Re-export ghostty-vt - this IS our terminal emulation
 pub const ghostty = @import("ghostty-vt");
@@ -79,6 +80,11 @@ pub const VT = struct {
     /// later milestone selects a namespace.
     ns_table: palette_mod.NamespaceTable = undefined,
 
+    /// Images arriving in a protocol ghostty's VT does not speak: sixel, and
+    /// iTerm2's inline images. It holds partial sequences across feeds, so it
+    /// is per-pane state and lives for as long as the VT.
+    images: image_import.Importer = .{},
+
     /// Initialize the VT in-place.
     ///
     /// IMPORTANT: Ghostty terminal state must not be moved after initialization.
@@ -114,6 +120,7 @@ pub const VT = struct {
     }
 
     pub fn deinit(self: *VT) void {
+        self.images.deinit(self.allocator);
         self.ns_table.deinit();
         self.render_state.deinit(self.allocator);
         self.kitty_image_cache.deinit();
@@ -136,7 +143,10 @@ pub const VT = struct {
     /// state for sequences that arrive split across PTY reads.
     pub fn feed(self: *VT, data: []const u8) !void {
         self.render_state_dirty = true;
-        try self.stream.nextSlice(data);
+        // Not straight to the stream: sixel and iTerm2 inline images have to be
+        // lifted out and decoded here, because ghostty's VT drops both. Output
+        // carrying neither reaches the stream as the same slices it arrived in.
+        try self.images.feed(self, data);
     }
 
     /// Mark the VT as needing a fresh render snapshot.
