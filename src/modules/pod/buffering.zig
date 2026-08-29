@@ -449,6 +449,98 @@ pub fn alignReplayToLine(data: []const u8, skip: usize, max_scan: usize) usize {
     return skip;
 }
 
+/// Where a replay may begin without handing the frontend the middle of a
+/// string sequence, and what to prepend when it cannot begin outside one.
+pub const ReplayStart = struct {
+    skip: usize,
+    /// Introducer to write before the replayed bytes. Non-empty only when the
+    /// cut is inside a sequence whose terminator is not in the ring: the
+    /// frontend then parses the torn remainder as that sequence and discards
+    /// it, instead of printing the payload.
+    prefix: []const u8 = "",
+};
+
+/// Move a replay start out of the middle of a string sequence (APC, DCS, OSC,
+/// SOS, PM).
+///
+/// `alignReplayToLine` resynchronises on the first LF, which covers CSI and
+/// every sequence a text program emits. It does not cover a Kitty image: the
+/// APC payload is base64, so it contains no LF at all, and it is routinely
+/// larger than both the 64 KiB align scan and the 1 MiB replay tail. The cut
+/// therefore lands inside the payload, the frontend's parser starts in ground
+/// state, and a screenful of base64 prints into the pane on reattach.
+///
+/// The scan runs from the start of the replay data rather than from the cut,
+/// because only the bytes before it say whether the cut is inside a sequence.
+/// It is O(ring) once per attach, off the output hot path. A ring whose own
+/// head is torn can begin mid-payload; the machine stays in ground until an
+/// introducer, so it resynchronises at the payload's own terminator.
+pub fn alignReplayOutOfStringSeq(data: []const u8, skip: usize) ReplayStart {
+    if (skip == 0 or skip >= data.len) return .{ .skip = skip };
+
+    const State = enum { ground, esc, string, string_esc };
+    var state: State = .ground;
+    // OSC alone accepts BEL as a terminator; inside an APC or DCS a BEL is
+    // payload, and consuming it there would end the sequence early.
+    var osc = false;
+
+    for (data[0..skip]) |byte| {
+        switch (state) {
+            .ground => if (byte == 0x1b) {
+                state = .esc;
+            },
+            .esc => switch (byte) {
+                'P', 'X', '^', '_' => {
+                    state = .string;
+                    osc = false;
+                },
+                ']' => {
+                    state = .string;
+                    osc = true;
+                },
+                0x1b => {},
+                else => state = .ground,
+            },
+            .string => switch (byte) {
+                0x1b => state = .string_esc,
+                0x07 => if (osc) {
+                    state = .ground;
+                },
+                else => {},
+            },
+            .string_esc => switch (byte) {
+                '\\' => state = .ground,
+                0x1b => {},
+                else => state = .string,
+            },
+        }
+    }
+
+    switch (state) {
+        .ground => return .{ .skip = skip },
+        // The cut fell between an ESC and its introducer. Restoring the ESC is
+        // enough: the introducer is the next byte replayed.
+        .esc => return .{ .skip = skip, .prefix = "\x1b" },
+        .string, .string_esc => {},
+    }
+
+    if (findStringTerminator(data, skip, osc)) |end| return .{ .skip = end };
+
+    return .{ .skip = skip, .prefix = if (osc) "\x1b]" else "\x1b_" };
+}
+
+/// Offset just past the terminator of a string sequence still open at `from`.
+fn findStringTerminator(data: []const u8, from: usize, osc: bool) ?usize {
+    var i = from;
+    while (i < data.len) : (i += 1) {
+        if (osc and data[i] == 0x07) return i + 1;
+        if (data[i] != 0x1b) continue;
+        if (i + 1 >= data.len) return null;
+        if (data[i + 1] == '\\') return i + 2;
+    }
+    return null;
+}
+
 /// Whether a replay starting at `skip` omits the alt-screen entry the app is
 /// currently inside.
 ///
@@ -474,6 +566,60 @@ pub fn replayNeedsAltEnter(
 /// What to prepend so the frontend's VT enters the alt screen before the
 /// replayed paint arrives. Matches what the app itself sent.
 pub const ALT_ENTER_SEQ = "\x1b[?1049h";
+
+test "alignReplayOutOfStringSeq clears a cut inside a Kitty image payload" {
+    // A Kitty image: APC introducer, base64 body with no LF anywhere, ST.
+    const img = "\x1b_Gf=32,s=4,v=4,i=1;" ++ "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=" ++ "\x1b\\";
+    const data = "before\n" ++ img ++ "after\n";
+    const cut = 7 + 25; // inside the base64 body
+
+    const start = alignReplayOutOfStringSeq(data, cut);
+    try testing.expectEqualStrings("", start.prefix);
+    try testing.expectEqualStrings("after\n", data[start.skip..]);
+
+    // A cut outside any sequence is left alone.
+    try testing.expectEqual(@as(usize, 3), alignReplayOutOfStringSeq(data, 3).skip);
+    const past = alignReplayOutOfStringSeq(data, 7 + img.len);
+    try testing.expectEqual(@as(usize, 7 + img.len), past.skip);
+    try testing.expectEqualStrings("", past.prefix);
+}
+
+test "alignReplayOutOfStringSeq re-opens a sequence the ring never terminates" {
+    // The image is still being transmitted, so no ST is in the ring: the
+    // remainder has to be swallowed as an APC rather than printed.
+    const data = "x\x1b_Gf=32,i=1;QUJDREVGR0hJSkt";
+    const start = alignReplayOutOfStringSeq(data, 20);
+    try testing.expectEqual(@as(usize, 20), start.skip);
+    try testing.expectEqualStrings("\x1b_", start.prefix);
+
+    // An unterminated OSC is re-opened as an OSC, which also accepts BEL.
+    const osc = "\x1b]0;a very long title that runs past the cut";
+    const osc_start = alignReplayOutOfStringSeq(osc, 20);
+    try testing.expectEqualStrings("\x1b]", osc_start.prefix);
+}
+
+test "alignReplayOutOfStringSeq handles BEL, split ESC and back-to-back chunks" {
+    // BEL ends an OSC...
+    const bel = "\x1b]0;title\x07rest";
+    try testing.expectEqualStrings("rest", bel[alignReplayOutOfStringSeq(bel, 5).skip..]);
+
+    // ...but inside an APC it is payload, not a terminator.
+    const apc = "\x1b_G;aa\x07bb\x1b\\tail";
+    const apc_start = alignReplayOutOfStringSeq(apc, 5);
+    try testing.expectEqualStrings("tail", apc[apc_start.skip..]);
+
+    // A cut between the ESC and its introducer only needs the ESC back.
+    const split = "ab\x1b_G;xx\x1b\\";
+    const split_start = alignReplayOutOfStringSeq(split, 3);
+    try testing.expectEqual(@as(usize, 3), split_start.skip);
+    try testing.expectEqualStrings("\x1b", split_start.prefix);
+
+    // Chunked transmission: landing in chunk one resumes at chunk two, which
+    // ghostty ignores as a continuation with no loading image. No garbage.
+    const chunked = "\x1b_Gm=1;AAAA\x1b\\\x1b_Gm=0;BBBB\x1b\\ok";
+    const chunk_start = alignReplayOutOfStringSeq(chunked, 8);
+    try testing.expectEqualStrings("\x1b_Gm=0;BBBB\x1b\\ok", chunked[chunk_start.skip..]);
+}
 
 test "alignReplayToLine never starts inside an escape sequence" {
     const data = "aaaa\x1b[38;5;250mBBBB\nCCCC\n";
