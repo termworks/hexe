@@ -46,6 +46,43 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     })) |liblink_dep| liblink_dep.module("liblink") else null;
 
+    // Per-module optimization, the same trade oslo makes per-package with
+    // `opt-level = "z"`. Zig spells it per-module: every module carries its own
+    // optimize mode, so code that runs once can be built for size while the VT
+    // and the render loop keep -OReleaseFast.
+    //
+    // ONLY ReleaseFast is downgraded. ReleaseSmall turns runtime safety OFF, so
+    // mapping ReleaseSafe onto it would quietly drop the checks that mode
+    // exists for, and Debug has to stay debuggable.
+    const cold: std.builtin.OptimizeMode = if (optimize == .ReleaseFast) .ReleaseSmall else optimize;
+
+    // `-Dsmall` additionally builds the ROOT module for size, and that is a
+    // different bargain from the one above -- worth stating, because the
+    // numbers are not intuitive.
+    //
+    // Measured on 2026-08-30, ReleaseFast + strip, x86_64:
+    //
+    //   default (cold leaves only)      6,217,648
+    //   -Dsmall=true (root as well)     3,942,040   -2.28 MB, -37%
+    //   -OReleaseSmall everywhere       3,529,952
+    //
+    // Almost none of that comes from hexe's own argument parsing. `std` follows
+    // the ROOT module's mode, so building the root small builds all of std
+    // small -- every hash map, formatter and sort the hot path calls into. That
+    // is why the root is worth 2.28 MB where the cold leaves are worth 111 KB.
+    //
+    // The cost, from `scripts/bench_render.py` run INTERLEAVED between the two
+    // binaries, n=8 each: 1.135 ms/row against 1.188, so about **4.6% slower**.
+    // Interleaving matters. Timing the two builds one after the other put the
+    // difference at 15%, and a re-run then had the FASTER binary looking
+    // slower -- that number was this machine's load, not the compiler's output.
+    //
+    // 4.6% for a third of the binary is a good trade for most people. It is
+    // still not the default, because a terminal that is out of the way is the
+    // thing hexe is for, and 6 MB is not a problem anyone has reported.
+    const small = b.option(bool, "small", "Build the root module for size too: ~2.3MB smaller, ~5% slower VT") orelse false;
+    const root_optimize: std.builtin.OptimizeMode = if (small) cold else optimize;
+
     // Create core module
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/mod.zig"),
@@ -85,7 +122,7 @@ pub fn build(b: *std.Build) void {
     const shp_module = b.createModule(.{
         .root_source_file = b.path("src/modules/shell/mod.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
     });
     shp_module.addImport("core", core_module);
 
@@ -93,7 +130,7 @@ pub fn build(b: *std.Build) void {
     const pop_module = b.createModule(.{
         .root_source_file = b.path("src/modules/popup/mod.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
     });
     pop_module.addImport("core", core_module);
 
@@ -124,7 +161,7 @@ pub fn build(b: *std.Build) void {
     const web_module = b.createModule(.{
         .root_source_file = b.path("src/frontends/web/mod.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
     });
     web_module.addImport("core", core_module);
     web_module.addImport("frontend_core", frontend_core_module);
@@ -132,7 +169,7 @@ pub fn build(b: *std.Build) void {
     const syslink_module = b.createModule(.{
         .root_source_file = b.path("src/frontends/syslink/mod.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
     });
     syslink_module.addImport("core", core_module);
     syslink_module.addImport("frontend_core", frontend_core_module);
@@ -167,7 +204,7 @@ pub fn build(b: *std.Build) void {
     const cli_root = b.createModule(.{
         .root_source_file = b.path("src/cli/app.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = root_optimize,
         .link_libc = true,
     });
     cli_root.addImport("core", core_module);
