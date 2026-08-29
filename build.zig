@@ -75,21 +75,24 @@ pub fn build(b: *std.Build) void {
 
     // `-Dsmall` additionally builds the ROOT module for size: 3,897,128 bytes,
     // another 2.06 MB off. It is not the default, and the reason is worth
-    // writing down because it is not obvious.
+    // writing down because it is not obvious and it is not fixable here.
     //
-    // The render path is `anytype` generics -- `renderTo(state, renderer:
-    // anytype)`, `drawRenderState(..., state: anytype)` and friends. A generic
-    // is compiled where it is INSTANTIATED, not where it is declared, and the
-    // instantiation chain for the frontend roots in this module. So building the
-    // root for size builds the render path for size no matter what mode
-    // `terminal_module` carries: measured, `loop_render.renderTo` goes from
-    // 48,147 bytes to 20,605 and `vt_bridge.drawRenderState` from 32,580 to
-    // 16,091, and the frame cost rises about 4.6%.
+    // `std` follows the ROOT module's optimize mode. There is one std in the
+    // compilation and no way to ask for two, so building the root for size
+    // builds every hash map, formatter, sorter and writer for size -- including
+    // the ones inlined into the render path. Measured, `loop_render.renderTo`
+    // goes from 48,147 bytes to 20,605 and `vt_bridge.drawRenderState` from
+    // 32,580 to 16,091, and the frame cost rises about 4.6%.
     //
-    // That is the whole reason the cold split above is worth only 374 KB rather
-    // than 2.4 MB: everything that would really move is generic, and generics
-    // follow the root. Making more of hexe non-generic -- concrete `*Renderer`
-    // instead of `renderer: anytype` -- is what would let the split go further.
+    // Those two functions are NOT generic and their module stays ReleaseFast;
+    // what shrinks inside them is the std they inlined. Rewriting the render
+    // path to concrete types was tried on the theory that `anytype` generics
+    // were being instantiated in the root's context, and it changed the sizes
+    // by nothing at all -- the conversion was kept because concrete types are
+    // better, not because it moved this number.
+    //
+    // So the cold split above is worth 374 KB and cannot be worth much more.
+    // The rest of the binary is std, and std has one mode per compilation.
     const small = b.option(bool, "small", "Also build the root module for size: ~2MB smaller, ~5% slower rendering") orelse false;
     const root_optimize: std.builtin.OptimizeMode = if (small) cold else optimize;
 
