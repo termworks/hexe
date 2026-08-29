@@ -30,6 +30,31 @@ by `img2sixel` inside a pane arrives at your terminal as a Kitty image.
   cell size from `TIOCGWINSZ` gets nothing and falls back to its own default. hexe knows the real
   figure from the host and uses it for placement; it does not yet pass it down to the pane.
 
+## Images hexe puts there itself
+
+Everything above is a program inside a pane drawing something. The other
+direction is hexe placing an image because a caller asked, through the same
+`draw` verb that takes bytes:
+
+```console
+$ hexe api draw '"logo"' '{"image":"/tmp/logo.png","corner":"topright","width":20,"height":8}'
+```
+
+```lua
+hexe.draw("logo", { image = "/tmp/logo.png", corner = "topright", width = 20, height = 8 })
+```
+
+`image` is a path to a PNG. hexe reads it and encodes it as a Kitty placement
+scaled to the rectangle, and that becomes the drawing's bytes — so it is not a
+second way of drawing, it is the existing one with the bytes supplied. It then
+travels the path every other image takes, which is why it works on a terminal
+with no graphics without another line of code.
+
+A drawing gets a stable image id derived from its name, so one redrawn every
+second occupies a single slot instead of accumulating an image per update. The
+file is capped at 16MB, and anything that is not a PNG is refused rather than
+drawn as garbage: `src/core/image_encode.zig`.
+
 ## When the terminal cannot draw images
 
 hexe asks at startup whether the host speaks the Kitty protocol. If it does not, the image is drawn
@@ -78,7 +103,7 @@ reasonable for a terminal that is one window and not for a mux with twenty panes
 
 ## Checking it
 
-Three smokes drive a real frontend over a pty, playing the part of the terminal:
+Four smokes drive a real frontend over a pty, playing the part of the terminal:
 
 - `scripts/smoke_kitty_graphics.py` — a pane draws a Kitty image; assert hexe transmits **and places**
   it.
@@ -87,8 +112,11 @@ Three smokes drive a real frontend over a pty, playing the part of the terminal:
 - `scripts/smoke_image_fallback.py` — the deliberate opposite: never answer the capability query, so
   the frontend believes it is on a plain terminal, then assert half blocks appear carrying the
   image's colour and that nothing was transmitted.
+- `scripts/smoke_draw_image.py` — `hexe api draw` with an `image` path, run twice against two
+  separate stacks: one whose terminal answers the capability query and one whose does not, asserting
+  the same call produces a Kitty image for the first and half blocks for the second.
 
-A fourth covers a failure that images made possible elsewhere:
+A fifth covers a failure that images made possible elsewhere:
 `scripts/smoke_reattach_image_intact.py` reattaches to a pane that displayed a megabyte-scale image.
 Backlog replay resynchronises on a newline, and an image payload is base64 with no newline in it, so
 the replay used to start inside the payload and print it as a wall of text.

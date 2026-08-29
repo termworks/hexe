@@ -300,6 +300,27 @@ pub fn build(b: *std.Build) void {
     });
     vt_test_module.addImport("core", core_module);
 
+    // Encoding an image file as a Kitty placement, which is how hexe's own
+    // surfaces (drawings, status zones, sprites) show a picture.
+    const image_encode_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/image_encode.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_image_encode_tests = b.addRunArtifact(image_encode_tests);
+
+    // The sixel decoder: bytes in, RGBA out, no terminal involved.
+    const sixel_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/sixel.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_sixel_tests = b.addRunArtifact(sixel_tests);
+
     const vt_tests = b.addTest(.{
         .root_module = vt_test_module,
     });
@@ -607,6 +628,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_input_tests.step);
     test_step.dependOn(&run_mouse_protocol_tests.step);
     test_step.dependOn(&run_image_fallback_tests.step);
+    test_step.dependOn(&run_image_encode_tests.step);
+    test_step.dependOn(&run_sixel_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
     test_step.dependOn(&run_lua_events_tests.step);
     test_step.dependOn(&run_api_json_tests.step);
