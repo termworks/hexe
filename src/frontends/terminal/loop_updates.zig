@@ -98,7 +98,7 @@ pub fn updateOverlaysPopupsAndKeyTimers(state: *State, now_ms: i64) void {
         state.needs_render = true;
     }
 
-    // Update overlays (expire info overlays, keycast entries).
+    // Update overlays (expire info overlays).
     if (state.overlays.update()) {
         state.needs_render = true;
     }

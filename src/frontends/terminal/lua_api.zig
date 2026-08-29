@@ -29,6 +29,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const drawings_mod = @import("drawings.zig");
 const zlua = @import("zlua");
 const Lua = zlua.Lua;
 const LuaState = zlua.LuaState;
@@ -842,6 +843,117 @@ fn hexe_act(lstate: ?*LuaState) callconv(.c) c_int {
 }
 
 /// `ctx.notify(message [, ms])` — mux-level notification.
+/// Read an optional string field, duplicated for the caller to own.
+fn optOwnedString(lua: *Lua, idx: i32, name: [:0]const u8, allocator: std.mem.Allocator) ?[]u8 {
+    const ty = lua.getField(idx, name);
+    defer lua.pop(1);
+    if (ty != .string) return null;
+    const v = lua.toString(-1) catch return null;
+    return allocator.dupe(u8, v) catch null;
+}
+
+/// Read an optional unsigned field, clamped into `u16`.
+fn optU16(lua: *Lua, idx: i32, name: [:0]const u8, fallback: u16) u16 {
+    const ty = lua.getField(idx, name);
+    defer lua.pop(1);
+    if (ty != .number) return fallback;
+    const v = lua.toNumber(-1) catch return fallback;
+    if (v <= 0) return 0;
+    if (v >= 65535) return 65535;
+    return @intFromFloat(v);
+}
+
+/// `ctx.draw(name, {content=, corner=|x=,y=, width=, height=, ttl_ms=})`
+///
+/// Puts something on the screen and leaves it there. hexe has always been able
+/// to draw art at a rectangle -- a pane's sprite is exactly that -- but only
+/// its own config could ask for one. This is the same capability, addressed by
+/// name, from outside.
+///
+/// Naming it twice replaces it, so a caller updating a drawing does not have to
+/// remove it first and flicker.
+fn hexe_draw(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    const name = lua.toString(1) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    if (name.len == 0 or lua.typeOf(2) != .table) {
+        lua.pushBoolean(false);
+        return 1;
+    }
+    const allocator = state.allocator;
+
+    const width = optU16(lua, 2, "width", 0);
+    const height = optU16(lua, 2, "height", 0);
+    if (width == 0 or height == 0) {
+        lua.pushBoolean(false);
+        return 1;
+    }
+
+    // Where. A corner is resolved at render time so it survives a resize; x/y
+    // is taken literally.
+    var anchor: drawings_mod.Anchor = .{ .corner = .top_left };
+    if (optOwnedString(lua, 2, "corner", allocator)) |c| {
+        defer allocator.free(c);
+        anchor = .{ .corner = drawings_mod.Corner.fromString(c) orelse .top_left };
+    } else {
+        anchor = .{ .at = .{ .x = optU16(lua, 2, "x", 0), .y = optU16(lua, 2, "y", 0) } };
+    }
+
+    const ttl = optU16(lua, 2, "ttl_ms", 0);
+    const expires_at: i64 = if (ttl == 0) 0 else std.time.milliTimestamp() + @as(i64, ttl);
+
+    // The caller's bytes. A drawing renders nothing itself and asks nothing to
+    // render for it: whoever wants a painter runs one and sends what it draws.
+    const content = optOwnedString(lua, 2, "content", allocator) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+
+    const owned_name = allocator.dupe(u8, name) catch {
+        allocator.free(content);
+        lua.pushBoolean(false);
+        return 1;
+    };
+
+    state.drawings.put(.{
+        .name = owned_name,
+        .anchor = anchor,
+        .width = width,
+        .height = height,
+        .content = content,
+        .expires_at = expires_at,
+    }) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    state.needs_render = true;
+    lua.pushBoolean(true);
+    return 1;
+}
+
+/// `ctx.undraw(name)` -- take one back off the screen.
+fn hexe_undraw(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    const name = lua.toString(1) catch {
+        lua.pushBoolean(false);
+        return 1;
+    };
+    const removed = state.drawings.remove(name);
+    if (removed) state.needs_render = true;
+    lua.pushBoolean(removed);
+    return 1;
+}
+
 fn hexe_notify(lstate: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(lstate orelse return 0);
     const state = liveState(lua) orelse {
@@ -1922,6 +2034,8 @@ const ENTRIES = [_]Entry{
     .{ .name = "env", .func = hexe_env, .about = "a pane's environment", .needs = .screen, .pane_local = true },
     .{ .name = "act", .func = hexe_act, .about = "perform a bound action by name" },
     .{ .name = "notify", .func = hexe_notify, .about = "put a line in front of the user", .needs = .popup },
+    .{ .name = "draw", .func = hexe_draw, .about = "put something on the screen and leave it there", .needs = .popup },
+    .{ .name = "undraw", .func = hexe_undraw, .about = "take a drawing back off the screen", .needs = .popup },
     .{ .name = "send", .func = hexe_send, .about = "write bytes into a pane, uninterpreted", .needs = .typing, .pane_local = true },
     // Scoped, this is "focus me" -- the selector cannot name another pane, so what a
     // pane buys is the ability to ask for the cursor back after it opened something

@@ -83,7 +83,7 @@ pub const PluginDef = struct {
     /// Run through `/bin/sh -c`, detached, with stdio closed.
     command: []const u8,
     /// The package directory it came from, if it is an installed package. Used
-    /// as the command's working directory, so a manifest can say
+    /// as the command's working directory, so a plugin can say
     /// `command = "./backend.sh"` without knowing where it will be installed.
     dir: []const u8 = "",
     /// What it may ask hexe to do, beyond the always-granted `read` floor.
@@ -696,7 +696,6 @@ pub const Config = struct {
         clipboard_copy,
         clipboard_request,
         system_notify,
-        keycast_toggle,
         sprite_toggle,
         split_h,
         split_v,
@@ -737,7 +736,6 @@ pub const Config = struct {
         clipboard_copy, // copy current mux selection via vaxis OSC52
         clipboard_request, // request system clipboard via OSC52 through vaxis
         system_notify, // send desktop notification via terminal OSC
-        keycast_toggle, // toggle keycast overlay
         sprite_toggle, // toggle pokemon sprite overlay
         split_h,
         split_v,
@@ -1079,7 +1077,6 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action_type, "clipboard.request")) return .clipboard_request;
     if (std.mem.eql(u8, action_type, "system.notify")) return .system_notify;
-    if (std.mem.eql(u8, action_type, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action_type, "overlay.sprite_toggle")) return .sprite_toggle;
     if (std.mem.eql(u8, action_type, "split.h")) return .split_h;
     if (std.mem.eql(u8, action_type, "split.v")) return .split_v;
@@ -1146,7 +1143,6 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action, "clipboard.request")) return .clipboard_request;
     if (std.mem.eql(u8, action, "system.notify")) return .system_notify;
-    if (std.mem.eql(u8, action, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action, "overlay.sprite_toggle")) return .sprite_toggle;
     if (std.mem.eql(u8, action, "split.h")) return .split_h;
     if (std.mem.eql(u8, action, "split.v")) return .split_v;

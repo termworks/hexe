@@ -242,6 +242,20 @@ pub fn isUnsafeMode() bool {
     return true;
 }
 
+/// Whether plugins run at all. `--noplugin`, or `HEXE_NOPLUGIN=1`.
+///
+/// The first question when a tool misbehaves is "is it me or a plugin?", and a
+/// tool with no way to start without them makes that unanswerable.
+var plugins_enabled: bool = true;
+
+pub fn setPluginsEnabled(on: bool) void {
+    plugins_enabled = on;
+}
+
+pub fn pluginsEnabled() bool {
+    return plugins_enabled and posix.getenv("HEXE_NOPLUGIN") == null;
+}
+
 /// Get the config directory path
 pub fn getConfigDir(allocator: std.mem.Allocator) ![]const u8 {
     if (posix.getenv("XDG_CONFIG_HOME")) |xdg| {
@@ -309,7 +323,7 @@ pub const LuaRuntime = struct {
     allocator: std.mem.Allocator,
     unsafe_mode: bool,
     last_error: ?[]const u8 = null,
-    /// Whether installed packages have already run in this runtime.
+    /// Whether the runtimepath's plugins have already run in this runtime.
     plugins_loaded: bool = false,
     config_builder: ?*ConfigBuilder = null,
     /// What the caller is willing to grant a project file that asks. Empty by
@@ -520,14 +534,12 @@ pub const LuaRuntime = struct {
         // Before the config is finished, not after: `applyReturnedConfig` calls
         // `__finish`, which snapshots the registration tables. A plugin binding
         // a key after that point registers into a table nobody reads again.
-        self.loadInstalledPlugins();
+        self.loadPlugins();
 
         try self.applyReturnedConfig();
     }
 
-    /// Load a Lua config file and return the top-level table
-    /// Returns the index of the table on the stack (always 1 after successful load)
-    /// Run every installed, approved plugin's entry file.
+    /// Run every plugin on the runtimepath.
     ///
     /// After the user's config chunk and before it is finished, so a plugin's
     /// `hexe.key(...)` lands in the same registry the user's own bindings do --
@@ -535,67 +547,51 @@ pub const LuaRuntime = struct {
     /// string. A plugin's keybinding belongs to the plugin, not pasted into
     /// somebody's config.
     ///
-    /// Untrusted packages are skipped with a warning rather than run: the
-    /// manifest exists to be read first, and `hexe plugin allow` is how that
-    /// reading is recorded.
-    pub fn loadInstalledPlugins(self: *Self) void {
-        // A runtime loads them once. Both config paths call through here, and
-        // running a plugin's entry twice would double every binding it makes.
+    /// **Nothing is asked and nothing is approved.** What is on the path runs,
+    /// because somebody put it there; a prompt would only ask them to confirm a
+    /// decision they already made by copying the directory in. Approval bound to
+    /// a content hash is worse than nothing here: it revokes itself on the
+    /// author's own edit, so installing hexe used to disable the plugins hexe
+    /// itself ships.
+    ///
+    /// **A raise is reported and the rest still load** -- deliberately unlike
+    /// init.lua, where a raise is fatal because carrying on would silently apply
+    /// settings nobody asked for. A plugin failing is one of several, and taking
+    /// hexe down with it is worse than doing without it.
+    pub fn loadPlugins(self: *Self) void {
+        // A runtime loads them once. Every config path calls through here, and
+        // running a plugin twice doubles every binding it made -- which looks
+        // exactly like a plugin whose handler fires twice.
         if (self.plugins_loaded) return;
         self.plugins_loaded = true;
+        if (!pluginsEnabled()) return;
 
-        const pkg = @import("plugin_pkg.zig");
-        const names = pkg.list(self.allocator) catch return;
-        defer {
-            for (names) |n| self.allocator.free(n);
-            self.allocator.free(names);
-        }
+        const rtp = @import("runtimepath.zig");
+        const list = rtp.roots(self.allocator) catch return;
+        defer rtp.deinitRoots(self.allocator, list);
+        const files = rtp.pluginFiles(self.allocator, list) catch return;
+        defer rtp.deinitFiles(self.allocator, files);
 
-        for (names) |name| {
-            var manifest = pkg.readManifest(self.allocator, name) catch |err| {
-                log.warn("plugin '{s}': its manifest did not read: {s}", .{ name, @errorName(err) });
-                continue;
-            };
-            defer manifest.deinit(self.allocator);
+        for (files) |file| {
+            const path_z = self.allocator.dupeZ(u8, file.path) catch continue;
+            defer self.allocator.free(path_z);
 
-            if (!pkg.isTrusted(self.allocator, name, manifest.entry)) {
-                log.warn("plugin '{s}' is not approved; run `hexe plugin allow {s}`", .{ name, name });
-                continue;
-            }
-
-            // The helper process, if it declared one, joins the same list an
-            // inline `hexe.plugin{}` uses -- one way to start a helper, not two.
-            const dir = pkg.pluginPath(self.allocator, name) catch continue;
-            defer self.allocator.free(dir);
-
-            // The helper process, if it declared one, joins the same list an
-            // inline `hexe.plugin{}` uses -- one way to start a helper, not two.
-            if (manifest.command.len > 0) {
-                if (self.getOrCreateMuxBuilder()) |mux| {
-                    mux.appendPackagePlugin(name, manifest.command, dir, manifest.granted) catch {};
-                } else |_| {}
-            }
-            const entry = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir, manifest.entry }) catch continue;
-            defer self.allocator.free(entry);
-            const entry_z = self.allocator.dupeZ(u8, entry) catch continue;
-            defer self.allocator.free(entry_z);
-
-            // `.text`, never bytecode: the manifest was read from source and the
-            // body has to be the same kind of thing, or the review was of
-            // something else.
-            self.lua.loadFile(entry_z, .text) catch {
-                log.warn("plugin '{s}': {s} did not load: {s}", .{ name, manifest.entry, self.getErrorMessage() });
+            // `.text`, never bytecode. Lua 5.4 has no bytecode verifier, so a
+            // compiled chunk gets arbitrary VM memory access and walks straight
+            // past the source-level sandbox -- and a plugin is the file most
+            // likely to have come from somewhere else.
+            self.lua.loadFile(path_z, .text) catch {
+                log.warn("plugin '{s}' did not load: {s}", .{ file.path, self.getErrorMessage() });
                 self.lua.pop(1);
                 continue;
             };
-            // The plugin's own directory, as the chunk's `...` -- Lua's own
-            // convention for telling a chunk where it came from. A package that
-            // ships a script beside its `init.lua` has no other way to name it,
-            // and hardcoding the install path would break the moment
-            // XDG_DATA_HOME moved.
-            _ = self.lua.pushString(dir);
+            // Its root, as the chunk's `...` -- Lua's own way of telling a chunk
+            // where it lives. A plugin shipping a script or a data file beside
+            // its `plugin/` has no other way to name it, and hardcoding the
+            // install path breaks the moment XDG_DATA_HOME moves.
+            _ = self.lua.pushString(file.root);
             self.lua.protectedCall(.{ .args = 1, .results = 0 }) catch {
-                log.warn("plugin '{s}' raised while loading: {s}", .{ name, self.getErrorMessage() });
+                log.warn("plugin '{s}' raised while loading: {s}", .{ file.path, self.getErrorMessage() });
                 self.lua.pop(1);
                 continue;
             };
@@ -629,7 +625,7 @@ pub const LuaRuntime = struct {
             return error.LuaError;
         };
 
-        self.loadInstalledPlugins();
+        self.loadPlugins();
         try self.applyReturnedConfig();
     }
 
@@ -850,6 +846,14 @@ pub const LuaRuntime = struct {
             // `read` is not something a plugin declares: it is the floor.
             // Without it nothing can even name a pane to act on.
             try mux.appendPluginWithAccess(name, command, granted.merge(config.access_mod.Set.baseline));
+
+            // `dir` is where the helper runs. A plugin file gets its own root as
+            // the chunk's `...`, so it passes that -- which is why there is no
+            // manifest any more: everything one used to declare, a plugin says
+            // for itself through the registrar the config already had.
+            if (self.getString(-1, "dir")) |d| {
+                try mux.setLastPluginDir(d);
+            }
         }
     }
 
@@ -1055,16 +1059,6 @@ pub const LuaRuntime = struct {
                 pop_builder.widgets.pokemon_position = try self.allocator.dupe(u8, v);
             }
             if (self.getNumber(-1, "shiny_chance")) |v| pop_builder.widgets.pokemon_shiny_chance = @floatCast(v);
-        }
-        if (self.pushTable(-1, "keycast")) {
-            defer self.pop();
-            if (self.getBool(-1, "enabled")) |v| pop_builder.widgets.keycast_enabled = v;
-            if (self.getString(-1, "position")) |v| {
-                pop_builder.widgets.keycast_position = try self.allocator.dupe(u8, v);
-            }
-            if (self.getInt(i64, -1, "duration_ms")) |v| pop_builder.widgets.keycast_duration_ms = v;
-            if (self.getInt(u8, -1, "max_entries")) |v| pop_builder.widgets.keycast_max_entries = v;
-            if (self.getInt(i64, -1, "grouping_timeout_ms")) |v| pop_builder.widgets.keycast_grouping_timeout_ms = v;
         }
         if (self.pushTable(-1, "digits")) {
             defer self.pop();
@@ -1485,24 +1479,20 @@ fn modifierNameToMask(value: []const u8) ?u8 {
 }
 
 fn setupUnsafeRequire(lua: *Lua, allocator: std.mem.Allocator) !void {
-    // Set up restricted package.path (only hexe config dirs)
-    const config_dir = getConfigDir(allocator) catch |err| {
-        log.warn("failed to resolve config dir for Lua package.path: {}", .{err});
+    // `package.path` is built from the same roots the plugins came from, so a
+    // plugin's `lua/` is requireable wherever the plugin lives.
+    //
+    // The verb matters now that declarations register themselves: `require`
+    // loads a file once however many times it is named, while `dofile` runs it
+    // again and registers a second copy of every key and layout in it.
+    const rtp = @import("runtimepath.zig");
+    const list = rtp.roots(allocator) catch |err| {
+        log.warn("failed to resolve the runtimepath for Lua package.path: {}", .{err});
         return;
     };
-    defer allocator.free(config_dir);
+    defer rtp.deinitRoots(allocator, list);
 
-    const path = std.fmt.allocPrint(
-        allocator,
-        // The config directory itself is on the path, not only its `lua/`
-        // subdirectory, so a fragment beside init.lua is `require("layout")`.
-        //
-        // The verb matters now that declarations register themselves: `require`
-        // loads a file once however many times it is named, while `dofile` runs
-        // it again and registers a second copy of every key and layout in it.
-        "{s}/?.lua;{s}/?/init.lua;{s}/lua/?.lua;{s}/lua/?/init.lua;./.hexe/lua/?.lua;./.hexe/lua/?/init.lua",
-        .{ config_dir, config_dir, config_dir, config_dir },
-    ) catch |err| {
+    const path = rtp.requirePath(allocator, list) catch |err| {
         log.warn("failed to allocate Lua package.path: {}", .{err});
         return;
     };
@@ -1636,7 +1626,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "local status=expect_table('status', cfg.status, true); if status then reject_unknown_fields('status', status, { enabled=true, view=true, exec=true, refresh_ms=true, stale_ms=true, float_title_view=true, container_title_view=true, sprite_view=true, zones=true, shrink=true }); local zones=expect_table('status.zones', status.zones, true); if zones then if status.view~=nil then error('config error: status.view and status.zones are mutually exclusive; a bar is either one full-width view or three zones',2) end; reject_unknown_fields('status.zones', zones, { left=true, center=true, right=true }); local any=false; for _,k in ipairs({'left','center','right'}) do local z=expect_table('status.zones.'..k, zones[k], true); if z then reject_unknown_fields('status.zones.'..k, z, { view=true }); if type(z.view)~='string' or #z.view==0 then type_error('status.zones.'..k..'.view','non-empty string',type(z.view)) end; any=true end end; if not any then error('config error: status.zones names no zone; give at least one of left, center, right',2) end end; if status.shrink~=nil then if type(status.shrink)~='table' or #status.shrink~=3 then error('config error: status.shrink must list all three zones, e.g. { \"center\", \"right\", \"left\" }',2) end; local sawz={} for _,v in ipairs(status.shrink) do if v~='left' and v~='center' and v~='right' then error('config error: status.shrink entries must be left, center or right',2) end; if sawz[v] then error('config error: status.shrink lists '..v..' twice',2) end; sawz[v]=true end end end; " ++
         "local palette=expect_table('palette', cfg.palette, true); if palette then reject_unknown_fields('palette', palette, { namespaces=true, osc=true }); if palette.namespaces~=nil and type(palette.namespaces)~='boolean' then type_error('palette.namespaces','boolean',type(palette.namespaces)) end; if palette.osc~=nil then if type(palette.osc)~='number' then type_error('palette.osc','number',type(palette.osc)) end; if palette.osc<1 or palette.osc>10000 or palette.osc%1~=0 then error('config error: palette.osc must be integer 1..10000',2) end; local reserved={[0]=true,[1]=true,[2]=true,[4]=true,[5]=true,[7]=true,[9]=true,[99]=true,[104]=true,[105]=true,[133]=true,[777]=true}; if reserved[palette.osc] or (palette.osc>=10 and palette.osc<=19) or (palette.osc>=50 and palette.osc<=59) or (palette.osc>=110 and palette.osc<=119) then error('config error: palette.osc '..palette.osc..' is reserved; hexe already forwards or consumes that OSC',2) end end end; " ++
         "local names=expect_table('names', cfg.names, true); if names then reject_unknown_fields('names', names, { session=true, pane=true, order=true, suffix=true }); for _,k in ipairs({'session','pane'}) do local d=names[k]; if d~=nil then if type(d)=='table' then if #d==0 then error('config error: names.'..k..' is an empty list; omit it to use the built-in pool',2) end; for i,v in ipairs(d) do if type(v)~='string' then type_error('names.'..k..'['..i..']','string',type(v)) end; if not v:match('^[a-z0-9][a-z0-9._%-]*$') then error('config error: names.'..k..'['..i..']=\"'..v..'\" must match [a-z0-9][a-z0-9._-]* -- a name is also a filename and a CLI argument',2) end; if #v>32 then error('config error: names.'..k..'['..i..'] is longer than 32 characters',2) end end elseif type(d)~='string' then type_error('names.'..k,'list of names or hexe.command(...)',type(d)) end end end; if names.order~=nil then if type(names.order)~='string' then type_error('names.order','string',type(names.order)) end; if names.order~='random' and names.order~='sequential' then error('config error: names.order must be \"random\" or \"sequential\"',2) end end; if names.suffix~=nil then if type(names.suffix)~='string' then type_error('names.suffix','string',type(names.suffix)) end; if #names.suffix==0 then error('config error: names.suffix must not be empty',2) end end end; " ++
-        "local pop=expect_table('pop', cfg.pop, true); if pop then local notify=expect_table('pop.notify', pop.notify, true); if notify and notify.carrier~=nil then error('config error: pop.notify.carrier is removed; use pop.notify.mux',2) end; local confirm=expect_table('pop.confirm', pop.confirm, true); if confirm and confirm.carrier~=nil then error('config error: pop.confirm.carrier is removed; use pop.confirm.mux',2) end; local choose=expect_table('pop.choose', pop.choose, true); if choose and choose.carrier~=nil then error('config error: pop.choose.carrier is removed; use pop.choose.mux',2) end; expect_table('pop.widgets', pop.widgets, true) end; " ++
+        "local pop=expect_table('pop', cfg.pop, true); if pop then local notify=expect_table('pop.notify', pop.notify, true); if notify and notify.carrier~=nil then error('config error: pop.notify.carrier is removed; use pop.notify.mux',2) end; local confirm=expect_table('pop.confirm', pop.confirm, true); if confirm and confirm.carrier~=nil then error('config error: pop.confirm.carrier is removed; use pop.confirm.mux',2) end; local choose=expect_table('pop.choose', pop.choose, true); if choose and choose.carrier~=nil then error('config error: pop.choose.carrier is removed; use pop.choose.mux',2) end; local widgets=expect_table('pop.widgets', pop.widgets, true); if widgets and widgets.keycast~=nil then error('config error: pop.widgets.keycast is removed; it is a plugin now, shipped on the runtimepath and toggled with ctrl+alt+k',2) end end; " ++
         "local ses=expect_table('ses', cfg.ses, true); if ses then expect_table('ses.isolation', ses.isolation, true); local layouts=expect_array('ses.layouts', ses.layouts, true); if layouts then for i,layout in ipairs(layouts) do validate_layout('ses.layouts['..i..']',layout) end end end; " ++
         "return cfg end; " ++
         "hexe.theme=hexe.theme or function(spec) return mark(spec,'theme') end; " ++
@@ -1666,7 +1656,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         "hexe.action.focus=hexe.action.focus or {}; hexe.action.focus.move=hexe.action.focus.move or function(dir) local o={}; if type(dir)=='table' then o=dir else o.dir=dir end; return action('focus.move',o) end; " ++
         "hexe.action.clipboard=hexe.action.clipboard or {}; hexe.action.clipboard.copy=hexe.action.clipboard.copy or function(o) return action('clipboard.copy',o) end; hexe.action.clipboard.request=hexe.action.clipboard.request or function(o) return action('clipboard.request',o) end; " ++
         "hexe.action.system=hexe.action.system or {}; hexe.action.system.notify=hexe.action.system.notify or function(o) return action('system.notify',o) end; " ++
-        "hexe.action.overlay=hexe.action.overlay or {}; hexe.action.overlay.keycast_toggle=hexe.action.overlay.keycast_toggle or function(o) return action('overlay.keycast_toggle',o) end; hexe.action.overlay.sprite_toggle=hexe.action.overlay.sprite_toggle or function(o) return action('overlay.sprite_toggle',o) end; " ++
+        "hexe.action.overlay=hexe.action.overlay or {}; hexe.action.overlay.sprite_toggle=hexe.action.overlay.sprite_toggle or function(o) return action('overlay.sprite_toggle',o) end; " ++
         "hexe.action.layout=hexe.action.layout or {}; hexe.action.layout.save=hexe.action.layout.save or function(o) return action('layout.save',o) end; hexe.action.layout.load=hexe.action.layout.load or function(o) return action('layout.load',o) end; " ++
         "end; " ++
         "hexe.setup=function(cfg) hexe.validate(cfg); rawset(cfg,'__hexe_type','config'); __theme_styles=(type(cfg.theme)=='table' and type(cfg.theme.styles)=='table') and cfg.theme.styles or {}; return cfg end; " ++
@@ -2491,7 +2481,7 @@ test "LuaRuntime loadConfig applies returned hexe setup config" {
         "local hexe = require('hexe')\n" ++
         "return hexe.setup({\n" ++
         "  mux = { selection_color = 238, mouse = { selection_override = { 'shift', hexe.mod.super } }, splits = { color = { active = 4, passive = 236 }, chars = { vertical = '|', horizontal = '-' } }, floats = { defaults = { size = { width = 80, height = 70 }, attrs = { sticky = true, global = true }, color = { active = 1, passive = 237 } }, adhoc = { size = { width = 82, height = 72 }, color = { active = 4, passive = 238 } }, match = { ['^container$'] = { padding = { x = 2, y = 1 }, color = { active = 3, passive = 239 } } } } },\n" ++
-        "  pop = { notify = { mux = { fg = 1, bg = 2, bold = false, padding_x = 3, padding_y = 4, offset = 5, alignment = 'right', duration_ms = 1234 }, pane = { fg = 6, bg = 7, alignment = 'left' } }, confirm = { mux = { fg = 8, bg = 9, bold = false, padding_x = 1, padding_y = 2, yes_label = 'Yep', no_label = 'Nope' }, pane = { fg = 10, bg = 11 } }, choose = { mux = { fg = 12, bg = 13, highlight_fg = 14, highlight_bg = 15, bold = true, padding_x = 2, padding_y = 3, visible_count = 4 }, pane = { fg = 16, bg = 17 } }, widgets = { pokemon = { enabled = true, position = 'bottomright', shiny_chance = 0.5 }, keycast = { enabled = true, position = 'topright', duration_ms = 1500, max_entries = 7, grouping_timeout_ms = 333 }, digits = { enabled = true, position = 'topleft', size = 'large' } } },\n" ++
+        "  pop = { notify = { mux = { fg = 1, bg = 2, bold = false, padding_x = 3, padding_y = 4, offset = 5, alignment = 'right', duration_ms = 1234 }, pane = { fg = 6, bg = 7, alignment = 'left' } }, confirm = { mux = { fg = 8, bg = 9, bold = false, padding_x = 1, padding_y = 2, yes_label = 'Yep', no_label = 'Nope' }, pane = { fg = 10, bg = 11 } }, choose = { mux = { fg = 12, bg = 13, highlight_fg = 14, highlight_bg = 15, bold = true, padding_x = 2, padding_y = 3, visible_count = 4 }, pane = { fg = 16, bg = 17 } }, widgets = { pokemon = { enabled = true, position = 'bottomright', shiny_chance = 0.5 }, digits = { enabled = true, position = 'topleft', size = 'large' } } },\n" ++
         "  ses = { isolation = { profile = 'sandbox', memory = '1G', cpu = '50%', pids = 42 }, layouts = { hexe.layout('unit', { tabs = { hexe.tab('main', { root = hexe.pane({ cwd = '.' }) }) }, floats = { hexe.float('codex', { key = '3', command = 'codex' }) } }) } },\n" ++
         "  keys = {\n" ++
         "    hexe.key({ hexe.key.ctrl, hexe.key.q }, hexe.action.quit()),\n" ++
@@ -2560,11 +2550,6 @@ test "LuaRuntime loadConfig applies returned hexe setup config" {
     try std.testing.expectEqual(true, pop_builder.widgets.pokemon_enabled.?);
     try std.testing.expectEqualStrings("bottomright", pop_builder.widgets.pokemon_position.?);
     try std.testing.expectEqual(@as(f32, 0.5), pop_builder.widgets.pokemon_shiny_chance.?);
-    try std.testing.expectEqual(true, pop_builder.widgets.keycast_enabled.?);
-    try std.testing.expectEqualStrings("topright", pop_builder.widgets.keycast_position.?);
-    try std.testing.expectEqual(@as(i64, 1500), pop_builder.widgets.keycast_duration_ms.?);
-    try std.testing.expectEqual(@as(u8, 7), pop_builder.widgets.keycast_max_entries.?);
-    try std.testing.expectEqual(@as(i64, 333), pop_builder.widgets.keycast_grouping_timeout_ms.?);
     try std.testing.expectEqual(true, pop_builder.widgets.digits_enabled.?);
     try std.testing.expectEqualStrings("topleft", pop_builder.widgets.digits_position.?);
     try std.testing.expectEqualStrings("large", pop_builder.widgets.digits_size.?);

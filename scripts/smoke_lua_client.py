@@ -30,16 +30,13 @@ WD = os.path.join(SCRATCH, f"luacl{os.getpid()}")
 CF = os.path.join(WD, "config")
 RUN = os.path.join(WD, "run")
 DATA = os.path.join(WD, "data")
-PKG = os.path.join(DATA, "hexe", "plugins", "caller")
-for d in (os.path.join(CF, "hexe"), RUN, PKG):
+PKG = os.path.join(DATA, "hexe", "site", "pack", "t", "start", "caller")
+for d in (os.path.join(CF, "hexe"), RUN, os.path.join(PKG, "plugin")):
     os.makedirs(d, exist_ok=True)
 INST = f"smk{os.getpid()}"
 RESULT = os.path.join(WD, "result")
 
-open(os.path.join(PKG, "plugin.lua"), "w").write("""
-return { name = "caller", version = "0.1.0", entry = "init.lua", access = { "popup" } }
-""")
-open(os.path.join(PKG, "init.lua"), "w").write(f"""
+open(os.path.join(PKG, "plugin", "caller.lua"), "w").write(f"""
 hexe.key({{ hexe.key.ctrl, hexe.key.g }}, function(ctx)
   local out = io.open("{RESULT}", "w")
   local ok, err = pcall(function()
@@ -134,10 +131,6 @@ for forbidden in ("require(", "hexe.json", "package."):
         fail(f"the client library reaches for `{forbidden}` — a host that lacks it cannot load "
              "the file, which defeats the point of it being plain Lua")
 print(f"library: `hexe lua-api` prints {len(src)} bytes of dependency-free Lua")
-
-subprocess.run([HEXE, "plugin", "allow", "caller"], env=env, cwd=WD,
-               capture_output=True, timeout=30)
-
 
 def start(name):
     m, sl = pty.openpty()

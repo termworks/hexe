@@ -1,8 +1,7 @@
 # dictate — speech to text, as a plugin
 
 ```sh
-hexe plugin install examples/plugins/dictate
-hexe plugin allow dictate
+cp -r examples/plugins/dictate ~/.local/share/hexe/site/pack/mine/start/
 ```
 
 Hold `ctrl+alt+d`, speak, release. The text is typed into the pane you started

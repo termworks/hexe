@@ -9,8 +9,12 @@
 -- pane shows three bars while a microphone is open. Swap whisper for anything
 -- else and hexe does not change.
 
-local here = ...                       -- where this package was installed
-local recorder = here .. "/record.sh"
+local root = ...                       -- the root this plugin came from
+local recorder = root .. "/record.sh"
+
+-- No `hexe.plugin` call: there is no helper process to start. The recorder is
+-- run per key press through `ctx.exec`, and the transcript is typed by hexe
+-- rather than by the tool -- so the tool never touches the pane at all.
 
 local CHORD = { hexe.key.ctrl, hexe.key.alt, hexe.key.d }
 

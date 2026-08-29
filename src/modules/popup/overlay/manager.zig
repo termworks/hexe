@@ -1,6 +1,5 @@
 const std = @import("std");
 const types = @import("types.zig");
-const keycast = @import("keycast.zig");
 const pane_select = @import("pane_select.zig");
 const pokemon = @import("../widgets/pokemon.zig");
 
@@ -20,10 +19,6 @@ pub const OverlayManager = struct {
     /// Pane select/swap mode
     pane_select: pane_select.PaneSelectState,
 
-    /// Keycast display
-    keycast: keycast.KeycastState,
-    keycast_position: pokemon.Position,
-
     /// Resize info overlay (shown during float resize)
     resize_info_active: bool,
     resize_info_pane_uuid: [32]u8,
@@ -37,8 +32,6 @@ pub const OverlayManager = struct {
             .allocator = allocator,
             .overlays = .empty,
             .pane_select = pane_select.PaneSelectState.init(allocator),
-            .keycast = keycast.KeycastState.init(),
-            .keycast_position = .bottomright,
             .resize_info_active = false,
             .resize_info_pane_uuid = undefined,
             .resize_info_width = 0,
@@ -46,18 +39,6 @@ pub const OverlayManager = struct {
             .resize_info_x = 0,
             .resize_info_y = 0,
         };
-    }
-
-    pub fn initWithConfig(allocator: std.mem.Allocator, cfg: anytype) OverlayManager {
-        var manager = init(allocator);
-        manager.keycast.setConfig(
-            cfg.enabled,
-            cfg.duration_ms,
-            cfg.grouping_timeout_ms,
-            cfg.max_entries,
-        );
-        manager.keycast_position = cfg.position;
-        return manager;
     }
 
     pub fn deinit(self: *OverlayManager) void {
@@ -89,11 +70,6 @@ pub const OverlayManager = struct {
                 continue;
             }
             i += 1;
-        }
-
-        // Update keycast
-        if (self.keycast.update()) {
-            changed = true;
         }
 
         return changed;
@@ -232,20 +208,7 @@ pub const OverlayManager = struct {
     }
 
     // =========================================================================
-    // Keycast
     // =========================================================================
-
-    pub fn toggleKeycast(self: *OverlayManager) void {
-        self.keycast.toggle();
-    }
-
-    pub fn recordKeypress(self: *OverlayManager, text: []const u8) void {
-        self.keycast.record(text);
-    }
-
-    pub fn isKeycastEnabled(self: *const OverlayManager) bool {
-        return self.keycast.enabled;
-    }
 
     // =========================================================================
     // Utility
@@ -255,8 +218,7 @@ pub const OverlayManager = struct {
     pub fn hasContent(self: *const OverlayManager) bool {
         return self.overlays.items.len > 0 or
             self.pane_select.isActive() or
-            self.resize_info_active or
-            self.keycast.hasContent();
+            self.resize_info_active;
     }
 
     /// Get generic overlays for rendering

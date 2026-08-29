@@ -1395,8 +1395,9 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     const inp = kp_res.bytes;
     if (inp.len == 0) return;
 
-    // Record all input for keycast display (before any processing)
-    loop_input_keys.recordKeycastInput(state, inp);
+    // Announce the chord before anything acts on it, so a subscriber sees what
+    // was pressed even when a binding consumes it.
+    loop_input_keys.emitKeyPresses(state, inp);
 
     const first_parsed = parseEventHead(state, inp);
     const popup_event: ?vaxis.Event = if (first_parsed) |h| h.event else null;

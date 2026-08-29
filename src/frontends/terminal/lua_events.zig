@@ -84,6 +84,30 @@ fn broadcastToApi(state: anytype, runtime: *LuaRuntime, event_name: []const u8) 
     server.broadcast(event_name, buf.items);
 }
 
+/// Whether anything would run for `event_name`.
+///
+/// For an event fired as often as a keystroke, building the payload table and
+/// walking into Lua to discover that nobody is listening is most of the cost of
+/// the event. This is the same three lookups the emit does, without the table.
+pub fn hasHandlers(runtime: *LuaRuntime, event_name: []const u8) bool {
+    const lua = runtime.lua;
+    _ = lua.getGlobal("hexe") catch return false;
+    defer lua.pop(1);
+    if (lua.typeOf(-1) != .table) return false;
+
+    _ = lua.getField(-1, "__events");
+    defer lua.pop(1);
+    if (lua.typeOf(-1) != .table) return false;
+
+    _ = lua.pushString(event_name);
+    _ = lua.getTable(-2);
+    defer lua.pop(1);
+    return switch (lua.typeOf(-1)) {
+        .function, .table => true,
+        else => false,
+    };
+}
+
 pub fn emitAutocmdWithPayloadOnStack(runtime: *LuaRuntime, event_name: []const u8) void {
     const lua = runtime.lua;
     // Absolute index of the payload. The previous version addressed it

@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.4.12] - 2026-08-29
+
+### <!-- 0 -->⛰️  Features
+
+- Install approves the plugins it ships
+- Its own chord turns it on
+- Keycast, and make install ships it
+- Key_pressed, guarded at the source
+- Draw anything, anywhere, by name
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Stop shipping the removed keycast widget
+
+### <!-- 2 -->🚜 Refactor
+
+- Ships in hexe's own runtime root
+- [**breaking**] A runtimepath, the way neovim does it
+- The plugin draws its own bytes
+- [**breaking**] Keycast leaves core
+
+### <!-- 3 -->📚 Documentation
+
+- The path, not the package manager
+
+### <!-- 6 -->🧪 Testing
+
+- Its plugin lives on the path now
+
 ## [0.4.11] - 2026-08-28
 
 ### <!-- 0 -->⛰️  Features

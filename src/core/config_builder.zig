@@ -204,16 +204,14 @@ pub const MuxConfigBuilder = struct {
         self.plugins.items[self.plugins.items.len - 1].access = access;
     }
 
-    /// A plugin that came from an installed package, so it knows its own home.
-    pub fn appendPackagePlugin(
-        self: *MuxConfigBuilder,
-        name: []const u8,
-        command: []const u8,
-        dir: []const u8,
-        access: config.access_mod.Set,
-    ) !void {
-        try self.appendPluginWithAccess(name, command, access);
-        self.plugins.items[self.plugins.items.len - 1].dir = try self.allocator.dupe(u8, dir);
+    /// Where the last-registered plugin's helper runs. Separate from
+    /// `appendPlugin` because a plugin declaring one is the exception: most are
+    /// only Lua and have no process to give a directory to.
+    pub fn setLastPluginDir(self: *MuxConfigBuilder, dir: []const u8) !void {
+        if (self.plugins.items.len == 0) return;
+        const last = &self.plugins.items[self.plugins.items.len - 1];
+        if (last.dir.len > 0) self.allocator.free(last.dir);
+        last.dir = try self.allocator.dupe(u8, dir);
     }
 
     pub fn appendPlugin(self: *MuxConfigBuilder, name: []const u8, command: []const u8) !void {
@@ -435,12 +433,6 @@ pub const PopConfigBuilder = struct {
         pokemon_position: ?[]const u8 = null,
         pokemon_shiny_chance: ?f32 = null,
 
-        keycast_enabled: ?bool = null,
-        keycast_position: ?[]const u8 = null,
-        keycast_duration_ms: ?i64 = null,
-        keycast_max_entries: ?u8 = null,
-        keycast_grouping_timeout_ms: ?i64 = null,
-
         digits_enabled: ?bool = null,
         digits_position: ?[]const u8 = null,
         digits_size: ?[]const u8 = null,
@@ -473,7 +465,6 @@ pub const PopConfigBuilder = struct {
         }
         // Widget strings cleanup
         if (self.widgets.pokemon_position) |p| self.allocator.free(p);
-        if (self.widgets.keycast_position) |p| self.allocator.free(p);
         if (self.widgets.digits_position) |p| self.allocator.free(p);
         if (self.widgets.digits_size) |s| self.allocator.free(s);
     }

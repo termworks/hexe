@@ -6,8 +6,9 @@ const log = std.log.scoped(.terminal_input_keys);
 const State = @import("state.zig").State;
 const input = @import("input.zig");
 const actions = @import("loop_actions.zig");
+const lua_events = @import("lua_events.zig");
 
-var keycast_parser: vaxis.Parser = .{};
+var key_parser: vaxis.Parser = .{};
 
 /// Parsed exit key with modifiers.
 const ParsedExitKey = struct {
@@ -15,20 +16,29 @@ const ParsedExitKey = struct {
     key: []const u8, // The base key (e.g., "k", "Esc", "Enter")
 };
 
-/// Record input for keycast if enabled.
-pub fn recordKeycastInput(state: *State, inp: []const u8) void {
-    if (!state.overlays.isKeycastEnabled()) return;
+/// Announce each key press as `key_pressed`, so anything that wants to show
+/// keys can.
+///
+/// This used to feed a keycast overlay hexe drew itself. Showing keys is not
+/// something a terminal multiplexer has to know how to do -- it is something a
+/// plugin does, given the keys -- so hexe reports them and draws nothing.
+///
+/// **The two guards stay here, and cannot move into a plugin.** A subscriber
+/// cannot tell that a pane is reading a password or that a paste is in flight;
+/// hexe can. Anything downstream sees keys that were already judged safe to
+/// show, which is the only place that judgement can be made.
+pub fn emitKeyPresses(state: *State, inp: []const u8) void {
     if (inp.len == 0) return;
-
-    // Don't show keycast during bracketed paste
     if (state.in_bracketed_paste) return;
-
-    // Don't show keycast if focused pane might be in password mode
     if (isFocusedPaneInPasswordMode(state)) return;
+
+    // Nothing is listening, so parsing every keystroke would be work for no one.
+    const rt = state.config._lua_runtime orelse return;
+    if (!lua_events.hasHandlers(rt, "key_pressed")) return;
 
     var i: usize = 0;
     while (i < inp.len) {
-        const res = keycast_parser.parse(inp[i..], state.allocator) catch {
+        const res = key_parser.parse(inp[i..], state.allocator) catch {
             i += 1;
             continue;
         };
@@ -37,10 +47,11 @@ pub fn recordKeycastInput(state: *State, inp: []const u8) void {
             if (input.keyEventFromVaxisEvent(ev_raw)) |ev| {
                 if (ev.when == .press) {
                     var event_buf: [32]u8 = undefined;
-                    const event_text = formatKeycastEvent(ev, &event_buf);
+                    const event_text = formatChord(ev, &event_buf);
                     if (event_text.len > 0) {
-                        state.overlays.recordKeypress(event_text);
-                        state.needs_render = true;
+                        lua_events.emit(state, rt, "key_pressed", &.{
+                            .{ .name = "key", .value = .{ .str = event_text } },
+                        });
                     }
                 }
             }
@@ -49,68 +60,68 @@ pub fn recordKeycastInput(state: *State, inp: []const u8) void {
     }
 }
 
-fn formatKeycastEvent(ev: input.KeyEvent, buf: *[32]u8) []const u8 {
+fn formatChord(ev: input.KeyEvent, buf: *[32]u8) []const u8 {
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
     if (ev.mods & 2 != 0) writer.writeAll("C-") catch |err| {
-        log.debug("failed to format keycast ctrl modifier: {}", .{err});
+        log.debug("failed to format ctrl modifier: {}", .{err});
         return buf[0..stream.pos];
     };
     if (ev.mods & 1 != 0) writer.writeAll("A-") catch |err| {
-        log.debug("failed to format keycast alt modifier: {}", .{err});
+        log.debug("failed to format alt modifier: {}", .{err});
         return buf[0..stream.pos];
     };
 
     switch (@as(core.Config.BindKeyKind, ev.key)) {
         .up => writer.writeAll("Up") catch |err| {
-            log.debug("failed to format keycast Up key: {}", .{err});
+            log.debug("failed to format Up key: {}", .{err});
             return buf[0..stream.pos];
         },
         .down => writer.writeAll("Down") catch |err| {
-            log.debug("failed to format keycast Down key: {}", .{err});
+            log.debug("failed to format Down key: {}", .{err});
             return buf[0..stream.pos];
         },
         .left => writer.writeAll("Left") catch |err| {
-            log.debug("failed to format keycast Left key: {}", .{err});
+            log.debug("failed to format Left key: {}", .{err});
             return buf[0..stream.pos];
         },
         .right => writer.writeAll("Right") catch |err| {
-            log.debug("failed to format keycast Right key: {}", .{err});
+            log.debug("failed to format Right key: {}", .{err});
             return buf[0..stream.pos];
         },
         .space => writer.writeAll("Space") catch |err| {
-            log.debug("failed to format keycast Space key: {}", .{err});
+            log.debug("failed to format Space key: {}", .{err});
             return buf[0..stream.pos];
         },
         .char => {
             const ch = ev.key.char;
             switch (ch) {
                 '\r' => writer.writeAll("Enter") catch |err| {
-                    log.debug("failed to format keycast Enter key: {}", .{err});
+                    log.debug("failed to format Enter key: {}", .{err});
                     return buf[0..stream.pos];
                 },
                 '\t' => writer.writeAll("Tab") catch |err| {
-                    log.debug("failed to format keycast Tab key: {}", .{err});
+                    log.debug("failed to format Tab key: {}", .{err});
                     return buf[0..stream.pos];
                 },
                 0x7f => writer.writeAll("Bksp") catch |err| {
-                    log.debug("failed to format keycast Backspace key: {}", .{err});
+                    log.debug("failed to format Backspace key: {}", .{err});
                     return buf[0..stream.pos];
                 },
                 0x1b => writer.writeAll("Esc") catch |err| {
-                    log.debug("failed to format keycast Escape key: {}", .{err});
+                    log.debug("failed to format Escape key: {}", .{err});
                     return buf[0..stream.pos];
                 },
                 else => {
                     if (ch >= 0x20 and ch < 0x7f) {
                         writer.writeByte(ch) catch |err| {
-                            log.debug("failed to format keycast printable byte: {}", .{err});
+                            log.debug("failed to format printable byte: {}", .{err});
                             return buf[0..stream.pos];
                         };
                     } else {
                         std.fmt.format(writer, "0x{x:0>2}", .{ch}) catch |err| {
-                            log.debug("failed to format keycast byte value: {}", .{err});
+                            log.debug("failed to format byte value: {}", .{err});
                             return buf[0..stream.pos];
                         };
                     }

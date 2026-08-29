@@ -1,8 +1,7 @@
 # share — hand a pane to a stream backend
 
 ```sh
-hexe plugin install contrib/plugins/share
-hexe plugin allow share
+cp -r examples/plugins/share ~/.local/share/hexe/site/pack/mine/start/
 ```
 
 `ctrl+alt+s` starts sharing the focused pane and shows where it went.

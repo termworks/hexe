@@ -5,8 +5,25 @@
 -- QR code already rendered into block characters. The moment hexe knows what a
 -- QR is, it owns a QR library and a set of opinions about them.
 
-local here = ...
-local BACKEND = os.getenv("HEXE_SHARE_BACKEND") or (here .. "/backend.sh")
+local root = ...
+
+-- The helper hexe starts alongside the session, declared here rather than in a
+-- separate manifest: a plugin is a fragment of config, so it asks through the
+-- registrar the config already had.
+--
+-- `stream` to be handed the pane's bytes, `popup` to show whatever address the
+-- backend gives back. Notably NOT `typing`: this is view-only sharing, and the
+-- absence of that word is what makes it so. Add it and the far end can type.
+--
+-- `dir` is the root, so the command can name a file the plugin ships without
+-- knowing where it was installed.
+hexe.plugin("share", {
+  command = "./backend.sh",
+  dir     = root,
+  access  = { "stream", "popup" },
+})
+
+local BACKEND = os.getenv("HEXE_SHARE_BACKEND") or (root .. "/backend.sh")
 
 -- Where the backend leaves the address it published to. A file rather than a
 -- pipe because the backend is started by hexe and outlives this callback.
