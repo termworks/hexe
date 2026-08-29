@@ -48,39 +48,49 @@ pub fn build(b: *std.Build) void {
 
     // Per-module optimization, the same trade oslo makes per-package with
     // `opt-level = "z"`. Zig spells it per-module: every module carries its own
-    // optimize mode, so code that runs once can be built for size while the VT
-    // and the render loop keep -OReleaseFast.
+    // optimize mode, so code that runs once is built for size while the VT, the
+    // render loop and the pod stay at -OReleaseFast.
     //
     // ONLY ReleaseFast is downgraded. ReleaseSmall turns runtime safety OFF, so
     // mapping ReleaseSafe onto it would quietly drop the checks that mode
     // exists for, and Debug has to stay debuggable.
+    //
+    // Cold: the subcommands (each runs once and exits), the session daemon
+    // (control plane -- pane output never flows through it, pods talk to the
+    // frontend directly), argument parsing, the shell and popup helpers, and
+    // the two frontends most people never launch.
+    //
+    // Hot, and staying that way: core, terminal, pod, frontend_core, ghostty-vt,
+    // vaxis.
+    //
+    // Measured 2026-08-30, ReleaseFast + strip, x86_64:
+    //
+    //   all modules fast (before)       6,329,032
+    //   cold split (now)                5,954,992   -374 KB
+    //
+    // It costs nothing. `scripts/bench_render.py`, interleaved, n=4 each:
+    // 1.026 ms/row before against 1.002 after -- if anything slightly better,
+    // a smaller binary being friendlier to the instruction cache.
     const cold: std.builtin.OptimizeMode = if (optimize == .ReleaseFast) .ReleaseSmall else optimize;
 
-    // `-Dsmall` additionally builds the ROOT module for size, and that is a
-    // different bargain from the one above -- worth stating, because the
-    // numbers are not intuitive.
+    // `-Dsmall` additionally builds the ROOT module for size: 3,897,128 bytes,
+    // another 2.06 MB off. It is not the default, and the reason is worth
+    // writing down because it is not obvious.
     //
-    // Measured on 2026-08-30, ReleaseFast + strip, x86_64:
+    // The render path is `anytype` generics -- `renderTo(state, renderer:
+    // anytype)`, `drawRenderState(..., state: anytype)` and friends. A generic
+    // is compiled where it is INSTANTIATED, not where it is declared, and the
+    // instantiation chain for the frontend roots in this module. So building the
+    // root for size builds the render path for size no matter what mode
+    // `terminal_module` carries: measured, `loop_render.renderTo` goes from
+    // 48,147 bytes to 20,605 and `vt_bridge.drawRenderState` from 32,580 to
+    // 16,091, and the frame cost rises about 4.6%.
     //
-    //   default (cold leaves only)      6,217,648
-    //   -Dsmall=true (root as well)     3,942,040   -2.28 MB, -37%
-    //   -OReleaseSmall everywhere       3,529,952
-    //
-    // Almost none of that comes from hexe's own argument parsing. `std` follows
-    // the ROOT module's mode, so building the root small builds all of std
-    // small -- every hash map, formatter and sort the hot path calls into. That
-    // is why the root is worth 2.28 MB where the cold leaves are worth 111 KB.
-    //
-    // The cost, from `scripts/bench_render.py` run INTERLEAVED between the two
-    // binaries, n=8 each: 1.135 ms/row against 1.188, so about **4.6% slower**.
-    // Interleaving matters. Timing the two builds one after the other put the
-    // difference at 15%, and a re-run then had the FASTER binary looking
-    // slower -- that number was this machine's load, not the compiler's output.
-    //
-    // 4.6% for a third of the binary is a good trade for most people. It is
-    // still not the default, because a terminal that is out of the way is the
-    // thing hexe is for, and 6 MB is not a problem anyone has reported.
-    const small = b.option(bool, "small", "Build the root module for size too: ~2.3MB smaller, ~5% slower VT") orelse false;
+    // That is the whole reason the cold split above is worth only 374 KB rather
+    // than 2.4 MB: everything that would really move is generic, and generics
+    // follow the root. Making more of hexe non-generic -- concrete `*Renderer`
+    // instead of `renderer: anytype` -- is what would let the split go further.
+    const small = b.option(bool, "small", "Also build the root module for size: ~2MB smaller, ~5% slower rendering") orelse false;
     const root_optimize: std.builtin.OptimizeMode = if (small) cold else optimize;
 
     // Create core module
@@ -178,7 +188,7 @@ pub fn build(b: *std.Build) void {
     const ses_module = b.createModule(.{
         .root_source_file = b.path("src/modules/session/main.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
         .link_libc = true,
     });
     ses_module.addImport("core", core_module);
@@ -200,6 +210,19 @@ pub fn build(b: *std.Build) void {
         pod_module.addImport("libvoid", vb);
     }
 
+    // The subcommand implementations. Their own module so they can be built for
+    // size: each runs once and exits, and they reach only for `core`, `xev` and
+    // the frontend's entry point -- nothing on a hot path.
+    const cli_commands_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/commands/mod.zig"),
+        .target = target,
+        .optimize = cold,
+        .link_libc = true,
+    });
+    cli_commands_module.addImport("core", core_module);
+    cli_commands_module.addImport("xev", xev_mod);
+    cli_commands_module.addImport("terminal", terminal_module);
+
     // Build unified hexe CLI executable
     const cli_root = b.createModule(.{
         .root_source_file = b.path("src/cli/app.zig"),
@@ -215,8 +238,11 @@ pub fn build(b: *std.Build) void {
     cli_root.addImport("ses", ses_module);
     cli_root.addImport("pod", pod_module);
     cli_root.addImport("shp", shp_module);
+    cli_root.addImport("cli_commands", cli_commands_module);
     cli_root.addImport("xev", xev_mod);
     if (yazap_mod) |yazap| {
+        // Argument parsing: it runs once, before anything is on screen.
+        yazap.optimize = cold;
         cli_root.addImport("yazap", yazap);
     }
     const cli_exe = b.addExecutable(.{

@@ -1,6 +1,7 @@
 const std = @import("std");
+const commands_mod = @import("cli_commands");
 const core = @import("core");
-const cli_cmds = @import("commands/com.zig");
+const cli_cmds = commands_mod.com;
 
 const print = std.debug.print;
 
