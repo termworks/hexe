@@ -20,6 +20,105 @@ fn initAsciiLut() [128]u8 {
     return table;
 }
 
+/// A rectangle in screen cells.
+pub const Rect = struct {
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+
+    fn right(self: Rect) u32 {
+        return @as(u32, self.x) + self.w;
+    }
+
+    fn bottom(self: Rect) u32 {
+        return @as(u32, self.y) + self.h;
+    }
+
+    fn area(self: Rect) u32 {
+        return @as(u32, self.w) * @as(u32, self.h);
+    }
+
+    fn intersects(self: Rect, o: Rect) bool {
+        return self.x < o.right() and o.x < self.right() and
+            self.y < o.bottom() and o.y < self.bottom();
+    }
+};
+
+/// The largest part of `rect` that no occluder covers.
+///
+/// An image is not made of cells. hexe writes ONE placement onto the image's
+/// top-left cell and the terminal draws the whole picture from there, spanning
+/// as many cells as the placement claims -- compositing it against the text on
+/// its own terms, not hexe's. So a float drawn over the middle of an image never
+/// touches the cell the placement lives on, and the terminal draws the picture
+/// straight over the float. The float is the thing the user is looking at.
+///
+/// Trimming to a visible rectangle is what the cell grid can express. For each
+/// occluder in turn, the covered band is removed by keeping whichever of the
+/// four remaining strips is largest; a picture is worth more whole than
+/// pixel-exact, and this keeps the biggest piece of it. When nothing survives,
+/// the caller draws no image at all -- which is right, because a picture painted
+/// across a float is worse than a missing one.
+pub fn visiblePart(rect: Rect, occluders: []const Rect) ?Rect {
+    var cur = rect;
+    for (occluders) |o| {
+        if (cur.w == 0 or cur.h == 0) return null;
+        if (!cur.intersects(o)) continue;
+
+        // The four strips of `cur` left uncovered by `o`, any of which may be
+        // empty. Cast through u32 so a clip past the edge cannot wrap.
+        const left: Rect = .{ .x = cur.x, .y = cur.y, .w = if (o.x > cur.x) o.x - cur.x else 0, .h = cur.h };
+        const right_x = @min(@as(u32, std.math.maxInt(u16)), o.right());
+        const right: Rect = .{
+            .x = @intCast(right_x),
+            .y = cur.y,
+            .w = if (cur.right() > right_x) @intCast(cur.right() - right_x) else 0,
+            .h = cur.h,
+        };
+        const top: Rect = .{ .x = cur.x, .y = cur.y, .w = cur.w, .h = if (o.y > cur.y) o.y - cur.y else 0 };
+        const bottom_y = @min(@as(u32, std.math.maxInt(u16)), o.bottom());
+        const bottom: Rect = .{
+            .x = cur.x,
+            .y = @intCast(bottom_y),
+            .w = cur.w,
+            .h = if (cur.bottom() > bottom_y) @intCast(cur.bottom() - bottom_y) else 0,
+        };
+
+        var best = left;
+        for ([_]Rect{ right, top, bottom }) |cand| {
+            if (cand.area() > best.area()) best = cand;
+        }
+        if (best.area() == 0) return null;
+        cur = best;
+    }
+    if (cur.w == 0 or cur.h == 0) return null;
+    return cur;
+}
+
+/// Map a trimmed destination rectangle back onto the source pixels.
+///
+/// The placement scales the source rect across the destination cells, so
+/// keeping a part of the destination means keeping the matching part of the
+/// source -- otherwise the visible strip would show the whole picture squashed
+/// into it rather than the piece that belongs there.
+fn clipSource(full: Rect, part: Rect, sx: u32, sy: u32, sw: u32, sh: u32) struct {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+} {
+    if (full.w == 0 or full.h == 0) return .{ .x = sx, .y = sy, .w = sw, .h = sh };
+    const dx = part.x - full.x;
+    const dy = part.y - full.y;
+    return .{
+        .x = sx + @as(u32, @intCast(@as(u64, dx) * sw / full.w)),
+        .y = sy + @as(u32, @intCast(@as(u64, dy) * sh / full.h)),
+        .w = @max(1, @as(u32, @intCast(@as(u64, part.w) * sw / full.w))),
+        .h = @max(1, @as(u32, @intCast(@as(u64, part.h) * sh / full.h))),
+    };
+}
+
 /// Blit ghostty RenderState into a vaxis Window.
 ///
 /// Follows prise's server.zig pattern for content_tag dispatch,
@@ -36,6 +135,9 @@ pub fn drawRenderState(
     vt: *core.VT,
     vx: *vaxis.Vaxis,
     stdout: std.fs.File,
+    /// Rectangles that will be drawn OVER this window later in the frame, in
+    /// screen cells. Images are trimmed to what they leave visible.
+    occluders: []const Rect,
 ) void {
     const MAX_REASONABLE_ROWS: usize = 10_000;
     const MAX_REASONABLE_COLS: usize = 1_000;
@@ -139,8 +241,8 @@ pub fn drawRenderState(
         }
     }
 
-    drawKittyPinPlacements(win, vt, vx.caps.kitty_graphics);
-    drawKittyVirtualPlacements(win, vt, row_pins, available_rows, vx.caps.kitty_graphics);
+    drawKittyPinPlacements(win, vt, vx.caps.kitty_graphics, occluders);
+    drawKittyVirtualPlacements(win, vt, row_pins, available_rows, vx.caps.kitty_graphics, occluders);
 }
 
 /// Convert ghostty cell content to a UTF-8 string.
@@ -347,6 +449,7 @@ fn drawKittyVirtualPlacements(
     row_pins: []const ghostty.PageList.Pin,
     available_rows: usize,
     graphics: bool,
+    occluders: []const Rect,
 ) void {
     if (comptime !@hasDecl(ghostty.kitty.graphics, "unicode")) return;
     const Storage = @TypeOf(vt.terminal.screens.active.kitty_images);
@@ -395,19 +498,21 @@ fn drawKittyVirtualPlacements(
         }
 
         const cached = vt.kitty_image_cache.get(placement.image_id) orelse continue;
-        writeImageCellPreserve(win, col, row, .{
+        const vis = visibleFor(win, col, row, size_cols, size_rows, occluders) orelse continue;
+        const clip = clipSource(vis.full, vis.part, rp.source_x, rp.source_y, rp.source_width, rp.source_height);
+        writeImageCellPreserve(win, vis.col, vis.row, .{
             .img_id = cached.vaxis_id,
             .options = .{
                 .pixel_offset = .{
                     .x = @intCast(@min(rp.offset_x, std.math.maxInt(u16))),
                     .y = @intCast(@min(rp.offset_y, std.math.maxInt(u16))),
                 },
-                .size = .{ .rows = size_rows, .cols = size_cols },
+                .size = .{ .rows = vis.part.h, .cols = vis.part.w },
                 .clip_region = .{
-                    .x = @intCast(@min(rp.source_x, std.math.maxInt(u16))),
-                    .y = @intCast(@min(rp.source_y, std.math.maxInt(u16))),
-                    .width = @intCast(@min(rp.source_width, std.math.maxInt(u16))),
-                    .height = @intCast(@min(rp.source_height, std.math.maxInt(u16))),
+                    .x = @intCast(@min(clip.x, std.math.maxInt(u16))),
+                    .y = @intCast(@min(clip.y, std.math.maxInt(u16))),
+                    .width = @intCast(@min(clip.w, std.math.maxInt(u16))),
+                    .height = @intCast(@min(clip.h, std.math.maxInt(u16))),
                 },
                 .z_index = -1,
             },
@@ -415,7 +520,7 @@ fn drawKittyVirtualPlacements(
     }
 }
 
-fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT, graphics: bool) void {
+fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT, graphics: bool, occluders: []const Rect) void {
     const Storage = @TypeOf(vt.terminal.screens.active.kitty_images);
     if (comptime !@hasField(Storage, "placements")) return;
     if (comptime !@hasDecl(Storage, "imageById")) return;
@@ -462,7 +567,9 @@ fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT, graphics: bool) void 
         }
 
         const cached = vt.kitty_image_cache.get(kv.key_ptr.image_id) orelse continue;
-        writeImageCellPreserve(win, col, row, .{
+        const vis = visibleFor(win, col, row, size_cols, size_rows, occluders) orelse continue;
+        const clip = clipSource(vis.full, vis.part, p.source_x, p.source_y, src_w, src_h);
+        writeImageCellPreserve(win, vis.col, vis.row, .{
             .img_id = cached.vaxis_id,
             .options = .{
                 .pixel_offset = .{
@@ -471,15 +578,47 @@ fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT, graphics: bool) void 
                 },
                 .z_index = p.z,
                 .clip_region = .{
-                    .x = @intCast(@min(p.source_x, std.math.maxInt(u16))),
-                    .y = @intCast(@min(p.source_y, std.math.maxInt(u16))),
-                    .width = @intCast(@min(src_w, std.math.maxInt(u16))),
-                    .height = @intCast(@min(src_h, std.math.maxInt(u16))),
+                    .x = @intCast(@min(clip.x, std.math.maxInt(u16))),
+                    .y = @intCast(@min(clip.y, std.math.maxInt(u16))),
+                    .width = @intCast(@min(clip.w, std.math.maxInt(u16))),
+                    .height = @intCast(@min(clip.h, std.math.maxInt(u16))),
                 },
-                .size = .{ .rows = size_rows, .cols = size_cols },
+                .size = .{ .rows = vis.part.h, .cols = vis.part.w },
             },
         });
     }
+}
+
+/// Trim an image's cell rectangle to the part no occluder covers.
+///
+/// Occluders are in SCREEN cells and the placement is in window cells, so the
+/// rectangle is lifted into screen space to be compared and the answer brought
+/// back. Returns null when the image is entirely hidden.
+fn visibleFor(
+    win: vaxis.Window,
+    col: u16,
+    row: u16,
+    cols: u16,
+    rows: u16,
+    occluders: []const Rect,
+) ?struct { col: u16, row: u16, full: Rect, part: Rect } {
+    const full: Rect = .{ .x = col, .y = row, .w = cols, .h = rows };
+    if (occluders.len == 0) return .{ .col = col, .row = row, .full = full, .part = full };
+
+    const screen: Rect = .{
+        .x = @intCast(@min(@as(i32, std.math.maxInt(u16)), win.x_off + @as(i32, col))),
+        .y = @intCast(@min(@as(i32, std.math.maxInt(u16)), win.y_off + @as(i32, row))),
+        .w = cols,
+        .h = rows,
+    };
+    const vis = visiblePart(screen, occluders) orelse return null;
+    const local: Rect = .{
+        .x = @intCast(@as(i32, vis.x) - win.x_off),
+        .y = @intCast(@as(i32, vis.y) - win.y_off),
+        .w = vis.w,
+        .h = vis.h,
+    };
+    return .{ .col = local.x, .row = local.y, .full = full, .part = local };
 }
 
 fn writeImageCellPreserve(win: vaxis.Window, col: u16, row: u16, placement: vaxis.Image.Placement) void {
@@ -638,4 +777,73 @@ fn resolveCellLink(
     }
 
     return .{ .uri = uri, .params = params };
+}
+
+const testing = std.testing;
+
+test "visiblePart keeps the largest strip a float leaves" {
+    const img: Rect = .{ .x = 0, .y = 0, .w = 60, .h = 24 };
+
+    // A float across the bottom half: the top strip survives, full width.
+    const bottom: Rect = .{ .x = 0, .y = 12, .w = 60, .h = 12 };
+    const top = visiblePart(img, &.{bottom}).?;
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 60, .h = 12 }, top);
+
+    // A float down the right: the left strip survives, full height.
+    const right: Rect = .{ .x = 40, .y = 0, .w = 20, .h = 24 };
+    const left = visiblePart(img, &.{right}).?;
+    try testing.expectEqual(Rect{ .x = 0, .y = 0, .w = 40, .h = 24 }, left);
+
+    // A float in the middle: whichever of the four strips is biggest, and it
+    // must not overlap the float.
+    const middle: Rect = .{ .x = 20, .y = 8, .w = 20, .h = 8 };
+    const part = visiblePart(img, &.{middle}).?;
+    try testing.expect(part.area() > 0);
+    try testing.expect(!part.intersects(middle));
+}
+
+test "visiblePart gives up when nothing is left" {
+    const img: Rect = .{ .x = 5, .y = 5, .w = 10, .h = 10 };
+
+    // Covered outright.
+    try testing.expect(visiblePart(img, &.{.{ .x = 0, .y = 0, .w = 40, .h = 40 }}) == null);
+    // Covered exactly.
+    try testing.expect(visiblePart(img, &.{img}) == null);
+
+    // Two floats that between them leave nothing.
+    const halves = [_]Rect{
+        .{ .x = 0, .y = 0, .w = 40, .h = 10 },
+        .{ .x = 0, .y = 10, .w = 40, .h = 40 },
+    };
+    try testing.expect(visiblePart(img, &halves) == null);
+}
+
+test "visiblePart leaves an untouched image alone" {
+    const img: Rect = .{ .x = 4, .y = 2, .w = 20, .h = 10 };
+    try testing.expectEqual(img, visiblePart(img, &.{}).?);
+    // A float elsewhere on the screen changes nothing.
+    try testing.expectEqual(img, visiblePart(img, &.{.{ .x = 40, .y = 20, .w = 10, .h = 5 }}).?);
+    // Nor does one that merely touches an edge without covering a cell.
+    try testing.expectEqual(img, visiblePart(img, &.{.{ .x = 24, .y = 2, .w = 6, .h = 10 }}).?);
+}
+
+test "clipSource keeps the piece of the picture that belongs in the strip" {
+    const full: Rect = .{ .x = 0, .y = 0, .w = 60, .h = 24 };
+
+    // The top half of the destination shows the top half of the source.
+    const top = clipSource(full, .{ .x = 0, .y = 0, .w = 60, .h = 12 }, 0, 0, 600, 240);
+    try testing.expectEqual(@as(u32, 0), top.y);
+    try testing.expectEqual(@as(u32, 120), top.h);
+    try testing.expectEqual(@as(u32, 600), top.w);
+
+    // The bottom half starts halfway down it.
+    const bottom = clipSource(full, .{ .x = 0, .y = 12, .w = 60, .h = 12 }, 0, 0, 600, 240);
+    try testing.expectEqual(@as(u32, 120), bottom.y);
+    try testing.expectEqual(@as(u32, 120), bottom.h);
+
+    // An existing source offset is kept rather than replaced.
+    const offset = clipSource(full, .{ .x = 30, .y = 0, .w = 30, .h = 24 }, 100, 50, 600, 240);
+    try testing.expectEqual(@as(u32, 400), offset.x);
+    try testing.expectEqual(@as(u32, 50), offset.y);
+    try testing.expectEqual(@as(u32, 300), offset.w);
 }

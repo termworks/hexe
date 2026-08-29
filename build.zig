@@ -386,6 +386,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_image_fallback_tests = b.addRunArtifact(image_fallback_tests);
 
+    // Image occlusion geometry: what a float leaves of an image, and which
+    // part of the picture belongs in the strip that survives.
+    const vt_bridge_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/vt_bridge.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vt_bridge_test_module.addImport("core", core_module);
+    vt_bridge_test_module.addImport("vaxis", vaxis_mod);
+    if (ghostty_vt_mod) |vt| {
+        vt_bridge_test_module.addImport("ghostty-vt", vt);
+    }
+    const vt_bridge_tests = b.addTest(.{
+        .root_module = vt_bridge_test_module,
+    });
+    const run_vt_bridge_tests = b.addRunArtifact(vt_bridge_tests);
+
     const pane_osc_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/frontends/terminal/pane_osc.zig"),
@@ -628,6 +645,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_input_tests.step);
     test_step.dependOn(&run_mouse_protocol_tests.step);
     test_step.dependOn(&run_image_fallback_tests.step);
+    test_step.dependOn(&run_vt_bridge_tests.step);
     test_step.dependOn(&run_image_encode_tests.step);
     test_step.dependOn(&run_sixel_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);

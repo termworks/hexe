@@ -143,7 +143,17 @@ fn drawPaneSprite(state: *State, renderer: anytype, pane: *Pane, stdout: std.fs.
     );
 }
 
-fn drawPaneRenderState(renderer: anytype, pane: *Pane, state: anytype, x: u16, y: u16, width: u16, height: u16, stdout: std.fs.File) void {
+fn drawPaneRenderState(
+    renderer: anytype,
+    pane: *Pane,
+    state: anytype,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    stdout: std.fs.File,
+    occluders: []const vt_bridge.Rect,
+) void {
     const root = renderer.vx.window();
     const win = root.child(.{
         .x_off = @intCast(x),
@@ -151,8 +161,64 @@ fn drawPaneRenderState(renderer: anytype, pane: *Pane, state: anytype, x: u16, y
         .width = width,
         .height = height,
     });
-    vt_bridge.drawRenderState(win, state, width, height, renderer.frame_arena.allocator(), &pane.vt, &renderer.vx, stdout);
+    vt_bridge.drawRenderState(win, state, width, height, renderer.frame_arena.allocator(), &pane.vt, &renderer.vx, stdout, occluders);
 }
+
+/// Every visible float's outer rectangle, in the order they are drawn.
+///
+/// Cells are composited by whoever writes them last, but an image is not: the
+/// terminal draws it from one anchor cell across as many cells as the placement
+/// claims. So a pane's images have to be trimmed against whatever will be drawn
+/// on top of them, and that means knowing the floats before the panes are
+/// drawn rather than after.
+///
+/// The border is part of it -- a picture drawn over a float's frame is the same
+/// bug as one drawn over its contents.
+fn collectFloatRects(state: *State, out: *[MAX_TRACKED_FLOATS]vt_bridge.Rect) []const vt_bridge.Rect {
+    var n: usize = 0;
+    const active = state.activeFloatingIndex();
+
+    for (state.view.float_views.items, 0..) |pane, i| {
+        if (n >= out.len) break;
+        if (active == i) continue; // drawn last, appended below
+        if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
+        if (state.paneParentTab(pane)) |parent| {
+            if (parent != state.activeTabIndex()) continue;
+        }
+        out[n] = .{
+            .x = state.paneBorderX(pane),
+            .y = state.paneBorderY(pane),
+            .w = state.paneBorderW(pane),
+            .h = state.paneBorderH(pane),
+        };
+        n += 1;
+    }
+
+    if (active) |idx| {
+        if (n < out.len and idx < state.view.float_views.items.len) {
+            const pane = state.view.float_views.items[idx];
+            const on_tab = if (state.paneParentTab(pane)) |parent|
+                parent == state.activeTabIndex()
+            else
+                true;
+            if (on_tab and state.paneVisibleOnTab(pane, state.activeTabIndex())) {
+                out[n] = .{
+                    .x = state.paneBorderX(pane),
+                    .y = state.paneBorderY(pane),
+                    .w = state.paneBorderW(pane),
+                    .h = state.paneBorderH(pane),
+                };
+                n += 1;
+            }
+        }
+    }
+
+    return out[0..n];
+}
+
+/// Enough for any plausible number of floats on one screen. Past this the
+/// extras simply do not occlude, which is the pre-existing behaviour.
+const MAX_TRACKED_FLOATS = 32;
 
 fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []const u8 {
     _ = out;
@@ -227,6 +293,12 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         return;
     }
 
+    // The floats that will be drawn over the splits, gathered before anything
+    // is drawn: an image has to be trimmed against them, and by the time a
+    // float is drawn the pane's placement has already been written.
+    var float_rect_buf: [MAX_TRACKED_FLOATS]vt_bridge.Rect = undefined;
+    const float_rects = collectFloatRects(state, &float_rect_buf);
+
     // Draw splits into the cell buffer.
     var pane_it = state.currentLayout().splitIterator();
     while (pane_it.next()) |pane| {
@@ -239,7 +311,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             core.logging.logError("terminal", "failed to get split pane render state", err);
             continue;
         };
-        drawPaneRenderState(renderer, pane.*, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, stdout);
+        drawPaneRenderState(renderer, pane.*, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, stdout, float_rects);
 
         if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane.*)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, range, state.config.selection_color);
@@ -309,6 +381,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // Draw visible floats (on top of splits).
     // Draw inactive floats first, then active one last so it's on top.
+    var drawn_floats: usize = 0;
     for (state.view.float_views.items, 0..) |pane, i| {
         if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
         if (state.activeFloatingIndex() == i) continue; // Skip active, draw it last.
@@ -332,7 +405,11 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             core.logging.logError("terminal", "failed to get floating pane render state", err);
             continue;
         };
-        drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout);
+        // Only what is drawn after this float can cover it. `collectFloatRects`
+        // lists them in draw order, so that is the tail past this one.
+        drawn_floats += 1;
+        const above = if (drawn_floats <= float_rects.len) float_rects[drawn_floats..] else float_rects[0..0];
+        drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout, above);
 
         if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
@@ -376,7 +453,8 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             }
 
             if (pane.getRenderState()) |render_state| {
-                drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout);
+                // Drawn last, so nothing covers it.
+                drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout, &.{});
 
                 if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane)) |range| {
                     mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);

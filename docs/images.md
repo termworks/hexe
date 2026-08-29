@@ -52,6 +52,38 @@ second occupies a single slot instead of accumulating an image per update. The
 file is capped at 16MB, and anything that is not a PNG is refused rather than
 drawn as garbage: `src/core/image_encode.zig`.
 
+## Floats over images
+
+A Kitty image is not made of cells, and that is the whole difficulty. hexe writes
+**one** placement onto the image's top-left cell, and the terminal draws the
+picture from there across as many cells as the placement claims — compositing it
+against the text on its own terms, not hexe's.
+
+So the cell grid does not protect a float. A float over the middle of an image
+never touches the cell the placement lives on, and the terminal drew the picture
+straight over the float; a float over the *top-left* corner removed the placement
+and the whole image vanished, however little of it was actually covered. Both are
+real: `scripts/smoke_image_occlusion.py` reproduced the first before it was
+fixed, with hexe still emitting a full 60×24 placement every frame under a float.
+
+hexe now trims a placement to the largest rectangle its occluders leave, and
+scales the source clip to match so the surviving strip shows the piece of the
+picture that belongs in it rather than the whole thing squashed. When nothing
+survives, no image is drawn at all — a picture painted across a float is worse
+than a missing one.
+
+The occluders are the floats, borders included, gathered **before** any pane is
+drawn: by the time a float is drawn the pane's placement has already been
+written. A float is only trimmed against floats drawn after it, and the active
+float, drawn last, is trimmed against nothing.
+
+A rectangle is what this can express. An image with a float over its centre keeps
+the biggest of the four surrounding strips rather than an L-shape, so more of it
+is hidden than strictly must be. The alternative — a placement per cell — costs
+one escape sequence per cell per frame, which is a great deal of bandwidth to
+recover a corner. This does not arise in the half-block fallback below, where an
+image really is made of cells and a float overwrites it like any other text.
+
 ## When the terminal cannot draw images
 
 hexe asks at startup whether the host speaks the Kitty protocol. If it does not, the image is drawn
@@ -121,7 +153,7 @@ reasonable for a terminal that is one window and not for a mux with twenty panes
 
 ## Checking it
 
-Five smokes drive a real frontend over a pty, playing the part of the terminal:
+Six smokes drive a real frontend over a pty, playing the part of the terminal:
 
 - `scripts/smoke_kitty_graphics.py` — a pane draws a Kitty image; assert hexe transmits **and places**
   it.
@@ -133,13 +165,16 @@ Five smokes drive a real frontend over a pty, playing the part of the terminal:
 - `scripts/smoke_draw_image.py` — `hexe api draw` with an `image` path, run twice against two
   separate stacks: one whose terminal answers the capability query and one whose does not, asserting
   the same call produces a Kitty image for the first and half blocks for the second.
+- `scripts/smoke_image_occlusion.py` — a pane draws a 60×24 image, a float opens over it, and the
+  placements hexe emits are read back: full size unobstructed, trimmed under the float, full size
+  again once it closes.
 - `scripts/smoke_pane_cell_size.py` — a program *inside* a pane reads its own `TIOCGWINSZ` and writes
   it to a file (scraping it back out of the rendered screen would be testing the renderer, not the
   ioctl). It asserts the pane reports the host's real cell size, that a resize keeps the two
   consistent, and that a host reporting no pixel size leaves the pane at zero rather than inheriting
   the fallback.
 
-A sixth covers a failure that images made possible elsewhere:
+A seventh covers a failure that images made possible elsewhere:
 `scripts/smoke_reattach_image_intact.py` reattaches to a pane that displayed a megabyte-scale image.
 Backlog replay resynchronises on a newline, and an image payload is base64 with no newline in it, so
 the replay used to start inside the payload and print it as a wall of text.
