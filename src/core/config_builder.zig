@@ -204,16 +204,14 @@ pub const MuxConfigBuilder = struct {
         self.plugins.items[self.plugins.items.len - 1].access = access;
     }
 
-    /// A plugin that came from an installed package, so it knows its own home.
-    pub fn appendPackagePlugin(
-        self: *MuxConfigBuilder,
-        name: []const u8,
-        command: []const u8,
-        dir: []const u8,
-        access: config.access_mod.Set,
-    ) !void {
-        try self.appendPluginWithAccess(name, command, access);
-        self.plugins.items[self.plugins.items.len - 1].dir = try self.allocator.dupe(u8, dir);
+    /// Where the last-registered plugin's helper runs. Separate from
+    /// `appendPlugin` because a plugin declaring one is the exception: most are
+    /// only Lua and have no process to give a directory to.
+    pub fn setLastPluginDir(self: *MuxConfigBuilder, dir: []const u8) !void {
+        if (self.plugins.items.len == 0) return;
+        const last = &self.plugins.items[self.plugins.items.len - 1];
+        if (last.dir.len > 0) self.allocator.free(last.dir);
+        last.dir = try self.allocator.dupe(u8, dir);
     }
 
     pub fn appendPlugin(self: *MuxConfigBuilder, name: []const u8, command: []const u8) !void {

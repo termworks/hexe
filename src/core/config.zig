@@ -83,7 +83,7 @@ pub const PluginDef = struct {
     /// Run through `/bin/sh -c`, detached, with stdio closed.
     command: []const u8,
     /// The package directory it came from, if it is an installed package. Used
-    /// as the command's working directory, so a manifest can say
+    /// as the command's working directory, so a plugin can say
     /// `command = "./backend.sh"` without knowing where it will be installed.
     dir: []const u8 = "",
     /// What it may ask hexe to do, beyond the always-granted `read` floor.

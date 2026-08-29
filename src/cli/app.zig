@@ -543,17 +543,10 @@ pub fn main() !void {
     // program that wants it is not hexe.
     const lua_api_cmd = app.createCommand("lua-api", "Print the Lua client library other programs require");
 
-    var plugin_cmd = app.createCommand("plugin", "Install, list, remove and approve plugins");
-    var plugin_list = app.createCommand("list", "What is installed, what it may do, and whether it changed");
+    var plugin_cmd = app.createCommand("plugin", "What is on the runtimepath, and what it would run");
+    var plugin_list = app.createCommand("list", "The path, and the plugins on it, in load order");
     try plugin_list.addArg(Arg.booleanOption("json", null, null));
-    var plugin_install = app.createCommand("install", "Install a plugin directory");
-    try plugin_install.addArg(Arg.positional("source", null, null));
-    try plugin_install.addArg(Arg.booleanOption("yes", 'y', null));
-    var plugin_remove = app.createCommand("remove", "Remove an installed plugin");
-    try plugin_remove.addArg(Arg.positional("name", null, null));
-    var plugin_allow = app.createCommand("allow", "Approve a plugin's current contents");
-    try plugin_allow.addArg(Arg.positional("name", null, null));
-    try plugin_cmd.addSubcommands(&[_]yazap.Command{ plugin_list, plugin_install, plugin_remove, plugin_allow });
+    try plugin_cmd.addSubcommands(&[_]yazap.Command{plugin_list});
 
     var pod_gc = app.createCommand("gc", "Garbage-collect stale pod metadata");
     try pod_gc.addArg(Arg.booleanOption("dry-run", 'n', null));
@@ -753,6 +746,9 @@ pub fn main() !void {
     // so the command a user actually types -- bare `hexe` -- could not pick one.
     try root.addArg(Arg.singleValueOption("profile", 'P', "Use a named profile (separate daemon and sessions)"));
     try root.addArg(Arg.singleValueOption("instance", 'I', "Alias for --profile"));
+    // The first question when something misbehaves is "is it me or a plugin?",
+    // and there has to be a way to answer it.
+    try root.addArg(Arg.booleanOption("noplugin", null, "Start without running any plugin"));
 
     var profile_cmd = app.createCommand("profile", "Profiles: separate daemons and sessions");
     profile_cmd.setProperty(.help_on_empty_args);
@@ -861,6 +857,9 @@ pub fn main() !void {
     }
     if (matches.getSingleValue("profile")) |name| setInstanceFromCli(name);
     if (matches.getSingleValue("instance")) |name| setInstanceFromCli(name);
+    // Set before anything reads a config: a plugin runs during the config load,
+    // so deciding afterwards would be deciding too late.
+    if (matches.containsArg("noplugin")) core.lua_runtime.setPluginsEnabled(false);
 
     // yazap turns a repeated flag into a multi-value, and getSingleValue then
     // answers null — which `orelse "*"` quietly widened into "every namespace in
@@ -882,18 +881,6 @@ pub fn main() !void {
     if (matches.subcommandMatches("plugin")) |plugin_matches| {
         if (plugin_matches.subcommandMatches("list")) |m| {
             try cli_cmds.runPluginList(allocator, m.containsArg("json"));
-            return;
-        }
-        if (plugin_matches.subcommandMatches("install")) |m| {
-            try cli_cmds.runPluginInstall(allocator, m.getSingleValue("source") orelse "", m.containsArg("yes"));
-            return;
-        }
-        if (plugin_matches.subcommandMatches("remove")) |m| {
-            try cli_cmds.runPluginRemove(allocator, m.getSingleValue("name") orelse "");
-            return;
-        }
-        if (plugin_matches.subcommandMatches("allow")) |m| {
-            try cli_cmds.runPluginAllow(allocator, m.getSingleValue("name") orelse "");
             return;
         }
         try cli_cmds.runPluginList(allocator, false);
