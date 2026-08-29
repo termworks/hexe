@@ -82,7 +82,12 @@ pub fn build(b: *std.Build) void {
     // builds every hash map, formatter, sorter and writer for size -- including
     // the ones inlined into the render path. Measured, `loop_render.renderTo`
     // goes from 48,147 bytes to 20,605 and `vt_bridge.drawRenderState` from
-    // 32,580 to 16,091, and the frame cost rises about 4.6%.
+    // 32,580 to 16,091.
+    //
+    // Pinning `terminal`, `core` and `pod` to ReleaseFast does NOT rescue it,
+    // which is the whole point: their own code stays fast and the std inlined
+    // into it does not. `scripts/bench_render.py`, interleaved, n=6 each:
+    // 0.972 ms/row default against 1.059 with `-Dsmall`, so **9% slower**.
     //
     // Those two functions are NOT generic and their module stays ReleaseFast;
     // what shrinks inside them is the std they inlined. Rewriting the render
@@ -93,7 +98,7 @@ pub fn build(b: *std.Build) void {
     //
     // So the cold split above is worth 374 KB and cannot be worth much more.
     // The rest of the binary is std, and std has one mode per compilation.
-    const small = b.option(bool, "small", "Also build the root module for size: ~2MB smaller, ~5% slower rendering") orelse false;
+    const small = b.option(bool, "small", "Also build the root module for size: ~2MB smaller, ~9% slower rendering") orelse false;
     const root_optimize: std.builtin.OptimizeMode = if (small) cold else optimize;
 
     // Create core module
