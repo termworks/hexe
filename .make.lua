@@ -558,7 +558,35 @@ make.recipe{
       if #names > 0 then
         print(oslo.ui.style("✓ ", { fg = "green" }) ..
               ("%d plugin%s -> %s"):format(#names, #names == 1 and "" or "s", plugin_dest))
-        print(oslo.ui.subtitle("  not approved yet:  hexe plugin allow " .. table.concat(names, " ")))
+
+        -- **Approved, because these came with the binary.**
+        --
+        -- The trust ledger exists for a plugin you got from SOMEWHERE ELSE: its
+        -- `init.lua` runs inside hexe's own Lua, so dropping a file into the
+        -- plugin directory must not be enough to get code running in your mux,
+        -- and the manifest is split from the body so you can read what it asks
+        -- for first.
+        --
+        -- None of that describes these. They are in this repository, installed
+        -- by this repository's own `make install`, built from the commit that
+        -- produced the binary being installed beside them. Anyone who could
+        -- change them could change hexe itself. Asking for a second yes adds no
+        -- decision -- it only means a plugin sits installed and inert until you
+        -- notice, which is exactly what happened.
+        --
+        -- Only these. `hexe plugin install <anywhere-else>` is untouched.
+        if oslo.fs.stat(BIN) and not a.dest then
+          for _, name in ipairs(names) do
+            local ok = oslo.run{ BIN, "plugin", "allow", name, capture = true }
+            if ok and ok.ok then
+              print(oslo.ui.style("✓ ", { fg = "green" }) ..
+                    ("approved %s"):format(name) ..
+                    oslo.ui.subtitle("  (shipped with this build)"))
+            else
+              print(oslo.ui.subtitle("  could not approve " .. name .. ":  hexe plugin allow " .. name))
+            end
+          end
+        end
       end
     end
 

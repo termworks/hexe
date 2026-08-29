@@ -70,6 +70,13 @@ They are separate steps, and deliberately so. Install copies the directory in
 and prints what it asks for. Nothing of it has run yet. `hexe plugin allow`
 records the package's contents as approved, and only then does hexe run it.
 
+**Except the ones hexe ships.** `config/plugins/*` are installed *and approved*
+by hexe's own `make install`: they come from this repository, built from the
+commit that produced the binary landing beside them, so anyone able to change
+them can already change hexe itself. A second yes there decides nothing — it
+only leaves a plugin installed and inert until somebody notices. Everything
+installed from anywhere else goes through `allow` exactly as before.
+
 Approval covers **the manifest and the entry together**. A manifest that quietly
 widens `access` is exactly as much a change as a rewritten `init.lua`, so
 changing either revokes it:
