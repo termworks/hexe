@@ -1,10 +1,7 @@
 //! What an image file is, and how to get pixels out of one.
 //!
-//! Two places in hexe are handed a whole encoded image rather than a stream of
-//! terminal escapes: an iTerm2 inline image arriving in a pane, and a path
-//! given to `draw`. Both used to accept PNG and nothing else -- which is the
-//! format `imgcat` sends least often, since people mostly point it at
-//! photographs.
+//! One place in hexe is handed a whole encoded image rather than a stream of
+//! terminal escapes: a path given to `draw`. It reads PNG and JPEG.
 //!
 //! PNG travels on untouched: the Kitty protocol carries it directly and
 //! ghostty decodes it on the way in, so re-decoding here would only cost time.
@@ -44,8 +41,7 @@ const png_magic = "\x89PNG\r\n\x1a\n";
 const jpeg_magic = "\xff\xd8\xff";
 
 /// Identify an image by its leading bytes. Extensions lie; magic numbers do
-/// not, and neither of these callers has an extension to consult anyway --
-/// an iTerm2 payload is bytes on a socket.
+/// not.
 pub fn detect(bytes: []const u8) ?Format {
     if (std.mem.startsWith(u8, bytes, png_magic)) return .png;
     if (std.mem.startsWith(u8, bytes, jpeg_magic)) return .jpeg;

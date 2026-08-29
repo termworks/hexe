@@ -1,14 +1,14 @@
 # Images
 
-A program draws an image on a terminal by writing an escape sequence full of pixels. There are three
-such sequences in circulation and no agreement on which one to use: the **Kitty graphics protocol**,
-**sixel**, and **iTerm2 inline images**. Which one a program speaks depends on when it was written;
-which one a terminal understands depends on which terminal it is.
+A program draws an image on a terminal by writing an escape sequence full of pixels, and there is no
+agreement on which sequence: the **Kitty graphics protocol** is the modern one, **sixel** the older
+one still in wide use. Which a program speaks depends on when it was written; which a terminal
+understands depends on which terminal it is.
 
-hexe sits in the middle of that, which is the useful place to stand. It **accepts all three from a
-pane and emits Kitty to the host terminal**, so what a program speaks and what your terminal speaks
-stop being the same question. On a terminal that draws no images at all, it draws them out of text
-rather than showing nothing.
+hexe sits in the middle of that, which is the useful place to stand. It **accepts both from a pane
+and emits Kitty to the host terminal**, so what a program speaks and what your terminal speaks stop
+being the same question. On a terminal that draws no images at all, it draws them out of text rather
+than showing nothing.
 
 ## What works
 
@@ -16,17 +16,17 @@ rather than showing nothing.
 |---|---|
 | Kitty graphics | Parsed by ghostty's VT into the pane's image storage |
 | Sixel | Decoded by hexe (`src/core/sixel.zig`) and handed to the same storage |
-| iTerm2 `OSC 1337 File=` | Base64 decoded by hexe, then PNG or JPEG handed to the same storage |
 
-Everything ends up in one place — ghostty's per-screen Kitty image storage — and the renderer
-re-transmits from there to whatever terminal you are actually attached to. That is why a sixel drawn
-by `img2sixel` inside a pane arrives at your terminal as a Kitty image.
+Both end up in one place — ghostty's per-screen Kitty image storage — and the renderer re-transmits
+from there to whatever terminal you are actually attached to. That is why a sixel drawn by
+`img2sixel` inside a pane arrives at your terminal as a Kitty image.
 
 ## What does not
 
 - **Animation.** Kitty animation frames are accepted and discarded, upstream and here.
-- **Formats other than PNG and JPEG.** GIF, WebP and the rest are refused rather than drawn as
-  garbage. hexe decodes through the wuffs already vendored with ghostty, which builds only those two.
+- **Formats other than PNG and JPEG** for `draw`. GIF, WebP and the rest are refused rather than
+  drawn as garbage. hexe decodes through the wuffs already vendored with ghostty, which builds only
+  those two.
 
 ## Images hexe puts there itself
 
@@ -87,10 +87,8 @@ image really is made of cells and a float overwrites it like any other text.
 
 ## PNG and JPEG
 
-Both entry points that take a whole encoded image — an iTerm2 inline image, and a path given to
-`draw` — read PNG and JPEG, and identify which by the leading bytes rather than by any extension
-(`src/core/image_file.zig`). An iTerm2 payload is bytes on a socket and has no extension to consult
-anyway.
+`draw` is handed a whole encoded image rather than a stream of escapes, and reads PNG and JPEG. It
+identifies which by the leading bytes rather than by the extension (`src/core/image_file.zig`).
 
 The two are handled differently on purpose. **PNG travels on untouched**: the Kitty protocol carries
 it and ghostty decodes it on arrival, so decoding it early would only swap a compressed image for a
@@ -133,9 +131,9 @@ PNG. The patch separates the two options and adds the dependency. The second cha
 readonly stream to handle APC, which is what the Kitty protocol travels in and which that stream had
 always dropped.
 
-Sixel and iTerm2 are hexe's own, in `src/core/image_import.zig`. It watches the pane's byte stream,
-lifts out the sequences carrying an image, decodes them, and injects the pixels as though the program
-had sent Kitty all along. Output carrying no image reaches the VT as the same slices it arrived in,
+Sixel is hexe's own, in `src/core/image_import.zig`. It watches the pane's byte stream, lifts out the
+sequences carrying an image, decodes them, and injects the pixels as though the program had sent
+Kitty all along. Output carrying no image reaches the VT as the same slices it arrived in,
 and the scan for a sequence start is a vector search for `ESC` rather than a walk — this is the VT's
 hot path, and a per-byte loop there would tax every pane to catch the rare image.
 
@@ -175,8 +173,8 @@ Six smokes drive a real frontend over a pty, playing the part of the terminal:
 
 - `scripts/smoke_kitty_graphics.py` — a pane draws a Kitty image; assert hexe transmits **and places**
   it.
-- `scripts/smoke_image_protocols.py` — a pane draws a sixel and an iTerm2 PNG; assert Kitty comes out
-  of the other side, and that the raw payloads never reach the screen as text.
+- `scripts/smoke_image_protocols.py` — a pane draws a sixel; assert Kitty comes out of the other
+  side, and that the raw payload never reaches the screen as text.
 - `scripts/smoke_image_fallback.py` — the deliberate opposite: never answer the capability query, so
   the frontend believes it is on a plain terminal, then assert half blocks appear carrying the
   image's colour and that nothing was transmitted.

@@ -94,9 +94,9 @@ pub const VT = struct {
     /// later milestone selects a namespace.
     ns_table: palette_mod.NamespaceTable = undefined,
 
-    /// Images arriving in a protocol ghostty's VT does not speak: sixel, and
-    /// iTerm2's inline images. It holds partial sequences across feeds, so it
-    /// is per-pane state and lives for as long as the VT.
+    /// Sixel images, which ghostty's VT does not speak. It holds partial
+    /// sequences across feeds, so it is per-pane state and lives for as long as
+    /// the VT.
     images: image_import.Importer = .{},
 
     /// Initialize the VT in-place.
@@ -157,9 +157,9 @@ pub const VT = struct {
     /// state for sequences that arrive split across PTY reads.
     pub fn feed(self: *VT, data: []const u8) !void {
         self.render_state_dirty = true;
-        // Not straight to the stream: sixel and iTerm2 inline images have to be
-        // lifted out and decoded here, because ghostty's VT drops both. Output
-        // carrying neither reaches the stream as the same slices it arrived in.
+        // Not straight to the stream: sixel has to be lifted out and decoded
+        // here, because ghostty's VT drops DCS. Output carrying none reaches
+        // the stream as the same slices it arrived in.
         try self.images.feed(self, data);
     }
 
