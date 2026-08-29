@@ -230,9 +230,9 @@ hexe.pop = {
       shiny_chance = 0.01,
     },
     -- Showing the keys you press is the keycast PLUGIN now, not a widget here.
-    -- `make install` puts it in place; `hexe plugin allow keycast` turns it on.
+    -- `make install` puts it on the runtimepath, where it runs like any other.
     -- Its position, how many chords it keeps and how long they linger are its
-    -- own settings, in the plugin's init.lua.
+    -- own settings, at the top of the plugin's own file.
     digits = {
       enabled = false,
       position = "topleft",

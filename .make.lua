@@ -342,7 +342,7 @@ local SMOKES = {
   "smoke_palette_fuzz.py", "smoke_palette_cells.py", "smoke_names.py",
   "smoke_decor.py", "smoke_float_state.py", "smoke_float_per_git.py", "smoke_float_navigatable.py", "smoke_painter_exec.py", "smoke_api_socket.py",
   "smoke_api_events.py", "smoke_stale_daemon.py", "smoke_api_geometry.py",
-  "smoke_inherit_env.py", "smoke_access.py", "smoke_capture.py", "smoke_lua_client.py", "smoke_pane_socket.py", "smoke_plugin_pkg.py", "smoke_popup.py", "smoke_plugin_stream.py", "smoke_share_indicator.py", "smoke_stream_attach.py", "smoke_status_zones.py",
+  "smoke_inherit_env.py", "smoke_access.py", "smoke_capture.py", "smoke_lua_client.py", "smoke_pane_socket.py", "smoke_runtimepath.py", "smoke_popup.py", "smoke_plugin_stream.py", "smoke_share_indicator.py", "smoke_stream_attach.py", "smoke_status_zones.py",
 }
 
 -- Heavy-load scenario: splits + floats + fullscreen apps + huge buffers + pastes, then chaos
@@ -484,9 +484,17 @@ make.recipe{ name = "demos", desc = "record, publish and embed",
 -- hexe's own configuration lives in `config/`, and this installs it: `config/*` becomes
 -- `~/.config/hexe/*`. The frontend reads `init.lua` from there at startup, so this is how a
 -- checkout's configuration becomes the one a running mux uses.
+-- **The repository mirrors XDG.** `config/` is what a person edits and installs to
+-- `$XDG_CONFIG_HOME/hexe`; `share/` is what hexe owns and installs to `$XDG_DATA_HOME/hexe`. The
+-- path in the tree names the destination, so nobody has to learn a mapping -- and the plugin hexe
+-- ships lives at `share/runtime/plugin/`, which is hexe's own root on the runtimepath.
+--
+-- Entry by entry, each mirrored with `--delete`, rather than one `--delete` over the whole tree:
+-- the destination is where you keep your own files beside hexe's, and a tree-wide mirror would take
+-- them with it.
 make.recipe{
   name = "configs",
-  desc = "install config/ into $XDG_CONFIG_HOME/hexe",
+  desc = "install config/ and share/ into their XDG directories",
   params = { { "--dest", desc = "somewhere other than the config directory" } },
   run = function(a)
     assert(oslo.run{ "sh", "-c", "command -v rsync", capture = true }.ok,
@@ -496,117 +504,64 @@ make.recipe{
     local top = oslo.run{ "git", "rev-parse", "--show-toplevel", capture = true }
     local root = top.ok and (top.out or ""):match("^%s*(.-)%s*$") or ""
     if root == "" then root = oslo.sys.pwd() end
-    local source = root .. "/config"
-    assert(oslo.fs.stat(source .. "/"), "there is no config/ directory in " .. root)
+    assert(oslo.fs.stat(root .. "/config/"), "there is no config/ directory in " .. root)
 
-    local dest = a.dest
-    if not dest then
-      local config = os.getenv("XDG_CONFIG_HOME")
-      if not config or config == "" then config = os.getenv("HOME") .. "/.config" end
-      dest = config .. "/" .. NAME
+    local function home(var, fallback)
+      local dir = os.getenv(var)
+      if not dir or dir == "" then dir = os.getenv("HOME") .. fallback end
+      return dir .. "/" .. NAME
     end
-    sh.mkdir("-p", dest)
 
-    -- One entry at a time, each mirrored with --delete, rather than one --delete over the whole
-    -- tree: the destination is where anything else you keep beside init.lua lives, and a tree-wide
-    -- mirror would take it with it.
-    -- **Plugins do not live with the config.** hexe reads them from the data directory, so
-    -- syncing `config/plugins` into `~/.config/hexe` would put them somewhere nothing looks. They
-    -- go to their own destination below, and are skipped here.
-    local synced = 0
-    for _, path in ipairs(oslo.fs.glob(source .. "/*")) do
-      local name = oslo.path.name(path)
-      if name == "plugins" then
-        goto continue
-      elseif oslo.fs.stat(path .. "/") then
-        sh.mkdir("-p", dest .. "/" .. name)
-        sh.rsync("-a", "--delete", path .. "/", dest .. "/" .. name .. "/")
-      else
-        sh.rsync("-a", path, dest .. "/" .. name)
-      end
-      synced = synced + 1
-      ::continue::
-    end
-    print(oslo.ui.style("✓ ", { fg = "green" }) ..
-          ("%d entr%s -> %s"):format(synced, synced == 1 and "y" or "ies", dest))
-
-    -- The plugins hexe ships, into the directory hexe reads them from.
-    --
-    -- **Installed is not approved**, and deliberately: nothing here has run, and `hexe plugin
-    -- allow <name>` is the separate step that lets it. Copying a plugin in and enabling it in one
-    -- move would make "see what it asks for before running any of it" impossible.
-    local plugin_src = source .. "/plugins"
-    if oslo.fs.stat(plugin_src .. "/") then
-      -- `--dest` redirects everything, plugins included: a run pointed somewhere else must not
-      -- reach into the real plugin directory.
-      local plugin_dest
-      if a.dest then
-        plugin_dest = a.dest .. "/plugins"
-      else
-        local data = os.getenv("XDG_DATA_HOME")
-        if not data or data == "" then data = os.getenv("HOME") .. "/.local/share" end
-        plugin_dest = data .. "/" .. NAME .. "/plugins"
-      end
-      sh.mkdir("-p", plugin_dest)
-      local names = {}
-      for _, path in ipairs(oslo.fs.glob(plugin_src .. "/*")) do
+    -- `shared` names a destination directory that holds THEIR files beside ours -- the plugin
+    -- directory holds whatever they installed themselves. Mirroring such a directory with
+    -- `--delete` removes every one of those, which is how `make configs` once deleted an
+    -- installed plugin hexe does not ship. There, descend and mirror each entry on its own.
+    local function install(source, dest, shared)
+      if not oslo.fs.stat(source .. "/") then return 0 end
+      sh.mkdir("-p", dest)
+      local synced = 0
+      for _, path in ipairs(oslo.fs.glob(source .. "/*")) do
         local name = oslo.path.name(path)
-        sh.mkdir("-p", plugin_dest .. "/" .. name)
-        sh.rsync("-a", "--delete", path .. "/", plugin_dest .. "/" .. name .. "/")
-        names[#names + 1] = name
-      end
-      if #names > 0 then
-        print(oslo.ui.style("✓ ", { fg = "green" }) ..
-              ("%d plugin%s -> %s"):format(#names, #names == 1 and "" or "s", plugin_dest))
-
-        -- **Approved, because these came with the binary.**
-        --
-        -- The trust ledger exists for a plugin you got from SOMEWHERE ELSE: its
-        -- `init.lua` runs inside hexe's own Lua, so dropping a file into the
-        -- plugin directory must not be enough to get code running in your mux,
-        -- and the manifest is split from the body so you can read what it asks
-        -- for first.
-        --
-        -- None of that describes these. They are in this repository, installed
-        -- by this repository's own `make install`, built from the commit that
-        -- produced the binary being installed beside them. Anyone who could
-        -- change them could change hexe itself. Asking for a second yes adds no
-        -- decision -- it only means a plugin sits installed and inert until you
-        -- notice, which is exactly what happened.
-        --
-        -- Only these. `hexe plugin install <anywhere-else>` is untouched.
-        if oslo.fs.stat(BIN) and not a.dest then
-          for _, name in ipairs(names) do
-            local ok = oslo.run{ BIN, "plugin", "allow", name, capture = true }
-            if ok and ok.ok then
-              print(oslo.ui.style("✓ ", { fg = "green" }) ..
-                    ("approved %s"):format(name) ..
-                    oslo.ui.subtitle("  (shipped with this build)"))
-            else
-              print(oslo.ui.subtitle("  could not approve " .. name .. ":  hexe plugin allow " .. name))
-            end
+        if oslo.fs.stat(path .. "/") then
+          if shared then
+            synced = synced + install(path, dest .. "/" .. name, false)
+            goto continue
           end
+          sh.mkdir("-p", dest .. "/" .. name)
+          sh.rsync("-a", "--delete", path .. "/", dest .. "/" .. name .. "/")
+        else
+          sh.rsync("-a", path, dest .. "/" .. name)
         end
+        synced = synced + 1
+        ::continue::
       end
+      print(oslo.ui.style("✓ ", { fg = "green" }) ..
+            ("%d entr%s -> %s"):format(synced, synced == 1 and "y" or "ies", dest))
+      return synced
     end
+
+    local dest = a.dest or home("XDG_CONFIG_HOME", "/.config")
+    install(root .. "/config", dest)
+    -- Only when `--dest` was not given: a caller redirecting the config has not asked for the data.
+    if not a.dest then
+      install(root .. "/share", home("XDG_DATA_HOME", "/.local/share"), true)
+    end
+    print(oslo.ui.subtitle("  anything else in those directories is left alone"))
 
     -- Installed, then checked. hexe can read its own config back, so a file that will not load is
     -- worth knowing about now rather than the next time a mux starts and degrades to defaults.
-    -- `validate` reads whatever `$XDG_CONFIG_HOME` points at and takes no path, so the variable is
-    -- set for the child by a shell rather than passed as an option: `oslo.run` has no `env` key and
-    -- ignores one silently, which validated the developer's own config and called it a pass.
     if oslo.fs.stat(BIN) then
-      local home = dest:gsub("/" .. NAME .. "$", "")
-      local r = oslo.run{ "sh", "-c",
-        ("XDG_CONFIG_HOME=%q %q config validate 2>&1"):format(home, BIN), capture = true }
-      if r.ok then
+      local check = oslo.run{ "sh", "-c",
+        ("XDG_CONFIG_HOME=%q %q config validate >/dev/null 2>&1"):format(
+          a.dest and (a.dest:gsub("/" .. NAME .. "$", "")) or
+            (os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")), BIN) }
+      if check and check.ok then
         print(oslo.ui.style("✓ ", { fg = "green" }) .. "it loads")
       else
         print(oslo.ui.style("✗ ", { fg = "yellow" }) .. "installed, but it does not load:")
-        print(dim("  " .. ((r.out or ""):match("[^\n]*") or "")))
+        oslo.run{ "sh", "-c", ("%q config validate 2>&1 | head -3"):format(BIN) }
       end
     end
-    print(oslo.ui.subtitle("  anything else in that directory is left alone"))
   end,
 }
 
