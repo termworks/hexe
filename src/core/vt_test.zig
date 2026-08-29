@@ -247,3 +247,27 @@ test "the fallback matches the default, so a first report is a change" {
     try std.testing.expect(core.vt.cell_px.known);
 }
 
+
+test "VT answers a Kitty graphics support query" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 5);
+    defer vt.deinit();
+
+    // The probe every image tool sends to decide whether to draw at all: a 1x1
+    // RGB image with `a=q`, "tell me if you understood this".
+    try vt.feed("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
+
+    const reply = vt.takeImageResponses();
+    defer std.testing.allocator.free(reply);
+
+    // Silence is what makes a tool downgrade itself to half blocks, so the
+    // answer has to exist, carry the id that was asked about, and say OK.
+    try std.testing.expect(reply.len > 0);
+    try std.testing.expect(std.mem.startsWith(u8, reply, "\x1b_Gi=31;"));
+    try std.testing.expect(std.mem.indexOf(u8, reply, "OK") != null);
+
+    // Drained, not merely peeked: the next feed must not repeat it.
+    const again = vt.takeImageResponses();
+    defer std.testing.allocator.free(again);
+    try std.testing.expectEqual(@as(usize, 0), again.len);
+}

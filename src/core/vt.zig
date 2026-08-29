@@ -163,6 +163,22 @@ pub const VT = struct {
         try self.images.feed(self, data);
     }
 
+    /// Kitty graphics replies this pane owes its program, or an empty slice.
+    ///
+    /// The protocol has a response half -- a program asks `a=q` whether the
+    /// terminal speaks it at all, and waits for the answer before drawing. The
+    /// readonly stream cannot reply on its own (it has no pty), so it queues
+    /// what it produced and the frontend posts it back. Without that drain a
+    /// program that asks politely gets silence and falls back to half blocks,
+    /// which is how `chafa` behaved in a pane while hexe was perfectly able to
+    /// carry the image.
+    ///
+    /// Caller frees with the VT's allocator.
+    pub fn takeImageResponses(self: *VT) []u8 {
+        if (comptime !@hasDecl(@TypeOf(self.stream.handler), "takeResponses")) return &.{};
+        return self.stream.handler.takeResponses();
+    }
+
     /// Mark the VT as needing a fresh render snapshot.
     pub fn invalidateRenderState(self: *VT) void {
         self.render_state_dirty = true;
