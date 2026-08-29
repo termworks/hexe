@@ -44,7 +44,7 @@ pub const Source = struct {
     height: u32,
     bpp: u32,
 
-    pub fn from(image: anytype) ?Source {
+    pub fn from(image: ghostty.kitty.graphics.Image) ?Source {
         const bpp: u32 = switch (image.format) {
             .gray => 1,
             .gray_alpha => 2,

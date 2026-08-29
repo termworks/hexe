@@ -305,7 +305,9 @@ fn isKittyGraphicsPlaceholder(cp: u21) bool {
     return false;
 }
 
-fn imageFormatToVaxis(format: anytype) ?vaxis.Image.TransmitFormat {
+const ImageFormat = @FieldType(ghostty.kitty.graphics.Image, "format");
+
+fn imageFormatToVaxis(format: ImageFormat) ?vaxis.Image.TransmitFormat {
     return switch (format) {
         .rgb => .rgb,
         // Kitty carries no greyscale format, so these travel as their
@@ -322,7 +324,7 @@ fn imageFormatToVaxis(format: anytype) ?vaxis.Image.TransmitFormat {
 /// always decodes to RGBA — so nothing hits this today. It exists because the
 /// alternative when it does is an image that silently fails to appear, and
 /// `scripts/vendor-ghostty.sh` follows upstream.
-fn expandGrey(arena: std.mem.Allocator, format: anytype, data: []const u8) ?[]const u8 {
+fn expandGrey(arena: std.mem.Allocator, format: ImageFormat, data: []const u8) ?[]const u8 {
     const src_bpp: usize = switch (format) {
         .gray => 1,
         .gray_alpha => 2,

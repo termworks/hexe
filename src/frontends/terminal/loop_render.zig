@@ -3,6 +3,8 @@ const core = @import("core");
 
 const State = @import("state.zig").State;
 const CursorInfo = @import("render_core.zig").CursorInfo;
+const Renderer = @import("render_core.zig").Renderer;
+const ghostty = @import("ghostty-vt");
 
 const statusbar = @import("statusbar.zig");
 const popup_render = @import("popup_render.zig");
@@ -22,7 +24,7 @@ const Pane = @import("pane.zig").Pane;
 
 /// Draw the scrollback-search prompt on the bottom terminal row:
 /// `/<query>` while typing, `/<query>  [i/N]` (or `[no matches]`) after running.
-fn renderSearchPrompt(state: *State, renderer: anytype) void {
+fn renderSearchPrompt(state: *State, renderer: *Renderer) void {
     const w = state.term_width;
     if (w == 0 or state.term_height == 0) return;
     const row: u16 = state.term_height - 1;
@@ -65,7 +67,7 @@ fn renderSearchPrompt(state: *State, renderer: anytype) void {
 /// Highlight a search match's cells (inclusive viewport range, pane-local) over
 /// the already-drawn focused pane. `current` matches reverse-video; others get
 /// a yellow tint.
-fn highlightSearchMatch(renderer: anytype, pane: *Pane, m: pane_search.PaneSearch.MatchViewport, current: bool) void {
+fn highlightSearchMatch(renderer: *Renderer, pane: *Pane, m: pane_search.PaneSearch.MatchViewport, current: bool) void {
     if (pane.width == 0 or pane.height == 0) return;
     var y = m.sy;
     while (y <= m.ey and y < pane.height) : (y += 1) {
@@ -112,7 +114,7 @@ fn spritePositionName(pos: anytype) []const u8 {
 /// over panes, over chrome, over the bar. A drawing that has timed out is
 /// dropped here rather than on a timer: one nobody is drawing does not need
 /// collecting on schedule.
-fn drawDrawings(state: *State, renderer: anytype, stdout: std.fs.File) void {
+fn drawDrawings(state: *State, renderer: *Renderer, stdout: std.fs.File) void {
     if (state.drawings.count() == 0) return;
     const cache = region_render.active orelse return;
     state.drawings.sweep(std.time.milliTimestamp());
@@ -125,7 +127,7 @@ fn drawDrawings(state: *State, renderer: anytype, stdout: std.fs.File) void {
     }
 }
 
-fn drawPaneSprite(state: *State, renderer: anytype, pane: *Pane, stdout: std.fs.File) void {
+fn drawPaneSprite(state: *State, renderer: *Renderer, pane: *Pane, stdout: std.fs.File) void {
     const cache = region_render.active orelse return;
     const name = pane.pokemon_state.sprite_name orelse state.paneName(pane.uuid) orelse return;
     region_render.drawPaneSprite(
@@ -144,9 +146,9 @@ fn drawPaneSprite(state: *State, renderer: anytype, pane: *Pane, stdout: std.fs.
 }
 
 fn drawPaneRenderState(
-    renderer: anytype,
+    renderer: *Renderer,
     pane: *Pane,
-    state: anytype,
+    state: *const ghostty.RenderState,
     x: u16,
     y: u16,
     width: u16,
