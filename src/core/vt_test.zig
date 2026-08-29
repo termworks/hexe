@@ -246,3 +246,39 @@ test "VT imports an iTerm2 inline PNG" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("after", firstRow(&vt, &buf));
 }
+
+test "a measured cell size is told apart from the fallback" {
+    // Process-global, so put it back: the other tests render against it.
+    const saved = core.vt.cell_px;
+    defer core.vt.cell_px = saved;
+
+    core.vt.cell_px = .{};
+    try std.testing.expect(!core.vt.cell_px.known);
+    // The fallback is a real size, so placement arithmetic never divides by
+    // zero even before a terminal has said anything.
+    try std.testing.expect(core.vt.cell_px.w > 0 and core.vt.cell_px.h > 0);
+
+    // A terminal reporting nothing leaves the fallback standing, and unknown.
+    try std.testing.expect(!core.vt.setCellPixels(0, 0));
+    try std.testing.expect(!core.vt.setCellPixels(9, 0));
+    try std.testing.expect(!core.vt.cell_px.known);
+
+    try std.testing.expect(core.vt.setCellPixels(9, 19));
+    try std.testing.expect(core.vt.cell_px.known);
+    try std.testing.expectEqual(@as(u16, 9), core.vt.cell_px.w);
+
+    // Unchanged means unchanged: the panes are only re-synced on a real move.
+    try std.testing.expect(!core.vt.setCellPixels(9, 19));
+    try std.testing.expect(core.vt.setCellPixels(10, 20));
+}
+
+test "the fallback matches the default, so a first report is a change" {
+    const saved = core.vt.cell_px;
+    defer core.vt.cell_px = saved;
+
+    // A host whose cell size happens to equal the fallback must still count as
+    // a report, or its panes would never be told the size is real.
+    core.vt.cell_px = .{};
+    try std.testing.expect(core.vt.setCellPixels(core.vt.cell_px.w, core.vt.cell_px.h));
+    try std.testing.expect(core.vt.cell_px.known);
+}

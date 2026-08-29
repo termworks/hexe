@@ -449,6 +449,21 @@ pub fn alignReplayToLine(data: []const u8, skip: usize, max_scan: usize) usize {
     return skip;
 }
 
+/// The host's cell size carried by a resize frame, if the sender knew it.
+///
+/// A resize payload is `cols`,`rows` as big-endian u16, optionally followed by
+/// the cell's width and height in pixels. Those two are an extension: a
+/// frontend built before them, and `hexe pod attach` on a terminal that reports
+/// no pixel size, send four bytes and the pty's pixel fields stay zero -- which
+/// is what every pane reported until the pane's own geometry started to matter.
+pub fn cellSizeFromResize(payload: []const u8) struct { w: u16, h: u16 } {
+    if (payload.len < 8) return .{ .w = 0, .h = 0 };
+    return .{
+        .w = std.mem.readInt(u16, payload[4..6], .big),
+        .h = std.mem.readInt(u16, payload[6..8], .big),
+    };
+}
+
 /// Where a replay may begin without handing the frontend the middle of a
 /// string sequence, and what to prepend when it cannot begin outside one.
 pub const ReplayStart = struct {
@@ -566,6 +581,22 @@ pub fn replayNeedsAltEnter(
 /// What to prepend so the frontend's VT enters the alt screen before the
 /// replayed paint arrives. Matches what the app itself sent.
 pub const ALT_ENTER_SEQ = "\x1b[?1049h";
+
+test "cellSizeFromResize treats the cell size as optional" {
+    // Four bytes is the payload every sender produced before the cell size
+    // existed, and it must still resize the pane rather than being refused.
+    const short = [_]u8{ 0, 80, 0, 24 };
+    try testing.expectEqual(@as(u16, 0), cellSizeFromResize(&short).w);
+    try testing.expectEqual(@as(u16, 0), cellSizeFromResize(&short).h);
+
+    const full = [_]u8{ 0, 80, 0, 24, 0, 9, 0, 19 };
+    try testing.expectEqual(@as(u16, 9), cellSizeFromResize(&full).w);
+    try testing.expectEqual(@as(u16, 19), cellSizeFromResize(&full).h);
+
+    // A truncated extension is not half a cell size.
+    const partial = [_]u8{ 0, 80, 0, 24, 0, 9 };
+    try testing.expectEqual(@as(u16, 0), cellSizeFromResize(&partial).w);
+}
 
 test "alignReplayOutOfStringSeq clears a cut inside a Kitty image payload" {
     // A Kitty image: APC introducer, base64 body with no LF anywhere, ST.

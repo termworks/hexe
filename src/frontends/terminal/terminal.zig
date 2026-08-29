@@ -19,7 +19,7 @@ pub fn getTermSize() TermSize {
         // The same ioctl carries the pixel size Kitty placements are measured
         // against. Terminals that report nothing leave the default standing.
         if (ws.ws_col > 0 and ws.ws_row > 0) {
-            core.vt.setCellPixels(ws.ws_xpixel / ws.ws_col, ws.ws_ypixel / ws.ws_row);
+            _ = core.vt.setCellPixels(ws.ws_xpixel / ws.ws_col, ws.ws_ypixel / ws.ws_row);
         }
         return .{
             .cols = if (ws.ws_col > 0) ws.ws_col else 80,

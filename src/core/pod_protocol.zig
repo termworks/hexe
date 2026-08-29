@@ -8,6 +8,10 @@ pub const MAX_FRAME_LEN: usize = wire.MAX_PAYLOAD_LEN;
 pub const FrameType = enum(u8) {
     output = 1,
     input = 2,
+    /// `cols`,`rows` as u16 big-endian, optionally followed by the host's
+    /// `cell_w`,`cell_h` in pixels. The last two are an extension: a pod built
+    /// before them, or a sender that does not know the cell size, sees or sends
+    /// a four-byte payload and the pty's pixel fields stay zero.
     resize = 3,
     backlog_end = 4,
     password_mode = 5,

@@ -26,9 +26,6 @@ by `img2sixel` inside a pane arrives at your terminal as a Kitty image.
 
 - **Animation.** Kitty animation frames are accepted and discarded, upstream and here.
 - **iTerm2 payloads that are not PNG.** JPEG and GIF would need a decoder hexe does not carry.
-- **Cell size inside a pane.** A pane's pty reports `ws_xpixel = 0`, so a program that works out its
-  cell size from `TIOCGWINSZ` gets nothing and falls back to its own default. hexe knows the real
-  figure from the host and uses it for placement; it does not yet pass it down to the pane.
 
 ## Images hexe puts there itself
 
@@ -98,12 +95,33 @@ rows and columns. A terminal that reports nothing leaves a default 8×16 standin
 figure the arithmetic divides by zero, the placement collapses to zero cells, and an image transmits
 but is never drawn.
 
+## What a program in a pane sees
+
+That same cell size goes down to the pane. A program deciding how tall a picture will be divides its
+pty's pixel fields by the cell counts, so a pane reporting `ws_xpixel = 0` — which every pane did —
+left `icat`, `timg`, `chafa` and anything else asking `TIOCGWINSZ` guessing, and guessing against the
+wrong terminal, because the pane is not the window.
+
+The resize frame the frontend sends its pod now carries the host's cell size after the size in cells,
+and the pod puts a real pixel geometry on the pty. The two extra fields are an extension: a pod built
+before them, or `hexe pod attach` from a terminal that reports no pixel size, sends the four bytes it
+always did and the pixel fields stay zero.
+
+**The fallback stops at hexe's edge.** The internal 8×16 default keeps placement arithmetic working,
+but it is never sent to a pane — `cell_px.known` separates a measurement from a stand-in. A program
+that is told a cell is 8×16 has no way to know it is being guessed at, and a wrong geometry is worse
+than an absent one; zero already means "unknown" in that protocol, and unknown is the honest answer.
+
+A font size change moves the cell size without moving any pane's rows and columns, so there is no
+cell-dimension change to carry the news. The frontend re-sends every pane's size outright when the
+cell size moves.
+
 Image storage is capped at 64MB per pane. ghostty's own default is 320MB **per screen**, which is
 reasonable for a terminal that is one window and not for a mux with twenty panes.
 
 ## Checking it
 
-Four smokes drive a real frontend over a pty, playing the part of the terminal:
+Five smokes drive a real frontend over a pty, playing the part of the terminal:
 
 - `scripts/smoke_kitty_graphics.py` — a pane draws a Kitty image; assert hexe transmits **and places**
   it.
@@ -115,8 +133,13 @@ Four smokes drive a real frontend over a pty, playing the part of the terminal:
 - `scripts/smoke_draw_image.py` — `hexe api draw` with an `image` path, run twice against two
   separate stacks: one whose terminal answers the capability query and one whose does not, asserting
   the same call produces a Kitty image for the first and half blocks for the second.
+- `scripts/smoke_pane_cell_size.py` — a program *inside* a pane reads its own `TIOCGWINSZ` and writes
+  it to a file (scraping it back out of the rendered screen would be testing the renderer, not the
+  ioctl). It asserts the pane reports the host's real cell size, that a resize keeps the two
+  consistent, and that a host reporting no pixel size leaves the pane at zero rather than inheriting
+  the fallback.
 
-A fifth covers a failure that images made possible elsewhere:
+A sixth covers a failure that images made possible elsewhere:
 `scripts/smoke_reattach_image_intact.py` reattaches to a pane that displayed a megabyte-scale image.
 Backlog replay resynchronises on a newline, and an image payload is base64 with no newline in it, so
 the replay used to start inside the payload and print it as a wall of text.

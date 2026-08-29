@@ -403,9 +403,21 @@ pub const Pane = struct {
     }
     fn sendResizeToPod(self: *Pane, cols: u16, rows: u16) void {
         const pod = self.backend.pod;
-        var payload: [4]u8 = undefined;
+        // The host's cell size travels with the size in cells, so the pane's
+        // pty can report a pixel geometry. A program that draws images divides
+        // one by the other to learn how tall a picture will be; without it the
+        // pane reported zero and every such program fell back to a guess.
+        //
+        // Only a size the host actually reported is passed on. hexe's internal
+        // fallback keeps placement arithmetic working, but sending it here
+        // would tell the program a cell is 8x16 when nobody knows, and a wrong
+        // geometry is worse than an absent one: the program cannot tell.
+        const cell = core.vt.cell_px;
+        var payload: [8]u8 = undefined;
         std.mem.writeInt(u16, payload[0..2], cols, .big);
         std.mem.writeInt(u16, payload[2..4], rows, .big);
+        std.mem.writeInt(u16, payload[4..6], if (cell.known) cell.w else 0, .big);
+        std.mem.writeInt(u16, payload[6..8], if (cell.known) cell.h else 0, .big);
         const frame_type = @intFromEnum(pod_protocol.FrameType.resize);
         queuePodFrame(pod.pane_id, pod.vt_fd, frame_type, &payload) catch |err| {
             core.logging.logError("terminal", "pane resize mux write failed", err);

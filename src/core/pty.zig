@@ -506,12 +506,23 @@ pub const Pty = struct {
         }
     }
 
-    pub fn setSize(self: Pty, cols: u16, rows: u16) !void {
+    /// Resize the pty, in cells and in pixels.
+    ///
+    /// The pixel fields are not decoration: a program that draws images works
+    /// out the size of a cell by dividing them by the cell counts, and that is
+    /// the only way it can know how many rows a picture will occupy. hexe used
+    /// to report zero here, so `icat`, `timg` and anything else that asks fell
+    /// back to a guess -- a guess made against the wrong terminal, since the
+    /// pane is not the window.
+    ///
+    /// A zero cell size means "not known", and leaves the pixel fields zero
+    /// rather than reporting a made-up geometry.
+    pub fn setSize(self: Pty, cols: u16, rows: u16, cell_w: u16, cell_h: u16) !void {
         var ws: c.winsize = .{
             .ws_col = cols,
             .ws_row = rows,
-            .ws_xpixel = 0,
-            .ws_ypixel = 0,
+            .ws_xpixel = if (cell_w == 0) 0 else cols *| cell_w,
+            .ws_ypixel = if (cell_h == 0) 0 else rows *| cell_h,
         };
         if (c.ioctl(self.master_fd, c.TIOCSWINSZ, &ws) != 0) {
             return error.SetSizeFailed;

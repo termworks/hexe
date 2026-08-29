@@ -36,14 +36,28 @@ const ReadonlyStream = @TypeOf((@as(*Terminal, undefined)).vtStream());
 /// `ws_xpixel = 0` until `setCellPixels` is called -- so this starts at a
 /// typical 8x16 cell and the frontend replaces it as soon as the host reports
 /// a real size. One terminal, one cell size, hence one global.
-pub var cell_px: struct { w: u16 = 8, h: u16 = 16 } = .{};
+///
+/// `known` separates a measurement from that fallback, and the distinction
+/// matters as soon as the figure leaves hexe. Placement arithmetic needs some
+/// non-zero cell size or every image collapses to zero cells, so the default
+/// stands in for one. A pane's pty is different: a program there divides the
+/// pixel fields by the cell counts and believes the answer, so reporting the
+/// fallback would be telling it the cell is 8x16 when hexe has no idea. Zero
+/// means "unknown" in that protocol, and unknown is the honest answer.
+pub var cell_px: struct { w: u16 = 8, h: u16 = 16, known: bool = false } = .{};
 
-/// Record the host's cell size. Zero in either axis means "not reported",
-/// which leaves the current value alone rather than reintroducing the divide
-/// by zero.
-pub fn setCellPixels(w: u16, h: u16) void {
-    if (w == 0 or h == 0) return;
-    cell_px = .{ .w = w, .h = h };
+/// Record the host's cell size. Zero in either axis means the terminal reported
+/// none, which leaves the fallback standing rather than reintroducing the
+/// divide by zero.
+///
+/// Returns whether the value actually changed. A font size change moves the
+/// cell size without moving the rows and columns, and the panes have to be
+/// told: their pty geometry is derived from this.
+pub fn setCellPixels(w: u16, h: u16) bool {
+    if (w == 0 or h == 0) return false;
+    if (cell_px.known and cell_px.w == w and cell_px.h == h) return false;
+    cell_px = .{ .w = w, .h = h, .known = true };
+    return true;
 }
 
 /// Thin wrapper around ghostty Terminal

@@ -97,6 +97,7 @@ inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
 /// so on timeout the connection is dropped and SES heals via backlog replay.
 const CLIENT_WRITE_TIMEOUT_MS: i32 = 2_000;
 
+
 /// A pod serves ONE pane, so both of these are generous. Neither list was
 /// bounded: SES counts its half-open connections against `max_connections`,
 /// but the pod accepted without limit, and every observer additionally costs a
@@ -1674,7 +1675,8 @@ const Pod = struct {
                 if (frame.payload.len >= 4) {
                     const cols = std.mem.readInt(u16, frame.payload[0..2], .big);
                     const rows = std.mem.readInt(u16, frame.payload[2..4], .big);
-                    self.pty.setSize(cols, rows) catch |err| {
+                    const cell = buffering.cellSizeFromResize(frame.payload);
+                    self.pty.setSize(cols, rows, cell.w, cell.h) catch |err| {
                         debugLog("handleFrame: resize to {d}x{d} failed: {s}", .{ cols, rows, @errorName(err) });
                     };
                 }
@@ -1921,7 +1923,8 @@ const Pod = struct {
         } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize) and payload.len >= 4) {
             const cols = std.mem.readInt(u16, payload[0..2], .big);
             const rows = std.mem.readInt(u16, payload[2..4], .big);
-            self.pty.setSize(cols, rows) catch |err| {
+            const cell = buffering.cellSizeFromResize(payload);
+            self.pty.setSize(cols, rows, cell.w, cell.h) catch |err| {
                 debugLog("handleAuxInput: resize to {d}x{d} failed: {s}", .{ cols, rows, @errorName(err) });
             };
         }
