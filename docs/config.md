@@ -46,9 +46,10 @@ validator, with its path: `config error: mux.confirm.exti`.
 
 ## Plugins
 
-Installed, not configured: `hexe plugin install ./thing`. A plugin brings its
-own keybindings and its own declaration of what it needs, so your config never
-mentions it. See [plugins.md](plugins.md).
+Put on the path, not configured: copy a plugin into
+`~/.local/share/hexe/site/pack/mine/start/`. A plugin brings its own keybindings
+and starts its own helper, so your config never mentions it. See
+[plugins.md](plugins.md).
 
 ## Helper programs
 

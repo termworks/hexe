@@ -1,183 +1,148 @@
 # Plugins
 
-A plugin is a directory you install, not a command string you paste into your
-config.
+A plugin is a fragment of config that arrived on its own. It runs in hexe's own
+Lua, against the same API your `init.lua` uses, and it registers rather than
+returns.
 
-```console
-$ hexe plugin install examples/plugins/share
-installed share 0.1.0
-  Hand a pane to a stream backend and show the link it gives back
-  it asks for: read,stream,popup
+hexe follows **neovim's model**, because most people arriving here have already
+learned it and deviating from it buys nothing.
 
-Nothing of it has run. When you are happy with what it asks for:
-  hexe plugin allow share
+## Installing one
 
-$ hexe plugin allow share
-$ hexe plugin list
-share            0.1.0      read,stream,popup            ok
-```
-
-Your `init.lua` never mentions it. That is the point: installing a plugin should
-not mean pasting somebody's glue into your own file, and removing one should not
-mean hunting for the lines to delete.
-
-## What a package is
+Put it on the path. That is the whole procedure — there is no install command,
+no manifest and no approval step:
 
 ```
-~/.local/share/hexe/plugins/<name>/
-    plugin.lua    what it is and what it needs
-    init.lua      what it does, in Lua, against hexe's API
+~/.local/share/hexe/site/pack/mine/start/thing/
+    plugin/thing.lua
 ```
-
-**`plugin.lua`** is the manifest, and it is read in an interpreter with **no
-`hexe` in it**:
-
-```lua
-return {
-  name        = "share",
-  version     = "0.1.0",
-  description = "Hand a pane to a stream backend and show the link it gives back",
-  entry       = "init.lua",
-  access      = { "stream", "popup" },
-  -- command  = "drop cast",   -- optional helper process
-}
-```
-
-Splitting it from the body is what makes "see what it asks for before running
-any of it" possible. Reading the manifest cannot itself be the thing that runs
-the plugin.
-
-**`init.lua`** is ordinary hexe config Lua, run inside the same runtime as your
-own, before the config is finished — so its bindings and handlers join the same
-registry yours do:
-
-```lua
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.s }, function(ctx)
-  local st = ctx.stream("share")
-  if not st.attached then return ctx.popup("could not start: " .. (st.error or "?")) end
-  ctx.popup("sharing this pane\n\npress any key to hide")
-end)
-```
-
-`access` in the manifest is what that plugin may ask hexe to do — see
-[access.md](access.md). A plugin declaring `command` also gets a helper process
-started for it, on its own scoped socket, exactly as an inline `hexe.plugin{}`
-would.
-
-## Installing does not approve
-
-They are separate steps, and deliberately so. Install copies the directory in
-and prints what it asks for. Nothing of it has run yet. `hexe plugin allow`
-records the package's contents as approved, and only then does hexe run it.
-
-**Except the ones hexe ships.** `config/plugins/*` are installed *and approved*
-by hexe's own `make install`: they come from this repository, built from the
-commit that produced the binary landing beside them, so anyone able to change
-them can already change hexe itself. A second yes there decides nothing — it
-only leaves a plugin installed and inert until somebody notices. Everything
-installed from anywhere else goes through `allow` exactly as before.
-
-Approval covers **the manifest and the entry together**. A manifest that quietly
-widens `access` is exactly as much a change as a rewritten `init.lua`, so
-changing either revokes it:
 
 ```console
 $ hexe plugin list
-share            0.1.0      read,stream,popup            CHANGED — run `hexe plugin allow`
 ```
 
-An unapproved plugin does not run at all — hexe says so in the log and carries
-on. This is the same ledger `.hexe.lua` already lives under; `hexe plugin allow`
-is `hexe allow` for a package.
+`plugin list` prints the path and every file that would run, in the order it
+would run them. A `-` marks a root that does not exist yet.
 
-The directory is **copied**, not linked, so what hexe runs is what you approved.
-A link would let the source change under an approval given once.
+## The path
 
-## The commands
+An ordered list of roots. Each root has the same layout inside, so hexe's own
+Lua is shipped exactly the way yours is:
 
-| | |
-| --- | --- |
-| `hexe plugin list [--json]` | what is installed, what it may do, whether it still matches |
-| `hexe plugin install <dir> [--yes]` | copy it in and report what it asks for; `--yes` also approves |
-| `hexe plugin allow <name>` | record its current contents as approved |
-| `hexe plugin remove <name>` | delete it, and its bindings with it |
-
-## Writing one
-
-The smallest useful plugin is two files and no process at all:
-
-```lua
--- plugin.lua
-return { name = "notes", version = "0.1.0", entry = "init.lua", access = { "popup" } }
+```
+~/.config/hexe                    yours
+/etc/xdg/hexe                     the system's
+~/.local/share/hexe/site          where packages install
+  + site/pack/*/start/*           each package, as its own root
+~/.local/share/hexe/runtime       hexe's own
+…/after                           the same list, reversed
 ```
 
+The `after` half is the first half reversed, so your own config directory is
+both first and last.
+
+## Inside a root
+
+```
+<root>/
+    plugin/**/*.lua   run at startup, alphabetically, subdirectories included
+    lua/              modules for `require`, never run on their own
+    after/plugin/     run after everything else
+```
+
+**`plugin/` runs, `lua/` is required.** A file under `plugin/` is a statement
+hexe executes for you. A file under `lua/` does nothing until something requires
+it — which is where a plugin's helpers go. Every root's `lua/` is on
+`package.path`, so a plugin's own module is `require("thing.util")` wherever the
+plugin lives.
+
+**`after/` is the override seam.** To undo something a plugin did, put a file in
+`~/.config/hexe/after/plugin/`. It runs last, and "edit the plugin" is not a
+thing anyone should have to do.
+
+**Order is path order between roots and alphabetical within a directory.**
+Alphabetical because directory order is filesystem order: it differs between
+machines and changes after a reinstall.
+
+A plugin gets its root as the chunk's `...`, so it can read a file it ships:
+
 ```lua
--- init.lua
-hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.n }, function(ctx)
-  ctx.popup("pane: " .. (ctx.pane().name or "?"))
+local root = ...
+local f = io.open(root .. "/data.txt", "r")
+```
+
+## What a plugin may assume
+
+The API the config gets. It is a fragment of config, so the registrars are
+simply there, and it returns nothing:
+
+```lua
+-- ~/.config/hexe/plugin/keys.lua
+local on = false
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.k }, function() on = not on end)
+
+hexe.on.key_pressed(function(ev)
+  if not on then return end
+  hexe.draw("keys", { content = ev.chord, width = 20, height = 1, corner = "bottomright" })
 end)
 ```
 
-### Files it ships
-
-`init.lua` receives the package's own directory as the chunk's `...`, which is
-Lua's convention for telling a chunk where it came from:
+A plugin that needs a helper process declares it the same way a config does,
+with `dir` for where it runs:
 
 ```lua
-local here = ...
-local recorder = here .. "/record.sh"
+local root = ...
+hexe.plugin("backend", { command = "./backend.sh", dir = root, access = { "stream" } })
 ```
 
-A package's `command` is started **with the package as its working directory**,
-so a manifest can say `command = "./backend.sh"` without knowing where it will
-be installed.
+## Packages
 
-### A helper process talks back over a socket
-
-A plugin whose work happens outside hexe — a recorder, an uploader, a speech
-backend — is started with `$HEXE_API_SOCKET` pointing at **its own** socket,
-scoped to the access it declared. That is the whole contract: no library to
-link, no version to match, just a unix socket carrying 4-byte-length JSON.
-
-```python
-s.connect(os.environ["HEXE_API_SOCKET"])
-body = json.dumps({"call": "panes"}).encode()
-s.sendall(struct.pack(">I", len(body)) + body)
-# reply: {"ok":true,"n":1,"result":[[ ...panes... ]]}
+```
+site/pack/<any>/start/<plugin>/     loaded at startup
+site/pack/<any>/opt/<plugin>/       there, but not loaded
 ```
 
-`result` is a **list** of return values and `n` says how many, so a client
-unwraps rather than reading the value directly. One connection serves as many
-requests as you like.
+The `<any>` level lets you group what you installed — by source, by purpose —
+without hexe caring. A package is laid out **exactly like a config root**, which
+is why you can develop one as `~/.config/hexe/plugin/thing.lua` and move it into
+a package later without editing it.
 
-If the helper is itself Lua, ask for the library instead of writing that by
-hand — `client()` returns it as source over the same socket. See
-[api.md](api.md#calling-it-from-another-lua).
+## Trust
 
-### Two worked examples
+There is none, and that is deliberate. What is on the path runs, because you put
+it there — a prompt would only ask you to confirm a decision you already made by
+copying the directory in.
 
-| | |
-| --- | --- |
-| [`examples/plugins/dictate`](../examples/plugins/dictate) | push-to-talk speech to text, from `typing` access and the capture indicator |
-| [`examples/plugins/share`](../examples/plugins/share) | hands a pane to a stream backend as asciicast and shows the address it returns |
+hexe used to gate plugins on a content hash. Any edit revoked the approval,
+including the author's own, so installing hexe disabled the plugins hexe itself
+ships, and a plugin under development went silently off after every save. It
+also decided nothing: anyone who can alter a first-party plugin can already
+alter the binary next to it.
 
-Between them they use every part of this: a keybinding, a shipped script, a
-helper process, an on-demand tool, and both halves of the access model.
+Review a plugin before you install it, the way you would any other code you run.
 
-Everything a plugin can reach is in [api.md](api.md); what it is allowed to
-reach is in [access.md](access.md).
+## When something misbehaves
 
-## What hexe does not do
+```console
+$ hexe --noplugin mux new
+```
 
-**It does not supervise a plugin's helper process.** Restarting something that
-exited on purpose is a fork loop with a delay, and a helper that wants to
-survive its own crashes knows better than hexe how to.
+Starts with none of them, which is how you answer "is it me or a plugin?"
+`HEXE_NOPLUGIN=1` does the same for a whole shell. Then narrow it down with
+`hexe plugin list`, which gives you the order they load in.
 
-**It does not sandbox.** A plugin runs as you, with your filesystem. `access`
-is a declaration boundary — least privilege by default and a list you can read
-— not a jail. If you need a real one, run the helper under
-[isolation](isolation.md).
+A plugin that raises is reported and the rest still load — deliberately unlike
+`init.lua`, where a raise is fatal because carrying on would silently apply
+settings you did not ask for. Look for `plugin '<path>' raised while loading` in
+the log.
 
-**There is no registry.** `install` takes a directory. Where you got that
-directory, and whether you read it first, is yours to decide — which is why
-`install` prints what it asks for and stops.
+## What hexe ships
+
+`share/runtime/plugin/` in the repository, installed by `make install` to
+`~/.local/share/hexe/runtime/plugin/`. It is hexe's own root, on the same path
+as yours and under the same rules — so `after/plugin/keycast.lua` in your config
+overrides it, and `--noplugin` turns it off with everything else.
+
+| plugin | what it does |
+|---|---|
+| `keycast.lua` | shows the keys you press, in a corner. `ctrl+alt+k` toggles it |
