@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const sixel = @import("sixel.zig");
+const image_file = @import("image_file.zig");
 const logging = @import("logging.zig");
 
 const ghostty = @import("ghostty-vt");
@@ -294,15 +295,21 @@ pub const Importer = struct {
             return;
         };
 
-        // The payload is a whole image file. PNG is the one ghostty can decode
-        // for us, through the same wuffs path a Kitty `f=100` transmission
-        // takes; anything else would need a decoder hexe does not carry yet.
-        const png_magic = "\x89PNG\r\n\x1a\n";
-        if (!std.mem.startsWith(u8, bytes, png_magic)) {
-            logging.debug("vt", "ignoring an iTerm2 inline image that is not a PNG", .{});
+        // The payload is a whole image file. PNG rides the protocol as itself
+        // and ghostty decodes it on the way in; JPEG has no place in the
+        // protocol, so it is decoded to pixels here and those are sent.
+        const format = image_file.detect(bytes) orelse {
+            logging.debug("vt", "ignoring an iTerm2 inline image in an unsupported format", .{});
             return;
+        };
+        switch (format) {
+            .png => inject(vt, .png, 0, 0, bytes),
+            .jpeg => {
+                var px = image_file.decodeJpeg(alloc, bytes) catch return;
+                defer px.deinit(alloc);
+                inject(vt, .rgba, px.width, px.height, px.rgba);
+            },
         }
-        inject(vt, .png, 0, 0, bytes);
     }
 };
 

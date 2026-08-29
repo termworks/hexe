@@ -16,7 +16,7 @@ rather than showing nothing.
 |---|---|
 | Kitty graphics | Parsed by ghostty's VT into the pane's image storage |
 | Sixel | Decoded by hexe (`src/core/sixel.zig`) and handed to the same storage |
-| iTerm2 `OSC 1337 File=` | Base64 decoded by hexe, PNG payloads handed to the same storage |
+| iTerm2 `OSC 1337 File=` | Base64 decoded by hexe, then PNG or JPEG handed to the same storage |
 
 Everything ends up in one place — ghostty's per-screen Kitty image storage — and the renderer
 re-transmits from there to whatever terminal you are actually attached to. That is why a sixel drawn
@@ -25,7 +25,8 @@ by `img2sixel` inside a pane arrives at your terminal as a Kitty image.
 ## What does not
 
 - **Animation.** Kitty animation frames are accepted and discarded, upstream and here.
-- **iTerm2 payloads that are not PNG.** JPEG and GIF would need a decoder hexe does not carry.
+- **Formats other than PNG and JPEG.** GIF, WebP and the rest are refused rather than drawn as
+  garbage. hexe decodes through the wuffs already vendored with ghostty, which builds only those two.
 
 ## Images hexe puts there itself
 
@@ -41,7 +42,7 @@ $ hexe api draw '"logo"' '{"image":"/tmp/logo.png","corner":"topright","width":2
 hexe.draw("logo", { image = "/tmp/logo.png", corner = "topright", width = 20, height = 8 })
 ```
 
-`image` is a path to a PNG. hexe reads it and encodes it as a Kitty placement
+`image` is a path to a PNG or a JPEG. hexe reads it and encodes it as a Kitty placement
 scaled to the rectangle, and that becomes the drawing's bytes — so it is not a
 second way of drawing, it is the existing one with the bytes supplied. It then
 travels the path every other image takes, which is why it works on a terminal
@@ -49,7 +50,7 @@ with no graphics without another line of code.
 
 A drawing gets a stable image id derived from its name, so one redrawn every
 second occupies a single slot instead of accumulating an image per update. The
-file is capped at 16MB, and anything that is not a PNG is refused rather than
+file is capped at 16MB, and a format hexe cannot read is refused rather than
 drawn as garbage: `src/core/image_encode.zig`.
 
 ## Floats over images
@@ -83,6 +84,23 @@ is hidden than strictly must be. The alternative — a placement per cell — co
 one escape sequence per cell per frame, which is a great deal of bandwidth to
 recover a corner. This does not arise in the half-block fallback below, where an
 image really is made of cells and a float overwrites it like any other text.
+
+## PNG and JPEG
+
+Both entry points that take a whole encoded image — an iTerm2 inline image, and a path given to
+`draw` — read PNG and JPEG, and identify which by the leading bytes rather than by any extension
+(`src/core/image_file.zig`). An iTerm2 payload is bytes on a socket and has no extension to consult
+anyway.
+
+The two are handled differently on purpose. **PNG travels on untouched**: the Kitty protocol carries
+it and ghostty decodes it on arrival, so decoding it early would only swap a compressed image for a
+raw one several times the size. **JPEG has no place in the protocol at all**, so hexe decodes it to
+pixels and sends those instead. That asymmetry is why a JPEG appears on the wire as `f=32` with
+explicit dimensions while a PNG appears as `f=100`.
+
+The decoder is the wuffs already vendored alongside ghostty's VT and already compiled into the binary
+for ghostty's own PNG path — hexe depends on it directly because it decodes images the VT never sees.
+That build enables PNG and JPEG only, which is exactly the set above; anything else is refused.
 
 ## When the terminal cannot draw images
 
