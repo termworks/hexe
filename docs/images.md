@@ -7,7 +7,8 @@ which one a terminal understands depends on which terminal it is.
 
 hexe sits in the middle of that, which is the useful place to stand. It **accepts all three from a
 pane and emits Kitty to the host terminal**, so what a program speaks and what your terminal speaks
-stop being the same question.
+stop being the same question. On a terminal that draws no images at all, it draws them out of text
+rather than showing nothing.
 
 ## What works
 
@@ -23,13 +24,32 @@ by `img2sixel` inside a pane arrives at your terminal as a Kitty image.
 
 ## What does not
 
-- **The host terminal must speak Kitty graphics.** hexe asks at startup; if the answer is no, images
-  are not drawn at all. There is no sixel or half-block fallback yet.
 - **Animation.** Kitty animation frames are accepted and discarded, upstream and here.
 - **iTerm2 payloads that are not PNG.** JPEG and GIF would need a decoder hexe does not carry.
 - **Cell size inside a pane.** A pane's pty reports `ws_xpixel = 0`, so a program that works out its
   cell size from `TIOCGWINSZ` gets nothing and falls back to its own default. hexe knows the real
   figure from the host and uses it for placement; it does not yet pass it down to the pane.
+
+## When the terminal cannot draw images
+
+hexe asks at startup whether the host speaks the Kitty protocol. If it does not, the image is drawn
+as text: one upper half block per cell, its foreground painting the top half of the pixels and its
+background the bottom, so a row of cells carries two rows of pixels. It is the trick `chafa` and
+`viu` use on a plain terminal, done here so it applies to any program's image rather than only to
+programs that thought to implement it.
+
+It is not a photograph. A chart is readable, a logo is recognisable, and a preview tells you what it
+was going to tell you — which is the point, because the alternative was a blank hole with no
+indication that anything had been there.
+
+Two details worth knowing. Pixels are averaged over the region each half cell covers rather than
+point-sampled, because a downscaled photograph sampled at single points is noisy in a way a small box
+average is not; the cost is bounded by the number of cells, not the size of the image. And a half
+cell that is mostly transparent is left alone rather than painted, so an image with an alpha channel
+does not punch a rectangle through the text behind it.
+
+Nothing is transmitted to a terminal that never claimed to support the protocol, which
+`scripts/smoke_image_fallback.py` asserts directly.
 
 ## How it is built
 
@@ -58,15 +78,17 @@ reasonable for a terminal that is one window and not for a mux with twenty panes
 
 ## Checking it
 
-Two smokes, both of which play the part of a graphics-capable terminal by answering the capability
-query:
+Three smokes drive a real frontend over a pty, playing the part of the terminal:
 
 - `scripts/smoke_kitty_graphics.py` — a pane draws a Kitty image; assert hexe transmits **and places**
   it.
 - `scripts/smoke_image_protocols.py` — a pane draws a sixel and an iTerm2 PNG; assert Kitty comes out
   of the other side, and that the raw payloads never reach the screen as text.
+- `scripts/smoke_image_fallback.py` — the deliberate opposite: never answer the capability query, so
+  the frontend believes it is on a plain terminal, then assert half blocks appear carrying the
+  image's colour and that nothing was transmitted.
 
-A third covers the failure that images made possible elsewhere:
+A fourth covers a failure that images made possible elsewhere:
 `scripts/smoke_reattach_image_intact.py` reattaches to a pane that displayed a megabyte-scale image.
 Backlog replay resynchronises on a newline, and an image payload is base64 with no newline in it, so
 the replay used to start inside the payload and print it as a wall of text.

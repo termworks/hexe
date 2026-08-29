@@ -7,6 +7,7 @@ const pagepkg = ghostty.page;
 const Style = ghostty.Style;
 const RenderState = ghostty.RenderState;
 const NamespaceTable = core.palette.NamespaceTable;
+const image_fallback = @import("image_fallback.zig");
 
 /// Static ASCII lookup table -- avoids arena allocation for 95%+ of cells.
 /// Each byte position i contains the byte value i, so ascii_lut[ch..][0..1]
@@ -138,8 +139,8 @@ pub fn drawRenderState(
         }
     }
 
-    drawKittyPinPlacements(win, vt);
-    drawKittyVirtualPlacements(win, vt, row_pins, available_rows);
+    drawKittyPinPlacements(win, vt, vx.caps.kitty_graphics);
+    drawKittyVirtualPlacements(win, vt, row_pins, available_rows, vx.caps.kitty_graphics);
 }
 
 /// Convert ghostty cell content to a UTF-8 string.
@@ -345,6 +346,7 @@ fn drawKittyVirtualPlacements(
     vt: *core.VT,
     row_pins: []const ghostty.PageList.Pin,
     available_rows: usize,
+    graphics: bool,
 ) void {
     if (comptime !@hasDecl(ghostty.kitty.graphics, "unicode")) return;
     const Storage = @TypeOf(vt.terminal.screens.active.kitty_images);
@@ -366,7 +368,6 @@ fn drawKittyVirtualPlacements(
             continue;
         };
 
-        const cached = vt.kitty_image_cache.get(placement.image_id) orelse continue;
         const p = vt.terminal.screens.active.pages.pointFromPin(.viewport, placement.pin) orelse continue;
         const vp = p.viewport;
 
@@ -378,6 +379,22 @@ fn drawKittyVirtualPlacements(
         const size_cols: u16 = @intCast(@min(placement.width, std.math.maxInt(u16)));
         if (size_rows == 0 or size_cols == 0) continue;
 
+        if (!graphics) {
+            const src = image_fallback.Source.from(image) orelse continue;
+            image_fallback.paint(win, src, .{
+                .col = col,
+                .row = row,
+                .cols = size_cols,
+                .rows = size_rows,
+                .src_x = rp.source_x,
+                .src_y = rp.source_y,
+                .src_w = rp.source_width,
+                .src_h = rp.source_height,
+            });
+            continue;
+        }
+
+        const cached = vt.kitty_image_cache.get(placement.image_id) orelse continue;
         writeImageCellPreserve(win, col, row, .{
             .img_id = cached.vaxis_id,
             .options = .{
@@ -398,7 +415,7 @@ fn drawKittyVirtualPlacements(
     }
 }
 
-fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT) void {
+fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT, graphics: bool) void {
     const Storage = @TypeOf(vt.terminal.screens.active.kitty_images);
     if (comptime !@hasField(Storage, "placements")) return;
     if (comptime !@hasDecl(Storage, "imageById")) return;
@@ -413,7 +430,6 @@ fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT) void {
         }
 
         const image = storage.imageById(kv.key_ptr.image_id) orelse continue;
-        const cached = vt.kitty_image_cache.get(kv.key_ptr.image_id) orelse continue;
         const rect = p.rect(image, &vt.terminal) orelse continue;
 
         const top = vt.terminal.screens.active.pages.pointFromPin(.viewport, rect.top_left) orelse continue;
@@ -430,6 +446,22 @@ fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT) void {
         const src_w = if (p.source_width == 0) image.width else p.source_width;
         const src_h = if (p.source_height == 0) image.height else p.source_height;
 
+        if (!graphics) {
+            const src = image_fallback.Source.from(image) orelse continue;
+            image_fallback.paint(win, src, .{
+                .col = col,
+                .row = row,
+                .cols = size_cols,
+                .rows = size_rows,
+                .src_x = p.source_x,
+                .src_y = p.source_y,
+                .src_w = src_w,
+                .src_h = src_h,
+            });
+            continue;
+        }
+
+        const cached = vt.kitty_image_cache.get(kv.key_ptr.image_id) orelse continue;
         writeImageCellPreserve(win, col, row, .{
             .img_id = cached.vaxis_id,
             .options = .{

@@ -348,6 +348,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_mouse_protocol_tests = b.addRunArtifact(mouse_protocol_tests);
 
+    // Half-block image fallback: sampling and transparency, which is what
+    // decides whether an image is legible on a terminal with no graphics.
+    const image_fallback_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/image_fallback.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    image_fallback_test_module.addImport("core", core_module);
+    image_fallback_test_module.addImport("vaxis", vaxis_mod);
+    if (ghostty_vt_mod) |vt| {
+        image_fallback_test_module.addImport("ghostty-vt", vt);
+    }
+    const image_fallback_tests = b.addTest(.{
+        .root_module = image_fallback_test_module,
+    });
+    const run_image_fallback_tests = b.addRunArtifact(image_fallback_tests);
+
     const pane_osc_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/frontends/terminal/pane_osc.zig"),
@@ -589,6 +606,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_fast_path_tests.step);
     test_step.dependOn(&run_input_tests.step);
     test_step.dependOn(&run_mouse_protocol_tests.step);
+    test_step.dependOn(&run_image_fallback_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
     test_step.dependOn(&run_lua_events_tests.step);
     test_step.dependOn(&run_api_json_tests.step);

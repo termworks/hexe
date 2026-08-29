@@ -27,7 +27,7 @@ reading twice.
 | [Reading what already happened](copy-and-search.md) | scrollback search, copy-mode, OSC 133 prompt marks |
 | [Overlays and popups](overlays.md) | notifications, questions, pickers, keycast, pane labels |
 | [Dictation](dictation.md) | speech to text as a tool hexe drives, and the sign that a mic is open |
-| [Images](images.md) | kitty, sixel and iTerm2 in; kitty out, whatever the program speaks |
+| [Images](images.md) | kitty, sixel and iTerm2 in; kitty out, or half blocks where there are no graphics |
 
 ## Appearance
 
