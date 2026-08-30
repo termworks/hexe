@@ -123,6 +123,12 @@ pub const Importer = struct {
                     'q' => {
                         // The decoder wants the introducer parameters too.
                         try self.buf.append(alloc, 'q');
+                        // The introducer is now consumed, so stop holding it.
+                        // Leaving it held meant the next ordinary escape
+                        // replayed a stray `ESC P` in front of itself, which
+                        // put the VT back into DCS and swallowed everything
+                        // the program printed after its image.
+                        self.held_len = 0;
                         self.overflowed = false;
                         self.state = .capture;
                         i += 1;

@@ -133,6 +133,24 @@ test "VT stores a Kitty image transmitted over APC" {
 
 /// Text on the VT's first row, trimmed. Images are asserted through the image
 /// store; this is for the bytes that must reach the screen unchanged.
+fn rowText(vt: *core.VT, row: u16, buf: []u8) []const u8 {
+    const state = vt.getRenderState() catch return "";
+    if (row >= state.rows) return "";
+    const rows = state.row_data.slice();
+    if (row >= rows.len) return "";
+    const cells = rows.items(.cells)[row].slice().items(.raw);
+    var n: usize = 0;
+    for (cells) |cell| {
+        const cp = cell.codepoint();
+        if (cp == 0 or cp > 127) continue;
+        if (n < buf.len) {
+            buf[n] = @intCast(cp);
+            n += 1;
+        }
+    }
+    return std.mem.trimRight(u8, buf[0..n], " ");
+}
+
 fn firstRow(vt: *core.VT, buf: []u8) []const u8 {
     const state = vt.getRenderState() catch return "";
     if (state.rows == 0) return "";
@@ -270,4 +288,36 @@ test "VT answers a Kitty graphics support query" {
     const again = vt.takeImageResponses();
     defer std.testing.allocator.free(again);
     try std.testing.expectEqual(@as(usize, 0), again.len);
+}
+
+test "VT imports a real chafa sixel" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 60, 20);
+    defer vt.deinit();
+
+    // The full sequence as chafa writes it: cursor hide, the DCS, cursor show,
+    // then ordinary text. All of it has to survive.
+    try vt.feed("\x1b[?25l\x1bP0;1;0q\"1;1;300;200#0;2;0;62;100#1;2;93;93;93#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255B!45B\x1b\\\x1b[?25hAFTER");
+
+    const storage = &vt.terminal.screens.active.kitty_images;
+    try std.testing.expectEqual(@as(usize, 1), storage.images.count());
+    var it = storage.images.iterator();
+    const img = it.next().?.value_ptr.*;
+    try std.testing.expectEqual(@as(u32, 300), img.width);
+    try std.testing.expectEqual(@as(u32, 200), img.height);
+
+    // The text is NOT on row 0: `a=T` leaves the cursor below the picture, so
+    // the 200px image pushes it down. Finding it anywhere is the point -- that
+    // the sixel was consumed and the stream resumed cleanly after it.
+    // The text after the image must survive. chafa follows its sixel with
+    // `ESC [ ?25h`, and an escape sequence is exactly what used to replay the
+    // stale `ESC P` still held from the introducer -- which put the VT back
+    // into DCS and swallowed the rest of the program's output.
+    var found = false;
+    var row: u16 = 0;
+    while (row < 20) : (row += 1) {
+        var buf: [80]u8 = undefined;
+        if (std.mem.indexOf(u8, rowText(&vt, row, &buf), "AFTER") != null) found = true;
+    }
+    try std.testing.expect(found);
 }

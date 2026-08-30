@@ -425,3 +425,24 @@ test "sixel: default palette applies without a colour definition" {
     // Palette entry 1 is the VT340's blue: 20/20/80 percent.
     try testing.expectEqual([4]u8{ 51, 51, 204, 255 }, pixel(img, 0, 0));
 }
+
+
+test "sixel: real chafa output decodes" {
+    // Captured from `chafa -f sixel --size 30x14`, verbatim. A synthetic sixel
+    // exercises the branches the author thought of; an encoder's output
+    // exercises the ones it actually emits.
+    const payload = "0;1;0q\"1;1;300;200#0;2;0;62;100#1;2;93;93;93#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255~!45~-#0!255B!45B";
+
+    var img = try decode(testing.allocator, payload, .{});
+    defer img.deinit(testing.allocator);
+
+    // The raster attributes say 300x200, and that is what should come out.
+    try testing.expectEqual(@as(u32, 300), img.width);
+    try testing.expectEqual(@as(u32, 200), img.height);
+    try testing.expectEqual(@as(usize, 300 * 200 * 4), img.rgba.len);
+
+    // Colour 0 is defined as 0;62;100 percent, i.e. the blue of the source.
+    const top_left = pixel(img, 0, 0);
+    try testing.expectEqual(@as(u8, 255), top_left[3]);
+    try testing.expect(top_left[2] > top_left[0]);
+}

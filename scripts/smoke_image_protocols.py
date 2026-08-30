@@ -116,7 +116,14 @@ print(f"instance={INST}")
 # Six rows tall, because a sixel character is six vertical pixels.
 sixel_blob = os.path.join(WORKDIR, "img.sixel")
 with open(sixel_blob, "wb") as f:
+    # Wrapped in cursor hide/show exactly the way chafa writes it. The trailing
+    # ESC matters: a stale introducer held from the DCS used to be replayed in
+    # front of the next escape sequence, putting the VT back into DCS and
+    # swallowing everything the program printed after its image. A sixel
+    # followed only by plain text does not catch that.
+    f.write(b"\x1b[?25l")
     f.write(b"\x1bP0;1;0q#1;2;100;0;0!8~\x1b\\")
+    f.write(b"\x1b[?25h")
     f.write(b"\nSIXEL_SENT\n")
 
 fe, master = spawn_frontend([HEXE, "mux", "new", "-n", "imgimport"])
