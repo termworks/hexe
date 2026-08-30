@@ -539,19 +539,41 @@ fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT, graphics: bool, occlu
         const image = storage.imageById(kv.key_ptr.image_id) orelse continue;
         const rect = p.rect(image, &vt.terminal) orelse continue;
 
-        const top = vt.terminal.screens.active.pages.pointFromPin(.viewport, rect.top_left) orelse continue;
-        const vp = top.viewport;
-        const col: u16 = @intCast(vp.x);
-        const row: u16 = @intCast(vp.y);
-        if (col >= win.width or row >= win.height) continue;
-
         const grid = p.gridSize(image, &vt.terminal);
-        const size_rows: u16 = @intCast(@min(grid.rows, std.math.maxInt(u16)));
         const size_cols: u16 = @intCast(@min(grid.cols, std.math.maxInt(u16)));
-        if (size_rows == 0 or size_cols == 0) continue;
+        if (grid.rows == 0 or size_cols == 0) continue;
 
-        const src_w = if (p.source_width == 0) image.width else p.source_width;
-        const src_h = if (p.source_height == 0) image.height else p.source_height;
+        // Where the image starts, measured against the top of the viewport.
+        //
+        // NOT `pointFromPin(.viewport, ...)`: that answers null once the image
+        // has scrolled even one row above the top, and the placement was then
+        // dropped -- losing the entire picture. An image that exactly fills its
+        // pane scrolls by one the moment anything is printed after it, which is
+        // precisely what a file preview does, so "fills the pane" meant
+        // "invisible". A real terminal clips such an image; so does this.
+        const pages = &vt.terminal.screens.active.pages;
+        const img_pt = pages.pointFromPin(.screen, rect.top_left) orelse continue;
+        const vp_pt = pages.pointFromPin(.screen, pages.getTopLeft(.viewport)) orelse continue;
+        const delta = @as(i64, img_pt.screen.y) - @as(i64, vp_pt.screen.y);
+
+        const col: u16 = @intCast(@min(@as(u32, rect.top_left.x), std.math.maxInt(u16)));
+        if (col >= win.width) continue;
+        if (delta >= @as(i64, win.height)) continue;
+
+        // Rows of the image hidden above the top, and what is left below it.
+        const hidden: u32 = if (delta < 0) @intCast(-delta) else 0;
+        if (hidden >= grid.rows) continue;
+        const row: u16 = if (delta < 0) 0 else @intCast(delta);
+        const size_rows: u16 = @intCast(@min(grid.rows - hidden, std.math.maxInt(u16)));
+        if (size_rows == 0) continue;
+
+        const full_w = if (p.source_width == 0) image.width else p.source_width;
+        const full_h = if (p.source_height == 0) image.height else p.source_height;
+        // Clipping the destination means clipping the source to match, or the
+        // surviving rows would show the whole picture squashed into them.
+        const skipped_px: u32 = @intCast(@as(u64, full_h) * hidden / grid.rows);
+        const src_w = full_w;
+        const src_h = full_h - skipped_px;
 
         if (!graphics) {
             const src = image_fallback.Source.from(image) orelse continue;
@@ -581,7 +603,7 @@ fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT, graphics: bool, occlu
                 .z_index = p.z,
                 .clip_region = .{
                     .x = @intCast(@min(clip.x, std.math.maxInt(u16))),
-                    .y = @intCast(@min(clip.y, std.math.maxInt(u16))),
+                    .y = @intCast(@min(clip.y + skipped_px, std.math.maxInt(u16))),
                     .width = @intCast(@min(clip.w, std.math.maxInt(u16))),
                     .height = @intCast(@min(clip.h, std.math.maxInt(u16))),
                 },
