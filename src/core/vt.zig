@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const palette_mod = @import("palette.zig");
 const logging = @import("logging.zig");
+const image_import = @import("image_import.zig");
 
 // Re-export ghostty-vt - this IS our terminal emulation
 pub const ghostty = @import("ghostty-vt");
@@ -14,7 +15,50 @@ pub const Terminal = ghostty.Terminal;
 // scrollback feels consistent with detach/reattach behavior.
 const DEFAULT_SCROLLBACK_BYTES: usize = 16 * 1024 * 1024;
 
+/// Kitty image storage per pane.
+///
+/// ghostty defaults this to 320MB PER SCREEN, which is a sane number for a
+/// terminal that is one window. A mux is not: hexe never lowered it, so twenty
+/// panes carried a 6.4GB ceiling for image data alone, and nothing but the
+/// programs' own restraint kept it down. 64MB still admits a full 4K RGBA
+/// image (33MB) — the largest thing `icat` will hand over without downscaling
+/// — and evicts oldest-first past that. It is a ceiling, not an allocation.
+const KITTY_IMAGE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 const ReadonlyStream = @TypeOf((@as(*Terminal, undefined)).vtStream());
+
+/// The host terminal's cell size in pixels.
+///
+/// A Kitty placement with no explicit `r=`/`c=` is sized by dividing the
+/// image's pixels by the cell's, so a terminal reporting nothing leaves ghostty
+/// dividing by zero: the placement collapses to zero cells and the image
+/// transmits but is never drawn. Most ptys report nothing -- hexe's own set
+/// `ws_xpixel = 0` until `setCellPixels` is called -- so this starts at a
+/// typical 8x16 cell and the frontend replaces it as soon as the host reports
+/// a real size. One terminal, one cell size, hence one global.
+///
+/// `known` separates a measurement from that fallback, and the distinction
+/// matters as soon as the figure leaves hexe. Placement arithmetic needs some
+/// non-zero cell size or every image collapses to zero cells, so the default
+/// stands in for one. A pane's pty is different: a program there divides the
+/// pixel fields by the cell counts and believes the answer, so reporting the
+/// fallback would be telling it the cell is 8x16 when hexe has no idea. Zero
+/// means "unknown" in that protocol, and unknown is the honest answer.
+pub var cell_px: struct { w: u16 = 8, h: u16 = 16, known: bool = false } = .{};
+
+/// Record the host's cell size. Zero in either axis means the terminal reported
+/// none, which leaves the fallback standing rather than reintroducing the
+/// divide by zero.
+///
+/// Returns whether the value actually changed. A font size change moves the
+/// cell size without moving the rows and columns, and the panes have to be
+/// told: their pty geometry is derived from this.
+pub fn setCellPixels(w: u16, h: u16) bool {
+    if (w == 0 or h == 0) return false;
+    if (cell_px.known and cell_px.w == w and cell_px.h == h) return false;
+    cell_px = .{ .w = w, .h = h, .known = true };
+    return true;
+}
 
 /// Thin wrapper around ghostty Terminal
 pub const VT = struct {
@@ -50,6 +94,11 @@ pub const VT = struct {
     /// later milestone selects a namespace.
     ns_table: palette_mod.NamespaceTable = undefined,
 
+    /// Sixel images, which ghostty's VT does not speak. It holds partial
+    /// sequences across feeds, so it is per-pane state and lives for as long as
+    /// the VT.
+    images: image_import.Importer = .{},
+
     /// Initialize the VT in-place.
     ///
     /// IMPORTANT: Ghostty terminal state must not be moved after initialization.
@@ -69,6 +118,15 @@ pub const VT = struct {
         // still allowing DECSCUSR steady-cursor sequences to disable it.
         self.terminal.modes.set(.cursor_blinking, true);
 
+        // The alternate screen inherits this when ghostty creates it, so the
+        // primary is the only one to set.
+        if (comptime @TypeOf(self.terminal.screens.active.kitty_images) != void) {
+            const primary = self.terminal.screens.get(.primary).?;
+            primary.kitty_images.setLimit(allocator, primary, KITTY_IMAGE_LIMIT_BYTES) catch |err| {
+                logging.logError("vt", "failed to cap Kitty image storage", err);
+            };
+        }
+
         self.stream = self.terminal.vtStream();
         self.render_state = .empty;
         self.kitty_image_cache = std.AutoHashMap(u32, KittyImageCache).init(allocator);
@@ -76,6 +134,7 @@ pub const VT = struct {
     }
 
     pub fn deinit(self: *VT) void {
+        self.images.deinit(self.allocator);
         self.ns_table.deinit();
         self.render_state.deinit(self.allocator);
         self.kitty_image_cache.deinit();
@@ -98,12 +157,40 @@ pub const VT = struct {
     /// state for sequences that arrive split across PTY reads.
     pub fn feed(self: *VT, data: []const u8) !void {
         self.render_state_dirty = true;
-        try self.stream.nextSlice(data);
+        // Not straight to the stream: sixel has to be lifted out and decoded
+        // here, because ghostty's VT drops DCS. Output carrying none reaches
+        // the stream as the same slices it arrived in.
+        try self.images.feed(self, data);
+    }
+
+    /// Kitty graphics replies this pane owes its program, or an empty slice.
+    ///
+    /// The protocol has a response half -- a program asks `a=q` whether the
+    /// terminal speaks it at all, and waits for the answer before drawing. The
+    /// readonly stream cannot reply on its own (it has no pty), so it queues
+    /// what it produced and the frontend posts it back. Without that drain a
+    /// program that asks politely gets silence and falls back to half blocks,
+    /// which is how `chafa` behaved in a pane while hexe was perfectly able to
+    /// carry the image.
+    ///
+    /// Caller frees with the VT's allocator.
+    pub fn takeImageResponses(self: *VT) []u8 {
+        if (comptime !@hasDecl(@TypeOf(self.stream.handler), "takeResponses")) return &.{};
+        return self.stream.handler.takeResponses();
     }
 
     /// Mark the VT as needing a fresh render snapshot.
     pub fn invalidateRenderState(self: *VT) void {
         self.render_state_dirty = true;
+    }
+
+    /// Restate the pane's size in pixels, which is what Kitty placements are
+    /// measured against. Cheap enough to call every frame, which is what the
+    /// renderer does -- the host's cell size can change under us (a font size
+    /// change) without the pane's cell dimensions moving at all.
+    pub fn applyCellPixels(self: *VT) void {
+        self.terminal.width_px = @as(u32, cell_px.w) * self.width;
+        self.terminal.height_px = @as(u32, cell_px.h) * self.height;
     }
 
     /// Resize the virtual terminal

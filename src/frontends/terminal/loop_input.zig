@@ -287,7 +287,31 @@ fn finishBracketedPaste(state: *State) void {
 fn applyInBandWinsize(state: *State, ws: vaxis.Winsize) void {
     const cols = ws.cols;
     const rows = ws.rows;
+    // A resize is also the moment the host's cell size can change under us: a
+    // font size change moves the pixels without moving the rows and columns.
+    const cell_changed = cols > 0 and rows > 0 and
+        core.vt.setCellPixels(ws.x_pixel / cols, ws.y_pixel / rows);
+
     state.applyTerminalResize(cols, rows);
+
+    // Every pane's pty reports a pixel geometry derived from that cell size, so
+    // when only the cell size moved there is no cell-dimension change to carry
+    // the news and the panes have to be told outright.
+    if (cell_changed) syncPaneBackendSizes(state);
+}
+
+/// Re-send every pane's size to its pod. Splits of every tab, then floats --
+/// the same set the Lua accessors call "all panes".
+fn syncPaneBackendSizes(state: *State) void {
+    for (state.view.tab_views.items) |*tab| {
+        var it = tab.layout.splitIterator();
+        while (it.next()) |p| {
+            if (p.*.isAlive()) p.*.syncBackendSize();
+        }
+    }
+    for (state.view.float_views.items) |p| {
+        if (p.isAlive()) p.syncBackendSize();
+    }
 }
 
 fn handleBlockedPopupInput(popups: anytype, parsed_event: ?vaxis.Event) bool {

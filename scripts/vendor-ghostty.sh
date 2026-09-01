@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # Fetch the pinned ghostty and apply hexe's patch into vendor/ghostty.
 #
-# hexe needs one field ghostty does not have: an opaque per-cell tag recording
-# which palette namespace wrote each cell. Rather than maintain a fork, the
-# upstream revision is pinned here and the diff lives in patches/ as a file, so
-# following ghostty is: bump GHOSTTY_REV, re-run this, fix the patch if it
-# drifted.
+# hexe needs two things ghostty's exported Zig module does not give it:
+#
+#   - ghostty-vt-ns:    an opaque per-cell tag recording which palette namespace
+#                       wrote each cell.
+#   - ghostty-vt-kitty: the Kitty graphics protocol. Upstream synthesises its
+#                       `kitty_graphics` build option from `oniguruma`, and the
+#                       Zig module force-disables oniguruma, so images compile
+#                       out entirely; and the readonly stream drops APC, which
+#                       is what the protocol travels in.
+#
+# Rather than maintain a fork, the upstream revision is pinned here and the
+# diffs live in patches/ as files, so following ghostty is: bump GHOSTTY_REV,
+# re-run this, fix the patches if they drifted.
 #
 # `vendor/` is generated and not committed, so a fresh clone runs this once
 # before building. It lives in a script rather than in the build runner because
@@ -18,9 +26,14 @@ GHOSTTY_URL="${GHOSTTY_URL:-https://github.com/ghostty-org/ghostty}"
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 dir="$root/vendor/ghostty"
-patch="$root/patches/ghostty-vt-ns.patch"
+patches=(
+  "$root/patches/ghostty-vt-ns.patch"
+  "$root/patches/ghostty-vt-kitty.patch"
+)
 
-test -f "$patch" || { echo "missing $patch" >&2; exit 1; }
+for patch in "${patches[@]}"; do
+  test -f "$patch" || { echo "missing $patch" >&2; exit 1; }
+done
 
 rm -rf "$dir"
 mkdir -p "$dir"
@@ -34,6 +47,12 @@ git -C "$dir" init -q .
 git -C "$dir" remote add origin "$GHOSTTY_URL"
 git -C "$dir" fetch -q --depth 1 origin "$GHOSTTY_REV"
 git -C "$dir" checkout -q FETCH_HEAD
-git -C "$dir" apply --whitespace=nowarn "$patch"
+for patch in "${patches[@]}"; do
+  git -C "$dir" apply --whitespace=nowarn "$patch"
+done
 
-echo "ghostty $GHOSTTY_REV + patches/$(basename "$patch") -> vendor/ghostty"
+names=""
+for patch in "${patches[@]}"; do
+  names="${names:+$names, }patches/$(basename "$patch")"
+done
+echo "ghostty $GHOSTTY_REV + $names -> vendor/ghostty"

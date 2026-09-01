@@ -26,14 +26,18 @@ const ses = @import("ses");
 const pod = @import("pod");
 const shell_hooks = @import("shp");
 const pop_handlers = @import("pop_handlers.zig");
-const cli_cmds = @import("commands/com.zig");
-const profile_cmds = @import("commands/profile.zig");
-const palette_cmds = @import("commands/palette.zig");
-const api_cmd_impl = @import("commands/api.zig");
-const config_validate = @import("commands/config_validate.zig");
-const ses_export = @import("commands/ses_export.zig");
-const ses_pipe = @import("commands/ses_pipe.zig");
-const ses_stats = @import("commands/ses_stats.zig");
+// The subcommands are their own module so they can be built for size: they run
+// once and exit, where the frontend they sit in front of has to keep up with a
+// pane. See `cold` in build.zig.
+const commands = @import("cli_commands");
+const cli_cmds = commands.com;
+const profile_cmds = commands.profile;
+const palette_cmds = commands.palette;
+const api_cmd_impl = commands.api;
+const config_validate = commands.config_validate;
+const ses_export = commands.ses_export;
+const ses_pipe = commands.ses_pipe;
+const ses_stats = commands.ses_stats;
 
 const c = @cImport({
     @cInclude("stdlib.h");

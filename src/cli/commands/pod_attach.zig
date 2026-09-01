@@ -319,9 +319,14 @@ fn winchHandler(_: i32) callconv(.c) void {
 }
 
 fn sendResize(socket_path: []const u8, size: tty.TermSize) !void {
-    var payload: [4]u8 = undefined;
+    // The cell size goes with it so the pod's pty can report a pixel geometry.
+    // A terminal that reports none sends zeroes, which the pod reads as
+    // "unknown" and leaves the pty's pixel fields alone.
+    var payload: [8]u8 = undefined;
     std.mem.writeInt(u16, payload[0..2], size.cols, .big);
     std.mem.writeInt(u16, payload[2..4], size.rows, .big);
+    std.mem.writeInt(u16, payload[4..6], size.cell_w, .big);
+    std.mem.writeInt(u16, payload[6..8], size.cell_h, .big);
     try sendAuxFrame(socket_path, .resize, &payload);
 }
 

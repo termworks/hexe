@@ -38,8 +38,22 @@ fn feedVtOutput(self: *Pane, data: []const u8) void {
             return;
         };
         processVtOutput(self, segment);
+        sendImageResponses(self);
         offset += segment_len;
     }
+}
+
+/// Post back whatever the Kitty graphics protocol owes the program.
+///
+/// Answering matters more than it looks: `a=q` is how an image tool decides
+/// whether to send an image at all. Silence reads as "no support", and every
+/// such tool then downgrades itself -- so a pane that could show a picture
+/// showed half blocks instead.
+fn sendImageResponses(self: *Pane) void {
+    const replies = self.vt.takeImageResponses();
+    if (replies.len == 0) return;
+    defer self.vt.allocator.free(replies);
+    writeResponse(self, replies, "failed to answer a Kitty graphics query");
 }
 
 /// Split `data` into OSC sequences and everything else, feeding the rest to the

@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.4.13] - 2026-09-01
+
+### <!-- 0 -->⛰️  Features
+
+- Read JPEG as well as PNG
+- Panes report the host's cell size
+- Place an image file, not just bytes
+- Half blocks where the terminal has no graphics
+- Accept sixel and iTerm2, emit kitty
+- Kitty graphics actually reach the terminal
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Clip an image scrolled above the viewport
+- Keep the output that follows an image
+- Answer a pane's kitty graphics query
+- A float hides the image under it
+- Replay never starts inside an image payload
+
+### <!-- 2 -->🚜 Refactor
+
+- Concrete types instead of anytype
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Untrack zig-pkg, it was committed by accident
+
+### <!-- 9 -->◀️ Revert
+
+- PNG only, drop the JPEG decoder
+- Drop iTerm2 inline image support
+
+### Build
+
+- Measured cost of -Dsmall is 9 percent, not 5
+- Correct the note on why -Dsmall costs speed
+- Build cold code for size, keep the render path fast
+- Per-module optimization and a -Dsmall option
+
 ## [0.4.12] - 2026-08-29
 
 ### <!-- 0 -->⛰️  Features

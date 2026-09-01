@@ -97,6 +97,7 @@ inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
 /// so on timeout the connection is dropped and SES heals via backlog replay.
 const CLIENT_WRITE_TIMEOUT_MS: i32 = 2_000;
 
+
 /// A pod serves ONE pane, so both of these are generous. Neither list was
 /// bounded: SES counts its half-open connections against `max_connections`,
 /// but the pod accepted without limit, and every observer additionally costs a
@@ -1561,8 +1562,13 @@ const Pod = struct {
         // Same two hazards as the VT path: never begin mid-escape-sequence, and
         // never paint a fullscreen app onto the observer's main screen.
         off = buffering.alignReplayToLine(backlog_tmp[0..n], off, REPLAY_ALIGN_SCAN);
+        const obs_start = buffering.alignReplayOutOfStringSeq(backlog_tmp[0..n], off);
+        off = obs_start.skip;
         if (buffering.replayNeedsAltEnter(self.alt_tracker.in_alt, self.alt_tracker.alt_enter_offset, obs_ring_start, off)) {
             pod_protocol.writeFrameBounded(&obs_conn, .output, buffering.ALT_ENTER_SEQ, CLIENT_WRITE_TIMEOUT_MS) catch {};
+        }
+        if (obs_start.prefix.len > 0) {
+            pod_protocol.writeFrameBounded(&obs_conn, .output, obs_start.prefix, CLIENT_WRITE_TIMEOUT_MS) catch {};
         }
         // Bounded writes, like the VT client path. The fd was just set
         // non-blocking and Connection.send is a bare write loop with no
@@ -1669,7 +1675,8 @@ const Pod = struct {
                 if (frame.payload.len >= 4) {
                     const cols = std.mem.readInt(u16, frame.payload[0..2], .big);
                     const rows = std.mem.readInt(u16, frame.payload[2..4], .big);
-                    self.pty.setSize(cols, rows) catch |err| {
+                    const cell = buffering.cellSizeFromResize(frame.payload);
+                    self.pty.setSize(cols, rows, cell.w, cell.h) catch |err| {
                         debugLog("handleFrame: resize to {d}x{d} failed: {s}", .{ cols, rows, @errorName(err) });
                     };
                 }
@@ -1750,6 +1757,11 @@ const Pod = struct {
         // The skip above is pure arithmetic, so it can land mid-escape-sequence
         // and desync the frontend's parser. Start on a line boundary instead.
         off = buffering.alignReplayToLine(backlog_tmp[0..n], off, REPLAY_ALIGN_SCAN);
+        // A newline resynchronises every sequence a text program emits, but a
+        // Kitty image payload is base64 and holds none, so the line align
+        // leaves the cut inside it and the frontend prints the payload.
+        const seq_start = buffering.alignReplayOutOfStringSeq(backlog_tmp[0..n], off);
+        off = seq_start.skip;
         // If that window begins after the app entered the alt screen, the
         // frontend would paint a fullscreen app onto its MAIN screen — the
         // content lands in scrollback and scrolling fights every redraw. Put it
@@ -1757,6 +1769,10 @@ const Pod = struct {
         if (buffering.replayNeedsAltEnter(self.alt_tracker.in_alt, self.alt_tracker.alt_enter_offset, ring_start, off)) {
             debugLog("acceptVtClient: re-sending alt-screen enter (replay starts past it)", .{});
             pod_protocol.writeFrameBounded(&self.client.?, .output, buffering.ALT_ENTER_SEQ, CLIENT_WRITE_TIMEOUT_MS) catch {};
+        }
+        if (seq_start.prefix.len > 0) {
+            debugLog("acceptVtClient: replay starts inside an unterminated string sequence, re-opening it", .{});
+            pod_protocol.writeFrameBounded(&self.client.?, .output, seq_start.prefix, CLIENT_WRITE_TIMEOUT_MS) catch {};
         }
         if (off > 0) debugLog("acceptVtClient: replay skipping {d} of {d} backlog bytes (alt={})", .{ off, n, self.alt_tracker.in_alt });
         while (off < n) {
@@ -1907,7 +1923,8 @@ const Pod = struct {
         } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize) and payload.len >= 4) {
             const cols = std.mem.readInt(u16, payload[0..2], .big);
             const rows = std.mem.readInt(u16, payload[2..4], .big);
-            self.pty.setSize(cols, rows) catch |err| {
+            const cell = buffering.cellSizeFromResize(payload);
+            self.pty.setSize(cols, rows, cell.w, cell.h) catch |err| {
                 debugLog("handleAuxInput: resize to {d}x{d} failed: {s}", .{ cols, rows, @errorName(err) });
             };
         }

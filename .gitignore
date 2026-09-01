@@ -1,3 +1,7 @@
 PLAN_BOX.md
 PLAN_IPC.md
 vendor/
+# Resolved Zig dependencies. Committed by accident in 271f56e, which was a
+# floats change that swept in 628 files; nothing builds from it. Zig resolves
+# these from its own cache, and `vendor/` above is ignored for the same reason.
+zig-pkg/

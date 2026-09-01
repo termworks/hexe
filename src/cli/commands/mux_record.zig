@@ -50,7 +50,7 @@ pub fn runMuxRecord(session: []const u8, out_path: []const u8, capture_input: bo
 
     var pty = try core.Pty.spawn(attach_cmd);
     defer pty.close();
-    pty.setSize(term_size.cols, term_size.rows) catch |err| {
+    pty.setSize(term_size.cols, term_size.rows, 0, 0) catch |err| {
         print("Warning: failed to set PTY size: {s}\n", .{@errorName(err)});
     };
 

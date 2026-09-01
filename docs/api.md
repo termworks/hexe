@@ -240,8 +240,30 @@ runs it and sends what it draws.
 `center`) or `x` and `y`. A corner is resolved against the terminal at draw
 time, so it stays in its corner across a resize; the bar's rows are kept clear.
 
+**`image` draws a picture instead of bytes.** It is a path to a PNG, which hexe
+reads and scales to the rectangle:
+
+```console
+$ hexe api draw '"logo"' '{"image":"/tmp/logo.png","corner":"topright",
+                           "width":20,"height":8}'
+{"ok":true,"result":true}
+```
+
+This is the one thing a caller cannot reasonably produce itself, so it is the
+one exception to a drawing carrying its own bytes — and it is only an exception
+in how the bytes are obtained. hexe encodes the file as a Kitty placement into
+the drawing's own surface, which is to say it becomes ordinary drawing content,
+and it reaches the screen the way every other image does: as a Kitty image on a
+terminal that speaks the protocol, and as half blocks on one that does not. See
+[Images](images.md). `image` and `content` are mutually exclusive; `image` wins.
+A path that is missing, too large, or not a PNG is refused with `result:false`
+rather than drawn as garbage. Reading the file rather than taking its bytes is
+also what makes a real picture possible at all: the socket caps a request at
+64 KB, which is a small icon after base64.
+
 **Naming one twice replaces it**, so a caller updating a drawing does not have
-to remove it first and flicker through the gap.
+to remove it first and flicker through the gap. A drawing redrawn with the same
+name reuses its image slot rather than accumulating one image per update.
 
 **`ttl_ms` expires it.** Callers die, and a drawing whose owner is gone would
 otherwise stay on the screen until hexe restarts. A plugin that redraws on a

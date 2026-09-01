@@ -46,6 +46,61 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     })) |liblink_dep| liblink_dep.module("liblink") else null;
 
+    // Per-module optimization, the same trade oslo makes per-package with
+    // `opt-level = "z"`. Zig spells it per-module: every module carries its own
+    // optimize mode, so code that runs once is built for size while the VT, the
+    // render loop and the pod stay at -OReleaseFast.
+    //
+    // ONLY ReleaseFast is downgraded. ReleaseSmall turns runtime safety OFF, so
+    // mapping ReleaseSafe onto it would quietly drop the checks that mode
+    // exists for, and Debug has to stay debuggable.
+    //
+    // Cold: the subcommands (each runs once and exits), the session daemon
+    // (control plane -- pane output never flows through it, pods talk to the
+    // frontend directly), argument parsing, the shell and popup helpers, and
+    // the two frontends most people never launch.
+    //
+    // Hot, and staying that way: core, terminal, pod, frontend_core, ghostty-vt,
+    // vaxis.
+    //
+    // Measured 2026-08-30, ReleaseFast + strip, x86_64:
+    //
+    //   all modules fast (before)       6,329,032
+    //   cold split (now)                5,954,992   -374 KB
+    //
+    // It costs nothing. `scripts/bench_render.py`, interleaved, n=4 each:
+    // 1.026 ms/row before against 1.002 after -- if anything slightly better,
+    // a smaller binary being friendlier to the instruction cache.
+    const cold: std.builtin.OptimizeMode = if (optimize == .ReleaseFast) .ReleaseSmall else optimize;
+
+    // `-Dsmall` additionally builds the ROOT module for size: 3,897,128 bytes,
+    // another 2.06 MB off. It is not the default, and the reason is worth
+    // writing down because it is not obvious and it is not fixable here.
+    //
+    // `std` follows the ROOT module's optimize mode. There is one std in the
+    // compilation and no way to ask for two, so building the root for size
+    // builds every hash map, formatter, sorter and writer for size -- including
+    // the ones inlined into the render path. Measured, `loop_render.renderTo`
+    // goes from 48,147 bytes to 20,605 and `vt_bridge.drawRenderState` from
+    // 32,580 to 16,091.
+    //
+    // Pinning `terminal`, `core` and `pod` to ReleaseFast does NOT rescue it,
+    // which is the whole point: their own code stays fast and the std inlined
+    // into it does not. `scripts/bench_render.py`, interleaved, n=6 each:
+    // 0.972 ms/row default against 1.059 with `-Dsmall`, so **9% slower**.
+    //
+    // Those two functions are NOT generic and their module stays ReleaseFast;
+    // what shrinks inside them is the std they inlined. Rewriting the render
+    // path to concrete types was tried on the theory that `anytype` generics
+    // were being instantiated in the root's context, and it changed the sizes
+    // by nothing at all -- the conversion was kept because concrete types are
+    // better, not because it moved this number.
+    //
+    // So the cold split above is worth 374 KB and cannot be worth much more.
+    // The rest of the binary is std, and std has one mode per compilation.
+    const small = b.option(bool, "small", "Also build the root module for size: ~2MB smaller, ~9% slower rendering") orelse false;
+    const root_optimize: std.builtin.OptimizeMode = if (small) cold else optimize;
+
     // Create core module
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/mod.zig"),
@@ -85,7 +140,7 @@ pub fn build(b: *std.Build) void {
     const shp_module = b.createModule(.{
         .root_source_file = b.path("src/modules/shell/mod.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
     });
     shp_module.addImport("core", core_module);
 
@@ -93,7 +148,7 @@ pub fn build(b: *std.Build) void {
     const pop_module = b.createModule(.{
         .root_source_file = b.path("src/modules/popup/mod.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
     });
     pop_module.addImport("core", core_module);
 
@@ -124,7 +179,7 @@ pub fn build(b: *std.Build) void {
     const web_module = b.createModule(.{
         .root_source_file = b.path("src/frontends/web/mod.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
     });
     web_module.addImport("core", core_module);
     web_module.addImport("frontend_core", frontend_core_module);
@@ -132,7 +187,7 @@ pub fn build(b: *std.Build) void {
     const syslink_module = b.createModule(.{
         .root_source_file = b.path("src/frontends/syslink/mod.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
     });
     syslink_module.addImport("core", core_module);
     syslink_module.addImport("frontend_core", frontend_core_module);
@@ -141,7 +196,7 @@ pub fn build(b: *std.Build) void {
     const ses_module = b.createModule(.{
         .root_source_file = b.path("src/modules/session/main.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = cold,
         .link_libc = true,
     });
     ses_module.addImport("core", core_module);
@@ -163,11 +218,24 @@ pub fn build(b: *std.Build) void {
         pod_module.addImport("libvoid", vb);
     }
 
+    // The subcommand implementations. Their own module so they can be built for
+    // size: each runs once and exits, and they reach only for `core`, `xev` and
+    // the frontend's entry point -- nothing on a hot path.
+    const cli_commands_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/commands/mod.zig"),
+        .target = target,
+        .optimize = cold,
+        .link_libc = true,
+    });
+    cli_commands_module.addImport("core", core_module);
+    cli_commands_module.addImport("xev", xev_mod);
+    cli_commands_module.addImport("terminal", terminal_module);
+
     // Build unified hexe CLI executable
     const cli_root = b.createModule(.{
         .root_source_file = b.path("src/cli/app.zig"),
         .target = target,
-        .optimize = optimize,
+        .optimize = root_optimize,
         .link_libc = true,
     });
     cli_root.addImport("core", core_module);
@@ -178,8 +246,11 @@ pub fn build(b: *std.Build) void {
     cli_root.addImport("ses", ses_module);
     cli_root.addImport("pod", pod_module);
     cli_root.addImport("shp", shp_module);
+    cli_root.addImport("cli_commands", cli_commands_module);
     cli_root.addImport("xev", xev_mod);
     if (yazap_mod) |yazap| {
+        // Argument parsing: it runs once, before anything is on screen.
+        yazap.optimize = cold;
         cli_root.addImport("yazap", yazap);
     }
     const cli_exe = b.addExecutable(.{
@@ -300,6 +371,27 @@ pub fn build(b: *std.Build) void {
     });
     vt_test_module.addImport("core", core_module);
 
+    // Encoding an image file as a Kitty placement, which is how hexe's own
+    // surfaces (drawings, status zones, sprites) show a picture.
+    const image_encode_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/image_encode.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_image_encode_tests = b.addRunArtifact(image_encode_tests);
+
+    // The sixel decoder: bytes in, RGBA out, no terminal involved.
+    const sixel_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core/sixel.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_sixel_tests = b.addRunArtifact(sixel_tests);
+
     const vt_tests = b.addTest(.{
         .root_module = vt_test_module,
     });
@@ -347,6 +439,40 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_mouse_protocol_tests = b.addRunArtifact(mouse_protocol_tests);
+
+    // Half-block image fallback: sampling and transparency, which is what
+    // decides whether an image is legible on a terminal with no graphics.
+    const image_fallback_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/image_fallback.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    image_fallback_test_module.addImport("core", core_module);
+    image_fallback_test_module.addImport("vaxis", vaxis_mod);
+    if (ghostty_vt_mod) |vt| {
+        image_fallback_test_module.addImport("ghostty-vt", vt);
+    }
+    const image_fallback_tests = b.addTest(.{
+        .root_module = image_fallback_test_module,
+    });
+    const run_image_fallback_tests = b.addRunArtifact(image_fallback_tests);
+
+    // Image occlusion geometry: what a float leaves of an image, and which
+    // part of the picture belongs in the strip that survives.
+    const vt_bridge_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/vt_bridge.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vt_bridge_test_module.addImport("core", core_module);
+    vt_bridge_test_module.addImport("vaxis", vaxis_mod);
+    if (ghostty_vt_mod) |vt| {
+        vt_bridge_test_module.addImport("ghostty-vt", vt);
+    }
+    const vt_bridge_tests = b.addTest(.{
+        .root_module = vt_bridge_test_module,
+    });
+    const run_vt_bridge_tests = b.addRunArtifact(vt_bridge_tests);
 
     const pane_osc_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -589,6 +715,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_fast_path_tests.step);
     test_step.dependOn(&run_input_tests.step);
     test_step.dependOn(&run_mouse_protocol_tests.step);
+    test_step.dependOn(&run_image_fallback_tests.step);
+    test_step.dependOn(&run_vt_bridge_tests.step);
+    test_step.dependOn(&run_image_encode_tests.step);
+    test_step.dependOn(&run_sixel_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
     test_step.dependOn(&run_lua_events_tests.step);
     test_step.dependOn(&run_api_json_tests.step);

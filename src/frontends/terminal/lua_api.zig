@@ -910,7 +910,22 @@ fn hexe_draw(lstate: ?*LuaState) callconv(.c) c_int {
 
     // The caller's bytes. A drawing renders nothing itself and asks nothing to
     // render for it: whoever wants a painter runs one and sends what it draws.
-    const content = optOwnedString(lua, 2, "content", allocator) orelse {
+    //
+    // `image` is the exception, and the one thing a caller cannot reasonably
+    // produce itself: a path to a PNG, which hexe reads and encodes as a Kitty
+    // placement sized to the rectangle. It is still just the drawing's bytes
+    // afterwards, so it renders through the same surface VT as any other
+    // content -- including the half-block fallback on a terminal with no
+    // graphics.
+    const content = if (optOwnedString(lua, 2, "image", allocator)) |path| blk: {
+        defer allocator.free(path);
+        const id = core.image_encode.idForName(name);
+        break :blk core.image_encode.fromFile(allocator, path, width, height, id) catch |err| {
+            core.logging.logError("terminal", "failed to place an image for a drawing", err);
+            lua.pushBoolean(false);
+            return 1;
+        };
+    } else optOwnedString(lua, 2, "content", allocator) orelse {
         lua.pushBoolean(false);
         return 1;
     };

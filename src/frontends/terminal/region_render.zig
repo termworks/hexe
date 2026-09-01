@@ -128,7 +128,9 @@ pub fn drawSurface(
         .width = w,
         .height = h,
     });
-    vt_bridge.drawRenderState(win, state, w, h, renderer.frame_arena.allocator(), &entry.vt, &renderer.vx, stdout);
+    // A painter surface is drawn where it was asked for and nothing in this
+    // frame goes over it, so there is nothing to trim against.
+    vt_bridge.drawRenderState(win, state, w, h, renderer.frame_arena.allocator(), &entry.vt, &renderer.vx, stdout, &.{});
     return true;
 }
 

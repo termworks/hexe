@@ -1,0 +1,137 @@
+diff --git a/src/build/GhosttyZig.zig b/src/build/GhosttyZig.zig
+index e63120e..aef4154 100644
+--- a/src/build/GhosttyZig.zig
++++ b/src/build/GhosttyZig.zig
+@@ -76,6 +76,16 @@ fn initVt(
+     // We need uucode for grapheme break support
+     deps.addUucode(b, vt, cfg.target, cfg.optimize);
+ 
++    // The Kitty graphics protocol decodes PNGs through wuffs.
++    if (vt_options.kitty_graphics) {
++        if (b.lazyDependency("wuffs", .{
++            .target = cfg.target,
++            .optimize = cfg.optimize,
++        })) |dep| {
++            vt.addImport("wuffs", dep.module("wuffs"));
++        }
++    }
++
+     // If SIMD is enabled, add all our SIMD dependencies.
+     if (cfg.simd) {
+         try SharedDeps.addSimd(b, vt, null);
+diff --git a/src/terminal/build_options.zig b/src/terminal/build_options.zig
+index e209a56..dc1a43c 100644
+--- a/src/terminal/build_options.zig
++++ b/src/terminal/build_options.zig
+@@ -28,6 +28,11 @@ pub const Options = struct {
+     /// Options.
+     c_abi: bool,
+ 
++    /// Whether the Kitty graphics protocol is available. Its only extra
++    /// dependency is wuffs, for PNG decoding -- it does not use Oniguruma,
++    /// so a module built without regex support can still carry images.
++    kitty_graphics: bool = true,
++
+     /// Add the required build options for the terminal module.
+     pub fn add(
+         self: Options,
+@@ -41,8 +46,9 @@ pub const Options = struct {
+         opts.addOption(bool, "simd", self.simd);
+         opts.addOption(bool, "slow_runtime_safety", self.slow_runtime_safety);
+ 
++        opts.addOption(bool, "kitty_graphics", self.kitty_graphics);
++
+         // These are synthesized based on other options.
+-        opts.addOption(bool, "kitty_graphics", self.oniguruma);
+         opts.addOption(bool, "tmux_control_mode", self.oniguruma);
+ 
+         m.addOptions("terminal_options", opts);
+diff --git a/src/terminal/stream_readonly.zig b/src/terminal/stream_readonly.zig
+index 18ed0dd..800fa6e 100644
+--- a/src/terminal/stream_readonly.zig
++++ b/src/terminal/stream_readonly.zig
+@@ -6,6 +6,7 @@ const Screen = @import("Screen.zig");
+ const modes = @import("modes.zig");
+ const osc_color = @import("osc/parsers/color.zig");
+ const kitty_color = @import("kitty/color.zig");
++const apcpkg = @import("apc.zig");
+ const Terminal = @import("Terminal.zig");
+ 
+ /// This is a Stream implementation that processes actions against
+@@ -29,6 +30,20 @@ pub const Handler = struct {
+     /// The terminal state to modify.
+     terminal: *Terminal,
+ 
++    /// APC command accumulator. APC carries the Kitty graphics protocol, which
++    /// is terminal-modifying (it loads images into the screen's image storage),
++    /// so it belongs in a readonly stream even though the protocol also has a
++    /// response half.
++    apc: apcpkg.Handler = .{},
++
++    /// Encoded Kitty graphics responses waiting to go back to the program.
++    ///
++    /// A readonly stream has no pty to write to, so it cannot answer on its
++    /// own. Rather than drop the responses -- which strands any program that
++    /// waits for one before drawing -- they queue here and the embedder drains
++    /// them with `takeResponses`.
++    responses: std.ArrayListUnmanaged(u8) = .empty,
++
+     pub fn init(terminal: *Terminal) Handler {
+         return .{
+             .terminal = terminal,
+@@ -36,9 +51,36 @@ pub const Handler = struct {
+     }
+ 
+     pub fn deinit(self: *Handler) void {
+-        // Currently does nothing but may in the future so callers should
+-        // call this.
+-        _ = self;
++        self.apc.deinit();
++        self.responses.deinit(self.alloc());
++    }
++
++    /// The allocator backing the terminal's screen state.
++    fn alloc(self: *Handler) std.mem.Allocator {
++        return self.terminal.screens.active.alloc;
++    }
++
++    /// Take ownership of the queued responses, leaving the queue empty. The
++    /// caller frees the returned slice with the terminal's allocator.
++    pub fn takeResponses(self: *Handler) []u8 {
++        return self.responses.toOwnedSlice(self.alloc()) catch &.{};
++    }
++
++    fn apcEnd(self: *Handler) !void {
++        var cmd = self.apc.end() orelse return;
++        defer cmd.deinit(self.alloc());
++
++        switch (cmd) {
++            .kitty => |*kitty_cmd| {
++                const resp = self.terminal.kittyGraphics(self.alloc(), kitty_cmd) orelse return;
++                var buf: [1024]u8 = undefined;
++                var writer: std.Io.Writer = .fixed(&buf);
++                resp.encode(&writer) catch return;
++                const final = writer.buffered();
++                // Two bytes is an empty APC envelope with nothing in it.
++                if (final.len > 2) try self.responses.appendSlice(self.alloc(), final);
++            },
++        }
+     }
+ 
+     pub fn vt(
+@@ -165,12 +207,9 @@ pub const Handler = struct {
+             .dcs_unhook,
+             => {},
+ 
+-            // APC can modify terminal state (Kitty graphics) but we don't
+-            // currently support it in the readonly stream.
+-            .apc_start,
+-            .apc_end,
+-            .apc_put,
+-            => {},
++            .apc_start => self.apc.start(),
++            .apc_put => self.apc.feed(self.alloc(), value),
++            .apc_end => try self.apcEnd(),
+ 
+             // Have no terminal-modifying effect
+             .bell,

@@ -10,6 +10,9 @@ pub const std_options: std.Options = .{
 
 pub const pty = @import("pty.zig");
 pub const vt = @import("vt.zig");
+pub const sixel = @import("sixel.zig");
+pub const image_import = @import("image_import.zig");
+pub const image_encode = @import("image_encode.zig");
 pub const config = @import("config.zig");
 pub const config_v2 = @import("config_v2.zig");
 pub const names = @import("names.zig");
