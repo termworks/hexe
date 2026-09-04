@@ -265,6 +265,12 @@ make.recipe{
   run = function() sh.zig("build", "test", "-Doptimize=ReleaseFast") end,
 }
 
+make.recipe{
+  name = "bench-blend",
+  desc = "benchmark one fully mixed 50x200 viewport",
+  run = function() sh.zig("build", "bench-blend", "-Doptimize=ReleaseFast") end,
+}
+
 make.alias("t", "test")
 
 ---------------------------------------------------------------------------- installing

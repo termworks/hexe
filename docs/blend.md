@@ -124,6 +124,11 @@ The ordinary path changed by -0.66%, inside the 3% regression budget. Ghostty
 existing trailing padding. Its packed hash representation remains 16 bytes,
 `Cell` remains 8 bytes, and `Page` remains 376 bytes.
 
+`oslo make bench-blend` measures the added colour-resolution and mixing work
+for a fully mixed 50x200 viewport. Its 30-run ReleaseFast median was 0.055 ms
+(range 0.055..0.058 ms), below the 16 ms frame budget without per-cell or
+per-frame allocation.
+
 ## Where it lives
 
 - `src/core/blend.zig` parses scopes and calculates RGB components.

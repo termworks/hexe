@@ -769,6 +769,19 @@ fn applyForegroundMix(style: *vaxis.Style, percent: u8, maybe_colors: ?*const Ho
     style.reverse = false;
 }
 
+pub fn benchmarkMixedViewport() !u64 {
+    var colors: HostColors = .{};
+    colors.palette[1] = .{ .r = 255, .g = 0, .b = 0 };
+    colors.background = .{ .r = 0, .g = 0, .b = 0 };
+    var timer = try std.time.Timer.start();
+    for (0..50 * 200) |_| {
+        var style: vaxis.Style = .{ .fg = .{ .index = 1 } };
+        applyForegroundMix(&style, 30, &colors);
+        std.mem.doNotOptimizeAway(style);
+    }
+    return timer.read();
+}
+
 fn resolveHostRgb(colors: *const HostColors, color: vaxis.Color, default_kind: DefaultKind) ?core.palette.RGB {
     return switch (color) {
         .rgb => |rgb| .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] },
