@@ -6,11 +6,21 @@ const log = std.log.scoped(.terminal_key_translate);
 const BindKey = core.Config.BindKey;
 const BindKeyKind = core.Config.BindKeyKind;
 
+/// Which half of a keystroke this is.
+///
+/// Defaulted at every existing call site because they are all bind dispatch on
+/// a press. It has to be a parameter at all because the encoder writes the
+/// event type into the sequence: without it a release encodes as a press, and
+/// an application receiving that sees a phantom second press rather than the
+/// release it was waiting for.
+pub const Action = ghostty.input.KeyAction;
+
 pub fn encodeKey(
     out: *[64]u8,
     mods: u8,
     key: BindKey,
     text_codepoint: ?u21,
+    action: Action,
     terminal: *const ghostty.Terminal,
 ) ?[]const u8 {
     var utf8_buf: [4]u8 = undefined;
@@ -19,6 +29,7 @@ pub fn encodeKey(
     const shift = (mods & 4) != 0;
 
     const event: ghostty.input.KeyEvent = .{
+        .action = action,
         .key = bindKeyToGhosttyKey(key),
         .utf8 = utf8,
         .unshifted_codepoint = bindKeyCodepoint(key),

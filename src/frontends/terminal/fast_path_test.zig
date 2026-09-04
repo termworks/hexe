@@ -120,12 +120,12 @@ test "key encoder distinguishes control chords from legacy keys" {
     try vt.feed("\x1b[>1u");
 
     var buf: [64]u8 = undefined;
-    const ctrl_i = key_translate.encodeKey(&buf, 2, .{ .char = 'i' }, null, &vt.terminal) orelse return error.MissingEncoding;
+    const ctrl_i = key_translate.encodeKey(&buf, 2, .{ .char = 'i' }, null, .press, &vt.terminal) orelse return error.MissingEncoding;
     try testing.expectEqualStrings("\x1b[105;5u", ctrl_i);
-    const tab = key_translate.encodeKey(&buf, 0, .{ .char = '\t' }, null, &vt.terminal) orelse return error.MissingEncoding;
+    const tab = key_translate.encodeKey(&buf, 0, .{ .char = '\t' }, null, .press, &vt.terminal) orelse return error.MissingEncoding;
     try testing.expectEqualStrings("\t", tab);
-    const ctrl_m = key_translate.encodeKey(&buf, 2, .{ .char = 'm' }, null, &vt.terminal) orelse return error.MissingEncoding;
+    const ctrl_m = key_translate.encodeKey(&buf, 2, .{ .char = 'm' }, null, .press, &vt.terminal) orelse return error.MissingEncoding;
     try testing.expectEqualStrings("\x1b[109;5u", ctrl_m);
-    const enter = key_translate.encodeKey(&buf, 0, .{ .char = '\r' }, null, &vt.terminal) orelse return error.MissingEncoding;
+    const enter = key_translate.encodeKey(&buf, 0, .{ .char = '\r' }, null, .press, &vt.terminal) orelse return error.MissingEncoding;
     try testing.expectEqualStrings("\r", enter);
 }

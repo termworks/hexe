@@ -1023,12 +1023,47 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
     // Require exact modifier matches for keybindings.
     // This prevents Alt+key from accidentally triggering Ctrl+Alt+key bindings.
 
-    if (ev.when == .press) {
-        keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint);
-        return .consumed;
+    switch (ev.when) {
+        .press => {
+            keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint, .press);
+            return .consumed;
+        },
+        // A release goes on only to a pane that turned on `report_events`.
+        // Anything else keeps the old behaviour of presses only: an
+        // application that never asked for releases must not start seeing
+        // them, which is exactly what the protocol's flags are for.
+        .release => {
+            if (paneWantsKeyEvents(state)) {
+                keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint, .release);
+                return .consumed;
+            }
+            return .unhandled;
+        },
+        // Neither reaches here today. `keyEventFromVaxisEvent` produces only
+        // press and release, because vaxis reads the Kitty event type solely to
+        // ask "is it a 3?" -- a repeat arrives indistinguishable from a press.
+        // hexe's own binds synthesise these from its key timers; panes do not
+        // see them.
+        .repeat, .hold => return .unhandled,
     }
+}
 
-    return .unhandled;
+/// Has the focused pane asked to be told about key releases?
+///
+/// `report_events` is the Kitty keyboard flag an application sets when it wants
+/// the other half of a keystroke. Held-key behaviour -- charge a jump, repeat a
+/// move -- is impossible without it, and until now hexe dropped every release
+/// before it could arrive.
+fn paneWantsKeyEvents(state: *State) bool {
+    const pane = blk: {
+        if (state.activeFloatingIndex()) |idx| {
+            const fpane = state.view.float_views.items[idx];
+            const can_interact = if (state.paneParentTab(fpane)) |parent| parent == state.activeTabIndex() else true;
+            if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) break :blk fpane;
+        }
+        break :blk state.currentLayout().getFocusedPane() orelse return false;
+    };
+    return pane.vt.terminal.screens.active.kitty_keyboard.current().report_events;
 }
 
 fn firstOrParseAt(state: *State, inp: []const u8, offset: usize, first: ?ParsedEventHead) ?ParsedEventHead {

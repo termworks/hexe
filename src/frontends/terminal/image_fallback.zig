@@ -233,21 +233,25 @@ test "a transparent half leaves the background alone" {
     try testing.expect(bottom.a < alpha_threshold);
 }
 
-test "Source rejects an image whose data is short" {
-    // Mirrors ghostty's format enum, `png` included: an image still encoded
-    // has no pixels to sample and must be refused, not misread as raw bytes.
-    const Fake = struct {
-        format: enum { gray, gray_alpha, rgb, rgba, png },
-        width: u32,
-        height: u32,
-        data: []const u8,
-    };
-    const short: Fake = .{ .format = .rgba, .width = 4, .height = 4, .data = &[_]u8{0} ** 8 };
+test "Source rejects an image it cannot sample" {
+    // Real ghostty images, not a stand-in: `from` takes the concrete type, so a
+    // look-alike struct no longer compiles -- which is the point of it being
+    // concrete.
+    const Img = ghostty.kitty.graphics.Image;
+
+    // Claims 4x4 RGBA but carries 8 bytes; sampling it would read past the end.
+    const short: Img = .{ .format = .rgba, .width = 4, .height = 4, .data = &[_]u8{0} ** 8 };
     try testing.expect(Source.from(short) == null);
 
-    const ok: Fake = .{ .format = .rgb, .width = 2, .height = 1, .data = &[_]u8{0} ** 6 };
+    const ok: Img = .{ .format = .rgb, .width = 2, .height = 1, .data = &[_]u8{0} ** 6 };
     try testing.expect(Source.from(ok) != null);
 
-    const encoded: Fake = .{ .format = .png, .width = 2, .height = 1, .data = &[_]u8{0} ** 64 };
+    // Still encoded, so there are no pixels to read. ghostty decodes PNG on the
+    // way in, so this is only reachable if that ever changes.
+    const encoded: Img = .{ .format = .png, .width = 2, .height = 1, .data = &[_]u8{0} ** 64 };
     try testing.expect(Source.from(encoded) == null);
+
+    // Zero-sized is not sampleable either.
+    const empty: Img = .{ .format = .rgba, .width = 0, .height = 0, .data = "" };
+    try testing.expect(Source.from(empty) == null);
 }

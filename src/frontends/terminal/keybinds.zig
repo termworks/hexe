@@ -105,11 +105,21 @@ pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, pars
 }
 
 /// Forward a key (with modifiers) to the focused pane as escape sequence.
+///
+/// A press, because every caller of this one is bind dispatch on a press. The
+/// other half of a keystroke goes through `forwardKeyToPaneWithText` with an
+/// explicit action.
 pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
-    forwardKeyToPaneWithText(state, mods, key, null);
+    forwardKeyToPaneWithText(state, mods, key, null, .press);
 }
 
-pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_codepoint: ?u21) void {
+pub fn forwardKeyToPaneWithText(
+    state: *State,
+    mods: u8,
+    key: BindKey,
+    text_codepoint: ?u21,
+    action: key_translate.Action,
+) void {
     var out: [64]u8 = undefined;
 
     const target_pane = blk: {
@@ -129,12 +139,18 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
     };
 
     if (target_pane) |pane| {
-        const kitty_flags: u8 = @intCast(pane.vt.terminal.screens.active.kitty_keyboard.current().int());
-        if (fast_path.fastPathBytes(&out, mods, key, text_codepoint, kitty_flags)) |n| {
-            forwardInputToFocusedPaneWithEvent(state, out[0..n], null);
-            return;
+        // The fast path encodes a press and nothing else. It is already gated on
+        // the Kitty flags being clear, and a pane that asked for releases has
+        // them set, so this is belt and braces -- but a release must never take
+        // a path that cannot express one.
+        if (action == .press) {
+            const kitty_flags: u8 = @intCast(pane.vt.terminal.screens.active.kitty_keyboard.current().int());
+            if (fast_path.fastPathBytes(&out, mods, key, text_codepoint, kitty_flags)) |n| {
+                forwardInputToFocusedPaneWithEvent(state, out[0..n], null);
+                return;
+            }
         }
-        if (key_translate.encodeKey(&out, mods, key, text_codepoint, &pane.vt.terminal)) |bytes| {
+        if (key_translate.encodeKey(&out, mods, key, text_codepoint, action, &pane.vt.terminal)) |bytes| {
             if (bytes.len > 0) {
                 forwardInputToFocusedPaneWithEvent(state, bytes, null);
             }
@@ -466,7 +482,13 @@ fn handleReleaseEvent(state: *State, cfg: *const core.Config, mods_eff: u8, key:
     if (findBestBind(state, mods_eff, key, .release, allow_only_tabs)) |b| {
         return dispatchBindWithMode(state, b, mods_eff, key);
     }
-    return true;
+
+    // No bind wanted this release and no hold timer was waiting on it, so the
+    // bind system did not handle it -- say so. Claiming it was handled swallowed
+    // every release before the caller could decide whether the focused pane had
+    // asked to be told about them, which is why an application could never see
+    // a key being let go.
+    return false;
 }
 
 fn touchRepeatActiveTimer(state: *State, mods_eff: u8, key: BindKey, focus_ctx: FocusContext, now_ms: i64) void {
