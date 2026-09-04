@@ -7,6 +7,7 @@ const log = std.log.scoped(.terminal_input);
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const input = @import("input.zig");
+const key_translate = @import("key_translate.zig");
 const terminal_main = @import("main.zig");
 
 const actions = @import("loop_actions.zig");
@@ -1069,7 +1070,7 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
         // application that never asked for releases must not start seeing
         // them, which is exactly what the protocol's flags are for.
         .release => {
-            if (paneWantsKeyEvents(state)) {
+            if (paneWantsKeyEvents(state, ev.mods, ev.key, ev.text_codepoint)) {
                 keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint, .release);
                 return .consumed;
             }
@@ -1084,13 +1085,21 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
     }
 }
 
-/// Has the focused pane asked to be told about key releases?
+/// Has the focused pane asked to be told about THIS key being released?
 ///
 /// `report_events` is the Kitty keyboard flag an application sets when it wants
 /// the other half of a keystroke. Held-key behaviour -- charge a jump, repeat a
-/// move -- is impossible without it, and until now hexe dropped every release
-/// before it could arrive.
-fn paneWantsKeyEvents(state: *State) bool {
+/// move -- is impossible without it, and hexe used to drop every release before
+/// it could arrive.
+///
+/// `report_all` is the second half of the question, and getting it wrong is
+/// worse than dropping the release was. The protocol does NOT report releases
+/// for keys that produce text unless an application also asks for
+/// `report_all`; send one anyway and an application that reads `CSI 97;1:3 u`
+/// as simply "the letter a" prints it twice. A doubled keystroke is harder to
+/// live with than a missing release, because nothing on screen says it is
+/// wrong.
+fn paneWantsKeyEvents(state: *State, mods: u8, key: core.Config.BindKey, text_codepoint: ?u21) bool {
     const pane = blk: {
         if (state.activeFloatingIndex()) |idx| {
             const fpane = state.view.float_views.items[idx];
@@ -1099,7 +1108,19 @@ fn paneWantsKeyEvents(state: *State) bool {
         }
         break :blk state.currentLayout().getFocusedPane() orelse return false;
     };
-    return pane.vt.terminal.screens.active.kitty_keyboard.current().report_events;
+
+    const flags = pane.vt.terminal.screens.active.kitty_keyboard.current();
+    if (!flags.report_events) return false;
+    if (flags.report_all) return true;
+
+    // Whether this key produces text is asked of the encoder rather than
+    // guessed from the keycap: a press that encodes to a literal byte instead
+    // of an escape sequence IS the protocol's notion of a text key.
+    var probe: [64]u8 = undefined;
+    const pressed = key_translate.encodeKey(&probe, mods, key, text_codepoint, .press, &pane.vt.terminal) orelse
+        return true;
+    const is_text = pressed.len > 0 and pressed[0] != 0x1b;
+    return !is_text;
 }
 
 fn firstOrParseAt(state: *State, inp: []const u8, offset: usize, first: ?ParsedEventHead) ?ParsedEventHead {

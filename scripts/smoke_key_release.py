@@ -108,9 +108,10 @@ with open(READER, "w") as f:
         "fd = sys.stdin.fileno()\n"
         "old = termios.tcgetattr(fd)\n"
         "tty.setraw(fd)\n"
-        "signal.alarm(25)\n"
+        "signal.alarm(40)\n"
         "out.write(b'PHASE1\\n')\n"
         "armed = False\n"
+        "stage = 1\n"
         "start = time.time()\n"
         "try:\n"
         "    while True:\n"
@@ -123,10 +124,18 @@ with open(READER, "w") as f:
         # Every flag on. `report_events` is the one that asks for releases at
         # all; `report_all` is what extends that to keys which produce text,
         # such as space.
-        "            sys.stdout.write('\\x1b[>15u'); sys.stdout.flush()\n"
+        # `report_events` WITHOUT `report_all` first. The protocol does not
+        # report releases for keys that produce text under that combination,
+        # and sending one anyway is what made applications show the key twice.
+        "            sys.stdout.write('\\x1b[>2u'); sys.stdout.flush()\n"
         "            armed = True\n"
         "            time.sleep(0.5)\n"
         "            out.write(b'\\nPHASE2\\n')\n"
+        "        if armed and stage == 1 and time.time() - start > 14:\n"
+        "            sys.stdout.write('\\x1b[>15u'); sys.stdout.flush()\n"
+        "            stage = 2\n"
+        "            time.sleep(0.5)\n"
+        "            out.write(b'\\nPHASE3\\n')\n"
         "finally:\n"
         "    termios.tcsetattr(fd, termios.TCSADRAIN, old)\n"
     )
@@ -181,26 +190,48 @@ if b":3" in phase1:
     fail("a pane that never asked for key events was sent a release anyway")
 print("unarmed: the press arrives, the release does not", flush=True)
 
-# ---- the protocol is ON: the release must arrive, tagged 3 ------------------
+# ---- report_events but NOT report_all: a text key must stay single ---------
+os.write(master, b"\x1b[32;1u")
+time.sleep(0.6)
+os.write(master, b"\x1b[32;1:3u")
+time.sleep(1.0)
+
+if not wait_for_marker(b"PHASE3", 40):
+    fail("the reader never asked for the full flag set")
+time.sleep(1.0)
+
+raw = open(got, "rb").read()
+phase2 = raw.split(b"PHASE2\n", 1)[1].split(b"\nPHASE3", 1)[0]
+print("events-only pane received:", repr(phase2[:60]), flush=True)
+
+if b" " not in phase2 and b"32" not in phase2:
+    fail("the events-only pane never saw the press, so this proves nothing")
+if b":3" in phase2:
+    fail("space produces text, so with report_events but no report_all its "
+         "release must not be sent — an application reading that as the key "
+         "itself shows it twice")
+print("events-only: a text key's release is withheld", flush=True)
+
+# ---- every flag on: now the release must arrive, tagged 3 ------------------
 os.write(master, b"\x1b[32;1u")
 time.sleep(0.6)
 os.write(master, b"\x1b[32;1:3u")
 time.sleep(1.5)
 
 raw = open(got, "rb").read()
-phase2 = raw.split(b"PHASE2\n", 1)[1] if b"PHASE2\n" in raw else b""
-print("armed pane received:", repr(phase2[:60]), flush=True)
+phase3 = raw.split(b"PHASE3\n", 1)[1] if b"PHASE3\n" in raw else b""
+print("fully armed pane received:", repr(phase3[:60]), flush=True)
 
-if b"32" not in phase2:
+if b"32" not in phase3:
     fail("the armed pane never even saw the press")
-if b":3" not in phase2:
+if b":3" not in phase3:
     fail("the pane asked for key events and was never told about the release "
-         f"— got {phase2!r}")
-print("armed: the release arrives, tagged :3", flush=True)
+         f"— got {phase3!r}")
+print("fully armed: the release arrives, tagged :3", flush=True)
 
 # A release must not arrive as a second press: a doubled press is worse than a
 # missing release, because the application cannot tell that it is wrong.
-if phase2.count(b"[32u") > 1 or phase2.count(b"[32;1u") > 1:
+if phase3.count(b"[32u") > 1 or phase3.count(b"[32;1u") > 1:
     fail("the release arrived as a second press")
 print("the release is not a phantom press", flush=True)
 

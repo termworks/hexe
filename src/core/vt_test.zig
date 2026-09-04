@@ -21,7 +21,15 @@ test "VT preserves explicit steady cursor style" {
 test "embedder style state keeps measured ghostty layouts" {
     try std.testing.expectEqual(@as(usize, 28), @sizeOf(core.vt.ghostty.Style));
     try std.testing.expectEqual(@as(usize, 8), @sizeOf(core.vt.ghostty.Cell));
-    try std.testing.expectEqual(@as(usize, 376), @sizeOf(core.vt.ghostty.Page));
+
+    // Page is one `usize` larger in a debug build: ghostty gives it a
+    // `pause_integrity_checks` field under `slow_runtime_safety`, which its
+    // Config turns on for Debug and off for every release mode
+    // (`page.zig:158`). Pinning the release figure alone made this canary fail
+    // for `zig build test`, which is a Debug build -- reporting drift that was
+    // only the build mode. Both numbers are correct; a third would be drift.
+    const page = @sizeOf(core.vt.ghostty.Page);
+    try std.testing.expect(page == 376 or page == 376 + @sizeOf(usize));
 }
 
 /// The tag hexe stamps onto the cursor is what ghostty copies onto every cell
