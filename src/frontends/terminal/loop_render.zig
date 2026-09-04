@@ -147,6 +147,7 @@ fn drawPaneSprite(state: *State, renderer: *Renderer, pane: *Pane, stdout: std.f
 
 fn drawPaneRenderState(
     renderer: *Renderer,
+    host_colors: *const @import("host_colors.zig").HostColors,
     pane: *Pane,
     state: *const ghostty.RenderState,
     x: u16,
@@ -163,7 +164,7 @@ fn drawPaneRenderState(
         .width = width,
         .height = height,
     });
-    vt_bridge.drawRenderState(win, state, width, height, renderer.frame_arena.allocator(), &pane.vt, &renderer.vx, stdout, occluders);
+    vt_bridge.drawRenderState(win, state, width, height, renderer.frame_arena.allocator(), &pane.vt, host_colors, &renderer.vx, stdout, occluders);
 }
 
 /// Every visible float's outer rectangle, in the order they are drawn.
@@ -313,7 +314,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             core.logging.logError("terminal", "failed to get split pane render state", err);
             continue;
         };
-        drawPaneRenderState(renderer, pane.*, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, stdout, float_rects);
+        drawPaneRenderState(renderer, &state.host_colors, pane.*, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, stdout, float_rects);
 
         if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane.*)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, range, state.config.selection_color);
@@ -411,7 +412,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         // lists them in draw order, so that is the tail past this one.
         drawn_floats += 1;
         const above = if (drawn_floats <= float_rects.len) float_rects[drawn_floats..] else float_rects[0..0];
-        drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout, above);
+        drawPaneRenderState(renderer, &state.host_colors, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout, above);
 
         if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
@@ -456,7 +457,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
             if (pane.getRenderState()) |render_state| {
                 // Drawn last, so nothing covers it.
-                drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout, &.{});
+                drawPaneRenderState(renderer, &state.host_colors, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout, &.{});
 
                 if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane)) |range| {
                     mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);

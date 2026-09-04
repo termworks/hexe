@@ -1,17 +1,17 @@
 From: hexe
-Subject: [PATCH] terminal: opaque namespace tag in Style's spare flag bits
+Subject: [PATCH] terminal: retain embedder-owned cell style state
 
 hexe records which palette namespace was current when each cell was written, so
 it can resolve indexed colours per namespace and recolour one program's output
 without touching anything else on screen.
 
 The tag is never interpreted by ghostty. It occupies bits that were already
-padding inside Flags, so Style keeps its size (14 bytes) and its page layout
+padding inside Flags, so Style keeps its 26-byte size and its page layout
 unchanged. Sitting in Flags also means it joins equality and hashing with no
 further changes, and a tag of 0 behaves exactly as before.
 
 A separate u8 field on Style would also work and would give 255 tags instead of
-31, at the cost of growing Style to 16 bytes and needing explicit eql and
+31, at the cost of growing Style to 28 bytes and needing explicit eql and
 PackedStyle changes. Measured resident memory was the same either way.
 
 The other three hunks all say one thing: the tag is embedder state, not terminal
@@ -27,12 +27,23 @@ did it.
     because assigning the style without that leaves style_id at the default and
     the cells written next carry a tag of 0 whatever the flag says.
 
-Each hunk is covered by a test in src/core/vt_test.zig that asserts on the
-cursor's tag directly, and each fails if its hunk is removed.
+OSC 1331 uses that 28-byte layout for one byte on each interned style for a
+foreground mix percentage. It participates in equality and consumes eight bits
+of PackedStyle's existing padding. Its default of 100 is ordinary opaque output.
 ---
 --- a/src/terminal/style.zig
 +++ b/src/terminal/style.zig
-@@ -37,7 +37,14 @@
+@@ -27,6 +27,8 @@
+     /// a packed struct to make this take up significantly less space.
+     flags: Flags = .{},
+-
++
++    fg_mix_percent: u8 = 100,
++
+     const Flags = packed struct(u16) {
+         bold: bool = false,
+         italic: bool = false,
+@@ -37,7 +39,14 @@
          strikethrough: bool = false,
          overline: bool = false,
          underline: sgr.Attribute.Underline = .none,
@@ -48,9 +59,37 @@ cursor's tag directly, and each fails if its hunk is removed.
      };
  
      /// The color for an SGR attribute. A color can come from multiple
+@@ -94,6 +103,7 @@
+     /// True if the style is equal to another style.
+     pub fn eql(self: Style, other: Style) bool {
+-        return self.flags == other.flags and
++        return self.fg_mix_percent == other.fg_mix_percent and
++            self.flags == other.flags and
+             self.fg_color.eql(other.fg_color) and
+             self.bg_color.eql(other.bg_color) and
+             self.underline_color.eql(other.underline_color);
+@@ -475,7 +485,8 @@
+             underline: Data,
+         },
+         flags: Flags,
+-        _padding: u16 = 0,
+-
++        fg_mix_percent: u8,
++        _padding: u8 = 0,
++
+         /// After https://github.com/ziglang/zig/issues/19754 is implemented,
+         /// it will be an compiler-error to have packed union fields of
+@@ -519,6 +530,7 @@
+                     .underline = .fromColor(style.underline_color),
+                 },
+                 .flags = style.flags,
++                .fg_mix_percent = style.fg_mix_percent,
+             };
+         }
+     };
 --- a/src/terminal/Screen.zig
 +++ b/src/terminal/Screen.zig
-@@ -340,12 +340,21 @@
+@@ -340,12 +340,23 @@
      assert(cursor_pin.x == 0);
      assert(cursor_pin.y == 0);
      const cursor_rac = cursor_pin.rowAndCell();
@@ -59,6 +98,7 @@ cursor's tag directly, and each fails if its hunk is removed.
 +    // silently untags everything printed after it, and the embedder cannot
 +    // notice because it never sees the sequence.
 +    const live_ns = self.cursor.style.flags.ns;
++    const live_fg_mix_percent = self.cursor.style.fg_mix_percent;
      self.cursor.deinit(self.alloc);
      self.cursor = .{
          .page_pin = cursor_pin,
@@ -66,13 +106,14 @@ cursor's tag directly, and each fails if its hunk is removed.
          .page_cell = cursor_rac.cell,
      };
 +    self.cursor.style.flags.ns = live_ns;
++    self.cursor.style.fg_mix_percent = live_fg_mix_percent;
 +    // Re-intern: assigning the style alone leaves style_id at the default, so
 +    // the cells written next would carry a tag of 0 whatever the flag says.
-+    if (live_ns != 0) self.manualStyleUpdate() catch {};
++    if (live_ns != 0 or live_fg_mix_percent != 100) self.manualStyleUpdate() catch {};
  
      if (comptime build_options.kitty_graphics) {
          // Reset kitty graphics storage
-@@ -1811,7 +1820,12 @@
+@@ -1811,7 +1822,14 @@
  
      switch (attr) {
          .unset => {
@@ -80,14 +121,16 @@ cursor's tag directly, and each fails if its hunk is removed.
 +            // must not clear it. Programs emit ESC[0m constantly; clearing here
 +            // would drop the tag on every cell written after the first reset.
 +            const ns = self.cursor.style.flags.ns;
++            const fg_mix_percent = self.cursor.style.fg_mix_percent;
              self.cursor.style = .{};
 +            self.cursor.style.flags.ns = ns;
++            self.cursor.style.fg_mix_percent = fg_mix_percent;
          },
  
          .bold => {
 --- a/src/terminal/Terminal.zig
 +++ b/src/terminal/Terminal.zig
-@@ -1008,8 +1008,15 @@
+@@ -1008,8 +1008,17 @@
          .charset = .{},
      };
  
@@ -99,8 +142,10 @@ cursor's tag directly, and each fails if its hunk is removed.
 +    // would resurrect a selection the program had already released, and stamp
 +    // whatever it printed next with someone else's namespace.
 +    const live_ns = self.screens.active.cursor.style.flags.ns;
++    const live_fg_mix_percent = self.screens.active.cursor.style.fg_mix_percent;
      self.screens.active.cursor.style = saved.style;
 +    self.screens.active.cursor.style.flags.ns = live_ns;
++    self.screens.active.cursor.style.fg_mix_percent = live_fg_mix_percent;
      self.screens.active.manualStyleUpdate() catch |err| {
          // Regardless of the error here, we revert back to an unstyled
          // cursor. It is more important that the restore succeeds in

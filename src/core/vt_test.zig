@@ -18,6 +18,10 @@ test "VT preserves explicit steady cursor style" {
     try std.testing.expectEqual(@as(u8, 2), vt.getCursorStyle());
 }
 
+test "embedder style state keeps the measured twenty eight byte layout" {
+    try std.testing.expectEqual(@as(usize, 28), @sizeOf(core.vt.ghostty.Style));
+}
+
 /// The tag hexe stamps onto the cursor is what ghostty copies onto every cell
 /// written next. These assert on that tag directly rather than through a
 /// rendered frame: a screen capture goes through the renderer, vaxis diffing and
@@ -29,6 +33,10 @@ fn initTagVt(vt: *core.VT) !void {
 
 fn cursorTag(vt: *core.VT) u8 {
     return vt.terminal.screens.active.cursor.style.flags.ns;
+}
+
+fn cursorMix(vt: *core.VT) u8 {
+    return vt.terminal.screens.active.cursor.style.fg_mix_percent;
 }
 
 test "the tag hexe stamps reaches the cursor" {
@@ -105,6 +113,51 @@ test "the tag follows the pane across an alt-screen switch" {
     // Released inside the alternate screen: leaving must not bring it back onto
     // the primary, where the shell's own output would then carry it.
     try std.testing.expectEqual(@as(u8, 0), cursorTag(&vt));
+}
+
+test "foreground mix reaches both screen cursors" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 5);
+    defer vt.deinit();
+
+    try std.testing.expectEqual(core.blend.Applied.changed, vt.blend_state.apply("use;fg=30"));
+    vt.syncBlendStyle();
+    try std.testing.expectEqual(@as(u8, 30), cursorMix(&vt));
+
+    try vt.feed("\x1b[?1049h");
+    try std.testing.expectEqual(@as(u8, 30), cursorMix(&vt));
+
+    try std.testing.expectEqual(core.blend.Applied.changed, vt.blend_state.apply("end"));
+    vt.syncBlendStyle();
+    try vt.feed("\x1b[?1049l");
+    try std.testing.expectEqual(@as(u8, 100), cursorMix(&vt));
+}
+
+test "SGR and RIS preserve foreground mix" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 5);
+    defer vt.deinit();
+    _ = vt.blend_state.apply("use;fg=30");
+    vt.syncBlendStyle();
+
+    try vt.feed("A\x1b[0mB");
+    try std.testing.expectEqual(@as(u8, 30), cursorMix(&vt));
+    try vt.feed("\x1bcAFTER");
+    try std.testing.expectEqual(@as(u8, 30), cursorMix(&vt));
+}
+
+test "cursor restore keeps the live foreground mix" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 5);
+    defer vt.deinit();
+    _ = vt.blend_state.apply("use;fg=30");
+    vt.syncBlendStyle();
+
+    try vt.feed("\x1b7");
+    _ = vt.blend_state.apply("end");
+    vt.syncBlendStyle();
+    try vt.feed("\x1b8");
+    try std.testing.expectEqual(@as(u8, 100), cursorMix(&vt));
 }
 
 test "VT stores a Kitty image transmitted over APC" {
@@ -264,7 +317,6 @@ test "the fallback matches the default, so a first report is a change" {
     try std.testing.expect(core.vt.setCellPixels(core.vt.cell_px.w, core.vt.cell_px.h));
     try std.testing.expect(core.vt.cell_px.known);
 }
-
 
 test "VT answers a Kitty graphics support query" {
     var vt: core.VT = undefined;

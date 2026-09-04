@@ -11,6 +11,7 @@ const wire = core.wire;
 const pop = @import("pop");
 const lua_api = @import("lua_api.zig");
 const drawings_mod = @import("drawings.zig");
+const host_colors_mod = @import("host_colors.zig");
 
 const state_types = @import("state_types.zig");
 pub const PendingAction = state_types.PendingAction;
@@ -332,6 +333,7 @@ pub const State = struct {
     /// terminal, so this is emitted only on change and undone on teardown.
     cursor_color: ?core.palette.RGB = null,
     cursor_color_set: bool = false,
+    host_colors: host_colors_mod.HostColors = .{},
     term_width: u16,
     term_height: u16,
     status_height: u16,
@@ -604,6 +606,7 @@ pub const State = struct {
             .terminal_query_deadline_ms = 0,
             .terminal_caps_ready = false,
             .terminal_query_timed_out = false,
+            .host_colors = .{},
             .drop_input_until_ms = 0,
 
             .pending_float_requests = std.AutoHashMap([32]u8, PendingFloatRequest).init(allocator),

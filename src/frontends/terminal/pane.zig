@@ -7,6 +7,7 @@ const wire = core.wire;
 
 const pane_output = @import("pane_output.zig");
 const pane_osc = @import("pane_osc.zig");
+const host_colors = @import("host_colors.zig");
 const vt_write_queue = @import("vt_write_queue.zig");
 const widgets = pop.widgets;
 
@@ -112,6 +113,9 @@ pub const Pane = struct {
     osc_notifications: std.ArrayList(pane_osc.Notification) = .empty,
     osc_progress: pane_osc.Progress = .{},
     osc_progress_changed: bool = false,
+    host_color_queries: [64]host_colors.QueryKey = undefined,
+    host_color_query_len: u8 = 0,
+    host_color_invalidation: host_colors.Invalidation = .{},
     /// Last observed alt-screen state, for the palette stack save/restore.
     /// Palette colours changed and SES has not been told yet.
     palette_dirty: bool = false,
@@ -156,6 +160,28 @@ pub const Pane = struct {
         const changed = self.osc_progress_changed;
         self.osc_progress_changed = false;
         return changed;
+    }
+
+    pub fn queueHostColorQuery(self: *Pane, key: host_colors.QueryKey) bool {
+        if (self.host_color_query_len >= self.host_color_queries.len) return false;
+        self.host_color_queries[self.host_color_query_len] = key;
+        self.host_color_query_len += 1;
+        return true;
+    }
+
+    pub fn takeHostColorQuery(self: *Pane) ?host_colors.QueryKey {
+        if (self.host_color_query_len == 0) return null;
+        const key = self.host_color_queries[0];
+        const len: usize = self.host_color_query_len;
+        if (len > 1) std.mem.copyForwards(host_colors.QueryKey, self.host_color_queries[0 .. len - 1], self.host_color_queries[1..len]);
+        self.host_color_query_len -= 1;
+        return key;
+    }
+
+    pub fn takeHostColorInvalidation(self: *Pane) host_colors.Invalidation {
+        const invalidation = self.host_color_invalidation;
+        self.host_color_invalidation = .{};
+        return invalidation;
     }
 
     pub fn takeCsiExpectedResponses(self: *Pane) u16 {
@@ -252,6 +278,8 @@ pub const Pane = struct {
         self.osc_notifications.clearRetainingCapacity();
         self.osc_progress = .{};
         self.osc_progress_changed = false;
+        self.host_color_query_len = 0;
+        self.host_color_invalidation = .{};
         self.dcs_query_state = .idle;
         self.dcs_query_len = 0;
         self.csi_query_state = .idle;

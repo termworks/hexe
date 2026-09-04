@@ -96,6 +96,7 @@ fn logTerminalCapabilities(state: *State, timed_out: bool) void {
 }
 
 fn finalizeCapabilities(state: *State, now_ms: i64) void {
+    state.host_colors.expire(now_ms);
     if (!state.terminal_query_in_flight) return;
 
     const query_done = state.renderer.vx.queries_done.load(.unordered);
@@ -119,6 +120,19 @@ fn finalizeCapabilities(state: *State, now_ms: i64) void {
     state.terminal_caps_ready = true;
     state.terminal_query_timed_out = timed_out;
     logTerminalCapabilities(state, timed_out);
+    startHostColorDiscovery(state, now_ms);
+}
+
+fn startHostColorDiscovery(state: *State, now_ms: i64) void {
+    const stdout = std.fs.File.stdout();
+    var buffer: [1024]u8 = undefined;
+    var writer = stdout.writer(&buffer);
+    state.host_colors.queryAll(&writer.interface, now_ms) catch |err| {
+        core.logging.logError("terminal", "failed to query host colours", err);
+    };
+    writer.interface.flush() catch |err| {
+        core.logging.logError("terminal", "failed to flush host colour queries", err);
+    };
 }
 
 /// Backstop cadence for the resize check. SIGWINCH is the primary trigger; this
@@ -289,6 +303,7 @@ pub const TerminalHost = struct {
             self.state.terminal_caps_ready = true;
             self.state.terminal_query_timed_out = true;
             logTerminalCapabilities(self.state, true);
+            startHostColorDiscovery(self.state, std.time.milliTimestamp());
         };
         if (!self.state.renderer.vx.queries_done.load(.unordered)) {
             self.state.terminal_query_in_flight = true;

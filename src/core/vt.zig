@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const palette_mod = @import("palette.zig");
+const blend_mod = @import("blend.zig");
 const logging = @import("logging.zig");
 const image_import = @import("image_import.zig");
 
@@ -93,6 +94,8 @@ pub const VT = struct {
     /// palette and passes indices through untouched, so this is inert until a
     /// later milestone selects a namespace.
     ns_table: palette_mod.NamespaceTable = undefined,
+
+    blend_state: blend_mod.State = .{},
 
     /// Sixel images, which ghostty's VT does not speak. It holds partial
     /// sequences across feeds, so it is per-pane state and lives for as long as
@@ -268,6 +271,23 @@ pub const VT = struct {
                 logging.logError("vt", "failed to apply palette namespace to cursor style", err);
             };
         }
+    }
+
+    pub fn syncBlendStyle(self: *VT) void {
+        const percent = self.blend_state.currentFgPercent();
+        var it = self.terminal.screens.all.iterator();
+        while (it.next()) |entry| {
+            const screen = entry.value.*;
+            if (screen.cursor.style.fg_mix_percent == percent) continue;
+            screen.cursor.style.fg_mix_percent = percent;
+            screen.manualStyleUpdate() catch |err| {
+                logging.logError("vt", "failed to apply foreground mix to cursor style", err);
+            };
+        }
+    }
+
+    pub fn cursorBlendPercent(self: *const VT) u8 {
+        return self.blend_state.currentFgPercent();
     }
 
     /// The palette namespace the cursor sits in.

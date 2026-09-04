@@ -8,6 +8,7 @@ const Style = ghostty.Style;
 const RenderState = ghostty.RenderState;
 const NamespaceTable = core.palette.NamespaceTable;
 const image_fallback = @import("image_fallback.zig");
+const HostColors = @import("host_colors.zig").HostColors;
 
 /// Static ASCII lookup table -- avoids arena allocation for 95%+ of cells.
 /// Each byte position i contains the byte value i, so ascii_lut[ch..][0..1]
@@ -133,6 +134,7 @@ pub fn drawRenderState(
     height: u16,
     arena: std.mem.Allocator,
     vt: *core.VT,
+    host_colors: ?*const HostColors,
     vx: *vaxis.Vaxis,
     stdout: std.fs.File,
     /// Rectangles that will be drawn OVER this window later in the frame, in
@@ -215,7 +217,7 @@ pub fn drawRenderState(
 
             // Resolve style
             const style = if (raw.style_id != 0)
-                convertStyle(styles_arr[col], raw, is_direct_color, ns_table, cell_ns, cell_defaults)
+                convertStyle(styles_arr[col], raw, is_direct_color, ns_table, cell_ns, cell_defaults, host_colors)
             else
                 convertDefaultStyle(raw, is_direct_color, cell_defaults);
 
@@ -687,6 +689,7 @@ fn convertStyle(
     ns_table: *const NamespaceTable,
     ns: u8,
     defaults: core.palette.Defaults,
+    host_colors: ?*const HostColors,
 ) vaxis.Style {
     var style = vaxis.Style{};
 
@@ -738,7 +741,43 @@ fn convertStyle(
         .dashed => .dashed,
     };
 
+    if (gs.fg_mix_percent < core.blend.OPAQUE_PERCENT) {
+        applyForegroundMix(&style, gs.fg_mix_percent, host_colors);
+    }
+
     return style;
+}
+
+const DefaultKind = enum { foreground, background };
+
+fn applyForegroundMix(style: *vaxis.Style, percent: u8, maybe_colors: ?*const HostColors) void {
+    const colors = maybe_colors orelse return;
+    var displayed_fg = style.fg;
+    var displayed_bg = style.bg;
+    var fg_default: DefaultKind = .foreground;
+    var bg_default: DefaultKind = .background;
+    if (style.reverse) {
+        std.mem.swap(vaxis.Color, &displayed_fg, &displayed_bg);
+        std.mem.swap(DefaultKind, &fg_default, &bg_default);
+    }
+
+    const foreground = resolveHostRgb(colors, displayed_fg, fg_default) orelse return;
+    const background = resolveHostRgb(colors, displayed_bg, bg_default) orelse return;
+    const mixed = core.blend.mixRgb(foreground, background, percent);
+    style.fg = .{ .rgb = .{ mixed.r, mixed.g, mixed.b } };
+    style.bg = displayed_bg;
+    style.reverse = false;
+}
+
+fn resolveHostRgb(colors: *const HostColors, color: vaxis.Color, default_kind: DefaultKind) ?core.palette.RGB {
+    return switch (color) {
+        .rgb => |rgb| .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] },
+        .index => |index| colors.resolvePalette(index),
+        .default => switch (default_kind) {
+            .foreground => colors.foreground,
+            .background => colors.background,
+        },
+    };
 }
 
 /// Style for a cell carrying no style of its own. It still belongs to the row's
@@ -804,6 +843,44 @@ fn resolveCellLink(
 }
 
 const testing = std.testing;
+
+test "foreground mix resolves indexed source over default background" {
+    var colors: HostColors = .{};
+    colors.palette[1] = .{ .r = 255, .g = 0, .b = 0 };
+    colors.background = .{ .r = 0, .g = 0, .b = 0 };
+    var style: vaxis.Style = .{ .fg = .{ .index = 1 } };
+
+    applyForegroundMix(&style, 30, &colors);
+
+    try testing.expectEqual(vaxis.Color{ .rgb = .{ 77, 0, 0 } }, style.fg);
+    try testing.expectEqual(vaxis.Color.default, style.bg);
+    try testing.expect(!style.reverse);
+}
+
+test "foreground mix normalizes reverse exactly once" {
+    var colors: HostColors = .{};
+    var style: vaxis.Style = .{
+        .fg = .{ .rgb = .{ 255, 0, 0 } },
+        .bg = .{ .rgb = .{ 0, 0, 255 } },
+        .reverse = true,
+    };
+
+    applyForegroundMix(&style, 30, &colors);
+
+    try testing.expectEqual(vaxis.Color{ .rgb = .{ 179, 0, 77 } }, style.fg);
+    try testing.expectEqual(vaxis.Color{ .rgb = .{ 255, 0, 0 } }, style.bg);
+    try testing.expect(!style.reverse);
+}
+
+test "foreground mix leaves unresolved colours opaque" {
+    var colors: HostColors = .{};
+    const original: vaxis.Style = .{ .fg = .{ .index = 1 }, .bg = .default, .reverse = true };
+    var style = original;
+
+    applyForegroundMix(&style, 30, &colors);
+
+    try testing.expect(style.eql(original));
+}
 
 test "visiblePart keeps the largest strip a float leaves" {
     const img: Rect = .{ .x = 0, .y = 0, .w = 60, .h = 24 };

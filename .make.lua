@@ -338,7 +338,7 @@ local SMOKES = {
   "smoke_startup_chooser.py", "smoke_bad_config.py", "smoke_session_env.py",
   "smoke_float_concurrent.py", "smoke_pod_record_input.py", "smoke_exit_intent_concurrent.py",
   "smoke_float_destroy.py", "smoke_keypad.py", "smoke_painter_showcase.py",
-  "smoke_profiles.py", "smoke_palette.py", "smoke_palette_persist.py",
+  "smoke_profiles.py", "smoke_palette.py", "smoke_blend.py", "smoke_palette_persist.py",
   "smoke_palette_fuzz.py", "smoke_palette_cells.py", "smoke_names.py",
   "smoke_decor.py", "smoke_float_state.py", "smoke_float_per_git.py", "smoke_float_navigatable.py", "smoke_painter_exec.py", "smoke_api_socket.py",
   "smoke_api_events.py", "smoke_stale_daemon.py", "smoke_api_geometry.py",

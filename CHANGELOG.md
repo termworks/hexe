@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### <!-- 0 -->⛰️  Features
+
+- Reserve OSC 1331 for per-cell foreground colour mixing
+
+### <!-- 4 -->💥 Breaking Changes
+
+- `palette.osc = 1331` is now rejected; use another unreserved number
+
 ## [0.4.13] - 2026-09-01
 
 ### <!-- 0 -->⛰️  Features
@@ -1552,4 +1562,3 @@
 ### <!-- 9 -->◀️ Revert
 
 - Disable perf caches causing freeze
-
