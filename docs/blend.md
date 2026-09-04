@@ -119,9 +119,10 @@ Measured on 2026-09-04 with a ReleaseFast GNU build and 30 runs of the same
 | OSC 1331 build, opaque | 3.891 s | 0.973 ms |
 | OSC 1331 build, every cell at 30% | 3.805 s | 0.951 ms |
 
-The ordinary path changed by -0.66%, inside the 3% regression budget. The
-Ghostty `Style` grew from 26 to 28 bytes; its packed hash representation remains
-16 bytes and the cell continues to store only a style identifier.
+The ordinary path changed by -0.66%, inside the 3% regression budget. Ghostty
+`Style` remained 28 bytes before and after because the new byte occupies
+existing trailing padding. Its packed hash representation remains 16 bytes,
+`Cell` remains 8 bytes, and `Page` remains 376 bytes.
 
 ## Where it lives
 

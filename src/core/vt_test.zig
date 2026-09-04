@@ -18,8 +18,10 @@ test "VT preserves explicit steady cursor style" {
     try std.testing.expectEqual(@as(u8, 2), vt.getCursorStyle());
 }
 
-test "embedder style state keeps the measured twenty eight byte layout" {
+test "embedder style state keeps measured ghostty layouts" {
     try std.testing.expectEqual(@as(usize, 28), @sizeOf(core.vt.ghostty.Style));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(core.vt.ghostty.Cell));
+    try std.testing.expectEqual(@as(usize, 376), @sizeOf(core.vt.ghostty.Page));
 }
 
 /// The tag hexe stamps onto the cursor is what ghostty copies onto every cell

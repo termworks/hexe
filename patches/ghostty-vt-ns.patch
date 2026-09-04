@@ -6,13 +6,9 @@ it can resolve indexed colours per namespace and recolour one program's output
 without touching anything else on screen.
 
 The tag is never interpreted by ghostty. It occupies bits that were already
-padding inside Flags, so Style keeps its 26-byte size and its page layout
-unchanged. Sitting in Flags also means it joins equality and hashing with no
-further changes, and a tag of 0 behaves exactly as before.
-
-A separate u8 field on Style would also work and would give 255 tags instead of
-31, at the cost of growing Style to 28 bytes and needing explicit eql and
-PackedStyle changes. Measured resident memory was the same either way.
+padding inside Flags, so Style and its page layout remain unchanged. Sitting in
+Flags also means it joins equality and hashing with no further changes, and a
+tag of 0 behaves exactly as before.
 
 The other three hunks all say one thing: the tag is embedder state, not terminal
 state a program can clear. Each is a path that rewrites the cursor style
@@ -27,9 +23,11 @@ did it.
     because assigning the style without that leaves style_id at the default and
     the cells written next carry a tag of 0 whatever the flag says.
 
-OSC 1331 uses that 28-byte layout for one byte on each interned style for a
-foreground mix percentage. It participates in equality and consumes eight bits
-of PackedStyle's existing padding. Its default of 100 is ordinary opaque output.
+OSC 1331 uses one byte of Style's existing trailing padding for each interned
+foreground mix percentage. Style remains 28 bytes on the supported target,
+Cell remains 8 bytes, and Page remains 376 bytes. The percentage participates
+in equality and consumes eight bits of PackedStyle's existing padding. Its
+default of 100 is ordinary opaque output.
 ---
 --- a/src/terminal/style.zig
 +++ b/src/terminal/style.zig
