@@ -162,6 +162,45 @@ test "cursor restore keeps the live foreground mix" {
     try std.testing.expectEqual(@as(u8, 100), cursorMix(&vt));
 }
 
+fn expectGlyphMix(vt: *core.VT, glyph: u21, expected_percent: u8, expected_count: usize) !void {
+    const state = try vt.getRenderState();
+    const rows = state.row_data.slice();
+    var found: usize = 0;
+    for (rows.items(.cells)) |cells| {
+        const slice = cells.slice();
+        for (slice.items(.raw), slice.items(.style)) |raw, style| {
+            if (raw.codepoint() != glyph) continue;
+            const percent = if (raw.style_id == 0) @as(u8, 100) else style.fg_mix_percent;
+            try std.testing.expectEqual(expected_percent, percent);
+            found += 1;
+        }
+    }
+    try std.testing.expectEqual(expected_count, found);
+}
+
+test "foreground mix stays on cells through reflow" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 8, 6);
+    defer vt.deinit();
+
+    try vt.feed("AA");
+    _ = vt.blend_state.apply("use;fg=30");
+    vt.syncBlendStyle();
+    try vt.feed("BBBBBBBBBBBB");
+    _ = vt.blend_state.apply("end");
+    vt.syncBlendStyle();
+    try vt.feed("ZZ");
+
+    try expectGlyphMix(&vt, 'A', 100, 2);
+    try expectGlyphMix(&vt, 'B', 30, 12);
+    try expectGlyphMix(&vt, 'Z', 100, 2);
+
+    try vt.resize(5, 6);
+    try expectGlyphMix(&vt, 'A', 100, 2);
+    try expectGlyphMix(&vt, 'B', 30, 12);
+    try expectGlyphMix(&vt, 'Z', 100, 2);
+}
+
 test "VT stores a Kitty image transmitted over APC" {
     var vt: core.VT = undefined;
     try vt.init(std.testing.allocator, 20, 5);

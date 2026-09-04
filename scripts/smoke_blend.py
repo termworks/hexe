@@ -139,6 +139,8 @@ with open(paint, "w", encoding="utf-8") as fh:
         "printf '\\033[38;5;200mUNKNOWN\\033[0m\\n'\n"
         "printf '\\033]1331;end\\033\\\\'\n"
         "printf 'AFTER \\033[31mRED\\033[0m\\n'\n"
+        "printf '\\033]1331;use;fg=30\\033\\\\\\033[?1049h\\033]1331;end\\033\\\\\\033[?1049l'\n"
+        "printf 'ALTRELEASE \\033[32mGREEN\\033[0m\\n'\n"
         "printf '\\033]1330;set;3;1=#00ff00\\033\\\\'\n"
         "printf '\\033]1330;use;3\\033\\\\'\n"
         "printf '\\033]1331;use;fg=30\\033\\\\'\n"
@@ -188,6 +190,7 @@ checks = (
     (sgr_rgb(153, 0, 0), "nested 60 percent scope was not retained"),
     (sgr_rgb(0, 0, 77), "truecolour foreground did not mix"),
     (sgr_index(200), "unknown host palette entry did not degrade to opaque indexed output"),
+    (re.compile(rb"\x1b\[(?:32m|38[:;]5[:;]2m)"), "leaving the alternate screen resurrected a released blend scope"),
     (sgr_rgb(0, 77, 0), "OSC 1330 namespace did not resolve before OSC 1331 mixing"),
 )
 for pattern, message in checks:
