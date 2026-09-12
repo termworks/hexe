@@ -181,6 +181,21 @@ const Region = struct {
     phase: Phase = .idle,
     /// This region's request frame, length header included.
     req: std.ArrayList(u8) = .empty,
+    /// Offset in `req` where the closing `now_ms` value starts; `req_key`
+    /// hashes everything before it.
+    req_split: usize = 0,
+    req_key: u64 = 0,
+    /// A request built while the last one was in flight, sent once it lands.
+    staged: std.ArrayList(u8) = .empty,
+    staged_split: usize = 0,
+    staged_key: u64 = 0,
+    has_staged: bool = false,
+    /// The frame this region was last drawn in.
+    frame_used: u64 = 0,
+    /// Hash of the last accepted answer.
+    body_hash: u64 = 0,
+    /// Already reported as stale.
+    stale_marked: bool = false,
 
     runs: std.ArrayList(Run) = .empty,
     run_text: std.ArrayList(u8) = .empty,
@@ -285,6 +300,11 @@ pub const Registry = struct {
     strays: std.ArrayList(Stray) = .empty,
     /// Commands seen to answer one request and exit; run once per region.
     solo: std.StringHashMapUnmanaged(void) = .empty,
+    /// Counts drawn frames; a region drawn in the latest one is live.
+    frame: u64 = 0,
+    /// Some region's content changed since the last `takeChanged()`.
+    changed: bool = false,
+    scratch: std.ArrayList(u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Registry {
         return .{
@@ -306,6 +326,7 @@ pub const Registry = struct {
         var solo_it = self.solo.keyIterator();
         while (solo_it.next()) |k| self.allocator.free(k.*);
         self.solo.deinit(self.allocator);
+        self.scratch.deinit(self.allocator);
 
         var it = self.entries.valueIterator();
         while (it.next()) |slot| self.destroyRegion(slot.*);
@@ -315,6 +336,7 @@ pub const Registry = struct {
     fn destroyRegion(self: *Registry, r: *Region) void {
         r.clearStrip();
         r.req.deinit(self.allocator);
+        r.staged.deinit(self.allocator);
         r.runs.deinit(self.allocator);
         r.run_text.deinit(self.allocator);
         r.hits.deinit(self.allocator);
@@ -349,10 +371,13 @@ pub const Registry = struct {
         // screen -- stale, and dimmed as stale -- until the refetch lands.
         if (resized) r.clearStrip();
 
-        // A resize invalidates the last frame, but it must not bypass the
-        // backoff: otherwise a dead painter is retried on every resize event.
-        if (!r.inFlight() and now >= r.next_try_ms and (resized or self.isDue(r, now))) {
-            self.begin(r, ctx, now);
+        r.frame_used = self.frame;
+        // A request that differs from the last one in anything but `now_ms`
+        // -- tab, hover, cwd, size -- is asked at once. The backoff still
+        // applies, so a dead painter is not retried on every change.
+        const changed = self.stage(r, ctx) catch false;
+        if (!r.inFlight() and now >= r.next_try_ms and (resized or changed or self.isDue(r, now))) {
+            self.queue(r, ctx.now_ms, now);
         }
 
         const done = r.last_done_ms != 0;
@@ -474,11 +499,24 @@ pub const Registry = struct {
     /// Build the request and queue the region for the next `poll()`. Any
     /// failure here is a failed fetch, not an error the caller sees.
     fn begin(self: *Registry, r: *Region, ctx: RequestContext, now: i64) void {
-        r.req.clearRetainingCapacity();
         self.buildRequest(r, ctx) catch {
             self.fail(r, now);
             return;
         };
+        self.enqueue(r, now);
+    }
+
+    /// Queue the stored request, stamped with `now_ms`.
+    fn queue(self: *Registry, r: *Region, now_ms: u64, now: i64) void {
+        if (r.req.items.len == 0) return;
+        self.restamp(r, now_ms) catch {
+            self.fail(r, now);
+            return;
+        };
+        self.enqueue(r, now);
+    }
+
+    fn enqueue(self: *Registry, r: *Region, now: i64) void {
         self.pending.append(self.allocator, r) catch {
             self.fail(r, now);
             return;
@@ -486,10 +524,27 @@ pub const Registry = struct {
         r.phase = .queued;
     }
 
+    /// Queue every live region that fell due, from its last request, and mark
+    /// any whose content just went stale.
+    fn refreshDue(self: *Registry, now: i64) void {
+        var it = self.entries.valueIterator();
+        while (it.next()) |slot| {
+            const r = slot.*;
+            if (r.frame_used != self.frame) continue;
+            if (!r.stale_marked and r.last_done_ms != 0 and now - r.last_done_ms > r.stale_ms) {
+                r.stale_marked = true;
+                self.changed = true;
+            }
+            if (r.inFlight() or now < r.next_try_ms or !self.isDue(r, now)) continue;
+            self.queue(r, @intCast(now), now);
+        }
+    }
+
     /// Start queued fetches and advance every painter run. Non-blocking
     /// throughout.
     pub fn poll(self: *Registry) void {
         const now = std.time.milliTimestamp();
+        self.refreshDue(now);
         self.launchPending(now);
 
         var i: usize = 0;
@@ -644,22 +699,37 @@ pub const Registry = struct {
             r.last_done_ms = now;
             r.fail_streak = 0;
             r.next_try_ms = 0;
-            return;
-        }
-        // A painter that answers `ok:false` is UP and simply does not implement
-        // this view. Retry on the ordinary cadence rather than the failure
-        // ladder: nothing is missing.
-        if (r.declined) {
+            const hash = std.hash.Wyhash.hash(0, bytes);
+            if (hash != r.body_hash or r.stale_marked) self.changed = true;
+            r.body_hash = hash;
+            r.stale_marked = false;
+        } else if (r.declined) {
+            // A painter that answers `ok:false` is UP and simply does not
+            // implement this view: retry on the ordinary cadence.
             r.fail_streak = 0;
             r.next_try_ms = now + @max(r.refresh_ms, RETRY_BASE_MS);
-            return;
+        } else {
+            self.backoff(r, now);
         }
-        self.backoff(r, now);
+        self.sendStaged(r);
     }
 
     fn fail(self: *Registry, r: *Region, now: i64) void {
         r.phase = .idle;
         self.backoff(r, now);
+        self.sendStaged(r);
+    }
+
+    /// Swap in a request built while the last one was in flight, and send it
+    /// now unless the region is backing off.
+    fn sendStaged(self: *Registry, r: *Region) void {
+        if (!r.has_staged) return;
+        std.mem.swap(std.ArrayList(u8), &r.req, &r.staged);
+        r.req_split = r.staged_split;
+        r.req_key = r.staged_key;
+        r.has_staged = false;
+        const now = std.time.milliTimestamp();
+        if (now >= r.next_try_ms) self.queue(r, @intCast(now), now);
     }
 
     /// Close a finished run and reap its painter without waiting.
@@ -725,38 +795,65 @@ pub const Registry = struct {
         logging.warn("regions", "painter answers one request per run; running it once per region: {s}", .{exec});
     }
 
-    /// Milliseconds until the soonest live region is due, or null when nothing
-    /// is scheduled. `next_frame_ms` was only ever a gate inside isDue(), so a
-    /// painter asking for 75ms still repainted at the loop's own cadence; the
-    /// caller uses this to arm its timer for the painter's frame instead.
     /// A painter run is queued or waiting on an answer.
     pub fn busy(self: *const Registry) bool {
         return self.pending.items.len > 0 or self.batches.items.len > 0;
     }
 
+    /// A frame is being drawn; the regions it draws are live until the next.
+    pub fn beginFrame(self: *Registry) void {
+        self.frame +%= 1;
+    }
+
+    /// Whether any region's content changed since the last call.
+    pub fn takeChanged(self: *Registry) bool {
+        const changed = self.changed;
+        self.changed = false;
+        return changed;
+    }
+
+    /// Milliseconds until the loop has work for a live region: a fetch or a
+    /// retry falling due, a filmstrip frame, or content going stale.
     pub fn msUntilDue(self: *Registry, now: i64) ?i64 {
-        var soonest: ?i64 = null;
+        var soonest = self.msUntilFrame(now);
         var it = self.entries.valueIterator();
-        while (it.next()) |r| {
-            // A playing strip needs the loop awake for its next frame even
-            // while a fetch is in flight -- that is the animation itself.
-            if (r.*.animating()) {
-                const frame_delta = @max(r.*.strip_due_ms - now, 0);
-                if (soonest == null or frame_delta < soonest.?) soonest = frame_delta;
+        while (it.next()) |slot| {
+            const r = slot.*;
+            if (r.frame_used != self.frame or r.inFlight()) continue;
+            if (!r.stale_marked and r.last_done_ms != 0) {
+                soonest = earlier(soonest, r.last_done_ms + r.stale_ms + 1 - now);
             }
-            if (r.*.inFlight()) continue;
-            if (r.*.next_try_ms != 0 and now < r.*.next_try_ms) continue;
-            const interval: i64 = if (r.*.animating())
-                r.*.refresh_ms
-            else if (r.*.next_frame_ms) |nf|
-                @min(r.*.refresh_ms, @as(i64, @intCast(nf)))
+            if (r.req.items.len == 0) continue;
+            if (now < r.next_try_ms) {
+                soonest = earlier(soonest, r.next_try_ms - now);
+                continue;
+            }
+            const interval: i64 = if (r.animating())
+                r.refresh_ms
+            else if (r.next_frame_ms) |nf|
+                @min(r.refresh_ms, @as(i64, @intCast(nf)))
             else
-                r.*.refresh_ms;
-            const due = r.*.last_done_ms + @max(interval, 16);
-            const delta = @max(due - now, 0);
-            if (soonest == null or delta < soonest.?) soonest = delta;
+                r.refresh_ms;
+            soonest = earlier(soonest, r.last_done_ms + @max(interval, 16) - now);
         }
         return soonest;
+    }
+
+    /// Milliseconds until a live region's filmstrip frame is due.
+    pub fn msUntilFrame(self: *Registry, now: i64) ?i64 {
+        var soonest: ?i64 = null;
+        var it = self.entries.valueIterator();
+        while (it.next()) |slot| {
+            const r = slot.*;
+            if (r.frame_used != self.frame or !r.animating()) continue;
+            soonest = earlier(soonest, r.strip_due_ms - now);
+        }
+        return soonest;
+    }
+
+    fn earlier(soonest: ?i64, delta: i64) ?i64 {
+        const d = @max(delta, 0);
+        return if (soonest) |s| @min(s, d) else d;
     }
 
     /// Back off after a failure. Hammering a painter that cannot serve this
@@ -770,15 +867,58 @@ pub const Registry = struct {
         r.next_try_ms = now + delay;
     }
 
+    /// Build and keep the request `ctx` describes as the one to send.
     fn buildRequest(self: *Registry, r: *Region, ctx: RequestContext) !void {
-        const start = r.req.items.len;
-        try r.req.appendNTimes(self.allocator, 0, 4);
-        const w = r.req.writer(self.allocator);
+        r.req.clearRetainingCapacity();
+        r.req_split = try self.buildInto(&r.req, r, ctx);
+        r.req_key = std.hash.Wyhash.hash(0, r.req.items[4..r.req_split]);
+    }
+
+    /// Build the request `ctx` describes and keep it if it differs from the
+    /// last one in anything but `now_ms`: as the request to send, or staged
+    /// behind the one in flight. True when the request to send changed.
+    fn stage(self: *Registry, r: *Region, ctx: RequestContext) !bool {
+        self.scratch.clearRetainingCapacity();
+        const split = try self.buildInto(&self.scratch, r, ctx);
+        const key = std.hash.Wyhash.hash(0, self.scratch.items[4..split]);
+        if (r.req.items.len != 0 and key == r.req_key) {
+            r.has_staged = false;
+            return false;
+        }
+        if (r.inFlight()) {
+            if (r.has_staged and key == r.staged_key) return false;
+            r.staged.clearRetainingCapacity();
+            try r.staged.appendSlice(self.allocator, self.scratch.items);
+            r.staged_split = split;
+            r.staged_key = key;
+            r.has_staged = true;
+            return false;
+        }
+        r.req.clearRetainingCapacity();
+        try r.req.appendSlice(self.allocator, self.scratch.items);
+        r.req_split = split;
+        r.req_key = key;
+        return true;
+    }
+
+    /// Rewrite the `now_ms` value that closes the stored request.
+    fn restamp(self: *Registry, r: *Region, now_ms: u64) !void {
+        r.req.shrinkRetainingCapacity(r.req_split);
+        try r.req.writer(self.allocator).print("{d}}}", .{now_ms});
+        std.mem.writeInt(u32, r.req.items[0..4], @intCast(r.req.items.len - 4), .big);
+    }
+
+    /// Write one request frame into `out`. Returns the offset where the
+    /// closing `now_ms` value starts.
+    fn buildInto(self: *Registry, out: *std.ArrayList(u8), r: *const Region, ctx: RequestContext) !usize {
+        const start = out.items.len;
+        try out.appendNTimes(self.allocator, 0, 4);
+        const w = out.writer(self.allocator);
 
         try w.writeAll("{\"version\":1,\"select\":[");
         try writeJsonString(w, r.selector);
-        try w.print("],\"mode\":\"{s}\",\"width\":{d},\"height\":{d},\"now_ms\":{d},\"frames_ms\":{d},\"ignore_missing\":false,\"context\":{{", .{
-            r.mode.wireName(), r.width, r.height, ctx.now_ms, r.refresh_ms,
+        try w.print("],\"mode\":\"{s}\",\"width\":{d},\"height\":{d},\"frames_ms\":{d},\"ignore_missing\":false,\"context\":{{", .{
+            r.mode.wireName(), r.width, r.height, r.refresh_ms,
         });
 
         var first = true;
@@ -850,11 +990,14 @@ pub const Registry = struct {
             try w.writeAll(",");
             try w.writeAll(ctx.extra_json);
         }
-        try w.writeAll("}}}");
+        try w.writeAll("}},\"now_ms\":");
+        const split = out.items.len;
+        try w.print("{d}}}", .{ctx.now_ms});
 
-        const len = r.req.items.len - start - 4;
+        const len = out.items.len - start - 4;
         if (len > MAX_FRAME) return error.FrameTooLarge;
-        std.mem.writeInt(u32, r.req.items[start..][0..4], @intCast(len), .big);
+        std.mem.writeInt(u32, out.items[start..][0..4], @intCast(len), .big);
+        return split;
     }
 
     /// Read the painter's `regions` array: clickable rectangles with an id and
@@ -1582,6 +1725,114 @@ test "a failing region runs alone while the others share a run" {
     try std.testing.expectEqual(regions[2], reg.batches.items[0].members.items[1]);
     try std.testing.expectEqual(@as(usize, 1), reg.batches.items[1].members.items.len);
     try std.testing.expectEqual(regions[1], reg.batches.items[1].members.items[0]);
+}
+
+test "only an answer that differs asks for a redraw" {
+    const allocator = std.testing.allocator;
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+    const r = reg.entry(.{ .selector = "status", .mode = .run, .width = 10, .height = 1, .exec = "true" }, 0).?;
+    const a =
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"a"}],"width":1}}
+    ;
+    const b =
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"b"}],"width":1}}
+    ;
+    reg.finish(r, a, 1);
+    try std.testing.expect(reg.takeChanged());
+    reg.finish(r, a, 2);
+    try std.testing.expect(!reg.takeChanged());
+    reg.finish(r, b, 3);
+    try std.testing.expect(reg.takeChanged());
+}
+
+fn countRuns(dir: std.fs.Dir, allocator: std.mem.Allocator) !usize {
+    const runs = dir.readFileAlloc(allocator, "runs", 4096) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer allocator.free(runs);
+    return std.mem.count(u8, runs, "run\n");
+}
+
+test "a drawn region refreshes itself, one no longer drawn does not" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+    const log = try std.fs.path.join(allocator, &.{ dir, "runs" });
+    defer allocator.free(log);
+    const reply =
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"x"}],"width":1}}
+    ;
+    const cmd = try framedReplies(allocator, log, &.{reply});
+    defer allocator.free(cmd);
+
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 10, .height = 1, .refresh_ms = 30, .exec = cmd };
+
+    reg.beginFrame();
+    try pollUntilDone(&reg, &.{spec});
+
+    // Not drawn again, and still asked again once due.
+    var spins: usize = 0;
+    while (try countRuns(tmp.dir, allocator) < 2) : (spins += 1) {
+        if (spins > 2000) return error.RegionNeverRefreshed;
+        reg.poll();
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+
+    // A frame that does not draw it retires it.
+    reg.beginFrame();
+    spins = 0;
+    while (reg.busy()) : (spins += 1) {
+        if (spins > 2000) return error.RunNeverFinished;
+        reg.poll();
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    const settled = try countRuns(tmp.dir, allocator);
+    for (0..100) |_| {
+        reg.poll();
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    try std.testing.expectEqual(settled, try countRuns(tmp.dir, allocator));
+}
+
+test "a request that changes is sent at once, even behind one in flight" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+    const log = try std.fs.path.join(allocator, &.{ dir, "runs" });
+    defer allocator.free(log);
+    const reply =
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"x"}],"width":1}}
+    ;
+    const cmd = try framedReplies(allocator, log, &.{reply});
+    defer allocator.free(cmd);
+
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+    const spec = Spec{ .selector = "status", .mode = .run, .width = 10, .height = 1, .exec = cmd };
+
+    _ = reg.snapshot(spec, .{ .now_ms = 1, .cwd = "/a" });
+    const r = reg.entries.get("status\x1frun\x1f").?;
+    try std.testing.expect(r.inFlight());
+
+    // Nowhere near due, but what would be sent changed.
+    _ = reg.snapshot(spec, .{ .now_ms = 2, .cwd = "/b" });
+    try std.testing.expect(r.has_staged);
+
+    var spins: usize = 0;
+    while (try countRuns(tmp.dir, allocator) < 2 or reg.busy()) : (spins += 1) {
+        if (spins > 2000) return error.StagedRequestNeverSent;
+        reg.poll();
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, r.req.items, "\"/b\"") != null);
 }
 
 test "plain painter commands skip the shell" {

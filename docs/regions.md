@@ -234,6 +234,11 @@ pressed and hovered states. hexe never restyles a painter's output.
 animating view returns `75` and gets asked again in 75ms. It can only shorten
 the interval, never lengthen it.
 
+hexe asks on this schedule by itself for as long as the region is on screen,
+and redraws only when an answer differs from the one before. A change in what
+it would send — a tab, the hovered region, the cwd, the size — is asked at once
+rather than at the next refresh.
+
 **It is a delay, never a timestamp.** A painter that sends an absolute time is
 asking for a frame decades away; hexe warns once and ignores it rather than
 clamping it silently, because the symptom of the silent version is only that the

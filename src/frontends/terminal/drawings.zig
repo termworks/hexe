@@ -142,6 +142,17 @@ pub const Registry = struct {
         for (doomed[0..n]) |name| _ = self.remove(name);
     }
 
+    /// When the soonest drawing with a ttl expires, or null.
+    pub fn nextExpiry(self: *const Registry) ?i64 {
+        var soonest: ?i64 = null;
+        var it = self.items.valueIterator();
+        while (it.next()) |d| {
+            if (d.expires_at == 0) continue;
+            if (soonest == null or d.expires_at < soonest.?) soonest = d.expires_at;
+        }
+        return soonest;
+    }
+
     pub fn iterator(self: *Registry) std.StringHashMap(Drawing).ValueIterator {
         return self.items.valueIterator();
     }

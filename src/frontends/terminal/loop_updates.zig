@@ -5,50 +5,10 @@ const State = @import("state.zig").State;
 const loop_ipc = @import("loop_ipc.zig");
 const keybinds = @import("keybinds.zig");
 
-fn wantsFastStatusRefresh(state: *State) bool {
-    const uuid = state.getCurrentFocusedUuid() orelse return false;
-
-    // If a float is focused, allow fast refresh (spinners in statusbar).
-    if (state.activeFloatingIndex() != null) return true;
-
-    // Suppress while alt-screen is active (for split-focused panes).
-    const alt = if (state.currentLayout().getFocusedPane()) |pane| pane.vt.inAltScreen() else false;
-    if (alt) return false;
-
-    // Prefer direct fg_process; fallback to cached process name.
-    const fg = if (state.activeFloatingIndex()) |idx| blk: {
-        if (idx < state.view.float_views.items.len) {
-            if (state.view.float_views.items[idx].getFgProcess()) |p| break :blk p;
-        }
-        break :blk @as(?[]const u8, null);
-    } else if (state.currentLayout().getFocusedPane()) |pane| pane.getFgProcess() else null;
-
-    const proc_name = fg orelse blk: {
-        if (state.getPaneProc(uuid)) |pi| {
-            if (pi.name) |n| break :blk n;
-        }
-        break :blk @as(?[]const u8, null);
-    };
-    if (proc_name == null) return false;
-
-    const shells = [_][]const u8{ "bash", "zsh", "fish", "sh", "dash", "nu", "xonsh", "pwsh", "cmd", "elvish" };
-    for (shells) |s| {
-        if (std.mem.eql(u8, proc_name.?, s)) return false;
-    }
-    return true;
-}
-
-fn statusUpdateInterval(state: *State) i64 {
-    return if (wantsFastStatusRefresh(state))
-        core.constants.Timing.status_update_interval_anim
-    else
-        core.constants.Timing.status_update_interval_base;
-}
-
 /// Update UI concerns that must run before dead split cleanup, because mouse
 /// selection can mutate pane scrollback/selection state on the currently
 /// focused pane.
-pub fn updateSelectionAndStatus(state: *State, now_ms: i64, last_status_update: *i64) void {
+pub fn updateSelectionAndStatus(state: *State, now_ms: i64) void {
     // Auto-scroll while selecting when the mouse is near the top/bottom.
     // This allows selecting hidden content by holding the mouse at the edge.
     if (state.mouse_selection.active and state.mouse_selection.edge_scroll != .none) {
@@ -71,24 +31,16 @@ pub fn updateSelectionAndStatus(state: *State, now_ms: i64, last_status_update: 
         }
     }
 
-    // The periodic refresh keeps time-driven UI current: statusbar content
-    // (clock, spinners, process info) and float border title segments, which
-    // run through the same segment machinery. With neither present, renders
-    // can be purely event-driven.
-    const has_time_driven_ui = state.config.tabs.status.enabled or state.view.float_views.items.len > 0;
-    if (has_time_driven_ui and now_ms - last_status_update.* >= statusUpdateInterval(state)) {
-        state.needs_render = true;
-        last_status_update.* = now_ms;
-    }
-
-    // A painter drives its own frame rate through next_frame_ms. The fixed
-    // interval above quantised that to the loop's cadence, so a spinner asking
-    // for 75ms actually repainted at ~4-10fps. Render as soon as any region is
-    // due; renderIfDue's own floor still caps the rate.
+    // Renders follow change. Painter answers that differ ask for one through
+    // the region registry; a filmstrip frame or a drawing's expiry falling
+    // due asks here.
     if (core.regions.active) |registry| {
-        if (registry.msUntilDue(now_ms)) |delta| {
+        if (registry.msUntilFrame(now_ms)) |delta| {
             if (delta <= 0) state.needs_render = true;
         }
+    }
+    if (state.drawings.nextExpiry()) |at| {
+        if (now_ms >= at) state.needs_render = true;
     }
 }
 

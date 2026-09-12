@@ -40,7 +40,16 @@ fn tickDelayMs(state: *const State) u64 {
     if (state.host_colors.pollDelayMs(now_ms)) |poll_delay| {
         delay = @min(delay, @max(poll_delay, 16));
     }
+    if (state.drawings.nextExpiry()) |at| {
+        delay = @min(delay, @as(u64, @intCast(@max(at - now_ms, 16))));
+    }
     return delay;
+}
+
+/// Advance painter fetches; content that changed asks for a render.
+fn pollRegions(state: *State) void {
+    state.regions.poll();
+    if (state.regions.takeChanged()) state.needs_render = true;
 }
 
 fn loopTimerCallback(
@@ -237,7 +246,6 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
 
     // Frame timing.
     var last_render: i64 = std.time.milliTimestamp();
-    var last_status_update: i64 = last_render;
     const pane_sync_interval: i64 = core.constants.Timing.pane_sync_interval;
     const heartbeat_interval: i64 = core.constants.Timing.heartbeat_interval;
 
@@ -269,7 +277,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         state.async_cmds.poll();
         // Same contract for externally painted regions: advance in-flight
         // fetches with non-blocking syscalls only.
-        state.regions.poll();
+        pollRegions(state);
         maybeReconnectSes(state, &reconnect_state);
         runtime_events.applyDeferredPaneExits(state);
         runtime_events.applyDeferredCwdResponse(state);
@@ -361,7 +369,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         if (!skip_dead_sweep) dead_panes.cleanupDeadFloats(state);
 
         const now2 = std.time.milliTimestamp();
-        loop_updates.updateSelectionAndStatus(state, now2, &last_status_update);
+        loop_updates.updateSelectionAndStatus(state, now2);
 
         // Handle a cancelled shell-death exit confirmation before dead-pane
         // cleanup re-enters the last-pane exit path.
@@ -389,7 +397,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);
         // Start the painter fetches this frame queued.
-        state.regions.poll();
+        pollRegions(state);
         const dbg_t3 = std.time.milliTimestamp();
         if (dbg_t3 - dbg_t2 > 300) terminal_main.debugLog("SLOW renderIfDue: {d}ms", .{dbg_t3 - dbg_t2});
         if (dbg_t2 - dbg_t1 > 300) terminal_main.debugLog("SLOW mid-steps: {d}ms", .{dbg_t2 - dbg_t1});

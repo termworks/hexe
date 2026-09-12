@@ -234,6 +234,7 @@ fn renderIfDue(state: *State, last_render_ms: *i64) void {
     // through the loop tries again and nothing is dropped.
     if (outputHeld(state) and render_now - last_render_ms.* < SYNC_HOLD_MS) return;
 
+    state.regions.beginFrame();
     render(state) catch |err| {
         core.logging.logError("terminal", "terminal render failed", err);
         // **A terminal that cannot be written to is a terminal that is gone.**
