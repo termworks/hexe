@@ -42,16 +42,22 @@ def parse_state(text):
         raise ValueError("percentage must be between 0 and 100")
 
     color = fields[1]
-    if color in ANSI:
+    if color.isdecimal() and 0 <= int(color) <= 255:
+        index = int(color)
+        label = f"ANSI color {index}"
+        sgr = f"\x1b[38;5;{index}m"
+    elif color in ANSI:
+        label = color
         sgr = f"\x1b[{ANSI[color]}m"
     elif re.fullmatch(r"#[0-9a-f]{6}", color):
+        label = color
         red, green, blue = (int(color[index:index + 2], 16) for index in (1, 3, 5))
         sgr = f"\x1b[38;2;{red};{green};{blue}m"
     else:
         names = ", ".join(ANSI)
-        raise ValueError(f"unknown colour {color!r}; use #RRGGBB or: {names}")
+        raise ValueError(f"unknown colour {color!r}; use 0..255, #RRGGBB or: {names}")
 
-    return percent, color, sgr
+    return percent, label, sgr
 
 
 def sample(label, sgr, percent=None):
@@ -72,7 +78,7 @@ def render(text):
 def write_initial_state(path):
     if path.exists():
         return
-    path.write_text("30 red\n", encoding="utf-8")
+    path.write_text("30 1\n", encoding="utf-8")
 
 
 def main():
@@ -85,7 +91,7 @@ def main():
     print("OSC 1331 live demo")
     print("Run this inside a Hexe pane.")
     print(f"Watching: {args.state}")
-    print("State format: PERCENT COLOR, for example: 30 red or 65 #ff8800")
+    print("State format: PERCENT COLOR, for example: 30 1 or 65 #ff8800")
     print("Press Ctrl-C to stop.", flush=True)
 
     previous = None
