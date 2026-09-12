@@ -25,12 +25,20 @@ const LoopTimerContext = struct {
 /// How long the loop timer may sleep. A painter's next_frame_ms is useless if
 /// nothing wakes to serve it, and the ticker was pinned at 100ms, so animation
 /// could never beat ~10fps. Never sleeps below 16ms.
-fn tickDelayMs() u64 {
+fn tickDelayMs(state: *const State) u64 {
     const base: u64 = 100;
-    const registry = core.regions.active orelse return base;
-    const delta = registry.msUntilDue(std.time.milliTimestamp()) orelse return base;
-    const clamped: u64 = @intCast(@max(delta, 16));
-    return @min(base, clamped);
+    const now_ms = std.time.milliTimestamp();
+    var delay = base;
+    if (core.regions.active) |registry| {
+        if (registry.msUntilDue(now_ms)) |delta| {
+            const clamped: u64 = @intCast(@max(delta, 16));
+            delay = @min(delay, clamped);
+        }
+    }
+    if (state.host_colors.pollDelayMs(now_ms)) |poll_delay| {
+        delay = @min(delay, @max(poll_delay, 16));
+    }
+    return delay;
 }
 
 fn loopTimerCallback(
@@ -42,7 +50,7 @@ fn loopTimerCallback(
     const timer_ctx = ctx orelse return .disarm;
     _ = result catch {
         // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
-        timer_ctx.ticker.run(loop, completion, tickDelayMs(), LoopTimerContext, timer_ctx, loopTimerCallback);
+        timer_ctx.ticker.run(loop, completion, tickDelayMs(timer_ctx.state), LoopTimerContext, timer_ctx, loopTimerCallback);
         return .disarm;
     };
 
@@ -69,7 +77,7 @@ fn loopTimerCallback(
 
     timer_ctx.last_fire = std.time.milliTimestamp();
     // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
-    timer_ctx.ticker.run(loop, completion, tickDelayMs(), LoopTimerContext, timer_ctx, loopTimerCallback);
+    timer_ctx.ticker.run(loop, completion, tickDelayMs(timer_ctx.state), LoopTimerContext, timer_ctx, loopTimerCallback);
     return .disarm;
 }
 
@@ -241,7 +249,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
     };
     var timer_completion: xev.Completion = .{};
     timer_ctx.last_fire = std.time.milliTimestamp();
-    loop_timer.run(loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
+    loop_timer.run(loop, &timer_completion, tickDelayMs(state), LoopTimerContext, &timer_ctx, loopTimerCallback);
 
     // Reusable lists for dead pane tracking (avoid per-iteration allocations).
     var dead_splits: std.ArrayList([32]u8) = .empty;
@@ -306,7 +314,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         if (dbg_t1 - timer_ctx.last_fire > 5000) {
             terminal_main.debugLog("loop ticker silent {d}ms; resurrecting", .{dbg_t1 - timer_ctx.last_fire});
             timer_ctx.last_fire = dbg_t1;
-            timer_ctx.ticker.run(loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
+            timer_ctx.ticker.run(loop, &timer_completion, tickDelayMs(state), LoopTimerContext, &timer_ctx, loopTimerCallback);
         }
         if (runtime_events.applyRuntimeStopRequest(state, hooks)) break;
         if (!state.running) break;

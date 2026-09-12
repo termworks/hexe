@@ -75,8 +75,9 @@ style. It never guesses black or substitutes a built-in ANSI palette.
 
 Programs such as pywal can write colour sequences directly to terminal PTYs.
 Those bytes bypass Hexe, so Hexe cannot observe the change itself. Hexe polls
-only the host colours used by visible mixed cells at a bounded 100 ms cadence
-and repaints when their RGB values change. No polling occurs without a visible
+only the host colours used by visible mixed cells at a bounded 16 ms cadence
+and repaints when their RGB values change. Each pass is capped at 16 queries
+and rotates across larger active palettes. No polling occurs without a visible
 mixed cell that depends on the host palette.
 
 `OSC 1331;refresh ST` provides an immediate event when the palette tool runs

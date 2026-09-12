@@ -3,7 +3,8 @@ const core = @import("core");
 
 pub const QUERY_TIMEOUT_MS: i64 = 1500;
 pub const REFRESH_COOLDOWN_MS: i64 = 50;
-pub const POLL_INTERVAL_MS: i64 = 100;
+pub const POLL_INTERVAL_MS: i64 = 16;
+pub const MAX_POLL_QUERIES: usize = 16;
 pub const MAX_PENDING: usize = 512;
 
 pub const QueryKey = union(enum) {
@@ -80,6 +81,7 @@ pub const HostColors = struct {
     used: Invalidation = .{},
     last_refresh_ms: i64 = 0,
     last_poll_ms: i64 = 0,
+    poll_palette_cursor: u16 = 0,
 
     pub fn beginFrame(self: *HostColors) void {
         self.used = .{};
@@ -137,7 +139,24 @@ pub const HostColors = struct {
     pub fn pollUsed(self: *HostColors, writer: anytype, now_ms: i64) !bool {
         if (self.used.empty() or now_ms - self.last_poll_ms < POLL_INTERVAL_MS) return false;
         self.last_poll_ms = now_ms;
-        return self.queryUsed(writer, now_ms);
+
+        var queried: usize = 0;
+        if (self.used.foreground and self.foreground != null and try self.refreshKey(writer, .foreground, now_ms)) queried += 1;
+        if (queried < MAX_POLL_QUERIES and self.used.background and self.background != null and try self.refreshKey(writer, .background, now_ms)) queried += 1;
+
+        var scanned: usize = 0;
+        while (scanned < 256 and queried < MAX_POLL_QUERIES) : (scanned += 1) {
+            const index: u8 = @intCast(self.poll_palette_cursor);
+            self.poll_palette_cursor = (self.poll_palette_cursor + 1) % 256;
+            if (self.used.hasPalette(index) and self.palette[index] != null and try self.refreshKey(writer, .{ .palette = index }, now_ms)) queried += 1;
+        }
+        return queried > 0;
+    }
+
+    pub fn pollDelayMs(self: *const HostColors, now_ms: i64) ?u64 {
+        if (!self.hasPollTarget()) return null;
+        const remaining = POLL_INTERVAL_MS - (now_ms - self.last_poll_ms);
+        return @intCast(@max(remaining, 0));
     }
 
     fn queryUsed(self: *HostColors, writer: anytype, now_ms: i64) !bool {
@@ -225,6 +244,16 @@ pub const HostColors = struct {
     fn hasHexePending(self: *const HostColors, key: QueryKey) bool {
         for (self.pending[0..self.pending_len]) |pending| {
             if (pending.owner == .hexe and std.meta.eql(pending.key, key)) return true;
+        }
+        return false;
+    }
+
+    fn hasPollTarget(self: *const HostColors) bool {
+        if (self.used.foreground and self.foreground != null and !self.hasHexePending(.foreground)) return true;
+        if (self.used.background and self.background != null and !self.hasHexePending(.background)) return true;
+        for (0..256) |index| {
+            const palette_index: u8 = @intCast(index);
+            if (self.used.hasPalette(palette_index) and self.palette[index] != null and !self.hasHexePending(.{ .palette = palette_index })) return true;
         }
         return false;
     }
@@ -395,4 +424,20 @@ test "used colours poll at the bounded cadence" {
     try std.testing.expect(!try colors.pollUsed(&writer, POLL_INTERVAL_MS - 1));
     try std.testing.expect(try colors.pollUsed(&writer, POLL_INTERVAL_MS));
     try std.testing.expectEqualStrings("\x1b]11;?\x1b\\\x1b]4;1;?\x1b\\", writer.buffered());
+}
+
+test "one poll caps queries and rotates across the palette" {
+    var colors: HostColors = .{};
+    colors.beginFrame();
+    for (0..256) |index| {
+        const palette_index: u8 = @intCast(index);
+        colors.palette[index] = .{ .r = palette_index, .g = 0, .b = 0 };
+        _ = colors.resolvePalette(palette_index);
+    }
+
+    var bytes: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try std.testing.expect(try colors.pollUsed(&writer, POLL_INTERVAL_MS));
+    try std.testing.expectEqual(@as(u16, MAX_POLL_QUERIES), colors.pending_len);
+    try std.testing.expectEqual(@as(u16, MAX_POLL_QUERIES), colors.poll_palette_cursor);
 }
