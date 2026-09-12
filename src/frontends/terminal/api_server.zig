@@ -265,6 +265,14 @@ pub const ApiServer = struct {
         }
     }
 
+    /// A connection is open, so there may be work without a new accept.
+    pub fn hasConns(self: *const ApiServer) bool {
+        for (&self.conns) |*c| {
+            if (c.active()) return true;
+        }
+        return false;
+    }
+
     fn step(self: *ApiServer, c: *Conn, state: *State) void {
         if (c.subscribed) {
             self.flush(c);

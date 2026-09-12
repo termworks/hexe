@@ -10,6 +10,7 @@ const runtime_events = @import("runtime_events.zig");
 const dead_panes = @import("dead_panes.zig");
 const loop_updates = @import("loop_updates.zig");
 const loop_ipc = @import("loop_ipc.zig");
+const ApiServer = @import("api_server.zig").ApiServer;
 const terminal_main = @import("main.zig");
 
 const LoopTimerContext = struct {
@@ -50,6 +51,49 @@ fn tickDelayMs(state: *const State) u64 {
 fn pollRegions(state: *State) void {
     state.regions.poll();
     if (state.regions.takeChanged()) state.needs_render = true;
+}
+
+/// Service the control sockets that have something to do. Servers with an
+/// open connection are serviced as always; the listeners of the rest share
+/// one `poll()` instead of an `accept()` each.
+fn serviceApiServers(state: *State) void {
+    const max_polled = 64;
+    var pfds: [max_polled]std.posix.pollfd = undefined;
+    var owners: [max_polled]*ApiServer = undefined;
+    var n: usize = 0;
+
+    var servers: [1]*ApiServer = undefined;
+    const main_server: []*ApiServer = if (state.api_server) |*srv| blk: {
+        servers[0] = srv;
+        break :blk servers[0..1];
+    } else servers[0..0];
+    const groups = [_][]ApiServer{ state.plugin_servers.items, state.pane_servers.items };
+
+    for (main_server) |srv| collect(state, srv, &pfds, &owners, &n);
+    for (groups) |group| {
+        for (group) |*srv| collect(state, srv, &pfds, &owners, &n);
+    }
+    if (n == 0) return;
+
+    const ready = std.posix.poll(pfds[0..n], 0) catch {
+        for (owners[0..n]) |srv| srv.service(state);
+        return;
+    };
+    if (ready == 0) return;
+    for (pfds[0..n], owners[0..n]) |pfd, srv| {
+        if (pfd.revents != 0) srv.service(state);
+    }
+}
+
+fn collect(state: *State, srv: *ApiServer, pfds: []std.posix.pollfd, owners: []*ApiServer, n: *usize) void {
+    if (srv.fd < 0) return;
+    if (srv.hasConns() or n.* == pfds.len) {
+        srv.service(state);
+        return;
+    }
+    pfds[n.*] = .{ .fd = srv.fd, .events = std.posix.POLL.IN, .revents = 0 };
+    owners[n.*] = srv;
+    n.* += 1;
 }
 
 fn loopTimerCallback(
@@ -385,14 +429,11 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         state.startApiServer();
         // After the socket, so HEXE_API_SOCKET is real when they read it.
         state.startPlugins();
-        if (state.api_server) |*srv| srv.service(state);
-        // Each plugin's own socket, serviced the same way. Separate listeners
+        // Plus each plugin's own socket and one per pane. Separate listeners
         // rather than one with per-connection grants, so authority is a
         // property of the door rather than of what the caller claims.
-        for (state.plugin_servers.items) |*srv| srv.service(state);
-        // And one per pane, for whatever is running inside it.
         state.syncPaneServers();
-        for (state.pane_servers.items) |*srv| srv.service(state);
+        serviceApiServers(state);
 
         const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);
