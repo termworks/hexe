@@ -463,6 +463,7 @@ fn consumeBlendOsc(self: *Pane, seq: []const u8) void {
         .have => {
             writeResponse(self, "\x1b]1331;have;1;fg\x1b\\", "OSC 1331 capability response write failed");
         },
+        .refresh => self.host_color_refresh_requested = true,
     }
 }
 
@@ -974,6 +975,29 @@ test "OSC 1331 ask replies exactly once" {
         try std.testing.expectEqual(@as(u16, 7), frame.header.pane_id);
         try std.testing.expectEqual(@intFromEnum(core.pod_protocol.FrameType.input), frame.header.frame_type);
         try std.testing.expectEqualStrings("\x1b]1331;have;1;fg\x1b\\", frame.payload[16..]);
+    }
+}
+
+test "OSC 1331 refresh is queued across every split" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+
+    const sequence = "\x1b]1331;refresh\x1b\\";
+    for (0..sequence.len + 1) |split| {
+        pane.feedPodOutput(sequence[0..split]);
+        pane.feedPodOutput(sequence[split..]);
+        try std.testing.expect(pane.takeHostColorRefresh());
+        try std.testing.expect(!pane.takeHostColorRefresh());
     }
 }
 

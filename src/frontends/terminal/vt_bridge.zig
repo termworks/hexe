@@ -134,7 +134,7 @@ pub fn drawRenderState(
     height: u16,
     arena: std.mem.Allocator,
     vt: *core.VT,
-    host_colors: ?*const HostColors,
+    host_colors: ?*HostColors,
     vx: *vaxis.Vaxis,
     stdout: std.fs.File,
     /// Rectangles that will be drawn OVER this window later in the frame, in
@@ -689,7 +689,7 @@ fn convertStyle(
     ns_table: *const NamespaceTable,
     ns: u8,
     defaults: core.palette.Defaults,
-    host_colors: ?*const HostColors,
+    host_colors: ?*HostColors,
 ) vaxis.Style {
     var style = vaxis.Style{};
 
@@ -750,7 +750,7 @@ fn convertStyle(
 
 const DefaultKind = enum { foreground, background };
 
-fn applyForegroundMix(style: *vaxis.Style, percent: u8, maybe_colors: ?*const HostColors) void {
+fn applyForegroundMix(style: *vaxis.Style, percent: u8, maybe_colors: ?*HostColors) void {
     const colors = maybe_colors orelse return;
     var displayed_fg = style.fg;
     var displayed_bg = style.bg;
@@ -782,13 +782,13 @@ pub fn benchmarkMixedViewport() !u64 {
     return timer.read();
 }
 
-fn resolveHostRgb(colors: *const HostColors, color: vaxis.Color, default_kind: DefaultKind) ?core.palette.RGB {
+fn resolveHostRgb(colors: *HostColors, color: vaxis.Color, default_kind: DefaultKind) ?core.palette.RGB {
     return switch (color) {
         .rgb => |rgb| .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] },
         .index => |index| colors.resolvePalette(index),
         .default => switch (default_kind) {
-            .foreground => colors.foreground,
-            .background => colors.background,
+            .foreground => colors.resolveForeground(),
+            .background => colors.resolveBackground(),
         },
     };
 }

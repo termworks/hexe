@@ -12,6 +12,7 @@ pub const Applied = enum {
     ignore,
     changed,
     have,
+    refresh,
 };
 
 pub const State = struct {
@@ -71,6 +72,7 @@ pub const State = struct {
             return .changed;
         }
         if (std.ascii.eqlIgnoreCase(verb, "ask")) return .have;
+        if (std.ascii.eqlIgnoreCase(verb, "refresh")) return .refresh;
         return .ignore;
     }
 };
@@ -151,6 +153,13 @@ test "ask reports version one support" {
     try std.testing.expectEqual(@as(u8, VERSION), 1);
 }
 
+test "refresh requests host colour discovery" {
+    var state: State = .{};
+    try std.testing.expectEqual(Applied.refresh, state.apply("refresh"));
+    try std.testing.expectEqual(@as(u8, OPAQUE_PERCENT), state.currentFgPercent());
+    try std.testing.expectEqual(@as(u8, 0), state.stack_len);
+}
+
 test "malformed percentages and commands leave state unchanged" {
     const invalid = [_][]const u8{
         "use",
@@ -166,6 +175,7 @@ test "malformed percentages and commands leave state unchanged" {
         "end;extra",
         "reset;extra",
         "ask;extra",
+        "refresh;extra",
         "unknown;fg=30",
     };
 

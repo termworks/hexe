@@ -275,4 +275,24 @@ if not sgr_rgb(77, 0, 179).search(changed):
     fail("host colour-scheme update did not repaint retained cells against blue", changed)
 print("refresh: host colour changes repaint existing mixed cells without application redraw")
 
+clear_seen()
+desired_palette[0] = b"0000/ffff/ffff"
+desired_background[0] = b"ffff/0000/ffff"
+time.sleep(0.3)
+if any(query_counts.values()):
+    fail(f"host colours were queried without an explicit refresh: {query_counts}", capture())
+os.write(master, b"printf '\\033]1331;refresh\\033\\\\'\r")
+deadline = time.time() + 5
+external = b""
+while time.time() < deadline:
+    external = capture()
+    palette_refreshed = query_counts[b"\x1b]4;1;?\x1b\\"] > 0
+    background_refreshed = query_counts[b"\x1b]11;?\x1b\\"] > 0
+    if palette_refreshed and background_refreshed and sgr_rgb(179, 77, 255).search(external):
+        break
+    time.sleep(0.1)
+else:
+    fail("out-of-band host palette changes did not refresh retained mixed cells", external)
+print("external: OSC 1331 refresh detects direct tty palette changes")
+
 print("PASS: OSC 1331 live blend smoke")

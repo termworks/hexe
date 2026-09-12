@@ -147,7 +147,7 @@ fn drawPaneSprite(state: *State, renderer: *Renderer, pane: *Pane, stdout: std.f
 
 fn drawPaneRenderState(
     renderer: *Renderer,
-    host_colors: *const @import("host_colors.zig").HostColors,
+    host_colors: *@import("host_colors.zig").HostColors,
     pane: *Pane,
     state: *const ghostty.RenderState,
     x: u16,
@@ -280,6 +280,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
 
     // Begin a new frame.
+    state.host_colors.beginFrame();
     renderer.vx.screen.clear();
 
     // Tab-less frame: the bare-`hexe` startup chooser is asking whether to

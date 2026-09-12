@@ -23,6 +23,7 @@ request. Hexe emits ST in replies.
 | `OSC 1331;use;fg=P ST` | push the current percentage and select `P` |
 | `OSC 1331;end ST` | restore the previous percentage |
 | `OSC 1331;reset ST` | clear every scope and restore 100% |
+| `OSC 1331;refresh ST` | refresh host colours used by visible mixed cells |
 | `OSC 1331;ask ST` | ask whether version 1 is supported |
 | `OSC 1331;have;1;fg ST` | Hexe's capability reply |
 
@@ -69,6 +70,33 @@ resolved before mixing and is not applied again by the outer terminal.
 An outer terminal that does not answer a colour query does not block startup.
 Until both source and background are known, Hexe emits the original opaque
 style. It never guesses black or substitutes a built-in ANSI palette.
+
+### Out-of-band palette changes
+
+Programs such as pywal can write colour sequences directly to terminal PTYs.
+Those bytes bypass Hexe, so Hexe cannot observe the change itself. After the
+palette writes finish, send `OSC 1331;refresh ST` through a Hexe pane. Hexe then
+re-queries only the host colours used by visible mixed cells and repaints when
+their RGB values change.
+
+For a broadcast script, use a second pass so every host receives its new
+palette before any Hexe frontend refreshes:
+
+```bash
+colors_to_tty() {
+    for tty in /dev/pts/*; do
+        [[ ${tty##*/} =~ ^[0-9]+$ ]] || continue
+        cat "$HOME/.cache/wal/sequences" > "$tty"
+    done
+    for tty in /dev/pts/*; do
+        [[ ${tty##*/} =~ ^[0-9]+$ ]] || continue
+        printf '\033]1331;refresh\033\\' > "$tty"
+    done
+}
+```
+
+Outer terminals ignore the private refresh request. A copy written through a
+Hexe pane is consumed by Hexe and does not alter the active mixing scope.
 
 OSC 1331 is reserved. A configuration cannot use `palette.osc = 1331`; choose
 another unreserved number such as 1332 when moving OSC 1330.

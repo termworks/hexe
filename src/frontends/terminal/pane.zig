@@ -116,6 +116,7 @@ pub const Pane = struct {
     host_color_queries: [64]host_colors.QueryKey = undefined,
     host_color_query_len: u8 = 0,
     host_color_invalidation: host_colors.Invalidation = .{},
+    host_color_refresh_requested: bool = false,
     /// Last observed alt-screen state, for the palette stack save/restore.
     /// Palette colours changed and SES has not been told yet.
     palette_dirty: bool = false,
@@ -182,6 +183,12 @@ pub const Pane = struct {
         const invalidation = self.host_color_invalidation;
         self.host_color_invalidation = .{};
         return invalidation;
+    }
+
+    pub fn takeHostColorRefresh(self: *Pane) bool {
+        const requested = self.host_color_refresh_requested;
+        self.host_color_refresh_requested = false;
+        return requested;
     }
 
     pub fn takeCsiExpectedResponses(self: *Pane) u16 {
@@ -280,6 +287,7 @@ pub const Pane = struct {
         self.osc_progress_changed = false;
         self.host_color_query_len = 0;
         self.host_color_invalidation = .{};
+        self.host_color_refresh_requested = false;
         self.dcs_query_state = .idle;
         self.dcs_query_len = 0;
         self.csi_query_state = .idle;

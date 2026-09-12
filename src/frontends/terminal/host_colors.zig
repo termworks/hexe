@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 
 pub const QUERY_TIMEOUT_MS: i64 = 1500;
+pub const REFRESH_COOLDOWN_MS: i64 = 50;
 pub const MAX_PENDING: usize = 512;
 
 pub const QueryKey = union(enum) {
@@ -75,9 +76,26 @@ pub const HostColors = struct {
     pending: [MAX_PENDING]Pending = undefined,
     pending_len: u16 = 0,
     generation: u64 = 0,
+    used: Invalidation = .{},
+    last_refresh_ms: i64 = 0,
 
-    pub fn resolvePalette(self: *const HostColors, index: u8) ?core.palette.RGB {
+    pub fn beginFrame(self: *HostColors) void {
+        self.used = .{};
+    }
+
+    pub fn resolvePalette(self: *HostColors, index: u8) ?core.palette.RGB {
+        self.used.addPalette(index);
         return self.palette[index];
+    }
+
+    pub fn resolveForeground(self: *HostColors) ?core.palette.RGB {
+        self.used.foreground = true;
+        return self.foreground;
+    }
+
+    pub fn resolveBackground(self: *HostColors) ?core.palette.RGB {
+        self.used.background = true;
+        return self.background;
     }
 
     pub fn registerPane(self: *HostColors, key: QueryKey, uuid: [32]u8, now_ms: i64) bool {
@@ -105,6 +123,26 @@ pub const HostColors = struct {
             const palette_index: u8 = @intCast(index);
             if (invalidation.hasPalette(palette_index)) try self.queryKey(writer, .{ .palette = palette_index }, now_ms);
         }
+    }
+
+    pub fn refreshUsed(self: *HostColors, writer: anytype, now_ms: i64) !bool {
+        if (self.used.empty() or now_ms - self.last_refresh_ms < REFRESH_COOLDOWN_MS) return false;
+        self.last_refresh_ms = now_ms;
+
+        var queried = false;
+        if (self.used.foreground and self.foreground != null) {
+            queried = try self.refreshKey(writer, .foreground, now_ms) or queried;
+        }
+        if (self.used.background and self.background != null) {
+            queried = try self.refreshKey(writer, .background, now_ms) or queried;
+        }
+        for (0..256) |index| {
+            const palette_index: u8 = @intCast(index);
+            if (self.used.hasPalette(palette_index) and self.palette[index] != null) {
+                queried = try self.refreshKey(writer, .{ .palette = palette_index }, now_ms) or queried;
+            }
+        }
+        return queried;
     }
 
     pub fn handleReport(self: *HostColors, report: Report, now_ms: i64) ReportAction {
@@ -140,6 +178,12 @@ pub const HostColors = struct {
         }
     }
 
+    fn refreshKey(self: *HostColors, writer: anytype, key: QueryKey, now_ms: i64) !bool {
+        if (self.hasHexePending(key)) return false;
+        try self.queryKey(writer, key, now_ms);
+        return true;
+    }
+
     fn appendPending(self: *HostColors, pending: Pending) bool {
         if (self.pending_len >= MAX_PENDING) return false;
         self.pending[self.pending_len] = pending;
@@ -164,6 +208,13 @@ pub const HostColors = struct {
             }
             index += 1;
         }
+    }
+
+    fn hasHexePending(self: *const HostColors, key: QueryKey) bool {
+        for (self.pending[0..self.pending_len]) |pending| {
+            if (pending.owner == .hexe and std.meta.eql(pending.key, key)) return true;
+        }
+        return false;
     }
 
     fn removePending(self: *HostColors, index: usize) Pending {
@@ -284,4 +335,37 @@ test "expired ownership is never reused" {
     colors.expire(100 + QUERY_TIMEOUT_MS);
     const report: Report = .{ .key = .background, .value = .{ 1, 2, 3 } };
     try std.testing.expectEqual(ReportAction.unowned, colors.handleReport(report, 2000));
+}
+
+test "used cached colours refresh without invalidation" {
+    var colors: HostColors = .{};
+    colors.palette[1] = .{ .r = 255, .g = 0, .b = 0 };
+    colors.palette[2] = .{ .r = 0, .g = 255, .b = 0 };
+    colors.background = .{ .r = 0, .g = 0, .b = 0 };
+    colors.beginFrame();
+    _ = colors.resolvePalette(1);
+    _ = colors.resolveBackground();
+
+    var bytes: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try std.testing.expect(try colors.refreshUsed(&writer, REFRESH_COOLDOWN_MS));
+    try std.testing.expectEqualStrings("\x1b]11;?\x1b\\\x1b]4;1;?\x1b\\", writer.buffered());
+    try std.testing.expectEqual(core.palette.RGB{ .r = 255, .g = 0, .b = 0 }, colors.palette[1].?);
+    try std.testing.expectEqual(core.palette.RGB{ .r = 0, .g = 255, .b = 0 }, colors.palette[2].?);
+    try std.testing.expectEqual(core.palette.RGB{ .r = 0, .g = 0, .b = 0 }, colors.background.?);
+
+    try std.testing.expect(!try colors.refreshUsed(&writer, REFRESH_COOLDOWN_MS * 2));
+    try std.testing.expectEqualStrings("\x1b]11;?\x1b\\\x1b]4;1;?\x1b\\", writer.buffered());
+}
+
+test "unknown used colours are not queried on refresh" {
+    var colors: HostColors = .{};
+    colors.beginFrame();
+    try std.testing.expect(colors.resolvePalette(200) == null);
+    try std.testing.expect(colors.resolveBackground() == null);
+
+    var bytes: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try std.testing.expect(!try colors.refreshUsed(&writer, REFRESH_COOLDOWN_MS));
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
 }
