@@ -270,6 +270,36 @@ fn firstRow(vt: *core.VT, buf: []u8) []const u8 {
     return std.mem.trimRight(u8, buf[0..n], " ");
 }
 
+test "render state follows edits, screen switches and scrolls across reuses" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 3);
+    defer vt.deinit();
+    var buf: [32]u8 = undefined;
+
+    try vt.feed("abc\r\nline2");
+    try std.testing.expectEqualStrings("abc", rowText(&vt, 0, &buf));
+    try std.testing.expectEqualStrings("line2", rowText(&vt, 1, &buf));
+
+    try vt.feed("\x1b[1;1HX");
+    try std.testing.expectEqualStrings("Xbc", rowText(&vt, 0, &buf));
+    try std.testing.expectEqualStrings("line2", rowText(&vt, 1, &buf));
+
+    try vt.feed("\x1b[?1049h\x1b[2J\x1b[1;1Halt");
+    try std.testing.expectEqualStrings("alt", rowText(&vt, 0, &buf));
+    try std.testing.expectEqualStrings("", rowText(&vt, 1, &buf));
+
+    try vt.feed("\x1b[?1049l");
+    try std.testing.expectEqualStrings("Xbc", rowText(&vt, 0, &buf));
+
+    try vt.feed("\x1b[3;1H\r\nr3\r\nr4\r\nr5");
+    try std.testing.expectEqualStrings("r3", rowText(&vt, 0, &buf));
+    try std.testing.expectEqualStrings("r5", rowText(&vt, 2, &buf));
+
+    try vt.resize(10, 4);
+    try vt.feed("\x1b[4;1Hlast");
+    try std.testing.expectEqualStrings("last", rowText(&vt, 3, &buf));
+}
+
 test "VT imports a sixel image and keeps the text around it" {
     var vt: core.VT = undefined;
     try vt.init(std.testing.allocator, 20, 5);

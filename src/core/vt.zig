@@ -318,12 +318,13 @@ pub const VT = struct {
         // snapshot rebuild (full viewport duplication) dominates that cost.
         if (!self.render_state_dirty) return &self.render_state;
 
-        // Clear previous state before updating to free memory from previous large scrollback
-        self.render_state.deinit(self.allocator);
-        self.render_state = .empty;
-
-        // Update render state - this allocates based on current VT dimensions
-        try self.render_state.update(self.allocator, &self.terminal);
+        // Incremental: ghostty rewrites only dirty rows, or everything on a
+        // resize, screen switch or viewport move.
+        self.render_state.update(self.allocator, &self.terminal) catch |err| {
+            self.render_state.deinit(self.allocator);
+            self.render_state = .empty;
+            return err;
+        };
 
         // Validate the RenderState dimensions are reasonable
         // Large scrollback can cause rows to become extremely large
