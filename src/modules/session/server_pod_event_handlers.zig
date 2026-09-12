@@ -71,7 +71,6 @@ pub fn handleBinaryCwdChanged(self: *Server, fd: posix.fd_t, payload_len: u32, b
             null;
         if (pane.cwd) |old| self.allocator.free(old);
         pane.cwd = new_cwd;
-        self.ses_state.markDirty();
     }
 
     forwardToOwningMux(self, cc.uuid, .cwd_changed, std.mem.asBytes(&cc), buf[0..cc.cwd_len]);
@@ -113,7 +112,6 @@ pub fn handleBinaryFgChanged(self: *Server, fd: posix.fd_t, payload_len: u32, bu
         pane.fg_pid = fc.pid;
         if (pane.fg_process) |old| self.allocator.free(old);
         pane.fg_process = new_fg_process;
-        self.ses_state.markDirty();
     }
 
     forwardToOwningMux(self, fc.uuid, .fg_changed, std.mem.asBytes(&fc), buf[0..fc.name_len]);

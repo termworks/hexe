@@ -42,6 +42,7 @@ pub fn updateFocus(
         core.logging.warn("ses", "client snapshot focus update skipped: pane is not in snapshot", .{});
         return;
     };
+    const before = focusFingerprint(snapshot);
 
     var active_tab: ?usize = null;
     if (active_tab_hint) |hint| {
@@ -74,9 +75,19 @@ pub fn updateFocus(
             snapshot.active_float_uuid = pane_uuid;
         },
     }
-    // Attached-session crash recovery persists this snapshot: without a
-    // dirty mark the periodic save skips it and a crash restores stale layout.
-    self.store.markDirty();
+    // Attached-session crash recovery persists this snapshot, so a change must
+    // reach the periodic save; repeating the same focus changes nothing.
+    if (focusFingerprint(snapshot) != before) self.store.markDirty();
+}
+
+/// Hash of the focus state `updateFocus` writes.
+fn focusFingerprint(snapshot: *const session_model.SessionSnapshot) u64 {
+    var h = std.hash.Wyhash.init(0);
+    std.hash.autoHash(&h, snapshot.focused_pane_uuid);
+    std.hash.autoHash(&h, snapshot.active_tab);
+    std.hash.autoHash(&h, snapshot.active_float_uuid);
+    for (snapshot.tabs.items) |tab| std.hash.autoHash(&h, tab.focused_pane_uuid);
+    return h.final();
 }
 
 pub fn addTab(

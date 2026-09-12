@@ -309,6 +309,9 @@ pub const State = struct {
     /// Whether SES has been told this config's pane-name dictionary on the
     /// current connection. Reset on disconnect so a reconnect re-sends it.
     name_pool_sent: bool = false,
+    /// Key of the last pane aux the sync tick sent, and when.
+    aux_sent_key: u64 = 0,
+    aux_sent_ms: i64 = 0,
     force_full_render: bool,
     /// When true, keyboard input is broadcast to every split pane in the
     /// active tab (tmux `synchronize-panes`). Toggled by pane.sync_toggle.
