@@ -483,12 +483,21 @@ fn handleReleaseEvent(state: *State, cfg: *const core.Config, mods_eff: u8, key:
         return dispatchBindWithMode(state, b, mods_eff, key);
     }
 
-    // No bind wanted this release and no hold timer was waiting on it, so the
-    // bind system did not handle it -- say so. Claiming it was handled swallowed
-    // every release before the caller could decide whether the focused pane had
-    // asked to be told about them, which is why an application could never see
-    // a key being let go.
-    return false;
+    // Every release is consumed here, which is what stops one reaching a pane.
+    //
+    // Letting it fall through is what a pane needs before it can be told about
+    // held keys, and that was tried: `2744d6c` returned false here and
+    // `loop_input` forwarded the release to any pane with `report_events`. It
+    // made some applications show every keystroke twice, and neither the unit
+    // tests nor `scripts/smoke_key_release.py` -- which walks flag sets 0, 1,
+    // 2, 3, 5, 11 and 15 and sees exactly one press and one release in each --
+    // could reproduce it. Reverted rather than left in the daily driver.
+    //
+    // Whatever doubles is therefore NOT the plain press/release path this
+    // exercised. Before trying again, get the failing application's own
+    // `CSI > N u` and reproduce it; the encoder already carries the action, so
+    // re-landing is a matter of this one `return` and the gate in `loop_input`.
+    return true;
 }
 
 fn touchRepeatActiveTimer(state: *State, mods_eff: u8, key: BindKey, focus_ctx: FocusContext, now_ms: i64) void {
