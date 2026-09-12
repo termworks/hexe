@@ -237,7 +237,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
         var runtime = try FrontendRuntime.createTerminalProbe(allocator, terminal_args.log_level, terminal_args.log_file, terminal_args.connect_options);
         defer runtime.destroy();
         runtime.connect() catch {
-            std.debug.print("Could not connect to ses daemon\n", .{});
+            std.debug.print("{s}", .{core.frontend_client.takeStartupDiagnosis() orelse "Could not connect to ses daemon\n"});
             return;
         };
 

@@ -108,7 +108,7 @@ pub const Server = struct {
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Server {
         // Validate path length to avoid silent truncation
-        if (path.len >= 108) return error.NameTooLong; // sockaddr_un.path max
+        if (path.len >= MAX_SOCKET_PATH) return error.NameTooLong;
 
         // Check if socket file exists and if something is listening
         if (accessSocketPath(path)) |_| {
@@ -229,6 +229,9 @@ pub const Server = struct {
 };
 
 /// Client connection to a Unix domain socket
+/// `sockaddr_un.path` capacity: a socket path must be shorter than this.
+pub const MAX_SOCKET_PATH: usize = 108;
+
 pub const Client = struct {
     fd: posix.fd_t,
 
@@ -241,7 +244,7 @@ pub const Client = struct {
     /// caller has always received.
     pub fn connectTimeout(path: []const u8, timeout_ms: i32) !Client {
         // Validate path length to avoid silent truncation
-        if (path.len >= 108) return error.NameTooLong; // sockaddr_un.path max
+        if (path.len >= MAX_SOCKET_PATH) return error.NameTooLong;
 
         const fd = try posix.socket(
             posix.AF.UNIX,
@@ -484,7 +487,7 @@ test "pod socket paths stay inside the sockaddr_un limit" {
     // Worst case the sanitiser permits: a 24-char instance name, plus the
     // longest thing we ever put in that directory (a 32-hex pod socket).
     const longest = base.len + "/hexe/".len + 24 + "/pod-".len + 32 + ".sock".len;
-    try std.testing.expect(longest < 108);
+    try std.testing.expect(longest < MAX_SOCKET_PATH);
 }
 
 pub fn getSocketDir(allocator: std.mem.Allocator) ![]const u8 {

@@ -107,6 +107,31 @@ pub fn takeStartupDiagnosis() ?[]const u8 {
     return out;
 }
 
+/// Record that the daemon's socket path cannot be used at all.
+fn reportSocketPathTooLong(socket_path: []const u8) void {
+    const written = std.fmt.bufPrint(&diagnosis_buf,
+        \\hexe: cannot reach the session daemon: its socket path is too long.
+        \\
+        \\  socket: {s}
+        \\  length: {d} bytes (a Unix socket path must be under {d})
+        \\
+        \\The path is built from XDG_RUNTIME_DIR and the profile name. Point
+        \\XDG_RUNTIME_DIR at a shorter directory, or use a shorter --profile name.
+        \\
+    , .{ socket_path, socket_path.len, ipc.MAX_SOCKET_PATH }) catch return;
+    diagnosis_len = written.len;
+}
+
+test "a socket path over the limit is diagnosed with its length" {
+    const long = "/" ++ "d" ** 150 ++ "/ses.sock";
+    reportSocketPathTooLong(long);
+    const text = takeStartupDiagnosis() orelse return error.NoDiagnosis;
+    try std.testing.expect(std.mem.indexOf(u8, text, "socket path is too long") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, long) != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "160 bytes") != null);
+    try std.testing.expect(takeStartupDiagnosis() == null);
+}
+
 /// Record which two things disagree and how to proceed.
 fn reportStaleDaemon(socket_path: []const u8) void {
     var pid_note: [64]u8 = undefined;
@@ -559,6 +584,12 @@ pub const SesClient = struct {
             break :blk owned_socket_path.?;
         };
         self.debugLog("ses connect: transport=local_ipc socket_path={s}", .{socket_path});
+        // Neither connecting nor starting a daemon can work on this path, and
+        // both would fail with nothing more specific than "refused".
+        if (socket_path.len >= ipc.MAX_SOCKET_PATH) {
+            reportSocketPathTooLong(socket_path);
+            return error.NameTooLong;
+        }
         self.stale_runtime_detected = false;
 
         // Try to connect to existing daemon first
