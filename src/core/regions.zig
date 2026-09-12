@@ -163,16 +163,10 @@ pub const Spec = struct {
     key_suffix: []const u8 = "",
     /// The painter, run as hexe's own child. Null draws nothing: a region has
     /// no other way to be filled.
-    ///
-    /// hexe used to connect to a socket instead, which meant one painter every
-    /// session on the machine shared -- its accept loop serialising them, its
-    /// config outliving the binary that made it, a slow render everyone's, and
-    /// nothing to kill it when the last frontend went. A child is spawned once,
-    /// answers many requests down the same pipe, and dies with us.
     exec: ?[]const u8 = null,
 };
 
-const Phase = enum { idle, writing, reading };
+const Phase = enum { idle, queued, sent };
 
 const Region = struct {
     key: []u8,
@@ -183,22 +177,10 @@ const Region = struct {
     width: u16 = 0,
     height: u16 = 1,
 
-    /// The pipe from the child's stdout.
-    fd: ?posix.fd_t = null,
-    /// The pipe to its stdin.
-    wfd: ?posix.fd_t = null,
-    /// The painter we own, kept between requests so the Lua VM and config are
-    /// paid for once rather than per frame.
-    child: ?std.process.Child = null,
     exec: ?[]u8 = null,
     phase: Phase = .idle,
+    /// This region's request frame, length header included.
     req: std.ArrayList(u8) = .empty,
-    req_off: usize = 0,
-    hdr: [4]u8 = [_]u8{0} ** 4,
-    hdr_off: usize = 0,
-    body: std.ArrayList(u8) = .empty,
-    body_need: usize = 0,
-    started_ms: i64 = 0,
 
     runs: std.ArrayList(Run) = .empty,
     run_text: std.ArrayList(u8) = .empty,
@@ -248,6 +230,41 @@ const Region = struct {
     }
 };
 
+/// One painter run serving every region that fell due together for the same
+/// command. Requests go one at a time, each after the previous answer, so an
+/// answer can only belong to the request before it; stdin closes after the last.
+const Batch = struct {
+    pid: posix.pid_t = 0,
+    wfd: ?posix.fd_t = null,
+    rfd: ?posix.fd_t = null,
+    members: std.ArrayList(*Region) = .empty,
+    /// Bytes of the current member's request already written.
+    out_off: usize = 0,
+    /// Index of the member the next answer belongs to.
+    next: usize = 0,
+    hdr: [4]u8 = [_]u8{0} ** 4,
+    hdr_off: usize = 0,
+    body: std.ArrayList(u8) = .empty,
+    body_need: usize = 0,
+    started_ms: i64,
+
+    fn atFrameBoundary(self: *const Batch) bool {
+        return self.hdr_off == 0 and self.body_need == 0;
+    }
+
+    fn deinit(self: *Batch, allocator: std.mem.Allocator) void {
+        self.members.deinit(allocator);
+        self.body.deinit(allocator);
+    }
+};
+
+/// A painter whose pipes are closed but which has not been reaped yet.
+const Stray = struct {
+    pid: posix.pid_t,
+    since_ms: i64,
+    killed: bool = false,
+};
+
 /// The frontend's registry, published for the render path the same way
 /// `cmd.async_cache` is. Null in short-lived processes, which have no painter.
 pub var active: ?*Registry = null;
@@ -260,8 +277,15 @@ pub const Registry = struct {
     allocator: std.mem.Allocator,
     entries: std.StringHashMap(*Region),
     use_counter: u64 = 0,
-    /// Painters this registry started. Reaped without blocking in `poll()`;
-    /// unreaped they would be a zombie per spawn for the life of the process.
+    /// Regions with a request built, waiting for `poll()` to start a painter.
+    pending: std.ArrayList(*Region) = .empty,
+    /// Painter runs in flight.
+    batches: std.ArrayList(Batch) = .empty,
+    /// Finished painters not reaped yet; `poll()` collects them without waiting.
+    strays: std.ArrayList(Stray) = .empty,
+    /// Commands seen to answer one request and exit; run once per region.
+    solo: std.StringHashMapUnmanaged(void) = .empty,
+
     pub fn init(allocator: std.mem.Allocator) Registry {
         return .{
             .allocator = allocator,
@@ -270,16 +294,27 @@ pub const Registry = struct {
     }
 
     pub fn deinit(self: *Registry) void {
+        const now = std.time.milliTimestamp();
+        while (self.batches.items.len > 0) self.abortBatch(0, now);
+        for (self.strays.items) |s| {
+            posix.kill(s.pid, posix.SIG.KILL) catch {};
+            _ = posix.waitpid(s.pid, 0);
+        }
+        self.strays.deinit(self.allocator);
+        self.batches.deinit(self.allocator);
+        self.pending.deinit(self.allocator);
+        var solo_it = self.solo.keyIterator();
+        while (solo_it.next()) |k| self.allocator.free(k.*);
+        self.solo.deinit(self.allocator);
+
         var it = self.entries.valueIterator();
         while (it.next()) |slot| self.destroyRegion(slot.*);
         self.entries.deinit();
     }
 
     fn destroyRegion(self: *Registry, r: *Region) void {
-        self.closeConn(r);
         r.clearStrip();
         r.req.deinit(self.allocator);
-        r.body.deinit(self.allocator);
         r.runs.deinit(self.allocator);
         r.run_text.deinit(self.allocator);
         r.hits.deinit(self.allocator);
@@ -288,64 +323,7 @@ pub const Registry = struct {
         self.allocator.free(r.key);
         self.allocator.free(r.selector);
         if (r.exec) |c| self.allocator.free(c);
-        // A painter we own goes when its region does, or it outlives what it
-        // was drawing -- which is the shared-daemon problem in miniature.
-        self.dropChild(r);
         self.allocator.destroy(r);
-    }
-
-    /// End the current request. A socket connection is per-request and closed;
-    /// a child's pipes are the point of having a child and stay open.
-    /// End the fetch and reap the painter. It answered; it has no reason to
-    /// still exist, and leaving it would be keeping a server by accident.
-    fn closeConn(self: *Registry, r: *Region) void {
-        _ = self;
-        if (r.fd) |fd| posix.close(fd);
-        if (r.wfd) |fd| posix.close(fd);
-        r.fd = null;
-        r.wfd = null;
-        if (r.child) |*c| {
-            c.stdin = null;
-            c.stdout = null;
-            // `Child.spawn` keeps a read end of its own -- `err_pipe`, how the
-            // forked child reports a failed exec -- and closes it only inside
-            // `wait()`. Reaping by hand skips that, so it has to be closed here
-            // or every fetch leaks one descriptor: a thousand of them and the
-            // frontend can no longer spawn anything, the bar stops refreshing,
-            // and every region is drawn dimmed as stale.
-            if (c.err_pipe) |ep| posix.close(ep);
-            c.err_pipe = null;
-            // Collected without waiting. Closing stdin already told it to go, so
-            // it is normally gone before this runs -- but `wait()` on one that
-            // is not would block the render loop, which is the single thing
-            // this module must never do. A straggler is killed instead.
-            const res = posix.waitpid(c.id, posix.W.NOHANG);
-            if (res.pid == 0) _ = c.kill() catch {};
-            r.child = null;
-        }
-        r.phase = .idle;
-        r.req_off = 0;
-        r.hdr_off = 0;
-        r.body_need = 0;
-    }
-
-    /// Take down the painter we own. Its pipes go with it, so the next fetch
-    /// starts a fresh one -- which is the recovery for a child that died,
-    /// wedged, or answered something unparseable.
-    fn dropChild(self: *Registry, r: *Region) void {
-        if (r.child) |*c| {
-            if (r.fd) |fd| posix.close(fd);
-            if (r.wfd) |fd| posix.close(fd);
-            c.stdin = null;
-            c.stdout = null;
-            _ = c.kill() catch {};
-            r.child = null;
-            logging.warn("regions", "painter child for '{s}' was taken down; it will be restarted", .{r.selector});
-        }
-        r.fd = null;
-        r.wfd = null;
-        r.phase = .idle;
-        _ = self;
     }
 
     /// Never blocks. Returns the last completed content for this region and
@@ -493,141 +471,176 @@ pub const Registry = struct {
         self.destroyRegion(target);
     }
 
-    /// Open the socket and queue the request. Any failure here is a failed
-    /// fetch, not an error the caller sees.
+    /// Build the request and queue the region for the next `poll()`. Any
+    /// failure here is a failed fetch, not an error the caller sees.
     fn begin(self: *Registry, r: *Region, ctx: RequestContext, now: i64) void {
         r.req.clearRetainingCapacity();
-        r.req_off = 0;
-        r.hdr_off = 0;
-        r.body.clearRetainingCapacity();
-        r.body_need = 0;
-
         self.buildRequest(r, ctx) catch {
             self.fail(r, now);
             return;
         };
-
-        // The painter is ours: spawned on the first fetch and kept, so every
-        // later request is a write and a read down a pipe already open.
-        if (r.child == null) self.startChild(r) catch {
+        self.pending.append(self.allocator, r) catch {
             self.fail(r, now);
             return;
         };
-        r.started_ms = now;
-        r.phase = .writing;
-        self.pump(r, now);
+        r.phase = .queued;
     }
 
-    /// Advance every in-flight region. Non-blocking throughout.
+    /// Start queued fetches and advance every painter run. Non-blocking
+    /// throughout.
     pub fn poll(self: *Registry) void {
         const now = std.time.milliTimestamp();
-        var it = self.entries.valueIterator();
-        while (it.next()) |slot| {
-            const r = slot.*;
-            if (!r.inFlight()) continue;
-            if (now - r.started_ms > HARD_DEADLINE_MS) {
-                logging.warn("regions", "painter did not answer within {d}ms: {s}", .{ HARD_DEADLINE_MS, r.selector });
+        self.launchPending(now);
+
+        var i: usize = 0;
+        while (i < self.batches.items.len) {
+            const b = &self.batches.items[i];
+            if (now - b.started_ms > HARD_DEADLINE_MS) {
+                logging.warn("regions", "painter did not answer within {d}ms: {s}", .{ HARD_DEADLINE_MS, b.members.items[b.next].selector });
+                self.abortBatch(i, now);
+                continue;
+            }
+            if (self.pump(b, now)) {
+                i += 1;
+            } else {
+                self.endBatch(i, now);
+            }
+        }
+        self.reapStrays(now);
+    }
+
+    /// One painter run per command for everything queued. A region that is
+    /// failing runs alone, so it cannot hold up the others.
+    fn launchPending(self: *Registry, now: i64) void {
+        while (self.pending.items.len > 0) {
+            const lead = self.pending.items[0];
+            const exec = lead.exec.?;
+            const solo = self.solo.contains(exec) or lead.fail_streak > 0;
+            var b: Batch = .{ .started_ms = now };
+
+            var i: usize = 0;
+            while (i < self.pending.items.len) {
+                const r = self.pending.items[i];
+                const joins = b.members.items.len == 0 or
+                    (!solo and r.fail_streak == 0 and std.mem.eql(u8, r.exec.?, exec));
+                if (!joins) {
+                    i += 1;
+                    continue;
+                }
+                _ = self.pending.orderedRemove(i);
+                b.members.append(self.allocator, r) catch self.fail(r, now);
+            }
+
+            self.startBatch(&b, exec) catch {
+                for (b.members.items) |r| self.fail(r, now);
+                b.deinit(self.allocator);
+            };
+        }
+    }
+
+    fn startBatch(self: *Registry, b: *Batch, exec: []const u8) !void {
+        if (b.members.items.len == 0) return error.NothingToRun;
+        try self.batches.ensureUnusedCapacity(self.allocator, 1);
+        const io = try spawnPainter(self.allocator, exec);
+        b.pid = io.pid;
+        b.wfd = io.stdin;
+        b.rfd = io.stdout;
+        for (b.members.items) |r| r.phase = .sent;
+        self.batches.appendAssumeCapacity(b.*);
+    }
+
+    /// Advance one painter run. Returns false once it has nothing left to do.
+    fn pump(self: *Registry, b: *Batch, now: i64) bool {
+        const rfd = b.rfd orelse return false;
+        while (b.next < b.members.items.len) {
+            // The current request; stdin closes once the last one is out. A
+            // painter that stopped reading may still have answered, so its
+            // answers are read either way.
+            if (b.wfd) |wfd| write: {
+                const req = b.members.items[b.next].req.items;
+                while (b.out_off < req.len) {
+                    const n = posix.write(wfd, req[b.out_off..]) catch |err| switch (err) {
+                        error.WouldBlock => return true,
+                        else => {
+                            posix.close(wfd);
+                            b.wfd = null;
+                            break :write;
+                        },
+                    };
+                    if (n == 0) return true;
+                    b.out_off += n;
+                }
+                if (b.next + 1 == b.members.items.len) {
+                    posix.close(wfd);
+                    b.wfd = null;
+                }
+            }
+
+            while (b.hdr_off < 4) {
+                const n = posix.read(rfd, b.hdr[b.hdr_off..]) catch |err| switch (err) {
+                    error.WouldBlock => return true,
+                    else => return self.hangUp(b, now, false),
+                };
+                if (n == 0) return self.hangUp(b, now, true);
+                b.hdr_off += n;
+            }
+            if (b.body_need == 0) {
+                const len = std.mem.readInt(u32, &b.hdr, .big);
+                if (len == 0 or len > MAX_FRAME) return self.hangUp(b, now, false);
+                b.body_need = len;
+                b.body.clearRetainingCapacity();
+                b.body.ensureTotalCapacity(self.allocator, len) catch return self.hangUp(b, now, false);
+            }
+            while (b.body.items.len < b.body_need) {
+                const room = b.body.unusedCapacitySlice();
+                const want = @min(room.len, b.body_need - b.body.items.len);
+                const n = posix.read(rfd, room[0..want]) catch |err| switch (err) {
+                    error.WouldBlock => return true,
+                    else => return self.hangUp(b, now, false),
+                };
+                if (n == 0) return self.hangUp(b, now, true);
+                b.body.items.len += n;
+            }
+
+            const r = b.members.items[b.next];
+            b.next += 1;
+            b.out_off = 0;
+            b.hdr_off = 0;
+            b.body_need = 0;
+            // Stamped with the run's start so its regions fall due together.
+            self.finish(r, b.body.items, b.started_ms);
+        }
+        return false;
+    }
+
+    /// The painter closed its output or broke the framing. After at least one
+    /// clean answer and a clean exit it is a one-request painter: its remaining
+    /// regions are queued again and its command runs once per region from now
+    /// on. Anything else fails the remaining regions.
+    fn hangUp(self: *Registry, b: *Batch, now: i64, eof: bool) bool {
+        const single_shot = eof and b.next > 0 and b.atFrameBoundary();
+        if (single_shot) self.markSolo(b.members.items[0].exec.?);
+        for (b.members.items[b.next..]) |r| {
+            if (!single_shot) {
                 self.fail(r, now);
                 continue;
             }
-            self.pump(r, now);
+            self.pending.append(self.allocator, r) catch {
+                self.fail(r, now);
+                continue;
+            };
+            r.phase = .queued;
         }
+        b.next = b.members.items.len;
+        return false;
     }
 
-    fn pump(self: *Registry, r: *Region, now: i64) void {
-        const fd = r.fd orelse {
-            self.fail(r, now);
-            return;
-        };
-        // The child's stdin and stdout are separate descriptors.
-        const wfd = r.wfd orelse fd;
-
-        if (r.phase == .writing) {
-            while (r.req_off < r.req.items.len) {
-                const n = posix.write(wfd, r.req.items[r.req_off..]) catch |err| switch (err) {
-                    error.WouldBlock => return,
-                    else => {
-                        self.fail(r, now);
-                        return;
-                    },
-                };
-                if (n == 0) {
-                    self.fail(r, now);
-                    return;
-                }
-                r.req_off += n;
-            }
-            // The request is out; closing stdin is what tells the painter there
-            // is no second one, so it answers and exits rather than waiting.
-            if (r.wfd) |w| {
-                if (r.child != null) {
-                    posix.close(w);
-                    r.wfd = null;
-                    if (r.child) |*c| c.stdin = null;
-                }
-            }
-            r.phase = .reading;
-        }
-
-        if (r.phase != .reading) return;
-
-        while (r.hdr_off < 4) {
-            const n = posix.read(fd, r.hdr[r.hdr_off..]) catch |err| switch (err) {
-                error.WouldBlock => return,
-                else => {
-                    self.fail(r, now);
-                    return;
-                },
-            };
-            if (n == 0) {
-                self.fail(r, now);
-                return;
-            }
-            r.hdr_off += n;
-        }
-        if (r.body_need == 0) {
-            const len = std.mem.readInt(u32, &r.hdr, .big);
-            if (len == 0 or len > MAX_FRAME) {
-                self.fail(r, now);
-                return;
-            }
-            r.body_need = len;
-            r.body.ensureTotalCapacity(self.allocator, len) catch {
-                self.fail(r, now);
-                return;
-            };
-        }
-
-        var chunk: [8192]u8 = undefined;
-        while (r.body.items.len < r.body_need) {
-            const want = @min(chunk.len, r.body_need - r.body.items.len);
-            const n = posix.read(fd, chunk[0..want]) catch |err| switch (err) {
-                error.WouldBlock => return,
-                else => {
-                    self.fail(r, now);
-                    return;
-                },
-            };
-            if (n == 0) {
-                self.fail(r, now);
-                return;
-            }
-            r.body.appendSlice(self.allocator, chunk[0..n]) catch {
-                self.fail(r, now);
-                return;
-            };
-        }
-
-        self.finish(r, now);
-    }
-
-    /// A completed frame arrived: parse it and retire the connection.
-    fn finish(self: *Registry, r: *Region, now: i64) void {
+    /// A completed answer arrived for this region.
+    fn finish(self: *Registry, r: *Region, bytes: []const u8, now: i64) void {
+        r.phase = .idle;
         r.declined = false;
         r.answered = false;
-        const parsed = self.parseResponse(r, r.body.items);
-        self.closeConn(r);
-        if (parsed) {
+        if (self.parseResponse(r, bytes)) {
             r.last_done_ms = now;
             r.fail_streak = 0;
             r.next_try_ms = 0;
@@ -645,60 +658,82 @@ pub const Registry = struct {
     }
 
     fn fail(self: *Registry, r: *Region, now: i64) void {
-        // A broken pipe means the child is gone or out of step with us, and
-        // reusing it would resynchronise onto the middle of a frame.
-        if (r.child != null) self.dropChild(r);
-        self.closeConn(r);
+        r.phase = .idle;
         self.backoff(r, now);
     }
 
-    /// Spawn the painter we own and keep its pipes.
-    ///
-    /// Both ends are non-blocking, because everything in `pump` is: a painter
-    /// that stops reading must cost a stale region, never a stalled frame. The
-    /// child is `/bin/sh -c` like the detached spawner, so a configured command
-    /// means the same thing in both transports.
-    /// Run the painter for ONE request, then let it go.
-    ///
-    /// Nothing stays resident between fetches. A painter kept alive is a server,
-    /// and a server is what all of this was for getting rid of -- it was only
-    /// ever worth keeping because a fetch cost a process start per FRAME. A
-    /// filmstrip buys a whole animation cycle per fetch, so the start is paid
-    /// once a refresh instead of twenty-five times a second, and at that rate a
-    /// fresh process is cheaper than the daemon it replaces.
-    ///
-    /// It also makes a wedged painter cost only the region that asked: there is
-    /// no shared pipe to hold and nothing alive to hold it.
-    ///
-    /// Run through `sh -c` verbatim -- NOT `exec sh -c`. Prefixing with `exec`
-    /// saves a fork, and silently breaks every command that opens with an
-    /// environment assignment: `exec FOO=bar cmd` makes the shell look for a
-    /// program called `FOO=bar`. The fork it saved was only ever worth having
-    /// when the shell stayed resident, and nothing stays resident now.
-    fn startChild(self: *Registry, r: *Region) !void {
-        const cmd = r.exec orelse return error.NoCommand;
-        var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd }, self.allocator);
-        child.stdin_behavior = .Pipe;
-        child.stdout_behavior = .Pipe;
-        // Left alone: a painter's diagnostics belong on the terminal that
-        // started hexe, not swallowed into a pipe nobody drains.
-        child.stderr_behavior = .Inherit;
-        try child.spawn();
+    /// Close a finished run and reap its painter without waiting.
+    fn endBatch(self: *Registry, i: usize, now: i64) void {
+        var b = self.batches.swapRemove(i);
+        if (b.wfd) |fd| posix.close(fd);
+        if (b.rfd) |fd| posix.close(fd);
+        self.release(b.pid, now);
+        b.deinit(self.allocator);
+    }
 
-        const in_fd = child.stdin.?.handle;
-        const out_fd = child.stdout.?.handle;
-        setNonBlocking(in_fd) catch {};
-        setNonBlocking(out_fd) catch {};
+    /// Take a run down: the region it is stuck on fails, the ones queued behind
+    /// it go back in the queue, and its painter is killed.
+    fn abortBatch(self: *Registry, i: usize, now: i64) void {
+        const b = &self.batches.items[i];
+        if (b.next < b.members.items.len) {
+            self.fail(b.members.items[b.next], now);
+            for (b.members.items[b.next + 1 ..]) |r| {
+                self.pending.append(self.allocator, r) catch {
+                    self.fail(r, now);
+                    continue;
+                };
+                r.phase = .queued;
+            }
+        }
+        posix.kill(b.pid, posix.SIG.KILL) catch {};
+        self.endBatch(i, now);
+    }
 
-        r.child = child;
-        r.wfd = in_fd;
-        r.fd = out_fd;
+    /// Reap now if it has exited, otherwise leave it to `reapStrays`.
+    fn release(self: *Registry, pid: posix.pid_t, now: i64) void {
+        if (posix.waitpid(pid, posix.W.NOHANG).pid != 0) return;
+        self.strays.append(self.allocator, .{ .pid = pid, .since_ms = now }) catch {
+            posix.kill(pid, posix.SIG.KILL) catch {};
+            _ = posix.waitpid(pid, 0);
+        };
+    }
+
+    /// Collect exited painters; one still running past the deadline is killed.
+    fn reapStrays(self: *Registry, now: i64) void {
+        var i: usize = 0;
+        while (i < self.strays.items.len) {
+            const s = &self.strays.items[i];
+            if (posix.waitpid(s.pid, posix.W.NOHANG).pid != 0) {
+                _ = self.strays.swapRemove(i);
+                continue;
+            }
+            if (!s.killed and now - s.since_ms > HARD_DEADLINE_MS) {
+                posix.kill(s.pid, posix.SIG.KILL) catch {};
+                s.killed = true;
+            }
+            i += 1;
+        }
+    }
+
+    fn markSolo(self: *Registry, exec: []const u8) void {
+        if (self.solo.contains(exec)) return;
+        const owned = self.allocator.dupe(u8, exec) catch return;
+        self.solo.put(self.allocator, owned, {}) catch {
+            self.allocator.free(owned);
+            return;
+        };
+        logging.warn("regions", "painter answers one request per run; running it once per region: {s}", .{exec});
     }
 
     /// Milliseconds until the soonest live region is due, or null when nothing
     /// is scheduled. `next_frame_ms` was only ever a gate inside isDue(), so a
     /// painter asking for 75ms still repainted at the loop's own cadence; the
     /// caller uses this to arm its timer for the painter's frame instead.
+    /// A painter run is queued or waiting on an answer.
+    pub fn busy(self: *const Registry) bool {
+        return self.pending.items.len > 0 or self.batches.items.len > 0;
+    }
+
     pub fn msUntilDue(self: *Registry, now: i64) ?i64 {
         var soonest: ?i64 = null;
         var it = self.entries.valueIterator();
@@ -736,9 +771,9 @@ pub const Registry = struct {
     }
 
     fn buildRequest(self: *Registry, r: *Region, ctx: RequestContext) !void {
-        var body: std.ArrayList(u8) = .empty;
-        defer body.deinit(self.allocator);
-        const w = body.writer(self.allocator);
+        const start = r.req.items.len;
+        try r.req.appendNTimes(self.allocator, 0, 4);
+        const w = r.req.writer(self.allocator);
 
         try w.writeAll("{\"version\":1,\"select\":[");
         try writeJsonString(w, r.selector);
@@ -817,12 +852,9 @@ pub const Registry = struct {
         }
         try w.writeAll("}}}");
 
-        if (body.items.len > MAX_FRAME) return error.FrameTooLarge;
-
-        var hdr: [4]u8 = undefined;
-        std.mem.writeInt(u32, &hdr, @intCast(body.items.len), .big);
-        try r.req.appendSlice(self.allocator, &hdr);
-        try r.req.appendSlice(self.allocator, body.items);
+        const len = r.req.items.len - start - 4;
+        if (len > MAX_FRAME) return error.FrameTooLarge;
+        std.mem.writeInt(u32, r.req.items[start..][0..4], @intCast(len), .big);
     }
 
     /// Read the painter's `regions` array: clickable rectangles with an id and
@@ -1069,6 +1101,89 @@ pub const Registry = struct {
         return true;
     }
 };
+
+const PainterIo = struct {
+    pid: posix.pid_t,
+    stdin: posix.fd_t,
+    stdout: posix.fd_t,
+};
+
+/// Opaque storage for libc's file-action list, larger than glibc's and musl's.
+const SpawnFileActions = extern struct {
+    storage: [256]u8 align(16) = undefined,
+};
+extern "c" fn posix_spawn_file_actions_init(actions: *SpawnFileActions) c_int;
+extern "c" fn posix_spawn_file_actions_destroy(actions: *SpawnFileActions) c_int;
+extern "c" fn posix_spawn_file_actions_adddup2(actions: *SpawnFileActions, fd: c_int, new_fd: c_int) c_int;
+extern "c" fn posix_spawnp(
+    pid: *posix.pid_t,
+    file: [*:0]const u8,
+    actions: *const SpawnFileActions,
+    attr: ?*const anyopaque,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*:null]const ?[*:0]const u8,
+) c_int;
+
+/// Start a painter with piped, non-blocking stdin and stdout. `posix_spawn`
+/// shares the frontend's address space until the exec instead of copying it.
+fn spawnPainter(allocator: std.mem.Allocator, cmd: []const u8) !PainterIo {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const argv = try painterArgv(arena.allocator(), cmd);
+
+    const to_child = try posix.pipe2(.{ .CLOEXEC = true });
+    const from_child = posix.pipe2(.{ .CLOEXEC = true }) catch |err| {
+        posix.close(to_child[0]);
+        posix.close(to_child[1]);
+        return err;
+    };
+    defer posix.close(to_child[0]);
+    defer posix.close(from_child[1]);
+    errdefer posix.close(to_child[1]);
+    errdefer posix.close(from_child[0]);
+
+    var actions: SpawnFileActions = .{};
+    if (posix_spawn_file_actions_init(&actions) != 0) return error.SpawnFailed;
+    defer _ = posix_spawn_file_actions_destroy(&actions);
+    if (posix_spawn_file_actions_adddup2(&actions, to_child[0], posix.STDIN_FILENO) != 0) return error.SpawnFailed;
+    if (posix_spawn_file_actions_adddup2(&actions, from_child[1], posix.STDOUT_FILENO) != 0) return error.SpawnFailed;
+
+    var pid: posix.pid_t = 0;
+    if (posix_spawnp(&pid, argv[0].?, &actions, null, argv.ptr, @ptrCast(std.c.environ)) != 0) return error.SpawnFailed;
+
+    setNonBlocking(to_child[1]) catch {};
+    setNonBlocking(from_child[0]) catch {};
+    return .{ .pid = pid, .stdin = to_child[1], .stdout = from_child[0] };
+}
+
+/// argv for a painter command: plain words are exec'd directly, anything the
+/// shell would interpret goes through `/bin/sh -c`.
+fn painterArgv(arena: std.mem.Allocator, cmd: []const u8) ![:null]?[*:0]const u8 {
+    if (plainWords(cmd)) {
+        var list: std.ArrayList(?[*:0]const u8) = .empty;
+        var it = std.mem.tokenizeScalar(u8, cmd, ' ');
+        while (it.next()) |word| try list.append(arena, try arena.dupeZ(u8, word));
+        return list.toOwnedSliceSentinel(arena, null);
+    }
+    const argv = try arena.allocSentinel(?[*:0]const u8, 3, null);
+    argv[0] = "/bin/sh";
+    argv[1] = "-c";
+    argv[2] = try arena.dupeZ(u8, cmd);
+    return argv;
+}
+
+/// Space-separated words with no quoting, expansion, redirection or leading
+/// `VAR=value` assignment.
+fn plainWords(cmd: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, cmd, ' ');
+    const first = it.next() orelse return false;
+    if (std.mem.indexOfScalar(u8, first, '=') != null) return false;
+    for (cmd) |c| switch (c) {
+        'a'...'z', 'A'...'Z', '0'...'9', ' ', '_', '-', '.', '/', ':', ',', '+', '@', '%', '=' => {},
+        else => return false,
+    };
+    return true;
+}
 
 fn boolStr(v: bool) []const u8 {
     return if (v) "true" else "false";
@@ -1348,6 +1463,142 @@ test "backoff grows and a good frame clears it" {
     r.next_try_ms = 0;
     r.last_done_ms = 0;
     try std.testing.expect(reg.isDue(r, 1000));
+}
+
+/// A painter that logs one line per run to `log` and answers with `replies` in
+/// order, 20ms apart, without reading its requests.
+fn framedReplies(allocator: std.mem.Allocator, log: []const u8, replies: []const []const u8) ![]u8 {
+    var script: std.ArrayList(u8) = .empty;
+    defer script.deinit(allocator);
+    const w = script.writer(allocator);
+    try w.print("echo run >> '{s}'", .{log});
+    for (replies) |reply| {
+        const n = reply.len;
+        try w.print("; printf '\\{o}\\{o}\\{o}\\{o}%s' '{s}'; sleep 0.02", .{
+            (n >> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff, reply,
+        });
+    }
+    return script.toOwnedSlice(allocator);
+}
+
+fn pollUntilDone(reg: *Registry, specs: []const Spec) !void {
+    var spins: usize = 0;
+    while (spins < 2000) : (spins += 1) {
+        reg.poll();
+        var done: usize = 0;
+        for (specs) |s| {
+            if (reg.snapshot(s, .{ .now_ms = 1 }).done) done += 1;
+        }
+        if (done == specs.len) return;
+        std.Thread.sleep(std.time.ns_per_ms);
+    }
+    return error.PainterFramesNeverArrived;
+}
+
+test "regions due together share one painter run" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(dir);
+    const log = try std.fs.path.join(allocator, &.{ dir, "runs" });
+    defer allocator.free(log);
+
+    const replies = [_][]const u8{
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"a"}],"width":1}}
+        ,
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"b"}],"width":1}}
+        ,
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"c"}],"width":1}}
+        ,
+    };
+    const cmd = try framedReplies(allocator, log, &replies);
+    defer allocator.free(cmd);
+
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+    const zones = [_][]const u8{ "left", "center", "right" };
+    var specs: [3]Spec = undefined;
+    for (&specs, zones) |*s, zone| {
+        s.* = .{ .selector = "status", .mode = .run, .width = 10, .height = 1, .key_suffix = zone, .exec = cmd };
+    }
+
+    for (specs) |s| _ = reg.snapshot(s, .{ .now_ms = 1 });
+    try pollUntilDone(&reg, &specs);
+
+    for (specs, [_][]const u8{ "a", "b", "c" }) |s, text| {
+        try std.testing.expectEqualStrings(text, reg.snapshot(s, .{ .now_ms = 1 }).runs[0].text);
+    }
+    const runs = try tmp.dir.readFileAlloc(allocator, "runs", 1024);
+    defer allocator.free(runs);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, runs, "run\n"));
+
+    // Answered on different wakes, still due together on the next refresh.
+    const left = reg.entries.get("status\x1frun\x1fleft").?;
+    for ([_][]const u8{ "status\x1frun\x1fcenter", "status\x1frun\x1fright" }) |key| {
+        try std.testing.expectEqual(left.last_done_ms, reg.entries.get(key).?.last_done_ms);
+    }
+}
+
+test "a painter that answers once per run still serves every region" {
+    const allocator = std.testing.allocator;
+    const reply =
+        \\{"version":1,"ok":true,"output":{"mode":"run","runs":[{"text":"x"}],"width":1}}
+    ;
+    const cmd = try framedEcho(allocator, reply);
+    defer allocator.free(cmd);
+
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+    const zones = [_][]const u8{ "left", "center", "right" };
+    var specs: [3]Spec = undefined;
+    for (&specs, zones) |*s, zone| {
+        s.* = .{ .selector = "status", .mode = .run, .width = 10, .height = 1, .key_suffix = zone, .exec = cmd };
+    }
+
+    for (specs) |s| _ = reg.snapshot(s, .{ .now_ms = 1 });
+    try pollUntilDone(&reg, &specs);
+    try std.testing.expect(reg.solo.contains(cmd));
+}
+
+test "a failing region runs alone while the others share a run" {
+    const allocator = std.testing.allocator;
+    var reg = Registry.init(allocator);
+    defer reg.deinit();
+
+    const zones = [_][]const u8{ "left", "center", "right" };
+    var regions: [3]*Region = undefined;
+    for (&regions, zones) |*r, zone| {
+        r.* = reg.entry(.{ .selector = "status", .mode = .run, .width = 10, .height = 1, .key_suffix = zone, .exec = "cat >/dev/null" }, 0).?;
+        r.*.width = 10;
+    }
+    regions[1].fail_streak = 1;
+    for (regions) |r| reg.begin(r, .{ .now_ms = 1 }, 0);
+
+    reg.launchPending(0);
+    try std.testing.expectEqual(@as(usize, 2), reg.batches.items.len);
+    try std.testing.expectEqual(@as(usize, 2), reg.batches.items[0].members.items.len);
+    try std.testing.expectEqual(regions[0], reg.batches.items[0].members.items[0]);
+    try std.testing.expectEqual(regions[2], reg.batches.items[0].members.items[1]);
+    try std.testing.expectEqual(@as(usize, 1), reg.batches.items[1].members.items.len);
+    try std.testing.expectEqual(regions[1], reg.batches.items[1].members.items[0]);
+}
+
+test "plain painter commands skip the shell" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const direct = try painterArgv(a, "pixy serve  --stdio");
+    try std.testing.expectEqual(@as(usize, 3), direct.len);
+    try std.testing.expectEqualStrings("pixy", std.mem.span(direct[0].?));
+    try std.testing.expectEqualStrings("--stdio", std.mem.span(direct[2].?));
+
+    for ([_][]const u8{ "FOO=1 pixy", "pixy | tee x", "~/bin/p", "p \"a b\"", "p $HOME", "p >log" }) |cmd| {
+        const shell = try painterArgv(a, cmd);
+        try std.testing.expectEqualStrings("/bin/sh", std.mem.span(shell[0].?));
+        try std.testing.expectEqualStrings(cmd, std.mem.span(shell[2].?));
+    }
 }
 
 test "interactive regions parse with ids, geometry and actions" {

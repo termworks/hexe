@@ -30,6 +30,8 @@ fn tickDelayMs(state: *const State) u64 {
     const now_ms = std.time.milliTimestamp();
     var delay = base;
     if (core.regions.active) |registry| {
+        // Painter answers are read on loop wakes.
+        if (registry.busy()) delay = 16;
         if (registry.msUntilDue(now_ms)) |delta| {
             const clamped: u64 = @intCast(@max(delta, 16));
             delay = @min(delay, clamped);
@@ -386,6 +388,8 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
 
         const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);
+        // Start the painter fetches this frame queued.
+        state.regions.poll();
         const dbg_t3 = std.time.milliTimestamp();
         if (dbg_t3 - dbg_t2 > 300) terminal_main.debugLog("SLOW renderIfDue: {d}ms", .{dbg_t3 - dbg_t2});
         if (dbg_t2 - dbg_t1 > 300) terminal_main.debugLog("SLOW mid-steps: {d}ms", .{dbg_t2 - dbg_t1});
