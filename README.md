@@ -73,8 +73,7 @@ printf '\033]1331;end\033\\'
 
 The percentage is recorded per cell and composes with OSC 1330 namespaces.
 See [foreground colour mixing](docs/blend.md) for the exact private protocol,
-fallback rules, capability query and the event-driven palette refresh used by
-tools such as pywal.
+fallback rules, capability query and host-palette refresh behavior.
 
 ---
 

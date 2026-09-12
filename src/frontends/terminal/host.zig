@@ -97,7 +97,10 @@ fn logTerminalCapabilities(state: *State, timed_out: bool) void {
 
 fn finalizeCapabilities(state: *State, now_ms: i64) void {
     state.host_colors.expire(now_ms);
-    if (!state.terminal_query_in_flight) return;
+    if (!state.terminal_query_in_flight) {
+        if (state.terminal_caps_ready) pollHostColors(state, now_ms);
+        return;
+    }
 
     const query_done = state.renderer.vx.queries_done.load(.unordered);
     const timed_out = now_ms >= state.terminal_query_deadline_ms;
@@ -132,6 +135,20 @@ fn startHostColorDiscovery(state: *State, now_ms: i64) void {
     };
     writer.interface.flush() catch |err| {
         core.logging.logError("terminal", "failed to flush host colour queries", err);
+    };
+}
+
+fn pollHostColors(state: *State, now_ms: i64) void {
+    const stdout = std.fs.File.stdout();
+    var buffer: [1024]u8 = undefined;
+    var writer = stdout.writer(&buffer);
+    const queried = state.host_colors.pollUsed(&writer.interface, now_ms) catch |err| {
+        core.logging.logError("terminal", "failed to poll host colours", err);
+        return;
+    };
+    if (!queried) return;
+    writer.interface.flush() catch |err| {
+        core.logging.logError("terminal", "failed to flush host colour polls", err);
     };
 }
 

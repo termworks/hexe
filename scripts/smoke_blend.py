@@ -278,10 +278,6 @@ print("refresh: host colour changes repaint existing mixed cells without applica
 clear_seen()
 desired_palette[0] = b"0000/ffff/ffff"
 desired_background[0] = b"ffff/0000/ffff"
-time.sleep(0.3)
-if any(query_counts.values()):
-    fail(f"host colours were queried without an explicit refresh: {query_counts}", capture())
-os.write(master, b"printf '\\033]1331;refresh\\033\\\\'\r")
 deadline = time.time() + 5
 external = b""
 while time.time() < deadline:
@@ -293,6 +289,6 @@ while time.time() < deadline:
     time.sleep(0.1)
 else:
     fail("out-of-band host palette changes did not refresh retained mixed cells", external)
-print("external: OSC 1331 refresh detects direct tty palette changes")
+print("external: host polling detects palette changes beyond the Hexe transport")
 
 print("PASS: OSC 1331 live blend smoke")

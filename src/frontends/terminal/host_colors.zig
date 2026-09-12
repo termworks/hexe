@@ -3,6 +3,7 @@ const core = @import("core");
 
 pub const QUERY_TIMEOUT_MS: i64 = 1500;
 pub const REFRESH_COOLDOWN_MS: i64 = 50;
+pub const POLL_INTERVAL_MS: i64 = 100;
 pub const MAX_PENDING: usize = 512;
 
 pub const QueryKey = union(enum) {
@@ -78,6 +79,7 @@ pub const HostColors = struct {
     generation: u64 = 0,
     used: Invalidation = .{},
     last_refresh_ms: i64 = 0,
+    last_poll_ms: i64 = 0,
 
     pub fn beginFrame(self: *HostColors) void {
         self.used = .{};
@@ -105,6 +107,7 @@ pub const HostColors = struct {
 
     pub fn queryAll(self: *HostColors, writer: anytype, now_ms: i64) !void {
         self.invalidateAll();
+        self.last_poll_ms = now_ms;
         try self.queryKey(writer, .foreground, now_ms);
         try self.queryKey(writer, .background, now_ms);
         for (0..256) |index| try self.queryKey(writer, .{ .palette = @intCast(index) }, now_ms);
@@ -128,7 +131,16 @@ pub const HostColors = struct {
     pub fn refreshUsed(self: *HostColors, writer: anytype, now_ms: i64) !bool {
         if (self.used.empty() or now_ms - self.last_refresh_ms < REFRESH_COOLDOWN_MS) return false;
         self.last_refresh_ms = now_ms;
+        return self.queryUsed(writer, now_ms);
+    }
 
+    pub fn pollUsed(self: *HostColors, writer: anytype, now_ms: i64) !bool {
+        if (self.used.empty() or now_ms - self.last_poll_ms < POLL_INTERVAL_MS) return false;
+        self.last_poll_ms = now_ms;
+        return self.queryUsed(writer, now_ms);
+    }
+
+    fn queryUsed(self: *HostColors, writer: anytype, now_ms: i64) !bool {
         var queried = false;
         if (self.used.foreground and self.foreground != null) {
             queried = try self.refreshKey(writer, .foreground, now_ms) or queried;
@@ -368,4 +380,19 @@ test "unknown used colours are not queried on refresh" {
     var writer = std.Io.Writer.fixed(&bytes);
     try std.testing.expect(!try colors.refreshUsed(&writer, REFRESH_COOLDOWN_MS));
     try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+}
+
+test "used colours poll at the bounded cadence" {
+    var colors: HostColors = .{};
+    colors.palette[1] = .{ .r = 255, .g = 0, .b = 0 };
+    colors.background = .{ .r = 0, .g = 0, .b = 0 };
+    colors.beginFrame();
+    _ = colors.resolvePalette(1);
+    _ = colors.resolveBackground();
+
+    var bytes: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try std.testing.expect(!try colors.pollUsed(&writer, POLL_INTERVAL_MS - 1));
+    try std.testing.expect(try colors.pollUsed(&writer, POLL_INTERVAL_MS));
+    try std.testing.expectEqualStrings("\x1b]11;?\x1b\\\x1b]4;1;?\x1b\\", writer.buffered());
 }
