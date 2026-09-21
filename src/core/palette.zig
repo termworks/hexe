@@ -489,6 +489,7 @@ pub fn isReservedOsc(code: u32) bool {
         10...19, 50...59, 110...119 => true, // dynamic colour and font families
         133 => true, // semantic prompt marks, which the zones are read from
         1331 => true, // foreground colour mixing
+        1332 => true, // stretch lines
         else => false,
     };
 }
@@ -895,7 +896,8 @@ test "reserved OSC numbers cannot be claimed by the config" {
     try std.testing.expect(isReservedOsc(52));
     try std.testing.expect(!isReservedOsc(DEFAULT_OSC));
     try std.testing.expect(isReservedOsc(1331));
-    try std.testing.expect(!isReservedOsc(1332));
+    try std.testing.expect(isReservedOsc(1332));
+    try std.testing.expect(!isReservedOsc(1333));
 }
 
 test "slot 1 is hexe's own and an application cannot claim it" {

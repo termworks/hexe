@@ -94,7 +94,8 @@ handles that topology. A refresh emitted through Hexe is consumed without
 altering the active mixing scope.
 
 OSC 1331 is reserved. A configuration cannot use `palette.osc = 1331`; choose
-another unreserved number such as 1332 when moving OSC 1330.
+another unreserved number such as 1333 when moving OSC 1330 (1332 is taken by
+stretch lines, see `docs/stretch.md`).
 
 ## Capability probing
 

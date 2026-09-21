@@ -567,6 +567,8 @@ const Pod = struct {
             .{ "HEXE_POD_NAME", pod_name orelse "" },
             .{ "HEXE_POD_SOCKET", socket_path },
             .{ "HEXE_PANE_API_SOCKET", pane_api },
+            // For programs that cannot send OSC 1332 `ask` and read the reply.
+            .{ "HEXE_STRETCH", "1332" },
         };
         var pty = try core.Pty.spawnWithEnv(shell, cwd, &extra_env);
         errdefer pty.close();

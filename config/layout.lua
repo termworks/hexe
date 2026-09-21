@@ -36,13 +36,13 @@ hexe.layout("default", {
     }),
   },
   floats = {
-    hexe.float("pi", {
+    hexe.float("magi", {
       key = "1",
       enabled = true,
-      title = "pi",
+      title = "magi",
       attrs = { per_cwd = true, inherit_env = true, exclusive = true },
-      command = "bun x --package @earendil-works/pi-coding-agent pi",
-      add_env = env({ OSLO_PROFILE = "pi", HEXE_FLOAT_NAME = "pi" }),
+      command = "magi",
+      add_env = env({ OSLO_PROFILE = "magi", HEXE_FLOAT_NAME = "magi" }),
       add_path = float_path,
     }),
     hexe.float("claude", {

@@ -164,7 +164,7 @@ def corpus():
     add(osc(b"1331;reset", term=BEL))
 
     # Neighbouring OSC numbers must not be swallowed as palette traffic.
-    for n in (b"1329", b"1332", b"133", b"13300", b"4", b"104", b"11", b"12"):
+    for n in (b"1329", b"1333", b"133", b"13300", b"4", b"104", b"11", b"12"):
         add(osc(n + b";0;?"))
 
     return bytes(out)

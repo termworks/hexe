@@ -85,6 +85,47 @@ fn release(codepoint: u21) vaxis.Event {
 // to encode every forwarded key as a press regardless, so a release -- if one
 // had been forwarded at all -- arrived as a phantom second press, and a hold
 // counter never cleared.
+test "a release encodes as a release, not as another press" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+
+    // The pane asks for the disambiguate + report_events flags, which is what
+    // makes the protocol carry an event type at all.
+    try vt.feed("\x1b[>3u");
+
+    const ev = input.keyEventFromVaxisEvent(release(' ')) orelse return error.NotDecoded;
+    try testing.expectEqual(core.Config.BindWhen.release, ev.when);
+
+    var buf: [64]u8 = undefined;
+    const down = key_translate.encodeKey(&buf, ev.mods, ev.key, ev.text_codepoint, .press, &vt.terminal) orelse
+        return error.MissingEncoding;
+    var press_buf: [64]u8 = undefined;
+    @memcpy(press_buf[0..down.len], down);
+    const pressed = press_buf[0..down.len];
+
+    const up = key_translate.encodeKey(&buf, ev.mods, ev.key, ev.text_codepoint, .release, &vt.terminal) orelse
+        return error.MissingEncoding;
+
+    // The two halves must not be the same bytes, and the release carries the
+    // Kitty event type `3`.
+    try testing.expect(!std.mem.eql(u8, pressed, up));
+    try testing.expect(std.mem.indexOf(u8, up, ":3") != null);
+}
+
+test "with no flags set there is nothing to distinguish, so a release must not be sent" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+
+    // No `CSI > u`: the pane never asked. A release has no legacy spelling, so
+    // the encoder produces nothing at all -- which is why forwarding has to be
+    // gated on the flag rather than left to the encoder.
+    const ev = input.keyEventFromVaxisEvent(release('a')) orelse return error.NotDecoded;
+    var buf: [64]u8 = undefined;
+    const up = key_translate.encodeKey(&buf, ev.mods, ev.key, ev.text_codepoint, .release, &vt.terminal);
+    try testing.expect(up == null or up.?.len == 0);
+}
 
 // The rule that decides whether a release may be sent at all.
 //
@@ -103,3 +144,39 @@ fn pressFor(vt: *core.VT, codepoint: u21, buf: *[64]u8) ?[]const u8 {
     return key_translate.encodeKey(buf, ev.mods, ev.key, ev.text_codepoint, .press, &vt.terminal);
 }
 
+test "a text key presses as a literal byte until report_all is asked for" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+
+    var buf: [64]u8 = undefined;
+
+    // report_events on its own. The press is still a plain `a`, which is the
+    // signal that this key produces text and its release is not on offer.
+    try vt.feed("\x1b[>2u");
+    const plain = pressFor(&vt, 'a', &buf) orelse return error.MissingEncoding;
+    try testing.expectEqualStrings("a", plain);
+
+    // Add report_all and the press becomes an escape sequence: now the
+    // application has asked to hear about this key in full.
+    try vt.feed("\x1b[>11u");
+    const escaped = pressFor(&vt, 'a', &buf) orelse return error.MissingEncoding;
+    try testing.expect(escaped.len > 1 and escaped[0] == 0x1b);
+}
+
+test "a key that never produces text is reportable under report_events alone" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+    try vt.feed("\x1b[>2u");
+
+    // An arrow key has no literal spelling, so its press is already an escape
+    // sequence and its release carries no risk of being read as text.
+    var buf: [64]u8 = undefined;
+    const down = pressFor(&vt, vaxis.Key.up, &buf) orelse return error.MissingEncoding;
+    try testing.expect(down.len > 1 and down[0] == 0x1b);
+
+    var rbuf: [64]u8 = undefined;
+    const up = releaseFor(&vt, vaxis.Key.up, &rbuf) orelse return error.MissingEncoding;
+    try testing.expect(std.mem.indexOf(u8, up, ":3") != null);
+}

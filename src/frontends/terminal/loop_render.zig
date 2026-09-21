@@ -67,12 +67,35 @@ fn renderSearchPrompt(state: *State, renderer: *Renderer) void {
 /// Highlight a search match's cells (inclusive viewport range, pane-local) over
 /// the already-drawn focused pane. `current` matches reverse-video; others get
 /// a yellow tint.
+/// The stretch layout of viewport row `y`, or null for an ordinary row.
+fn stretchRow(pane: *Pane, y: u16) ?struct { raw: []const ghostty.page.Cell, info: vt_bridge.StretchInfo } {
+    if (pane.vt.stretch.count == 0) return null;
+    const rs = pane.getRenderState() catch return null;
+    const rows = rs.row_data.slice();
+    if (y >= rows.len) return null;
+    const raw = rows.items(.cells)[y].slice().items(.raw);
+    const info = vt_bridge.stretchInfo(raw, @min(@as(usize, pane.width), rs.cols)) orelse return null;
+    return .{ .raw = raw, .info = info };
+}
+
+/// A cursor on an OSC 1332 stretch row sits where the row is drawn, not where
+/// its cells are stored.
+fn stretchedCursorX(pane: *Pane, abs_x: u16, abs_y: u16) u16 {
+    const row = stretchRow(pane, abs_y -| pane.y) orelse return abs_x;
+    const drawn = vt_bridge.stretchColumn(row.raw, row.info, abs_x -| pane.x);
+    return pane.x + @as(u16, @intCast(@min(drawn, pane.width -| 1)));
+}
+
 fn highlightSearchMatch(renderer: *Renderer, pane: *Pane, m: pane_search.PaneSearch.MatchViewport, current: bool) void {
     if (pane.width == 0 or pane.height == 0) return;
     var y = m.sy;
     while (y <= m.ey and y < pane.height) : (y += 1) {
-        const row_start: u16 = if (y == m.sy) m.sx else 0;
-        const row_end: u16 = if (y == m.ey) m.ex else pane.width - 1;
+        var row_start: u16 = if (y == m.sy) m.sx else 0;
+        var row_end: u16 = if (y == m.ey) m.ex else pane.width - 1;
+        if (stretchRow(pane, y)) |row| {
+            row_start = @intCast(@min(vt_bridge.stretchColumn(row.raw, row.info, row_start), pane.width - 1));
+            row_end = @intCast(@min(vt_bridge.stretchColumn(row.raw, row.info, @as(usize, row_end) + 1) -| 1, pane.width - 1));
+        }
         var x = row_start;
         while (x <= row_end and x < pane.width) : (x += 1) {
             const cx = pane.x + x;
@@ -562,14 +585,14 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     if (state.activeFloatingIndex()) |idx| {
         const pane = state.view.float_views.items[idx];
         const pos = pane.getCursorPos();
-        cursor.x = pos.x;
+        cursor.x = stretchedCursorX(pane, pos.x, pos.y);
         cursor.y = pos.y;
         cursor.style = pane.getCursorStyle();
         cursor.visible = pane.isCursorVisible();
         cursor_palette = pane.vt.ns_table.cursorFor(pane.vt.cursorNamespace());
     } else if (state.currentLayout().getFocusedPane()) |pane| {
         const pos = pane.getCursorPos();
-        cursor.x = pos.x;
+        cursor.x = stretchedCursorX(pane, pos.x, pos.y);
         cursor.y = pos.y;
         cursor.style = pane.getCursorStyle();
         cursor.visible = pane.isCursorVisible();

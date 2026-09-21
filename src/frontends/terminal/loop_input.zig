@@ -1065,9 +1065,16 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
             keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint, .press);
             return .consumed;
         },
-        // Releases are not forwarded. See `handleReleaseEvent` in keybinds.zig
-        // for what happened when they were.
-        .release => return .unhandled,
+        // A release goes on only to a pane the protocol says may hear it.
+        // `releaseAllowedForKey` consumes the press record either way, so a key
+        // held down never leaves one behind to authorise a later release.
+        .release => {
+            if (keybinds.releaseAllowedForKey(state, ev.mods, ev.key)) {
+                keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint, .release);
+                return .consumed;
+            }
+            return .unhandled;
+        },
         // Neither reaches here today. `keyEventFromVaxisEvent` produces only
         // press and release, because vaxis reads the Kitty event type solely to
         // ask "is it a 3?" -- a repeat arrives indistinguishable from a press.

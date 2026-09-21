@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const palette_mod = @import("palette.zig");
 const blend_mod = @import("blend.zig");
+const stretch_mod = @import("stretch.zig");
 const logging = @import("logging.zig");
 const image_import = @import("image_import.zig");
 
@@ -96,6 +97,9 @@ pub const VT = struct {
     ns_table: palette_mod.NamespaceTable = undefined,
 
     blend_state: blend_mod.State = .{},
+
+    /// OSC 1332 fill patterns and the open stretch line, if any.
+    stretch: stretch_mod.State = .{},
 
     /// Sixel images, which ghostty's VT does not speak. It holds partial
     /// sequences across feeds, so it is per-pane state and lives for as long as
@@ -271,6 +275,29 @@ pub const VT = struct {
                 logging.logError("vt", "failed to apply palette namespace to cursor style", err);
             };
         }
+    }
+
+    /// OSC 1332 `begin`: the cursor row is a stretch line. Autowrap stays off
+    /// until `end`, so a long line cannot spill onto the next row.
+    pub fn stretchBegin(self: *VT) void {
+        if (!self.stretch.in_line) self.stretch.saved_wrap = self.terminal.modes.get(.wraparound);
+        self.stretch.in_line = true;
+        self.terminal.modes.set(.wraparound, false);
+    }
+
+    pub fn stretchEnd(self: *VT) void {
+        if (!self.stretch.in_line) return;
+        self.stretch.in_line = false;
+        self.terminal.modes.set(.wraparound, self.stretch.saved_wrap);
+    }
+
+    /// Print the placeholder cell for fill pattern `id` at the cursor, in the
+    /// current style.
+    pub fn printStretchFill(self: *VT, id: u8) void {
+        self.terminal.print(stretch_mod.placeholder(id)) catch |err| {
+            logging.logError("vt", "failed to print stretch fill", err);
+        };
+        self.render_state_dirty = true;
     }
 
     pub fn syncBlendStyle(self: *VT) void {

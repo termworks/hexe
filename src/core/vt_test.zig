@@ -300,6 +300,42 @@ test "render state follows edits, screen switches and scrolls across reuses" {
     try std.testing.expectEqualStrings("last", rowText(&vt, 3, &buf));
 }
 
+test "a stretch fill is one placeholder cell between the text around it" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 3);
+    defer vt.deinit();
+
+    try std.testing.expect(vt.terminal.modes.get(.wraparound));
+    vt.stretchBegin();
+    try std.testing.expect(!vt.terminal.modes.get(.wraparound));
+    try vt.feed("ab");
+    const id = vt.stretch.intern(.{ .glyphs = .{ '-', 0, 0, 0, 0, 0, 0, 0 }, .len = 1 }).?;
+    vt.printStretchFill(id);
+    try vt.feed("cd");
+    vt.stretchEnd();
+    try std.testing.expect(vt.terminal.modes.get(.wraparound));
+
+    const state = try vt.getRenderState();
+    const cells = state.row_data.slice().items(.cells)[0].slice().items(.raw);
+    try std.testing.expectEqual(@as(u21, 'a'), cells[0].codepoint());
+    try std.testing.expectEqual(@as(u21, 'b'), cells[1].codepoint());
+    try std.testing.expectEqual(@as(?u8, id), core.stretch.fillId(cells[2].codepoint()));
+    try std.testing.expectEqual(@as(u21, 'c'), cells[3].codepoint());
+    try std.testing.expectEqual(@as(u21, 'd'), cells[4].codepoint());
+}
+
+test "a long stretch line does not wrap onto the next row" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 10, 3);
+    defer vt.deinit();
+    var buf: [32]u8 = undefined;
+
+    vt.stretchBegin();
+    try vt.feed("0123456789ABCDEF");
+    vt.stretchEnd();
+    try std.testing.expectEqualStrings("", rowText(&vt, 1, &buf));
+}
+
 test "VT imports a sixel image and keeps the text around it" {
     var vt: core.VT = undefined;
     try vt.init(std.testing.allocator, 20, 5);

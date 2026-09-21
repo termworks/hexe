@@ -29,6 +29,19 @@ fn processVtOutput(self: *Pane, data: []const u8) void {
 }
 
 fn feedVtOutput(self: *Pane, data: []const u8) void {
+    // A stretch line ends with its row, even when the program never says `end`.
+    if (self.vt.stretch.in_line) {
+        if (std.mem.indexOfAny(u8, data, "\n\x0b\x0c")) |i| {
+            feedVtSegments(self, data[0..i]);
+            self.vt.stretchEnd();
+            feedVtSegments(self, data[i..]);
+            return;
+        }
+    }
+    feedVtSegments(self, data);
+}
+
+fn feedVtSegments(self: *Pane, data: []const u8) void {
     var offset: usize = 0;
     while (offset < data.len) {
         const remaining = data[offset..];
@@ -406,6 +419,10 @@ fn finishOsc(self: *Pane) void {
         consumeBlendOsc(self, self.osc_buf.items);
         return;
     }
+    if (code == core.stretch.OSC) {
+        consumeStretchOsc(self, self.osc_buf.items);
+        return;
+    }
     if (isConsumedOscCode(code)) {
         consumeOsc(self, self.osc_buf.items);
         return;
@@ -464,6 +481,18 @@ fn consumeBlendOsc(self: *Pane, seq: []const u8) void {
             writeResponse(self, "\x1b]1331;have;1;fg\x1b\\", "OSC 1331 capability response write failed");
         },
         .refresh => self.host_color_refresh_requested = true,
+    }
+}
+
+/// OSC 1332 — stretch lines (docs/stretch.md).
+fn consumeStretchOsc(self: *Pane, seq: []const u8) void {
+    const params = oscParams(seq) orelse return;
+    switch (self.vt.stretch.apply(params)) {
+        .ignore => {},
+        .have => writeResponse(self, "\x1b]1332;have;1\x1b\\", "OSC 1332 capability response write failed"),
+        .begin => self.vt.stretchBegin(),
+        .end => self.vt.stretchEnd(),
+        .fill => |id| self.vt.printStretchFill(id),
     }
 }
 

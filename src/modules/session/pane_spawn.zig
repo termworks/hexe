@@ -84,6 +84,7 @@ fn isPerProcessEnvKey(key: []const u8) bool {
         "HEXE_SESSION",
         "HEXE_FLOAT",
         "HEXE_FLOAT_NAME",
+        "HEXE_STRETCH",
         "PWD",
         "OLDPWD",
         "BOX",
