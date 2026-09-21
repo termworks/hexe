@@ -7,6 +7,7 @@ const log = std.log.scoped(.terminal_input);
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const input = @import("input.zig");
+const key_translate = @import("key_translate.zig");
 const terminal_main = @import("main.zig");
 
 const actions = @import("loop_actions.zig");
@@ -370,6 +371,41 @@ fn routePaneFeedbackOscBytes(state: *State, raw: []const u8) bool {
     state.writePaneInput(pane, raw);
     terminal_main.debugLogUuid(&pane.uuid, "OSC feedback routed to focused pane len={d}", .{raw.len});
     return true;
+}
+
+fn handleHostColorReport(state: *State, report: vaxis.Color.Report, raw: []const u8) bool {
+    const key: @import("host_colors.zig").QueryKey = switch (report.kind) {
+        .fg => .foreground,
+        .bg => .background,
+        .cursor => .cursor,
+        .index => |index| .{ .palette = index },
+    };
+    switch (state.host_colors.handleReport(.{ .key = key, .value = report.value }, std.time.milliTimestamp())) {
+        .unowned => return false,
+        .cached => |changed| {
+            if (changed) {
+                state.renderer.invalidate();
+                state.needs_render = true;
+            }
+            return true;
+        },
+        .pane => |uuid| {
+            if (state.findPaneByUuid(uuid)) |pane| state.writePaneInput(pane, raw);
+            return true;
+        },
+    }
+}
+
+fn refreshAllHostColors(state: *State) void {
+    const stdout = std.fs.File.stdout();
+    var buffer: [1024]u8 = undefined;
+    var writer = stdout.writer(&buffer);
+    state.host_colors.queryAll(&writer.interface, std.time.milliTimestamp()) catch |err| {
+        core.logging.logError("terminal", "failed to refresh host colours", err);
+    };
+    writer.interface.flush() catch |err| {
+        core.logging.logError("terminal", "failed to flush host colour refresh", err);
+    };
 }
 
 fn runLayoutSaveWithScope(state: *State, scope: []const u8) void {
@@ -937,6 +973,7 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
             return true;
         },
         .color_scheme => {
+            refreshAllHostColors(state);
             state.renderer.invalidate();
             state.needs_render = true;
             return true;
@@ -1023,13 +1060,30 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
     // Require exact modifier matches for keybindings.
     // This prevents Alt+key from accidentally triggering Ctrl+Alt+key bindings.
 
-    if (ev.when == .press) {
-        keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint);
-        return .consumed;
+    switch (ev.when) {
+        .press => {
+            keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint, .press);
+            return .consumed;
+        },
+        // A release goes on only to a pane the protocol says may hear it.
+        // `releaseAllowedForKey` consumes the press record either way, so a key
+        // held down never leaves one behind to authorise a later release.
+        .release => {
+            if (keybinds.releaseAllowedForKey(state, ev.mods, ev.key)) {
+                keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint, .release);
+                return .consumed;
+            }
+            return .unhandled;
+        },
+        // Neither reaches here today. `keyEventFromVaxisEvent` produces only
+        // press and release, because vaxis reads the Kitty event type solely to
+        // ask "is it a 3?" -- a repeat arrives indistinguishable from a press.
+        // hexe's own binds synthesise these from its key timers; panes do not
+        // see them.
+        .repeat, .hold => return .unhandled,
     }
-
-    return .unhandled;
 }
+
 
 fn firstOrParseAt(state: *State, inp: []const u8, offset: usize, first: ?ParsedEventHead) ?ParsedEventHead {
     if (offset == 0) return first;
@@ -1127,6 +1181,13 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
             }
 
             const raw_event = inp[i .. i + res.n];
+            if (res.event) |event| {
+                if (event == .color_report and handleHostColorReport(state, event.color_report, raw_event)) {
+                    freeParsedEventPayload(state, res.event);
+                    i += res.n;
+                    continue;
+                }
+            }
             if (isPaneFeedbackOscEvent(res.event, raw_event) and routePaneFeedbackOscBytes(state, raw_event)) {
                 freeParsedEventPayload(state, res.event);
                 i += res.n;

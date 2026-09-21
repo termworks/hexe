@@ -91,10 +91,17 @@ You name it, and hexe runs it:
 hexe.status = { enabled = true, exec = "pixy serve --stdio" }
 ```
 
-That is the whole of it. On each fetch the command is run through `/bin/sh -c`,
-written one request, and its stdin closed; it answers and exits. Its stdout is
-the wire and its stderr is left on the terminal that started hexe, so a
-painter's diagnostics have somewhere to go. Say nothing and nothing is drawn.
+That is the whole of it. Every region that falls due at the same moment for the
+same command shares one run: hexe starts the command and hands it the requests
+one at a time, each after the answer to the one before, closing its stdin after
+the last. A command of plain words is started directly; one that uses quoting,
+expansion, redirection or a leading `VAR=value` goes through `/bin/sh -c`. Its
+stdout is the wire and its stderr is left on the terminal that started hexe, so
+a painter's diagnostics have somewhere to go. Say nothing and nothing is drawn.
+
+A painter that answers only the first request and exits still works: the
+regions it left unanswered are run again, and from then on its command is run
+once per region.
 
 **Nothing stays running between fetches**, and that is the point.
 
@@ -226,6 +233,11 @@ pressed and hovered states. hexe never restyles a painter's output.
 `next_frame_ms` in a response asks to be polled sooner than `refresh_ms` — an
 animating view returns `75` and gets asked again in 75ms. It can only shorten
 the interval, never lengthen it.
+
+hexe asks on this schedule by itself for as long as the region is on screen,
+and redraws only when an answer differs from the one before. A change in what
+it would send — a tab, the hovered region, the cwd, the size — is asked at once
+rather than at the next refresh.
 
 **It is a delay, never a timestamp.** A painter that sends an absolute time is
 asking for a frame decades away; hexe warns once and ignores it rather than

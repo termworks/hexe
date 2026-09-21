@@ -10,6 +10,7 @@ const runtime_events = @import("runtime_events.zig");
 const dead_panes = @import("dead_panes.zig");
 const loop_updates = @import("loop_updates.zig");
 const loop_ipc = @import("loop_ipc.zig");
+const ApiServer = @import("api_server.zig").ApiServer;
 const terminal_main = @import("main.zig");
 
 const LoopTimerContext = struct {
@@ -25,12 +26,74 @@ const LoopTimerContext = struct {
 /// How long the loop timer may sleep. A painter's next_frame_ms is useless if
 /// nothing wakes to serve it, and the ticker was pinned at 100ms, so animation
 /// could never beat ~10fps. Never sleeps below 16ms.
-fn tickDelayMs() u64 {
+fn tickDelayMs(state: *const State) u64 {
     const base: u64 = 100;
-    const registry = core.regions.active orelse return base;
-    const delta = registry.msUntilDue(std.time.milliTimestamp()) orelse return base;
-    const clamped: u64 = @intCast(@max(delta, 16));
-    return @min(base, clamped);
+    const now_ms = std.time.milliTimestamp();
+    var delay = base;
+    if (core.regions.active) |registry| {
+        // Painter answers are read on loop wakes.
+        if (registry.busy()) delay = 16;
+        if (registry.msUntilDue(now_ms)) |delta| {
+            const clamped: u64 = @intCast(@max(delta, 16));
+            delay = @min(delay, clamped);
+        }
+    }
+    if (state.host_colors.pollDelayMs(now_ms)) |poll_delay| {
+        delay = @min(delay, @max(poll_delay, 16));
+    }
+    if (state.drawings.nextExpiry()) |at| {
+        delay = @min(delay, @as(u64, @intCast(@max(at - now_ms, 16))));
+    }
+    return delay;
+}
+
+/// Advance painter fetches; content that changed asks for a render.
+fn pollRegions(state: *State) void {
+    state.regions.poll();
+    if (state.regions.takeChanged()) state.needs_render = true;
+}
+
+/// Service the control sockets that have something to do. Servers with an
+/// open connection are serviced as always; the listeners of the rest share
+/// one `poll()` instead of an `accept()` each.
+fn serviceApiServers(state: *State) void {
+    const max_polled = 64;
+    var pfds: [max_polled]std.posix.pollfd = undefined;
+    var owners: [max_polled]*ApiServer = undefined;
+    var n: usize = 0;
+
+    var servers: [1]*ApiServer = undefined;
+    const main_server: []*ApiServer = if (state.api_server) |*srv| blk: {
+        servers[0] = srv;
+        break :blk servers[0..1];
+    } else servers[0..0];
+    const groups = [_][]ApiServer{ state.plugin_servers.items, state.pane_servers.items };
+
+    for (main_server) |srv| collect(state, srv, &pfds, &owners, &n);
+    for (groups) |group| {
+        for (group) |*srv| collect(state, srv, &pfds, &owners, &n);
+    }
+    if (n == 0) return;
+
+    const ready = std.posix.poll(pfds[0..n], 0) catch {
+        for (owners[0..n]) |srv| srv.service(state);
+        return;
+    };
+    if (ready == 0) return;
+    for (pfds[0..n], owners[0..n]) |pfd, srv| {
+        if (pfd.revents != 0) srv.service(state);
+    }
+}
+
+fn collect(state: *State, srv: *ApiServer, pfds: []std.posix.pollfd, owners: []*ApiServer, n: *usize) void {
+    if (srv.fd < 0) return;
+    if (srv.hasConns() or n.* == pfds.len) {
+        srv.service(state);
+        return;
+    }
+    pfds[n.*] = .{ .fd = srv.fd, .events = std.posix.POLL.IN, .revents = 0 };
+    owners[n.*] = srv;
+    n.* += 1;
 }
 
 fn loopTimerCallback(
@@ -42,7 +105,7 @@ fn loopTimerCallback(
     const timer_ctx = ctx orelse return .disarm;
     _ = result catch {
         // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
-        timer_ctx.ticker.run(loop, completion, tickDelayMs(), LoopTimerContext, timer_ctx, loopTimerCallback);
+        timer_ctx.ticker.run(loop, completion, tickDelayMs(timer_ctx.state), LoopTimerContext, timer_ctx, loopTimerCallback);
         return .disarm;
     };
 
@@ -69,7 +132,7 @@ fn loopTimerCallback(
 
     timer_ctx.last_fire = std.time.milliTimestamp();
     // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
-    timer_ctx.ticker.run(loop, completion, tickDelayMs(), LoopTimerContext, timer_ctx, loopTimerCallback);
+    timer_ctx.ticker.run(loop, completion, tickDelayMs(timer_ctx.state), LoopTimerContext, timer_ctx, loopTimerCallback);
     return .disarm;
 }
 
@@ -227,7 +290,6 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
 
     // Frame timing.
     var last_render: i64 = std.time.milliTimestamp();
-    var last_status_update: i64 = last_render;
     const pane_sync_interval: i64 = core.constants.Timing.pane_sync_interval;
     const heartbeat_interval: i64 = core.constants.Timing.heartbeat_interval;
 
@@ -241,7 +303,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
     };
     var timer_completion: xev.Completion = .{};
     timer_ctx.last_fire = std.time.milliTimestamp();
-    loop_timer.run(loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
+    loop_timer.run(loop, &timer_completion, tickDelayMs(state), LoopTimerContext, &timer_ctx, loopTimerCallback);
 
     // Reusable lists for dead pane tracking (avoid per-iteration allocations).
     var dead_splits: std.ArrayList([32]u8) = .empty;
@@ -259,7 +321,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         state.async_cmds.poll();
         // Same contract for externally painted regions: advance in-flight
         // fetches with non-blocking syscalls only.
-        state.regions.poll();
+        pollRegions(state);
         maybeReconnectSes(state, &reconnect_state);
         runtime_events.applyDeferredPaneExits(state);
         runtime_events.applyDeferredCwdResponse(state);
@@ -306,7 +368,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         if (dbg_t1 - timer_ctx.last_fire > 5000) {
             terminal_main.debugLog("loop ticker silent {d}ms; resurrecting", .{dbg_t1 - timer_ctx.last_fire});
             timer_ctx.last_fire = dbg_t1;
-            timer_ctx.ticker.run(loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
+            timer_ctx.ticker.run(loop, &timer_completion, tickDelayMs(state), LoopTimerContext, &timer_ctx, loopTimerCallback);
         }
         if (runtime_events.applyRuntimeStopRequest(state, hooks)) break;
         if (!state.running) break;
@@ -351,7 +413,7 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         if (!skip_dead_sweep) dead_panes.cleanupDeadFloats(state);
 
         const now2 = std.time.milliTimestamp();
-        loop_updates.updateSelectionAndStatus(state, now2, &last_status_update);
+        loop_updates.updateSelectionAndStatus(state, now2);
 
         // Handle a cancelled shell-death exit confirmation before dead-pane
         // cleanup re-enters the last-pane exit path.
@@ -367,17 +429,16 @@ pub fn runMainLoop(state: *State, hooks: HostHooks, loop: *xev.Loop, loop_timer:
         state.startApiServer();
         // After the socket, so HEXE_API_SOCKET is real when they read it.
         state.startPlugins();
-        if (state.api_server) |*srv| srv.service(state);
-        // Each plugin's own socket, serviced the same way. Separate listeners
+        // Plus each plugin's own socket and one per pane. Separate listeners
         // rather than one with per-connection grants, so authority is a
         // property of the door rather than of what the caller claims.
-        for (state.plugin_servers.items) |*srv| srv.service(state);
-        // And one per pane, for whatever is running inside it.
         state.syncPaneServers();
-        for (state.pane_servers.items) |*srv| srv.service(state);
+        serviceApiServers(state);
 
         const dbg_t2 = std.time.milliTimestamp();
         hooks.renderIfDue(state, &last_render);
+        // Start the painter fetches this frame queued.
+        pollRegions(state);
         const dbg_t3 = std.time.milliTimestamp();
         if (dbg_t3 - dbg_t2 > 300) terminal_main.debugLog("SLOW renderIfDue: {d}ms", .{dbg_t3 - dbg_t2});
         if (dbg_t2 - dbg_t1 > 300) terminal_main.debugLog("SLOW mid-steps: {d}ms", .{dbg_t2 - dbg_t1});

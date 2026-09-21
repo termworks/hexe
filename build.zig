@@ -483,6 +483,29 @@ pub fn build(b: *std.Build) void {
     });
     const run_pane_osc_tests = b.addRunArtifact(pane_osc_tests);
 
+    const host_color_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/host_colors.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    host_color_test_module.addImport("core", core_module);
+    const host_color_tests = b.addTest(.{ .root_module = host_color_test_module });
+    const run_host_color_tests = b.addRunArtifact(host_color_tests);
+
+    const blend_bench_module = b.createModule(.{
+        .root_source_file = b.path("scripts/bench_blend.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    blend_bench_module.addImport("vt_bridge", vt_bridge_test_module);
+    const blend_bench = b.addExecutable(.{
+        .name = "bench-blend",
+        .root_module = blend_bench_module,
+    });
+    const run_blend_bench = b.addRunArtifact(blend_bench);
+    const blend_bench_step = b.step("bench-blend", "Benchmark a fully mixed viewport");
+    blend_bench_step.dependOn(&run_blend_bench.step);
+
     // Lua event dispatch. These tests existed but were in no test target, so
     // they never ran — and they cover exactly the two bugs that shipped: a
     // stack underflow after a handler call, and a dropped second handler.
@@ -720,6 +743,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_image_encode_tests.step);
     test_step.dependOn(&run_sixel_tests.step);
     test_step.dependOn(&run_pane_osc_tests.step);
+    test_step.dependOn(&run_host_color_tests.step);
     test_step.dependOn(&run_lua_events_tests.step);
     test_step.dependOn(&run_api_json_tests.step);
     test_step.dependOn(&run_float_geometry_tests.step);

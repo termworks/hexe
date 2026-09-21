@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.4.14] - 2026-09-21
+
+### <!-- 0 -->⛰️  Features
+
+- Add OSC 1332 for stretchable lines
+- Add live OSC 1331 viewer
+- Remove key release forwarding to panes
+- Add OSC 1331 colour mixing
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Report a too-long socket path
+- Default to ANSI color 1
+- Support remote palette changes
+- Refresh mixed host colors
+- Withhold a text key's release unless asked
+- Forward key releases to panes that ask
+
+### <!-- 4 -->⚡ Performance
+
+- Poll proc less on quiet panes
+- Stop the idle state fsync
+- Render only on change
+- One painter run per refresh
+- Reuse render state and smp allocator
+- Poll mixed colors at 60fps
+- Benchmark mixed viewport
+
+### <!-- 6 -->🧪 Testing
+
+- Widen protocol response windows
+- Isolate painter configuration
+- Cover OSC 1331 reflow
+- Assert ghostty layout sizes
+
+## [Unreleased]
+
+### <!-- 0 -->⛰️  Features
+
+- Reserve OSC 1331 for per-cell foreground colour mixing
+
+### <!-- 4 -->💥 Breaking Changes
+
+- `palette.osc = 1331` is now rejected; use another unreserved number
+
 ## [0.4.13] - 2026-09-01
 
 ### <!-- 0 -->⛰️  Features
@@ -1552,4 +1597,3 @@
 ### <!-- 9 -->◀️ Revert
 
 - Disable perf caches causing freeze
-

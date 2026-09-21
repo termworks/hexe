@@ -376,8 +376,14 @@ pub fn getReliableCwd(self: anytype, pane: *Pane) ?[]const u8 {
     return null;
 }
 
+/// Resend an unchanged pane aux this often, so a restarted SES converges.
+const AUX_RESEND_MS: i64 = 30_000;
+
 pub fn syncFocusedPaneInfo(self: anytype) void {
-    if (!self.runtime.isConnected()) return;
+    if (!self.runtime.isConnected()) {
+        self.aux_sent_ms = 0;
+        return;
+    }
 
     const pane = if (getCurrentFocusedUuid(self)) |uuid|
         self.findPaneByUuid(uuid)
@@ -392,7 +398,8 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     if (p.uuid[0] == 0) return;
 
     // Ensure pane metadata eventually converges even if an async response was
-    // missed during reconnect/startup races.
+    // missed during reconnect/startup races. Pods push cwd and process
+    // changes as they happen, so these ask only while nothing is known.
     if (!self.hasPaneName(p.uuid)) {
         self.runtime.requestPaneProcess(p.uuid);
     }
@@ -400,16 +407,11 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
         self.runtime.requestPaneCwd(p.uuid);
     }
 
-    _ = self.refreshPaneCwd(p);
-
-    // Best-effort process detection.
-    // SES owns process inspection; request a refresh and use any cached value we
-    // already have for immediate consumers.
     const fg_proc_local = p.getFgProcess();
     const fg_pid_local: ?i32 = if (p.getFgPid()) |pid| @intCast(pid) else null;
     if (fg_proc_local) |proc_name| {
         self.setPaneProc(p.uuid, proc_name, fg_pid_local);
-    } else {
+    } else if (self.getPaneProc(p.uuid) == null) {
         self.runtime.requestPaneProcess(p.uuid);
     }
 
@@ -420,6 +422,29 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     const alt_screen = p.vt.inAltScreen();
     const layout_path = getLayoutPathForSync(self, p, "syncFocusedPaneInfo");
     defer if (layout_path) |path| self.allocator.free(path);
+
+    // An identical send is a blocking round trip for nothing.
+    var h = std.hash.Wyhash.init(0);
+    std.hash.autoHash(&h, p.uuid);
+    std.hash.autoHash(&h, self.activeTabIndex());
+    std.hash.autoHash(&h, pane_type);
+    std.hash.autoHash(&h, cursor.x);
+    std.hash.autoHash(&h, cursor.y);
+    std.hash.autoHash(&h, cursor_style);
+    std.hash.autoHash(&h, cursor_visible);
+    std.hash.autoHash(&h, alt_screen);
+    std.hash.autoHash(&h, p.width);
+    std.hash.autoHash(&h, p.height);
+    std.hash.autoHash(&h, fg_pid_local);
+    h.update(self.paneRealCwd(p) orelse "");
+    h.update("\x00");
+    h.update(fg_proc_local orelse "");
+    h.update("\x00");
+    h.update(layout_path orelse "");
+    const key = h.final();
+    const now_ms = std.time.milliTimestamp();
+    if (key == self.aux_sent_key and now_ms - self.aux_sent_ms < AUX_RESEND_MS) return;
+
     self.runtime.updatePaneAux(
         p.uuid,
         self.activeTabIndex(),
@@ -439,7 +464,10 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
         layout_path,
     ) catch |err| {
         core.logging.logError("terminal", "failed IPC operation in state_sync", err);
+        return;
     };
+    self.aux_sent_key = key;
+    self.aux_sent_ms = now_ms;
 }
 
 pub fn resizeFloatingPanes(self: anytype) void {

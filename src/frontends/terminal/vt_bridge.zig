@@ -8,6 +8,7 @@ const Style = ghostty.Style;
 const RenderState = ghostty.RenderState;
 const NamespaceTable = core.palette.NamespaceTable;
 const image_fallback = @import("image_fallback.zig");
+const HostColors = @import("host_colors.zig").HostColors;
 
 /// Static ASCII lookup table -- avoids arena allocation for 95%+ of cells.
 /// Each byte position i contains the byte value i, so ascii_lut[ch..][0..1]
@@ -133,6 +134,7 @@ pub fn drawRenderState(
     height: u16,
     arena: std.mem.Allocator,
     vt: *core.VT,
+    host_colors: ?*HostColors,
     vx: *vaxis.Vaxis,
     stdout: std.fs.File,
     /// Rectangles that will be drawn OVER this window later in the frame, in
@@ -158,91 +160,216 @@ pub fn drawRenderState(
     syncKittyImages(vt, vx, stdout, arena);
 
     const ns_table = &vt.ns_table;
+    // Rows are only scanned for stretch fills once the pane has used OSC 1332.
+    const may_stretch = vt.stretch.count > 0;
 
     for (0..available_rows) |yi| {
         const y: u16 = @intCast(yi);
         if (y >= win.height) break;
 
         const cells_slice = row_cells[yi].slice();
-        const raw_cells = cells_slice.items(.raw);
-        const graphemes_arr = cells_slice.items(.grapheme);
-        const styles_arr = cells_slice.items(.style);
+        const row: RowCtx = .{
+            .win = win,
+            .y = y,
+            .cols = @min(cols, win.width),
+            .raw_cells = cells_slice.items(.raw),
+            .graphemes = cells_slice.items(.grapheme),
+            .styles = cells_slice.items(.style),
+            .pin = row_pins[yi],
+            .arena = arena,
+            .ns_table = ns_table,
+            .host_colors = host_colors,
+        };
+
+        if (may_stretch) {
+            if (stretchInfo(row.raw_cells, row.cols)) |info| {
+                drawStretchRow(row, &vt.stretch, info);
+                continue;
+            }
+        }
 
         var col: usize = 0;
-        while (col < cols) {
-            const x: u16 = @intCast(col);
-            if (x >= win.width) break;
-
-            const raw = raw_cells[col];
-
-            // The namespace is carried by the cell itself, stamped when it was
-            // written. hexe never infers it from what is on screen: a program
-            // selects a namespace, and the cells it writes remember it.
-            const cell_ns: u8 = if (raw.style_id != 0) styles_arr[col].flags.ns else 0;
-            const cell_defaults = ns_table.defaultsFor(cell_ns);
-
-            // Skip spacer tails (prise: server.zig:930-933)
-            if (raw.wide == .spacer_tail) {
-                col += 1;
-                continue;
-            }
-
-            const is_direct_color = (raw.content_tag == .bg_color_rgb or
-                raw.content_tag == .bg_color_palette);
-            const cp = raw.codepoint();
-            // Blank, unstyled cells are normally skipped rather than written.
-            // A namespace background has to paint them, or `set --ns prompt
-            // bg=…` colours the glyphs and leaves the space between them at the
-            // terminal's own background. Gated on the row actually having one,
-            // so the skip still applies everywhere else — which is everywhere,
-            // until someone sets a background.
-            if (!is_direct_color and raw.style_id == 0 and !raw.hyperlink and
-                (cp == 0 or cp == ' ') and cell_defaults.bg == null)
-            {
-                col += 1;
-                continue;
-            }
-
-            const cell_width: u8 = if (raw.wide == .wide) 2 else 1;
-
-            const grapheme_tail: []const u21 = if (raw.content_tag == .codepoint_grapheme)
-                graphemes_arr[col]
-            else
-                &.{};
-
-            // Resolve grapheme text
-            const text = resolveCellText(arena, raw, grapheme_tail, is_direct_color) catch " ";
-
-            // Resolve style
-            const style = if (raw.style_id != 0)
-                convertStyle(styles_arr[col], raw, is_direct_color, ns_table, cell_ns, cell_defaults)
-            else
-                convertDefaultStyle(raw, is_direct_color, cell_defaults);
-
-            const link = resolveCellLink(arena, row_pins[yi], @intCast(col), raw);
-
-            win.writeCell(@intCast(col), y, .{
-                .char = .{ .grapheme = text, .width = cell_width },
-                .style = style,
-                .link = link,
-            });
-
-            // Write explicit spacer cells for wide characters
-            // (prise: Surface.zig:264-270)
-            if (cell_width == 2 and col + 1 < cols and x + 1 < win.width) {
-                win.writeCell(x + 1, y, .{
-                    .char = .{ .grapheme = "", .width = 0 },
-                    .style = style,
-                    .link = link,
-                });
-            }
-
-            col += cell_width;
-        }
+        while (col < row.cols) col += drawCell(row, col, col);
     }
 
     drawKittyPinPlacements(win, vt, vx.caps.kitty_graphics, occluders);
     drawKittyVirtualPlacements(win, vt, row_pins, available_rows, vx.caps.kitty_graphics, occluders);
+}
+
+/// One row being drawn, and everything a cell of it needs.
+const RowCtx = struct {
+    win: vaxis.Window,
+    y: u16,
+    /// Columns that may be drawn: the row's width, clipped to the window.
+    cols: usize,
+    raw_cells: []const pagepkg.Cell,
+    graphemes: []const []const u21,
+    styles: []const Style,
+    pin: ghostty.PageList.Pin,
+    arena: std.mem.Allocator,
+    ns_table: *NamespaceTable,
+    host_colors: ?*HostColors,
+};
+
+/// Draw source cell `src` at column `dst`. Returns the source columns it spans.
+fn drawCell(row: RowCtx, src: usize, dst: usize) usize {
+    const raw = row.raw_cells[src];
+
+    // The namespace is carried by the cell itself, stamped when it was
+    // written. hexe never infers it from what is on screen: a program
+    // selects a namespace, and the cells it writes remember it.
+    const cell_ns: u8 = if (raw.style_id != 0) row.styles[src].flags.ns else 0;
+    const cell_defaults = row.ns_table.defaultsFor(cell_ns);
+
+    // Skip spacer tails (prise: server.zig:930-933)
+    if (raw.wide == .spacer_tail) return 1;
+
+    const is_direct_color = (raw.content_tag == .bg_color_rgb or
+        raw.content_tag == .bg_color_palette);
+    const cp = raw.codepoint();
+    // Blank, unstyled cells are normally skipped rather than written.
+    // A namespace background has to paint them, or `set --ns prompt
+    // bg=…` colours the glyphs and leaves the space between them at the
+    // terminal's own background. Gated on the row actually having one,
+    // so the skip still applies everywhere else — which is everywhere,
+    // until someone sets a background.
+    if (!is_direct_color and raw.style_id == 0 and !raw.hyperlink and
+        (cp == 0 or cp == ' ') and cell_defaults.bg == null)
+    {
+        return 1;
+    }
+
+    const cell_width: u8 = if (raw.wide == .wide) 2 else 1;
+
+    const grapheme_tail: []const u21 = if (raw.content_tag == .codepoint_grapheme)
+        row.graphemes[src]
+    else
+        &.{};
+
+    const text = resolveCellText(row.arena, raw, grapheme_tail, is_direct_color) catch " ";
+
+    const style = if (raw.style_id != 0)
+        convertStyle(row.styles[src], raw, is_direct_color, row.ns_table, cell_ns, cell_defaults, row.host_colors)
+    else
+        convertDefaultStyle(raw, is_direct_color, cell_defaults);
+
+    const link = resolveCellLink(row.arena, row.pin, @intCast(src), raw);
+
+    row.win.writeCell(@intCast(dst), row.y, .{
+        .char = .{ .grapheme = text, .width = cell_width },
+        .style = style,
+        .link = link,
+    });
+
+    // Write explicit spacer cells for wide characters
+    // (prise: Surface.zig:264-270)
+    if (cell_width == 2 and dst + 1 < row.cols) {
+        row.win.writeCell(@intCast(dst + 1), row.y, .{
+            .char = .{ .grapheme = "", .width = 0 },
+            .style = style,
+            .link = link,
+        });
+    }
+
+    return cell_width;
+}
+
+/// Layout of an OSC 1332 stretch row.
+pub const StretchInfo = struct {
+    /// Fill cells on the row.
+    fills: usize,
+    /// One past the last cell the program wrote.
+    end: usize,
+    /// Columns the fills share.
+    free: usize,
+};
+
+/// The row's stretch layout at `cols` columns, or null when it has no fill.
+pub fn stretchInfo(raw_cells: []const pagepkg.Cell, cols: usize) ?StretchInfo {
+    var fills: usize = 0;
+    var end: usize = 0;
+    for (raw_cells[0..@min(cols, raw_cells.len)], 0..) |raw, c| {
+        const cp = raw.codepoint();
+        if (core.stretch.fillId(cp) != null) fills += 1;
+        if (cp != 0 or raw.style_id != 0 or raw.content_tag != .codepoint) end = c + 1;
+    }
+    if (fills == 0) return null;
+    return .{ .fills = fills, .end = end, .free = cols -| (end - fills) };
+}
+
+/// The drawn column of source column `src` on a stretch row.
+pub fn stretchColumn(raw_cells: []const pagepkg.Cell, info: StretchInfo, src: usize) usize {
+    var dst: usize = 0;
+    var nth: usize = 0;
+    for (raw_cells[0..@min(src, info.end)]) |raw| {
+        if (core.stretch.fillId(raw.codepoint()) != null) {
+            dst += core.stretch.fillWidth(info.free, info.fills, nth);
+            nth += 1;
+        } else dst += 1;
+    }
+    return dst + (src -| info.end);
+}
+
+/// The source column drawn at column `dst` on a stretch row.
+pub fn stretchSource(raw_cells: []const pagepkg.Cell, info: StretchInfo, dst: usize) usize {
+    var at: usize = 0;
+    var nth: usize = 0;
+    for (raw_cells[0..info.end], 0..) |raw, src| {
+        var w: usize = 1;
+        if (core.stretch.fillId(raw.codepoint()) != null) {
+            w = core.stretch.fillWidth(info.free, info.fills, nth);
+            nth += 1;
+        }
+        if (dst < at + w) return src;
+        at += w;
+    }
+    return info.end + (dst -| at);
+}
+
+/// Draw a stretch row: content shifted right past the fills before it, each
+/// fill its pattern repeated across its share of the free width. Content past
+/// the pane's edge is cut.
+fn drawStretchRow(row: RowCtx, stretch: *const core.stretch.State, info: StretchInfo) void {
+    var src: usize = 0;
+    var dst: usize = 0;
+    var nth: usize = 0;
+    while (src < info.end and dst < row.cols) {
+        if (core.stretch.fillId(row.raw_cells[src].codepoint())) |id| {
+            const w = core.stretch.fillWidth(info.free, info.fills, nth);
+            nth += 1;
+            if (stretch.pattern(id)) |pattern| drawFill(row, src, dst, w, pattern);
+            dst += w;
+            src += 1;
+            continue;
+        }
+        const span = drawCell(row, src, dst);
+        src += span;
+        dst += span;
+    }
+}
+
+fn drawFill(row: RowCtx, src: usize, dst: usize, width: usize, pattern: *const core.stretch.Pattern) void {
+    const raw = row.raw_cells[src];
+    const cell_ns: u8 = if (raw.style_id != 0) row.styles[src].flags.ns else 0;
+    const cell_defaults = row.ns_table.defaultsFor(cell_ns);
+    const style = if (raw.style_id != 0)
+        convertStyle(row.styles[src], raw, false, row.ns_table, cell_ns, cell_defaults, row.host_colors)
+    else
+        convertDefaultStyle(raw, false, cell_defaults);
+
+    var i: usize = 0;
+    while (i < width and dst + i < row.cols) : (i += 1) {
+        row.win.writeCell(@intCast(dst + i), row.y, .{
+            .char = .{ .grapheme = glyphText(row.arena, pattern.at(i)), .width = 1 },
+            .style = style,
+        });
+    }
+}
+
+fn glyphText(arena: std.mem.Allocator, cp: u21) []const u8 {
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &buf) catch return " ";
+    return arena.dupe(u8, buf[0..n]) catch " ";
 }
 
 /// Convert ghostty cell content to a UTF-8 string.
@@ -687,6 +814,7 @@ fn convertStyle(
     ns_table: *const NamespaceTable,
     ns: u8,
     defaults: core.palette.Defaults,
+    host_colors: ?*HostColors,
 ) vaxis.Style {
     var style = vaxis.Style{};
 
@@ -738,7 +866,56 @@ fn convertStyle(
         .dashed => .dashed,
     };
 
+    if (gs.fg_mix_percent < core.blend.OPAQUE_PERCENT) {
+        applyForegroundMix(&style, gs.fg_mix_percent, host_colors);
+    }
+
     return style;
+}
+
+const DefaultKind = enum { foreground, background };
+
+fn applyForegroundMix(style: *vaxis.Style, percent: u8, maybe_colors: ?*HostColors) void {
+    const colors = maybe_colors orelse return;
+    var displayed_fg = style.fg;
+    var displayed_bg = style.bg;
+    var fg_default: DefaultKind = .foreground;
+    var bg_default: DefaultKind = .background;
+    if (style.reverse) {
+        std.mem.swap(vaxis.Color, &displayed_fg, &displayed_bg);
+        std.mem.swap(DefaultKind, &fg_default, &bg_default);
+    }
+
+    const foreground = resolveHostRgb(colors, displayed_fg, fg_default) orelse return;
+    const background = resolveHostRgb(colors, displayed_bg, bg_default) orelse return;
+    const mixed = core.blend.mixRgb(foreground, background, percent);
+    style.fg = .{ .rgb = .{ mixed.r, mixed.g, mixed.b } };
+    style.bg = displayed_bg;
+    style.reverse = false;
+}
+
+pub fn benchmarkMixedViewport() !u64 {
+    var colors: HostColors = .{};
+    colors.palette[1] = .{ .r = 255, .g = 0, .b = 0 };
+    colors.background = .{ .r = 0, .g = 0, .b = 0 };
+    var timer = try std.time.Timer.start();
+    for (0..50 * 200) |_| {
+        var style: vaxis.Style = .{ .fg = .{ .index = 1 } };
+        applyForegroundMix(&style, 30, &colors);
+        std.mem.doNotOptimizeAway(style);
+    }
+    return timer.read();
+}
+
+fn resolveHostRgb(colors: *HostColors, color: vaxis.Color, default_kind: DefaultKind) ?core.palette.RGB {
+    return switch (color) {
+        .rgb => |rgb| .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] },
+        .index => |index| colors.resolvePalette(index),
+        .default => switch (default_kind) {
+            .foreground => colors.resolveForeground(),
+            .background => colors.resolveBackground(),
+        },
+    };
 }
 
 /// Style for a cell carrying no style of its own. It still belongs to the row's
@@ -804,6 +981,44 @@ fn resolveCellLink(
 }
 
 const testing = std.testing;
+
+test "foreground mix resolves indexed source over default background" {
+    var colors: HostColors = .{};
+    colors.palette[1] = .{ .r = 255, .g = 0, .b = 0 };
+    colors.background = .{ .r = 0, .g = 0, .b = 0 };
+    var style: vaxis.Style = .{ .fg = .{ .index = 1 } };
+
+    applyForegroundMix(&style, 30, &colors);
+
+    try testing.expectEqual(vaxis.Color{ .rgb = .{ 77, 0, 0 } }, style.fg);
+    try testing.expectEqual(vaxis.Color.default, style.bg);
+    try testing.expect(!style.reverse);
+}
+
+test "foreground mix normalizes reverse exactly once" {
+    var colors: HostColors = .{};
+    var style: vaxis.Style = .{
+        .fg = .{ .rgb = .{ 255, 0, 0 } },
+        .bg = .{ .rgb = .{ 0, 0, 255 } },
+        .reverse = true,
+    };
+
+    applyForegroundMix(&style, 30, &colors);
+
+    try testing.expectEqual(vaxis.Color{ .rgb = .{ 179, 0, 77 } }, style.fg);
+    try testing.expectEqual(vaxis.Color{ .rgb = .{ 255, 0, 0 } }, style.bg);
+    try testing.expect(!style.reverse);
+}
+
+test "foreground mix leaves unresolved colours opaque" {
+    var colors: HostColors = .{};
+    const original: vaxis.Style = .{ .fg = .{ .index = 1 }, .bg = .default, .reverse = true };
+    var style = original;
+
+    applyForegroundMix(&style, 30, &colors);
+
+    try testing.expect(style.eql(original));
+}
 
 test "visiblePart keeps the largest strip a float leaves" {
     const img: Rect = .{ .x = 0, .y = 0, .w = 60, .h = 24 };

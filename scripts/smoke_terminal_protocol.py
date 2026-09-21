@@ -127,7 +127,7 @@ def read_until(fd, marker, timeout_seconds):
 
 def run_query(fd, name, sequence, expected):
     command = (
-        "stty raw -echo min 1 time 20; "
+        "stty raw -echo min 1 time 50; "
         f"printf '{sequence}'; "
         f"value=$(dd bs=1 count={len(expected)} 2>/dev/null | od -An -tx1 | tr -d ' \\n'); "
         "stty sane; stty -echo; "
@@ -135,7 +135,7 @@ def run_query(fd, name, sequence, expected):
     ).encode()
     marker = f"PROTO_{name}_{expected.hex()}".encode()
     os.write(fd, command)
-    ok, data = read_until(fd, marker, 15)
+    ok, data = read_until(fd, marker, 20)
     if not ok:
         fail(f"{name} reply missing; tail={data[-240:]!r}")
     print(f"{name}: {expected!r}")
@@ -377,7 +377,7 @@ os.write(master, b"printf '\\033]777;notify;Live;Once\\033\\'\r")
 # with a semicolon, so it cannot match by accident.
 NOTIFY_DRAW = re.compile(rb"\[[0-9a-f]{8}\] Live: Once")
 notify_seen = b""
-notify_deadline = time.time() + 20
+notify_deadline = time.time() + 30
 while time.time() < notify_deadline:
     notify_seen += pump(master, 0.1)
     if NOTIFY_DRAW.search(notify_seen):

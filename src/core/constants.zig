@@ -5,14 +5,6 @@ const std = @import("std");
 
 /// Timing-related constants (all values in milliseconds)
 pub const Timing = struct {
-    /// Status bar update interval for non-animated content
-    /// Used in: src/frontends/terminal/loop_core.zig
-    pub const status_update_interval_base: i64 = 250;
-
-    /// Status bar update interval when animations are active
-    /// Used in: src/frontends/terminal/loop_core.zig
-    pub const status_update_interval_anim: i64 = 75;
-
     /// Interval for syncing pane info (CWD, foreground process)
     /// Used in: src/frontends/terminal/loop_core.zig
     pub const pane_sync_interval: i64 = 1000;

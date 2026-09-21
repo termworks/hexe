@@ -29,10 +29,7 @@ const std = @import("std");
 /// Slot 0 is what a cell that selected nothing resolves against. Setting it
 /// recolours the ordinary indexed palette for this pane.
 ///
-/// The bound is the tag carried on each cell: 5 bits of ghostty's style flags
-/// (patches/ghostty-vt-ns.patch), which are bits that were already padding.
-/// Widening it to a byte would grow the style struct from 14 to 16 and needs
-/// explicit equality and hashing changes, for 224 more slots than a pane uses.
+/// The bound is the five-bit namespace tag in Ghostty's style flags.
 pub const MAX_NS = 32;
 
 /// Reserved for hexe's own chrome: borders, the status bar, float titles,
@@ -491,6 +488,8 @@ pub fn isReservedOsc(code: u32) bool {
         9, 99, 777 => true, // progress and notifications
         10...19, 50...59, 110...119 => true, // dynamic colour and font families
         133 => true, // semantic prompt marks, which the zones are read from
+        1331 => true, // foreground colour mixing
+        1332 => true, // stretch lines
         else => false,
     };
 }
@@ -896,7 +895,9 @@ test "reserved OSC numbers cannot be claimed by the config" {
     try std.testing.expect(isReservedOsc(133));
     try std.testing.expect(isReservedOsc(52));
     try std.testing.expect(!isReservedOsc(DEFAULT_OSC));
-    try std.testing.expect(!isReservedOsc(1331));
+    try std.testing.expect(isReservedOsc(1331));
+    try std.testing.expect(isReservedOsc(1332));
+    try std.testing.expect(!isReservedOsc(1333));
 }
 
 test "slot 1 is hexe's own and an application cannot claim it" {

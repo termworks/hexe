@@ -157,7 +157,8 @@ run**: a mistake in the third is not a reason to skip the fourth.
 `hexe.events.on("<event>", fn)` is the same registrar spelled out, and still works.
 
 Available: `pane_focus_changed`, `tab_changed`, `command_finished`,
-`pane_shell_running_changed`, `statusbar_redraw` (throttled, 120 ms by default).
+`pane_shell_running_changed`, `statusbar_redraw` (when the bar is redrawn, at
+most every 120 ms; the bar redraws only when its content changes).
 
 ### Getting the chord to hexe at all
 
@@ -511,7 +512,8 @@ Supported events:
 - `tab_closed` — `ev.tab`, `ev.tab_count`
 - `command_finished`
 - `pane_shell_running_changed`
-- `statusbar_redraw` (throttled, default 120ms)
+- `statusbar_redraw` (when the bar is redrawn, at most every 120ms; the bar
+  redraws only when its content changes, so this is not a timer)
 
 Every payload carries `event` and `now_ms`. Handlers get the live API too, so a
 handler can query and act:

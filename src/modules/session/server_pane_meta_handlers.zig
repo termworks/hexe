@@ -155,7 +155,8 @@ pub fn handleBinaryUpdatePaneAux(self: *Server, fd: posix.fd_t, payload_len: u32
                 upa.is_focused != 0,
             );
         }
-        self.ses_state.markDirty();
+        // None of the fields above is persisted; the focus update marks the
+        // snapshot dirty itself when it changes.
     }
     self.replyOrClose(fd, .ok, &.{});
 }

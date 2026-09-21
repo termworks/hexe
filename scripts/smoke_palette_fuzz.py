@@ -148,8 +148,23 @@ def corpus():
         add(osc(b"1330;ask"))
     add(osc(b"1330;have;1330;200"))
 
+    # Foreground-mix scopes share the same bounded OSC ingest path.
+    for bad in (b"", b"-1", b"101", b"1.5", b"1e2", b" 30", b"999999999999999999"):
+        add(osc(b"1331;use;fg=" + bad))
+    add(osc(b"1331;use;future=value"))
+    add(osc(b"1331;use;fg=20;fg=30"))
+    add(osc(b"1331;unknown;fg=30"))
+    add(osc(b"1331;use;fg=" + b"3" * 65536))
+    for _ in range(1000):
+        add(osc(b"1331;use;fg=30"))
+    for _ in range(1200):
+        add(osc(b"1331;end"))
+    for _ in range(200):
+        add(osc(b"1331;ask"))
+    add(osc(b"1331;reset", term=BEL))
+
     # Neighbouring OSC numbers must not be swallowed as palette traffic.
-    for n in (b"1329", b"1331", b"133", b"13300", b"4", b"104", b"11", b"12"):
+    for n in (b"1329", b"1333", b"133", b"13300", b"4", b"104", b"11", b"12"):
         add(osc(n + b";0;?"))
 
     return bytes(out)

@@ -4,6 +4,7 @@ const core = @import("core");
 const pane_mod = @import("pane.zig");
 const Pane = pane_mod.Pane;
 const pane_respond = @import("pane_respond.zig");
+const host_colors = @import("host_colors.zig");
 
 fn writeResponse(self: *Pane, data: []const u8, comptime context: []const u8) void {
     self.write(data) catch |err| {
@@ -28,6 +29,19 @@ fn processVtOutput(self: *Pane, data: []const u8) void {
 }
 
 fn feedVtOutput(self: *Pane, data: []const u8) void {
+    // A stretch line ends with its row, even when the program never says `end`.
+    if (self.vt.stretch.in_line) {
+        if (std.mem.indexOfAny(u8, data, "\n\x0b\x0c")) |i| {
+            feedVtSegments(self, data[0..i]);
+            self.vt.stretchEnd();
+            feedVtSegments(self, data[i..]);
+            return;
+        }
+    }
+    feedVtSegments(self, data);
+}
+
+fn feedVtSegments(self: *Pane, data: []const u8) void {
     var offset: usize = 0;
     while (offset < data.len) {
         const remaining = data[offset..];
@@ -401,6 +415,14 @@ fn finishOsc(self: *Pane) void {
         consumePaletteOsc(self, self.osc_buf.items);
         return;
     }
+    if (code == core.blend.OSC) {
+        consumeBlendOsc(self, self.osc_buf.items);
+        return;
+    }
+    if (code == core.stretch.OSC) {
+        consumeStretchOsc(self, self.osc_buf.items);
+        return;
+    }
     if (isConsumedOscCode(code)) {
         consumeOsc(self, self.osc_buf.items);
         return;
@@ -412,8 +434,10 @@ fn finishOsc(self: *Pane) void {
 
     if (isOscQuery(self.osc_buf.items)) {
         if (handleOscQuery(self, code)) return;
-        self.osc_expected_responses +|= 1;
+        const registered = if (parseHostColorQuery(self.osc_buf.items)) |key| self.queueHostColorQuery(key) else false;
+        if (!registered) self.osc_expected_responses +|= 1;
     }
+    if (hostColorInvalidation(self.osc_buf.items, code)) |invalidation| self.host_color_invalidation.merge(invalidation);
     const stdout = std.fs.File.stdout();
     stdout.writeAll(self.osc_buf.items) catch |err| {
         core.logging.logError("terminal", "forward OSC sequence to terminal stdout", err);
@@ -445,6 +469,33 @@ fn consumePaletteOsc(self: *Pane, seq: []const u8) void {
     }
 }
 
+fn consumeBlendOsc(self: *Pane, seq: []const u8) void {
+    const params = oscParams(seq) orelse return;
+    switch (self.vt.blend_state.apply(params)) {
+        .ignore => {},
+        .changed => {
+            self.vt.syncBlendStyle();
+            self.vt.invalidateRenderState();
+        },
+        .have => {
+            writeResponse(self, "\x1b]1331;have;1;fg\x1b\\", "OSC 1331 capability response write failed");
+        },
+        .refresh => self.host_color_refresh_requested = true,
+    }
+}
+
+/// OSC 1332 — stretch lines (docs/stretch.md).
+fn consumeStretchOsc(self: *Pane, seq: []const u8) void {
+    const params = oscParams(seq) orelse return;
+    switch (self.vt.stretch.apply(params)) {
+        .ignore => {},
+        .have => writeResponse(self, "\x1b]1332;have;1\x1b\\", "OSC 1332 capability response write failed"),
+        .begin => self.vt.stretchBegin(),
+        .end => self.vt.stretchEnd(),
+        .fill => |id| self.vt.printStretchFill(id),
+    }
+}
+
 /// Everything after the OSC number and its `;`, with the introducer and the
 /// terminator stripped.
 fn oscParams(seq: []const u8) ?[]const u8 {
@@ -463,7 +514,7 @@ fn oscParams(seq: []const u8) ?[]const u8 {
     } else return null;
 
     const body = seq[start..end];
-    const semi = std.mem.indexOfScalar(u8, body, ';') orelse return null;
+    const semi = std.mem.indexOfScalar(u8, body, ';') orelse return body[body.len..];
     return body[semi + 1 ..];
 }
 
@@ -502,6 +553,8 @@ fn parseOscCode(seq: []const u8) ?u32 {
     while (i < seq.len) : (i += 1) {
         const c = seq[i];
         if (c == ';') break;
+        if (c == 0x07 or c == 0x9c) break;
+        if (c == 0x1b and i + 1 < seq.len and seq[i + 1] == '\\') break;
         if (c < '0' or c > '9') return null;
         any = true;
         code = code * 10 + @as(u32, c - '0');
@@ -517,6 +570,55 @@ fn handleOscQuery(self: *Pane, code: u32) bool {
     _ = self;
     _ = code;
     return false;
+}
+
+fn parseHostColorQuery(seq: []const u8) ?host_colors.QueryKey {
+    const code = parseOscCode(seq) orelse return null;
+    const params = oscParams(seq) orelse return null;
+    if (code == 10 and std.mem.eql(u8, params, "?")) return .foreground;
+    if (code == 11 and std.mem.eql(u8, params, "?")) return .background;
+    if (code == 12 and std.mem.eql(u8, params, "?")) return .cursor;
+    if (code != 4) return null;
+
+    var fields = std.mem.splitScalar(u8, params, ';');
+    const index_text = fields.next() orelse return null;
+    const value = fields.next() orelse return null;
+    if (!std.mem.eql(u8, value, "?") or fields.next() != null) return null;
+    const index = std.fmt.parseUnsigned(u8, index_text, 10) catch return null;
+    return .{ .palette = index };
+}
+
+fn hostColorInvalidation(seq: []const u8, code: u32) ?host_colors.Invalidation {
+    const params = oscParams(seq) orelse return null;
+    var result: host_colors.Invalidation = .{};
+    switch (code) {
+        4 => {
+            var fields = std.mem.splitScalar(u8, params, ';');
+            while (fields.next()) |index_text| {
+                const value = fields.next() orelse break;
+                if (std.mem.eql(u8, value, "?")) continue;
+                const index = std.fmt.parseUnsigned(u8, index_text, 10) catch continue;
+                result.addPalette(index);
+            }
+        },
+        104 => {
+            if (params.len == 0) {
+                result.palette_all = true;
+            } else {
+                var fields = std.mem.splitScalar(u8, params, ';');
+                while (fields.next()) |index_text| {
+                    const index = std.fmt.parseUnsigned(u8, index_text, 10) catch continue;
+                    result.addPalette(index);
+                }
+            }
+        },
+        10 => result.foreground = !std.mem.eql(u8, params, "?"),
+        11 => result.background = !std.mem.eql(u8, params, "?"),
+        110 => result.foreground = true,
+        111 => result.background = true,
+        else => return null,
+    }
+    return if (result.empty()) null else result;
 }
 
 fn shouldPassthroughOsc(seq: []const u8) bool {
@@ -562,6 +664,8 @@ test "OSC passthrough keeps color feedback families including OSC 51" {
     try std.testing.expect(shouldPassthroughOsc("\x1b]11;?\x07"));
     try std.testing.expect(shouldPassthroughOsc("\x1b]51;?\x07"));
     try std.testing.expect(shouldPassthroughOsc("\x1b]110;?\x07"));
+    try std.testing.expect(shouldPassthroughOsc("\x1b]104\x1b\\"));
+    try std.testing.expect(shouldPassthroughOsc("\x1b]110\x07"));
 
     try std.testing.expect(isOscQuery("\x1b]51;?\x07"));
     try std.testing.expect(isOscQuery("\x1b]119;?\x07"));
@@ -569,6 +673,28 @@ test "OSC passthrough keeps color feedback families including OSC 51" {
     try std.testing.expect(isConsumedOscCode(9));
     try std.testing.expect(isConsumedOscCode(99));
     try std.testing.expect(isConsumedOscCode(777));
+}
+
+test "host colour query parsing names one reply owner" {
+    try std.testing.expectEqual(host_colors.QueryKey{ .palette = 7 }, parseHostColorQuery("\x1b]4;7;?\x1b\\").?);
+    try std.testing.expectEqual(host_colors.QueryKey.foreground, parseHostColorQuery("\x1b]10;?\x07").?);
+    try std.testing.expectEqual(host_colors.QueryKey.background, parseHostColorQuery("\x1b]11;?\x1b\\").?);
+    try std.testing.expectEqual(host_colors.QueryKey.cursor, parseHostColorQuery("\x1b]12;?\x1b\\").?);
+    try std.testing.expect(parseHostColorQuery("\x1b]4;7;?;8;?\x1b\\") == null);
+    try std.testing.expect(parseHostColorQuery("\x1b]4;7;#ffffff\x1b\\") == null);
+}
+
+test "host colour mutation parsing targets affected cache entries" {
+    const set = hostColorInvalidation("\x1b]4;7;#ffffff;9;rgb:00/00/00\x1b\\", 4).?;
+    try std.testing.expect(set.hasPalette(7));
+    try std.testing.expect(set.hasPalette(9));
+    try std.testing.expect(!set.hasPalette(8));
+
+    const reset_all = hostColorInvalidation("\x1b]104\x1b\\", 104).?;
+    try std.testing.expect(reset_all.palette_all);
+    try std.testing.expect(hostColorInvalidation("\x1b]10;?\x1b\\", 10) == null);
+    try std.testing.expect(hostColorInvalidation("\x1b]110\x1b\\", 110).?.foreground);
+    try std.testing.expect(hostColorInvalidation("\x1b]111\x1b\\", 111).?.background);
 }
 
 test "CSI scanner preserves query state across every split" {
@@ -828,6 +954,79 @@ test "OSC 99 capability replies return to the pane across every split" {
         pane.feedPodOutput(query[split..]);
         const frame = try readTestFrame(fds[1], &frame_buf);
         try std.testing.expectEqualStrings("\x1b]99;i=probe:p=?;p=title,body\x1b\\", frame.payload[16..]);
+    }
+}
+
+test "OSC 1331 scopes survive every split and both terminators" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+
+    const sequence = "\x1b]1331;use;fg=30\x1b\\";
+    for (0..sequence.len + 1) |split| {
+        pane.feedPodOutput(sequence[0..split]);
+        pane.feedPodOutput(sequence[split..]);
+        try std.testing.expectEqual(@as(u8, 30), pane.vt.cursorBlendPercent());
+        try std.testing.expectEqual(@as(u8, 30), pane.vt.terminal.screens.active.cursor.style.fg_mix_percent);
+        pane.feedPodOutput("\x1b]1331;end\x07");
+        try std.testing.expectEqual(@as(u8, 100), pane.vt.cursorBlendPercent());
+    }
+}
+
+test "OSC 1331 ask replies exactly once" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+
+    const query = "\x1b]1331;ask\x1b\\";
+    for (0..query.len + 1) |split| {
+        pane.feedPodOutput(query[0..split]);
+        pane.feedPodOutput(query[split..]);
+        const frame = try readTestFrame(fds[1], &frame_buf);
+        try std.testing.expectEqual(@as(u16, 7), frame.header.pane_id);
+        try std.testing.expectEqual(@intFromEnum(core.pod_protocol.FrameType.input), frame.header.frame_type);
+        try std.testing.expectEqualStrings("\x1b]1331;have;1;fg\x1b\\", frame.payload[16..]);
+    }
+}
+
+test "OSC 1331 refresh is queued across every split" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+
+    const sequence = "\x1b]1331;refresh\x1b\\";
+    for (0..sequence.len + 1) |split| {
+        pane.feedPodOutput(sequence[0..split]);
+        pane.feedPodOutput(sequence[split..]);
+        try std.testing.expect(pane.takeHostColorRefresh());
+        try std.testing.expect(!pane.takeHostColorRefresh());
     }
 }
 

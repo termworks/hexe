@@ -105,41 +105,96 @@ pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, pars
 }
 
 /// Forward a key (with modifiers) to the focused pane as escape sequence.
+///
+/// A press, because every caller of this one is bind dispatch on a press. The
+/// other half of a keystroke goes through `forwardKeyToPaneWithText` with an
+/// explicit action.
 pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
-    forwardKeyToPaneWithText(state, mods, key, null);
+    forwardKeyToPaneWithText(state, mods, key, null, .press);
 }
 
-pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_codepoint: ?u21) void {
+pub fn forwardKeyToPaneWithText(
+    state: *State,
+    mods: u8,
+    key: BindKey,
+    text_codepoint: ?u21,
+    action: key_translate.Action,
+) void {
     var out: [64]u8 = undefined;
 
-    const target_pane = blk: {
-        if (state.activeFloatingIndex()) |idx| {
-            const fpane = state.view.float_views.items[idx];
-            const can_interact = if (state.paneParentTab(fpane)) |parent| parent == state.activeTabIndex() else true;
-            if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) {
-                break :blk fpane;
+    if (keyTargetPane(state)) |pane| {
+        // The fast path encodes a press and nothing else. It is already gated on
+        // the Kitty flags being clear, and a pane that asked for releases has
+        // them set, so this is belt and braces -- but a release must never take
+        // a path that cannot express one.
+        if (action == .press) {
+            const kitty_flags: u8 = @intCast(pane.vt.terminal.screens.active.kitty_keyboard.current().int());
+            if (fast_path.fastPathBytes(&out, mods, key, text_codepoint, kitty_flags)) |n| {
+                // The fast path runs only with the Kitty flags clear, so what it
+                // writes is the legacy spelling: text, and no release to follow.
+                state.recordSentPress(pane.uuid, mods, key, true);
+                forwardInputToFocusedPaneWithEvent(state, out[0..n], null);
+                return;
             }
         }
-
-        if (state.currentLayout().getFocusedPane()) |pane| {
-            break :blk pane;
-        }
-
-        break :blk null;
-    };
-
-    if (target_pane) |pane| {
-        const kitty_flags: u8 = @intCast(pane.vt.terminal.screens.active.kitty_keyboard.current().int());
-        if (fast_path.fastPathBytes(&out, mods, key, text_codepoint, kitty_flags)) |n| {
-            forwardInputToFocusedPaneWithEvent(state, out[0..n], null);
-            return;
-        }
-        if (key_translate.encodeKey(&out, mods, key, text_codepoint, &pane.vt.terminal)) |bytes| {
+        if (key_translate.encodeKey(&out, mods, key, text_codepoint, action, &pane.vt.terminal)) |bytes| {
+            if (action == .press) {
+                // An escape code carries an event subfield and can be told apart
+                // from text; anything else IS text, whatever produced it.
+                state.recordSentPress(pane.uuid, mods, key, !(bytes.len > 0 and bytes[0] == 0x1b));
+            }
             if (bytes.len > 0) {
                 forwardInputToFocusedPaneWithEvent(state, bytes, null);
             }
+        } else if (action == .press) {
+            // The encoder declined, so nothing was sent and nothing may follow.
+            state.recordSentPress(pane.uuid, mods, key, true);
         }
     }
+}
+
+/// Which pane a forwarded key reaches. Release gating must ask the same pane the
+/// press was written to, or it answers for the wrong flags.
+pub fn keyTargetPane(state: *State) ?*Pane {
+    if (state.activeFloatingIndex()) |idx| {
+        const fpane = state.view.float_views.items[idx];
+        const can_interact = if (state.paneParentTab(fpane)) |parent| parent == state.activeTabIndex() else true;
+        if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) return fpane;
+    }
+    return state.currentLayout().getFocusedPane();
+}
+
+/// May this key's release be sent to the pane it was pressed in?
+///
+/// Three rules, in the order the protocol states them: a pane that never set
+/// `report_events` hears no releases at all; a pane that set `report_all` hears
+/// every one, because text is no longer sent and a `:3` sequence cannot be
+/// mistaken for a character; otherwise the release is owed only to a key whose
+/// press went out as an escape code.
+pub fn releaseAllowedForKey(state: *State, mods: u8, key: BindKey) bool {
+    const pane = keyTargetPane(state) orelse return false;
+    const record = state.takeSentPress(pane.uuid, mods, key);
+
+    const flags = pane.vt.terminal.screens.active.kitty_keyboard.current();
+    if (!flags.report_events) return false;
+    if (flags.report_all) return true;
+
+    // No record means the press never reached this pane -- it was swallowed by a
+    // bind, or arrived before the pane was focused. Sending a release for a
+    // press an application never saw is the same unmatched half the record
+    // exists to prevent.
+    const sent = record orelse {
+        main.debugLog("release: withheld, no press record: mods={d} key={any} flags={d}", .{ mods, key, flags.int() });
+        return false;
+    };
+    main.debugLog("release: {s}: mods={d} key={any} flags={d} press_was_text={}", .{
+        if (sent.as_text) "withheld" else "forwarded",
+        mods,
+        key,
+        flags.int(),
+        sent.as_text,
+    });
+    return !sent.as_text;
 }
 
 /// Focus context used for key timer bookkeeping.
@@ -466,7 +521,12 @@ fn handleReleaseEvent(state: *State, cfg: *const core.Config, mods_eff: u8, key:
     if (findBestBind(state, mods_eff, key, .release, allow_only_tabs)) |b| {
         return dispatchBindWithMode(state, b, mods_eff, key);
     }
-    return true;
+
+    // No bind wanted this release and no hold timer was waiting on it. Saying it
+    // was handled swallowed every release before the caller could ask whether
+    // the pane had earned one, which is why an application could never see a key
+    // being let go. `loop_input` applies `releaseAllowedForKey` from here.
+    return false;
 }
 
 fn touchRepeatActiveTimer(state: *State, mods_eff: u8, key: BindKey, focus_ctx: FocusContext, now_ms: i64) void {

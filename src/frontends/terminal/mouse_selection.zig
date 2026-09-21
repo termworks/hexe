@@ -3,6 +3,19 @@ const ghostty = @import("ghostty-vt");
 
 const Pane = @import("pane.zig").Pane;
 const Renderer = @import("render_core.zig").Renderer;
+const core = @import("core");
+const vt_bridge = @import("vt_bridge.zig");
+
+/// On an OSC 1332 stretch row the drawn column is not the stored one.
+fn sourceColumn(pane: *Pane, local_x: u16, local_y: u16) u16 {
+    if (pane.vt.stretch.count == 0) return local_x;
+    const rs = pane.getRenderState() catch return local_x;
+    const rows = rs.row_data.slice();
+    if (local_y >= rows.len) return local_x;
+    const raw = rows.items(.cells)[local_y].slice().items(.raw);
+    const info = vt_bridge.stretchInfo(raw, @min(@as(usize, pane.width), rs.cols)) orelse return local_x;
+    return @intCast(@min(vt_bridge.stretchSource(raw, info, local_x), std.math.maxInt(u16)));
+}
 
 /// Pane-local mouse coordinate (viewport coordinate space).
 pub const Pos = struct {
@@ -67,13 +80,14 @@ pub const MouseSelection = struct {
         self.alt_screen_mode = is_alt;
         self.last_local = .{ .x = local_x, .y = local_y };
         self.edge_scroll = edgeFromLocalY(local_y, pane.height);
+        const src_x = sourceColumn(pane, local_x, local_y);
         // In alt screen mode, store local coords directly (no viewport offset needed).
         // In normal mode, add viewport offset so selection tracks buffer lines during scroll.
         if (is_alt) {
-            self.anchor = .{ .x = local_x, .y = local_y };
+            self.anchor = .{ .x = src_x, .y = local_y };
         } else {
             const viewport_top = getViewportTopScreenY(pane);
-            self.anchor = .{ .x = local_x, .y = viewport_top + local_y };
+            self.anchor = .{ .x = src_x, .y = viewport_top + local_y };
         }
         self.cursor = self.anchor;
         self.has_range = false;
@@ -83,12 +97,13 @@ pub const MouseSelection = struct {
         if (!self.active) return;
         self.last_local = .{ .x = local_x, .y = local_y };
         self.edge_scroll = edgeFromLocalY(local_y, pane.height);
+        const src_x = sourceColumn(pane, local_x, local_y);
         // Use same coordinate mode as when selection started
         const next: BufPos = if (self.alt_screen_mode)
-            .{ .x = local_x, .y = local_y }
+            .{ .x = src_x, .y = local_y }
         else blk: {
             const viewport_top = getViewportTopScreenY(pane);
-            break :blk .{ .x = local_x, .y = viewport_top + local_y };
+            break :blk .{ .x = src_x, .y = viewport_top + local_y };
         };
         if (self.cursor.x != next.x or self.cursor.y != next.y) {
             self.dragging = true;
@@ -265,8 +280,17 @@ pub fn applyOverlayTrimmed(renderer: *Renderer, render_state: *const ghostty.Ren
 
         if (end_x < start_x) continue;
 
-        var x: u16 = start_x;
-        while (x <= end_x) : (x += 1) {
+        // A stretch row is drawn wider than it is stored: cover what is drawn.
+        var draw_start = start_x;
+        var draw_end = end_x;
+        const raw_row = row_cells[@intCast(y)].slice().items(.raw);
+        if (vt_bridge.stretchInfo(raw_row, cols_max)) |info| {
+            draw_start = @intCast(@min(vt_bridge.stretchColumn(raw_row, info, start_x), cols_max - 1));
+            draw_end = @intCast(@min(vt_bridge.stretchColumn(raw_row, info, @as(usize, end_x) + 1) -| 1, cols_max - 1));
+        }
+
+        var x: u16 = draw_start;
+        while (x <= draw_end) : (x += 1) {
             var cell = renderer.getVaxisCell(pane_x + x, pane_y + y) orelse continue;
             cell.style.bg = .{ .index = selection_color };
             renderer.setVaxisCell(pane_x + x, pane_y + y, cell);
@@ -291,7 +315,11 @@ pub fn extractText(allocator: std.mem.Allocator, pane: *Pane, range: BufRange) !
     defer allocator.free(text_z);
 
     const slice = std.mem.sliceTo(text_z, 0);
-    return dupeTrimBlankLines(allocator, slice);
+    if (pane.vt.stretch.count == 0) return dupeTrimBlankLines(allocator, slice);
+    // Stretch fills are copied as drawn, not as their placeholder cells.
+    const expanded = try core.stretch.expandText(allocator, slice, &pane.vt.stretch, pane.width);
+    defer allocator.free(expanded);
+    return dupeTrimBlankLines(allocator, expanded);
 }
 
 /// Standard word separators for terminal word selection

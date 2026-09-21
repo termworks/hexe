@@ -224,7 +224,7 @@ pub const TerminalArgs = struct {
 
 /// Entry point for the terminal frontend - can be called directly from unified CLI.
 pub fn run(terminal_args: TerminalArgs) !void {
-    const allocator = std.heap.page_allocator;
+    const allocator = std.heap.smp_allocator;
 
     // Handle --notify: send to parent terminal frontend and exit.
     if (terminal_args.notify_message) |msg| {
@@ -237,7 +237,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
         var runtime = try FrontendRuntime.createTerminalProbe(allocator, terminal_args.log_level, terminal_args.log_file, terminal_args.connect_options);
         defer runtime.destroy();
         runtime.connect() catch {
-            std.debug.print("Could not connect to ses daemon\n", .{});
+            std.debug.print("{s}", .{core.frontend_client.takeStartupDiagnosis() orelse "Could not connect to ses daemon\n"});
             return;
         };
 
@@ -642,7 +642,7 @@ pub fn exportSessionEnv(session_uuid: [32]u8) void {
 }
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    const allocator = std.heap.smp_allocator;
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);

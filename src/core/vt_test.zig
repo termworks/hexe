@@ -18,6 +18,20 @@ test "VT preserves explicit steady cursor style" {
     try std.testing.expectEqual(@as(u8, 2), vt.getCursorStyle());
 }
 
+test "embedder style state keeps measured ghostty layouts" {
+    try std.testing.expectEqual(@as(usize, 28), @sizeOf(core.vt.ghostty.Style));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(core.vt.ghostty.Cell));
+
+    // Page is one `usize` larger in a debug build: ghostty gives it a
+    // `pause_integrity_checks` field under `slow_runtime_safety`, which its
+    // Config turns on for Debug and off for every release mode
+    // (`page.zig:158`). Pinning the release figure alone made this canary fail
+    // for `zig build test`, which is a Debug build -- reporting drift that was
+    // only the build mode. Both numbers are correct; a third would be drift.
+    const page = @sizeOf(core.vt.ghostty.Page);
+    try std.testing.expect(page == 376 or page == 376 + @sizeOf(usize));
+}
+
 /// The tag hexe stamps onto the cursor is what ghostty copies onto every cell
 /// written next. These assert on that tag directly rather than through a
 /// rendered frame: a screen capture goes through the renderer, vaxis diffing and
@@ -29,6 +43,10 @@ fn initTagVt(vt: *core.VT) !void {
 
 fn cursorTag(vt: *core.VT) u8 {
     return vt.terminal.screens.active.cursor.style.flags.ns;
+}
+
+fn cursorMix(vt: *core.VT) u8 {
+    return vt.terminal.screens.active.cursor.style.fg_mix_percent;
 }
 
 test "the tag hexe stamps reaches the cursor" {
@@ -107,6 +125,90 @@ test "the tag follows the pane across an alt-screen switch" {
     try std.testing.expectEqual(@as(u8, 0), cursorTag(&vt));
 }
 
+test "foreground mix reaches both screen cursors" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 5);
+    defer vt.deinit();
+
+    try std.testing.expectEqual(core.blend.Applied.changed, vt.blend_state.apply("use;fg=30"));
+    vt.syncBlendStyle();
+    try std.testing.expectEqual(@as(u8, 30), cursorMix(&vt));
+
+    try vt.feed("\x1b[?1049h");
+    try std.testing.expectEqual(@as(u8, 30), cursorMix(&vt));
+
+    try std.testing.expectEqual(core.blend.Applied.changed, vt.blend_state.apply("end"));
+    vt.syncBlendStyle();
+    try vt.feed("\x1b[?1049l");
+    try std.testing.expectEqual(@as(u8, 100), cursorMix(&vt));
+}
+
+test "SGR and RIS preserve foreground mix" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 5);
+    defer vt.deinit();
+    _ = vt.blend_state.apply("use;fg=30");
+    vt.syncBlendStyle();
+
+    try vt.feed("A\x1b[0mB");
+    try std.testing.expectEqual(@as(u8, 30), cursorMix(&vt));
+    try vt.feed("\x1bcAFTER");
+    try std.testing.expectEqual(@as(u8, 30), cursorMix(&vt));
+}
+
+test "cursor restore keeps the live foreground mix" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 5);
+    defer vt.deinit();
+    _ = vt.blend_state.apply("use;fg=30");
+    vt.syncBlendStyle();
+
+    try vt.feed("\x1b7");
+    _ = vt.blend_state.apply("end");
+    vt.syncBlendStyle();
+    try vt.feed("\x1b8");
+    try std.testing.expectEqual(@as(u8, 100), cursorMix(&vt));
+}
+
+fn expectGlyphMix(vt: *core.VT, glyph: u21, expected_percent: u8, expected_count: usize) !void {
+    const state = try vt.getRenderState();
+    const rows = state.row_data.slice();
+    var found: usize = 0;
+    for (rows.items(.cells)) |cells| {
+        const slice = cells.slice();
+        for (slice.items(.raw), slice.items(.style)) |raw, style| {
+            if (raw.codepoint() != glyph) continue;
+            const percent = if (raw.style_id == 0) @as(u8, 100) else style.fg_mix_percent;
+            try std.testing.expectEqual(expected_percent, percent);
+            found += 1;
+        }
+    }
+    try std.testing.expectEqual(expected_count, found);
+}
+
+test "foreground mix stays on cells through reflow" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 8, 6);
+    defer vt.deinit();
+
+    try vt.feed("AA");
+    _ = vt.blend_state.apply("use;fg=30");
+    vt.syncBlendStyle();
+    try vt.feed("BBBBBBBBBBBB");
+    _ = vt.blend_state.apply("end");
+    vt.syncBlendStyle();
+    try vt.feed("ZZ");
+
+    try expectGlyphMix(&vt, 'A', 100, 2);
+    try expectGlyphMix(&vt, 'B', 30, 12);
+    try expectGlyphMix(&vt, 'Z', 100, 2);
+
+    try vt.resize(5, 6);
+    try expectGlyphMix(&vt, 'A', 100, 2);
+    try expectGlyphMix(&vt, 'B', 30, 12);
+    try expectGlyphMix(&vt, 'Z', 100, 2);
+}
+
 test "VT stores a Kitty image transmitted over APC" {
     var vt: core.VT = undefined;
     try vt.init(std.testing.allocator, 20, 5);
@@ -166,6 +268,72 @@ fn firstRow(vt: *core.VT, buf: []u8) []const u8 {
         }
     }
     return std.mem.trimRight(u8, buf[0..n], " ");
+}
+
+test "render state follows edits, screen switches and scrolls across reuses" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 3);
+    defer vt.deinit();
+    var buf: [32]u8 = undefined;
+
+    try vt.feed("abc\r\nline2");
+    try std.testing.expectEqualStrings("abc", rowText(&vt, 0, &buf));
+    try std.testing.expectEqualStrings("line2", rowText(&vt, 1, &buf));
+
+    try vt.feed("\x1b[1;1HX");
+    try std.testing.expectEqualStrings("Xbc", rowText(&vt, 0, &buf));
+    try std.testing.expectEqualStrings("line2", rowText(&vt, 1, &buf));
+
+    try vt.feed("\x1b[?1049h\x1b[2J\x1b[1;1Halt");
+    try std.testing.expectEqualStrings("alt", rowText(&vt, 0, &buf));
+    try std.testing.expectEqualStrings("", rowText(&vt, 1, &buf));
+
+    try vt.feed("\x1b[?1049l");
+    try std.testing.expectEqualStrings("Xbc", rowText(&vt, 0, &buf));
+
+    try vt.feed("\x1b[3;1H\r\nr3\r\nr4\r\nr5");
+    try std.testing.expectEqualStrings("r3", rowText(&vt, 0, &buf));
+    try std.testing.expectEqualStrings("r5", rowText(&vt, 2, &buf));
+
+    try vt.resize(10, 4);
+    try vt.feed("\x1b[4;1Hlast");
+    try std.testing.expectEqualStrings("last", rowText(&vt, 3, &buf));
+}
+
+test "a stretch fill is one placeholder cell between the text around it" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 20, 3);
+    defer vt.deinit();
+
+    try std.testing.expect(vt.terminal.modes.get(.wraparound));
+    vt.stretchBegin();
+    try std.testing.expect(!vt.terminal.modes.get(.wraparound));
+    try vt.feed("ab");
+    const id = vt.stretch.intern(.{ .glyphs = .{ '-', 0, 0, 0, 0, 0, 0, 0 }, .len = 1 }).?;
+    vt.printStretchFill(id);
+    try vt.feed("cd");
+    vt.stretchEnd();
+    try std.testing.expect(vt.terminal.modes.get(.wraparound));
+
+    const state = try vt.getRenderState();
+    const cells = state.row_data.slice().items(.cells)[0].slice().items(.raw);
+    try std.testing.expectEqual(@as(u21, 'a'), cells[0].codepoint());
+    try std.testing.expectEqual(@as(u21, 'b'), cells[1].codepoint());
+    try std.testing.expectEqual(@as(?u8, id), core.stretch.fillId(cells[2].codepoint()));
+    try std.testing.expectEqual(@as(u21, 'c'), cells[3].codepoint());
+    try std.testing.expectEqual(@as(u21, 'd'), cells[4].codepoint());
+}
+
+test "a long stretch line does not wrap onto the next row" {
+    var vt: core.VT = undefined;
+    try vt.init(std.testing.allocator, 10, 3);
+    defer vt.deinit();
+    var buf: [32]u8 = undefined;
+
+    vt.stretchBegin();
+    try vt.feed("0123456789ABCDEF");
+    vt.stretchEnd();
+    try std.testing.expectEqualStrings("", rowText(&vt, 1, &buf));
 }
 
 test "VT imports a sixel image and keeps the text around it" {
@@ -264,7 +432,6 @@ test "the fallback matches the default, so a first report is a change" {
     try std.testing.expect(core.vt.setCellPixels(core.vt.cell_px.w, core.vt.cell_px.h));
     try std.testing.expect(core.vt.cell_px.known);
 }
-
 
 test "VT answers a Kitty graphics support query" {
     var vt: core.VT = undefined;

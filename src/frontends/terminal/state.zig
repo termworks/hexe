@@ -11,6 +11,7 @@ const wire = core.wire;
 const pop = @import("pop");
 const lua_api = @import("lua_api.zig");
 const drawings_mod = @import("drawings.zig");
+const host_colors_mod = @import("host_colors.zig");
 
 const state_types = @import("state_types.zig");
 pub const PendingAction = state_types.PendingAction;
@@ -308,6 +309,9 @@ pub const State = struct {
     /// Whether SES has been told this config's pane-name dictionary on the
     /// current connection. Reset on disconnect so a reconnect re-sends it.
     name_pool_sent: bool = false,
+    /// Key of the last pane aux the sync tick sent, and when.
+    aux_sent_key: u64 = 0,
+    aux_sent_ms: i64 = 0,
     force_full_render: bool,
     /// When true, keyboard input is broadcast to every split pane in the
     /// active tab (tmux `synchronize-panes`). Toggled by pane.sync_toggle.
@@ -332,6 +336,7 @@ pub const State = struct {
     /// terminal, so this is emitted only on change and undone on teardown.
     cursor_color: ?core.palette.RGB = null,
     cursor_color_set: bool = false,
+    host_colors: host_colors_mod.HostColors = .{},
     term_width: u16,
     term_height: u16,
     status_height: u16,
@@ -489,6 +494,10 @@ pub const State = struct {
     // Keybinding timers (hold/double-tap delayed press)
     key_timers: std.ArrayList(PendingKeyTimer),
 
+    // What each recent press actually wrote to its pane, for releaseAllowed.
+    sent_presses: [sent_press_slots]?SentPress = @splat(null),
+    sent_press_next: usize = 0,
+
     // Scroll acceleration tracking
     scroll_repeat_count: u8 = 0,
     last_scroll_key: u8 = 0, // 5=pageup, 6=pagedown
@@ -604,6 +613,7 @@ pub const State = struct {
             .terminal_query_deadline_ms = 0,
             .terminal_caps_ready = false,
             .terminal_query_timed_out = false,
+            .host_colors = .{},
             .drop_input_until_ms = 0,
 
             .pending_float_requests = std.AutoHashMap([32]u8, PendingFloatRequest).init(allocator),
@@ -1498,6 +1508,69 @@ pub const State = struct {
             return;
         }
         self.flushPendingMuxVtWrites();
+    }
+
+    pub const sent_press_slots = 16;
+
+    /// What a key's press actually wrote to a pane.
+    ///
+    /// The Kitty protocol offers no release for a key that produced text: with
+    /// `report_events` alone the press goes out as a literal byte, and the spec
+    /// says of that case that "there is no way to be notified of key
+    /// repeat/release events" -- only `report_all`, which stops text being sent
+    /// at all, makes one reportable. Sending a `:3` sequence anyway is read as
+    /// the character a second time by any application that does not inspect the
+    /// event subfield, which is a keystroke appearing twice with nothing on
+    /// screen to say why.
+    ///
+    /// The press is recorded rather than re-derived at release time. Encoding a
+    /// hypothetical press to ask what it would have been is what `139effc` did,
+    /// and a probe that disagrees with the bytes actually sent -- a missing
+    /// `text_codepoint`, an encoder that declined -- leaks exactly the release
+    /// this exists to withhold.
+    pub const SentPress = struct {
+        pane_uuid: [32]u8,
+        mods: u8,
+        key: BindKey,
+        as_text: bool,
+    };
+
+    pub fn recordSentPress(self: *State, pane_uuid: [32]u8, mods: u8, key: BindKey, as_text: bool) void {
+        for (&self.sent_presses) |*slot| {
+            const s = &(slot.* orelse continue);
+            if (s.mods == mods and sentPressKeyEq(s.key, key) and std.mem.eql(u8, &s.pane_uuid, &pane_uuid)) {
+                s.as_text = as_text;
+                return;
+            }
+        }
+        self.sent_presses[self.sent_press_next] = .{
+            .pane_uuid = pane_uuid,
+            .mods = mods,
+            .key = key,
+            .as_text = as_text,
+        };
+        self.sent_press_next = (self.sent_press_next + 1) % sent_press_slots;
+    }
+
+    /// Take the record of this key's press, if one is still held.
+    ///
+    /// Consuming it keeps a single press from authorising a second release, and
+    /// keeps a stale entry from outliving the pane it named.
+    pub fn takeSentPress(self: *State, pane_uuid: [32]u8, mods: u8, key: BindKey) ?SentPress {
+        for (&self.sent_presses) |*slot| {
+            const s = slot.* orelse continue;
+            if (s.mods == mods and sentPressKeyEq(s.key, key) and std.mem.eql(u8, &s.pane_uuid, &pane_uuid)) {
+                slot.* = null;
+                return s;
+            }
+        }
+        return null;
+    }
+
+    fn sentPressKeyEq(a: BindKey, b: BindKey) bool {
+        if (@as(core.Config.BindKeyKind, a) != @as(core.Config.BindKeyKind, b)) return false;
+        if (@as(core.Config.BindKeyKind, a) == .char) return a.char == b.char;
+        return true;
     }
 
     pub const PendingKeyTimerKind = enum { delayed_press, tap_pending, hold, hold_fired, repeat_wait, repeat_active, repeat_locked };

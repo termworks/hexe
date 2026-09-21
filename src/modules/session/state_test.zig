@@ -1825,6 +1825,36 @@ test "updateClientSessionFocus: float focus preserves split focus and tracks act
     try testing.expectEqual([_]u8{'1'} ** 32, client.session_snapshot.?.tabs.items[0].focused_pane_uuid.?);
 }
 
+test "updateClientSessionFocus: repeating the same focus leaves the store clean" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const client = ses_state.getClient(client_id).?;
+
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha");
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-1"),
+        .focused_pane_uuid = null,
+        .allocator = testing.allocator,
+    });
+    try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 0 });
+    try snapshot.panes.put([_]u8{'2'} ** 32, .{ .uuid = [_]u8{'2'} ** 32, .kind = .split, .parent_tab = 0 });
+    client.updateSessionSnapshot(snapshot);
+
+    ses_state.store.dirty = false;
+    ses_state.updateClientSessionFocus(client_id, [_]u8{'1'} ** 32, 0, true);
+    try testing.expect(ses_state.store.dirty);
+
+    ses_state.store.dirty = false;
+    ses_state.updateClientSessionFocus(client_id, [_]u8{'1'} ** 32, 0, true);
+    try testing.expect(!ses_state.store.dirty);
+
+    ses_state.updateClientSessionFocus(client_id, [_]u8{'2'} ** 32, 0, true);
+    try testing.expect(ses_state.store.dirty);
+}
+
 test "addClientSessionTab: inserts active tab with focused split pane" {
     var ses_state = state.SesState.init(testing.allocator);
     defer ses_state.deinit();

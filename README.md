@@ -59,6 +59,24 @@ See [the palette protocol](docs/palette.md) for the sequences to emit.
 
 ---
 
+## Foreground colour mixing
+
+OSC 1331 can soften ordinary ANSI, 256-colour, default or truecolour text
+against its effective cell background without changing the application's SGR
+palette choices.
+
+```sh
+printf '\033]1331;use;fg=30\033\\'
+printf '\033[31m30%% red, 70%% cell background\033[0m\n'
+printf '\033]1331;end\033\\'
+```
+
+The percentage is recorded per cell and composes with OSC 1330 namespaces.
+See [foreground colour mixing](docs/blend.md) for the exact private protocol,
+fallback rules, capability query and host-palette refresh behavior.
+
+---
+
 ## Anything can drive it
 
 Everything hexe knows about its panes, floats, tabs and session has one definition — the live Lua
@@ -124,6 +142,7 @@ hexe itself — see [recording](docs/recording.md).
 | [Painting](docs/regions.md) | the bar, titles, sprites and popups are drawn by an external painter |
 | [Shell integration](docs/prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
 | [Palette protocol](docs/palette.md) | a program claims its own 256-colour table for the output it writes |
+| [Foreground mixing](docs/blend.md) | mix ordinary ANSI foregrounds with each cell's effective background |
 | [Configuration](docs/config.md) | one Lua file, a schema that refuses typos, reload without losing panes |
 | [Project sessions](docs/session-manager.md) | `.hexe.lua`, freezing a session, and the trust ledger |
 | [Isolation](docs/isolation.md) | namespaces and cgroups per pane — and what it needs from the kernel |

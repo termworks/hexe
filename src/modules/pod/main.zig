@@ -482,6 +482,8 @@ const IO_BUF_LEN: usize = 64 * 1024;
 
 /// Cadence of the socket-file / accept-watcher self-heal check.
 const POD_SOCKET_HEAL_MS: i64 = 5_000;
+/// How long without pty traffic before a pane counts as quiet.
+const QUIET_AFTER_MS: i64 = 3_000;
 
 fn applyPasswordMode(backlog: *RingBuffer, password_mode: *bool, enabled: bool) void {
     if (password_mode.* == enabled) return;
@@ -518,6 +520,9 @@ const Pod = struct {
     alt_tracker: buffering.AltScreenTracker = .{},
     reader: pod_protocol.Reader,
     password_mode: bool = false,
+    /// Last pty output or input. A pane quiet for `QUIET_AFTER_MS` polls its
+    /// cwd and foreground process at the detached rate.
+    last_io_ms: i64 = 0,
 
     // Exactly-once input dedup across a frontend VT reconnect. See applyInputFrame.
     input_dedup: input_dedup_mod.InputDedup = .{},
@@ -562,6 +567,8 @@ const Pod = struct {
             .{ "HEXE_POD_NAME", pod_name orelse "" },
             .{ "HEXE_POD_SOCKET", socket_path },
             .{ "HEXE_PANE_API_SOCKET", pane_api },
+            // For programs that cannot send OSC 1332 `ask` and read the reply.
+            .{ "HEXE_STRETCH", "1332" },
         };
         var pty = try core.Pty.spawnWithEnv(shell, cwd, &extra_env);
         errdefer pty.close();
@@ -1157,6 +1164,7 @@ const Pod = struct {
             return .disarm;
         }
 
+        pty_ctx.pod.last_io_ms = std.time.milliTimestamp();
         pty_ctx.pod.processPtyOutput(pty_ctx.io_buf[0..n]);
 
         return .rearm;
@@ -1166,6 +1174,10 @@ const Pod = struct {
     /// Tries to write directly first; any remainder is buffered and
     /// an xev write-readiness watcher drains it asynchronously.
     fn queuePtyWrite(self: *Pod, data: []const u8) void {
+        self.last_io_ms = std.time.milliTimestamp();
+        // Read the tty mode before these keystrokes go anywhere, so a prompt
+        // that turned echo off is never recorded or forwarded as plain input.
+        self.pollPasswordMode();
         // Every input path (mux frames, aux input from `pod attach`) funnels
         // through here, so this is the one place a recorder can see keystrokes.
         // Password mode suppresses it exactly as it suppresses output.
@@ -1299,7 +1311,10 @@ const Pod = struct {
         timer_ctx.pod.pollPasswordMode();
 
         const uplink_attached = timer_ctx.pod.client != null or timer_ctx.pod.observers.items.len > 0;
-        timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid, uplink_attached);
+        // A cd or a new foreground process comes with pty traffic, so a pane
+        // that has been quiet a while is polled at the detached rate.
+        const quiet = std.time.milliTimestamp() - timer_ctx.pod.last_io_ms > QUIET_AFTER_MS;
+        timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid, uplink_attached and !quiet);
         // The mutation sites report immediately; this is the retry for the ones
         // that could not reach SES at the time, and the first announcement for a
         // pod nobody has ever watched. Idempotent, so it costs a comparison.

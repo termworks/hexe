@@ -9,7 +9,7 @@ run can be compared against the same number.
 This measures the whole absorb+render pipeline from outside, which is the thing
 a user feels; it is not a microbenchmark of convertStyle.
 """
-import fcntl, os, pty, struct, subprocess, sys, termios, threading, time
+import fcntl, os, pty, statistics, struct, subprocess, sys, termios, threading, time
 
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HEXE = os.path.join(REPO, "zig-out/bin/hexe")
@@ -19,6 +19,8 @@ os.makedirs(WD, exist_ok=True)
 INST = f"smk{os.getpid()}"
 ROWS, COLS = 50, 200
 PAYLOAD_ROWS = 4000
+RUNS = int(os.environ.get("HEXE_BENCH_RUNS", "1"))
+BLEND = os.environ.get("HEXE_BENCH_BLEND") == "1"
 
 env = os.environ.copy()
 env.update({"HEXE_INSTANCE": INST, "XDG_STATE_HOME": os.path.join(WD, "state"),
@@ -58,10 +60,30 @@ def main():
             seen.extend(chunk)
 
     threading.Thread(target=drain, daemon=True).start()
-    time.sleep(4.0)
-    if fe.poll() is not None:
-        print(f"FAIL: frontend exited rc={fe.returncode}")
-        return 1
+    if BLEND:
+        deadline = time.time() + 8
+        while b"\x1b]11;?\x1b\\" not in bytes(seen) and time.time() < deadline:
+            if fe.poll() is not None:
+                print(f"FAIL: frontend exited rc={fe.returncode}")
+                return 1
+            time.sleep(0.02)
+        if b"\x1b]11;?\x1b\\" not in bytes(seen):
+            print("FAIL: frontend did not start host colour discovery")
+            cleanup(fe)
+            return 1
+    else:
+        time.sleep(4.0)
+        if fe.poll() is not None:
+            print(f"FAIL: frontend exited rc={fe.returncode}")
+            return 1
+
+    if BLEND:
+        reports = bytearray(b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\\x1b]11;rgb:0000/0000/0000\x1b\\")
+        for index in range(256):
+            value = f"{index:02x}{index:02x}".encode()
+            reports.extend(b"\x1b]4;" + str(index).encode() + b";rgb:" + value + b"/" + value + b"/" + value + b"\x1b\\")
+        os.write(master, reports)
+        time.sleep(1.0)
 
     # A file of indexed-colour rows, then cat it and wait for the end marker.
     src = os.path.join(WD, "payload.txt")
@@ -76,29 +98,41 @@ def main():
     # what is typed, so a marker in the command text can be seen rendered
     # before a single payload byte is, which times the echo instead of the
     # render. That made runs differ by 200x depending on scheduling.
-    marker = b"BENCH_DONE_MARKER"
-    runner = os.path.join(WD, "run.sh")
-    with open(runner, "w") as fh:
-        fh.write(f"cat {src}\nprintf '%s\\n' {marker.decode()}\n")
+    elapsed_runs = []
+    for run in range(RUNS):
+        marker = f"BENCH_DONE_{run:03d}".encode()
+        runner = os.path.join(WD, f"run-{run:03d}.sh")
+        with open(runner, "w") as fh:
+            if BLEND:
+                fh.write("printf '\\033]1331;use;fg=30\\033\\\\'\n")
+            fh.write(f"cat {src}\n")
+            if BLEND:
+                fh.write("printf '\\033]1331;end\\033\\\\'\n")
+            fh.write(f"printf '%s\\n' {marker.decode()}\n")
+        del seen[:]
+        started = time.perf_counter()
+        os.write(master, f"sh {runner}\r".encode())
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            if marker in bytes(seen):
+                break
+            time.sleep(0.01)
+        elapsed = time.perf_counter() - started
+        if marker not in bytes(seen):
+            print(f"FAIL: payload run {run + 1} never finished rendering")
+            cleanup(fe)
+            return 1
+        elapsed_runs.append(elapsed)
 
-    del seen[:]
-    t0 = time.time()
-    os.write(master, f"sh {runner}\r".encode())
-    deadline = time.time() + 120
-    while time.time() < deadline:
-        if marker in bytes(seen):
-            break
-        time.sleep(0.02)
-    elapsed = time.time() - t0
-
-    if marker not in bytes(seen):
-        print("FAIL: payload never finished rendering")
-        cleanup(fe)
-        return 1
+    elapsed = statistics.median(elapsed_runs)
 
     print(f"rows        : {PAYLOAD_ROWS}")
+    print(f"mode        : {'mixed-30' if BLEND else 'opaque'}")
+    print(f"runs        : {RUNS}")
     print(f"payload     : {size/1024/1024:.2f} MiB of indexed-colour SGR")
-    print(f"elapsed     : {elapsed:.2f} s")
+    print(f"median      : {elapsed:.3f} s")
+    print(f"range       : {min(elapsed_runs):.3f}..{max(elapsed_runs):.3f} s")
+    print("samples     : " + " ".join(f"{sample:.6f}" for sample in elapsed_runs))
     print(f"throughput  : {size/elapsed/1024/1024:.2f} MiB/s")
     print(f"per row     : {elapsed/PAYLOAD_ROWS*1000:.3f} ms")
     cleanup(fe)

@@ -356,6 +356,37 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
             .output => {
                 terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ vt_event.pane_id, vt_event.payload_len });
                 pane.feedPodOutput(payload);
+                const now_ms = std.time.milliTimestamp();
+                while (pane.takeHostColorQuery()) |key| {
+                    if (!state.host_colors.registerPane(key, pane.uuid, now_ms)) state.enqueueOscReplyTarget(pane.uuid);
+                }
+                const color_invalidation = pane.takeHostColorInvalidation();
+                if (!color_invalidation.empty()) {
+                    const stdout = std.fs.File.stdout();
+                    var color_buf: [1024]u8 = undefined;
+                    var color_writer = stdout.writer(&color_buf);
+                    state.host_colors.refresh(&color_writer.interface, color_invalidation, now_ms) catch |err| {
+                        core.logging.logError("terminal", "failed to refresh host colours", err);
+                    };
+                    color_writer.interface.flush() catch |err| {
+                        core.logging.logError("terminal", "failed to flush host colour queries", err);
+                    };
+                    state.needs_render = true;
+                }
+                if (pane.takeHostColorRefresh()) {
+                    const stdout = std.fs.File.stdout();
+                    var color_buf: [1024]u8 = undefined;
+                    var color_writer = stdout.writer(&color_buf);
+                    const queried = state.host_colors.refreshUsed(&color_writer.interface, now_ms) catch |err| blk: {
+                        core.logging.logError("terminal", "failed to refresh used host colours", err);
+                        break :blk false;
+                    };
+                    if (queried) {
+                        color_writer.interface.flush() catch |err| {
+                            core.logging.logError("terminal", "failed to flush used host colour queries", err);
+                        };
+                    }
+                }
                 // The frontend already has these bytes, so a plugin watching
                 // this pane is fed from here rather than opening its own
                 // observer against the pod -- same data, one fewer consumer.

@@ -9,8 +9,7 @@ protocol, different file descriptors.
 
 Checked against a real mux and a real pixy:
 
-  * the bar paints from the child, so the transport actually carries content
-    rather than merely connecting;
+  * the bar paints a deterministic marker from the child;
   * no painter socket is created -- nothing is shared, which is the point;
   * the child goes when the frontend goes, so a painter cannot outlive what it
     was drawing for.
@@ -21,12 +20,16 @@ import os, pty, subprocess, time, fcntl, termios, struct, threading, re, sys
 REPO = os.environ.get("HEXE_REPO", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 H = os.path.join(REPO, "zig-out/bin/hexe")
 PIXY = os.environ.get("PIXY_BIN", os.path.join(os.path.dirname(REPO), "pixy/build/pixy"))
-PCFG = os.environ.get("PIXY_CONFIG", os.path.join(os.path.dirname(REPO), "pixy/config/init.lua"))
-if not (os.path.exists(PIXY) and os.path.exists(PCFG)):
+if not os.path.exists(PIXY):
     print(f"SKIP: no pixy at {PIXY}; this needs a real painter on the far end")
     raise SystemExit(0)
 W="/tmp/hexe-exec"; subprocess.run(["rm","-rf",W])
 for d in (W+"/run/hexe", W+"/cfg/hexe"): os.makedirs(d, exist_ok=True)
+open(W+"/pixy.lua","w").write("""local pixy = require("pixy")
+pixy.zone("status.left", {
+  pixy.segment("probe", function() return pixy.text("PIXY_EXEC_OK") end),
+})
+""")
 open(W+"/cfg/hexe/init.lua","w").write(f"""
 local hexe = require("hexe")
 hexe.status = {{
@@ -40,7 +43,7 @@ open(W+"/spawn.sh","w").write(f"""#!/bin/sh
 # sampling for a live process almost never catches one -- what is worth
 # asserting is that painters keep being STARTED, and that none is left over.
 echo start >> {W}/spawns
-exec {PIXY} serve --stdio --config {PCFG}
+exec {PIXY} serve --stdio --config {W}/pixy.lua
 """)
 os.chmod(W+"/spawn.sh", 0o755)
 
@@ -110,12 +113,11 @@ print("resident: none — every painter answers and exits")
 if socks:
     fail(f"a painter socket was created at {socks}; `exec` must share nothing")
 print("socket: none created — the painter is this frontend's alone")
-# the bar should carry pixy's clock, i.e. HH:MM:SS
-clock = re.search(r'\d\d:\d\d:\d\d', txt)
-if not clock:
+marker = re.search(r'PIXY_EXEC_OK', txt)
+if not marker:
     fail("the bar never showed the painter's content, so the pipe carried a "
          f"connection but no frames; saw: {txt[-200:]!r}")
-print(f"content: the bar is painted by the child ({clock.group(0)})")
+print(f"content: the bar is painted by the child ({marker.group(0)})")
 if p.poll() is not None:
     fail(f"the frontend exited rc={p.returncode} while using an exec painter")
 p.terminate()
@@ -131,4 +133,3 @@ if alive:
     fail(f"a painter outlived the frontend (pids {alive}) — nothing may be left running")
 print("lifetime: nothing left behind")
 print("PASS: hexe paints through one-shot painters, sharing nothing, leaving nothing")
-

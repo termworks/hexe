@@ -37,6 +37,7 @@ reading twice.
 | [Shell integration](prompt.md) | what a shell reports to the mux, and how the prompt is drawn |
 | [Names](names.md) | where session and pane names come from, and how to bring your own |
 | [Palette protocol](palette.md) | a program claims its own 256-colour table for the output it writes |
+| [Foreground mixing](blend.md) | mix ordinary ANSI foregrounds with each cell's effective background |
 | [Pane decoration](decor.md) | twelve painter-drawn slots around every pane, and buttons in them |
 
 ## Configuring it

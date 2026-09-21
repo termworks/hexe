@@ -1,6 +1,8 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const palette_mod = @import("palette.zig");
+const blend_mod = @import("blend.zig");
+const stretch_mod = @import("stretch.zig");
 const logging = @import("logging.zig");
 const image_import = @import("image_import.zig");
 
@@ -93,6 +95,11 @@ pub const VT = struct {
     /// palette and passes indices through untouched, so this is inert until a
     /// later milestone selects a namespace.
     ns_table: palette_mod.NamespaceTable = undefined,
+
+    blend_state: blend_mod.State = .{},
+
+    /// OSC 1332 fill patterns and the open stretch line, if any.
+    stretch: stretch_mod.State = .{},
 
     /// Sixel images, which ghostty's VT does not speak. It holds partial
     /// sequences across feeds, so it is per-pane state and lives for as long as
@@ -270,6 +277,46 @@ pub const VT = struct {
         }
     }
 
+    /// OSC 1332 `begin`: the cursor row is a stretch line. Autowrap stays off
+    /// until `end`, so a long line cannot spill onto the next row.
+    pub fn stretchBegin(self: *VT) void {
+        if (!self.stretch.in_line) self.stretch.saved_wrap = self.terminal.modes.get(.wraparound);
+        self.stretch.in_line = true;
+        self.terminal.modes.set(.wraparound, false);
+    }
+
+    pub fn stretchEnd(self: *VT) void {
+        if (!self.stretch.in_line) return;
+        self.stretch.in_line = false;
+        self.terminal.modes.set(.wraparound, self.stretch.saved_wrap);
+    }
+
+    /// Print the placeholder cell for fill pattern `id` at the cursor, in the
+    /// current style.
+    pub fn printStretchFill(self: *VT, id: u8) void {
+        self.terminal.print(stretch_mod.placeholder(id)) catch |err| {
+            logging.logError("vt", "failed to print stretch fill", err);
+        };
+        self.render_state_dirty = true;
+    }
+
+    pub fn syncBlendStyle(self: *VT) void {
+        const percent = self.blend_state.currentFgPercent();
+        var it = self.terminal.screens.all.iterator();
+        while (it.next()) |entry| {
+            const screen = entry.value.*;
+            if (screen.cursor.style.fg_mix_percent == percent) continue;
+            screen.cursor.style.fg_mix_percent = percent;
+            screen.manualStyleUpdate() catch |err| {
+                logging.logError("vt", "failed to apply foreground mix to cursor style", err);
+            };
+        }
+    }
+
+    pub fn cursorBlendPercent(self: *const VT) u8 {
+        return self.blend_state.currentFgPercent();
+    }
+
     /// The palette namespace the cursor sits in.
     ///
     /// The pane's current selection: hexe does not decide where a namespace
@@ -298,12 +345,13 @@ pub const VT = struct {
         // snapshot rebuild (full viewport duplication) dominates that cost.
         if (!self.render_state_dirty) return &self.render_state;
 
-        // Clear previous state before updating to free memory from previous large scrollback
-        self.render_state.deinit(self.allocator);
-        self.render_state = .empty;
-
-        // Update render state - this allocates based on current VT dimensions
-        try self.render_state.update(self.allocator, &self.terminal);
+        // Incremental: ghostty rewrites only dirty rows, or everything on a
+        // resize, screen switch or viewport move.
+        self.render_state.update(self.allocator, &self.terminal) catch |err| {
+            self.render_state.deinit(self.allocator);
+            self.render_state = .empty;
+            return err;
+        };
 
         // Validate the RenderState dimensions are reasonable
         // Large scrollback can cause rows to become extremely large
