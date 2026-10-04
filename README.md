@@ -160,6 +160,55 @@ hexe itself — see [recording](docs/recording.md).
 
 ## Quick start
 
+**Nix.** The flake builds a static musl binary on `x86_64-linux` and `aarch64-linux`:
+
+```sh
+nix build                      # result/bin/hexe
+nix run . -- --help
+nix flake check                # build and package smoke checks
+```
+
+Add this input to another flake:
+
+```nix
+inputs.hexe.url = "github:termworks/hexe/develop";
+```
+
+Accept `hexe` in your flake's `outputs` arguments. In a development shell, add
+`hexe.packages.${system}.default` to `packages`. For NixOS, pass `hexe` through
+`specialArgs`, accept it in the module arguments, and use:
+
+```nix
+environment.systemPackages = [
+  hexe.packages.${pkgs.stdenv.hostPlatform.system}.default
+];
+```
+
+For Home Manager, use `extraSpecialArgs` and `home.packages` instead. The named package is
+`hexe.packages.${system}.hexe`; it is the same as `default`.
+Use `github:termworks/hexe` once this packaging is merged into the default branch.
+Remote URLs require the changes to be committed and pushed first.
+`nix develop` still opens the development shell. Example configuration and runtime
+Lua files are installed under the package's `share/hexe/`; they are not copied into
+your home directory automatically.
+
+**Binary cache.** The shared cache is `termworks`. Accept the flake's cache
+configuration when prompted, or run `cachix use termworks` on the consumer machine.
+When using Hexe as an input of another flake, configure the consumer's cache too.
+Use a release tag whose cache workflow has succeeded:
+
+```sh
+nix build github:termworks/hexe/vX.Y.Z
+```
+
+Replace `vX.Y.Z` with the desired published tag. Only pushed `v*` tags trigger
+`.github/workflows/nix-cache.yml`; branch pushes do not publish. The workflow builds
+on native x86_64 and ARM64 Linux runners, uploads and pins the runtime closures,
+then checks downloads and CLI startup on fresh runners with builders disabled.
+Create a Cachix per-cache write token and store it as the GitHub Actions secret
+`CACHIX_AUTH_TOKEN` for this repository. Never commit the token. Modified build
+inputs or features can require a new build rather than a cached download.
+
 **Build.** Needs Zig 0.15.2. A static musl binary:
 
 ```sh

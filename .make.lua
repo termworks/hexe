@@ -251,6 +251,18 @@ make.recipe{
 
 make.alias("b", "build")
 
+make.recipe{
+  name = "nix-build",
+  desc = "build the static Nix package into result/bin/hexe",
+  run = function() sh.nix("build", ".#hexe", "-L") end,
+}
+
+make.recipe{
+  name = "nix-check",
+  desc = "validate flake outputs and package smoke checks",
+  run = function() sh.nix("flake", "check", "-L") end,
+}
+
 -- Escape hatch: link against the host's glibc instead.
 make.recipe{
   name = "build-gnu",
