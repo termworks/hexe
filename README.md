@@ -192,6 +192,10 @@ Remote URLs require the changes to be committed and pushed first.
 Lua files are installed under the package's `share/hexe/`; they are not copied into
 your home directory automatically.
 
+Only the latest release per package and architecture is protected from cache
+cleanup. Pins use `*-latest-*` with `--keep-revisions 1`; older releases may
+need rebuilding after garbage collection.
+
 **Binary cache.** The shared cache is `termworks`. Accept the flake's cache
 configuration when prompted, or run `cachix use termworks` on the consumer machine.
 When using Hexe as an input of another flake, configure the consumer's cache too.
