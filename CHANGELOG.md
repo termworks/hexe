@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.15] - 2026-10-04
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Package hexe and publish release cache
+
 ## [0.4.14] - 2026-09-21
 
 ### <!-- 0 -->⛰️  Features
