@@ -2,6 +2,16 @@ const std = @import("std");
 const core = @import("core");
 
 pub const QUERY_TIMEOUT_MS: i64 = 1500;
+
+/// Added to the timeout for each query already waiting.
+///
+/// `queryAll` asks 258 questions in one burst and the host answers them in
+/// order, so a flat deadline measured from the moment they were all sent gives
+/// the last reply the same budget as the first. Past the deadline a reply is
+/// unowned, and an unowned reply is dropped -- so a flat deadline silently lost
+/// most of a palette refresh on any host that needs more than QUERY_TIMEOUT_MS
+/// to work through the queue.
+pub const QUERY_QUEUE_GRACE_MS: i64 = 10;
 pub const REFRESH_COOLDOWN_MS: i64 = 50;
 pub const POLL_INTERVAL_MS: i64 = 16;
 pub const MAX_POLL_QUERIES: usize = 16;
@@ -102,9 +112,15 @@ pub const HostColors = struct {
         return self.background;
     }
 
+    /// When a query sent now should stop being waited for, given how many are
+    /// already queued ahead of it.
+    fn deadlineFor(self: *const HostColors, now_ms: i64) i64 {
+        return now_ms + QUERY_TIMEOUT_MS + @as(i64, self.pending_len) * QUERY_QUEUE_GRACE_MS;
+    }
+
     pub fn registerPane(self: *HostColors, key: QueryKey, uuid: [32]u8, now_ms: i64) bool {
         self.expire(now_ms);
-        return self.appendPending(.{ .key = key, .owner = .{ .pane = uuid }, .deadline_ms = now_ms + QUERY_TIMEOUT_MS });
+        return self.appendPending(.{ .key = key, .owner = .{ .pane = uuid }, .deadline_ms = self.deadlineFor(now_ms) });
     }
 
     pub fn queryAll(self: *HostColors, writer: anytype, now_ms: i64) !void {
@@ -199,7 +215,7 @@ pub const HostColors = struct {
 
     fn queryKey(self: *HostColors, writer: anytype, key: QueryKey, now_ms: i64) !void {
         self.removeHexePending(key);
-        if (!self.appendPending(.{ .key = key, .owner = .hexe, .deadline_ms = now_ms + QUERY_TIMEOUT_MS })) return error.QueryQueueFull;
+        if (!self.appendPending(.{ .key = key, .owner = .hexe, .deadline_ms = self.deadlineFor(now_ms) })) return error.QueryQueueFull;
         errdefer self.removeHexePending(key);
         switch (key) {
             .foreground => try writer.writeAll("\x1b]10;?\x1b\\"),
@@ -376,6 +392,32 @@ test "expired ownership is never reused" {
     colors.expire(100 + QUERY_TIMEOUT_MS);
     const report: Report = .{ .key = .background, .value = .{ 1, 2, 3 } };
     try std.testing.expectEqual(ReportAction.unowned, colors.handleReport(report, 2000));
+}
+
+test "a burst of queries is not all deadlined from the same instant" {
+    var colors: HostColors = .{};
+    var bytes: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+
+    // What a recolour sends: foreground, background, and all 256 palette slots.
+    try colors.queryAll(&writer, 1000);
+
+    // The first answer is owed the base timeout.
+    const first: Report = .{ .key = .foreground, .value = .{ 1, 2, 3 } };
+    try std.testing.expectEqual(
+        ReportAction{ .cached = true },
+        colors.handleReport(first, 1000 + QUERY_TIMEOUT_MS - 1),
+    );
+
+    // The last answer arrives long after that, because the host works through
+    // the queue in order. It must still be owned: an unowned reply is dropped,
+    // so a flat deadline threw away the tail of every palette refresh.
+    const last: Report = .{ .key = .{ .palette = 255 }, .value = .{ 4, 5, 6 } };
+    // Two seconds past the base timeout, stated outright rather than in terms
+    // of the grace, so shrinking the grace fails this test instead of moving it.
+    const late = 1000 + QUERY_TIMEOUT_MS + 2000;
+    try std.testing.expectEqual(ReportAction{ .cached = true }, colors.handleReport(last, late));
+    try std.testing.expectEqual(core.palette.RGB{ .r = 4, .g = 5, .b = 6 }, colors.palette[255].?);
 }
 
 test "used cached colours refresh without invalidation" {
