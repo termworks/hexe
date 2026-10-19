@@ -537,9 +537,23 @@ const Pod = struct {
     // OSC 7 CWD tracking
     osc7_scanner: Osc7Scanner = .{},
     osc7_cwd: ?[]u8 = null,
-    /// This pane's shell marks its prompts, so the frontend can retire a dead
-    /// program's colour questions exactly and this pod need not guess.
-    saw_prompt_mark: bool = false,
+    /// This pane's shell marks its prompts (OSC 133), so the marks can say
+    /// whether a colour question came from the shell or from a program.
+    marks_seen: bool = false,
+    /// Between `133;C` and `133;D` a command is running; otherwise the shell
+    /// holds the terminal. Only meaningful once `marks_seen`.
+    at_prompt: bool = false,
+    /// Was the last colour question asked by a program rather than the shell?
+    ///
+    /// Taken from the marks in output order, not from `tcgetpgrp` at the time
+    /// the question is read: a program that asks and exits is already gone by
+    /// then, so a live check would call it the shell's. The marks and the
+    /// question are in one ordered stream, so their order is not a race.
+    ///
+    /// Defaults to true, so a pane whose shell marks nothing is treated as a
+    /// program having asked -- which is what makes the check below refuse a
+    /// dead asker's answer on a shell with no integration.
+    query_from_program: bool = true,
     vt_client_ever_attached: bool = false,
 
     const RunOptions = struct {
@@ -1974,34 +1988,57 @@ const Pod = struct {
     fn scanOutputMetadata(self: *Pod, data: []const u8) void {
         if (!self.shouldScanOutputMetadata(data)) return;
         self.scanOsc7(data);
-        if (!self.saw_prompt_mark and std.mem.indexOf(u8, data, "\x1b]133;") != null) {
-            self.saw_prompt_mark = true;
-        }
+        self.scanColorAttribution(data);
         if (containsClearSeq(data)) {
             self.backlog.clear();
         }
     }
 
-    /// Is there anything in this pty that could have asked a colour question?
+    /// Walk this chunk in order, tracking who the terminal is talking to.
     ///
-    /// Recording the asking process group and comparing it later does not work:
-    /// a program that writes the question and exits is already gone by the time
-    /// this pod reads that output, so the group recorded is the shell's and the
-    /// later comparison matches. The result was timing-dependent.
+    /// One pass, because the order of a mark and a question inside a single
+    /// chunk is what decides who asked: `133;C` then a question means a program
+    /// asked it, while a question after `133;A` is the shell asking for itself.
     ///
-    /// What is left is the state at the moment of writing, and there only one
-    /// question can be answered: does a program hold the terminal. If one does,
-    /// it is the asker and it is still there. If the shell holds it, the asker
-    /// has exited -- or the shell asked on its own behalf, which from here looks
-    /// exactly the same. The two are indistinguishable, so the harm decides: an
-    /// unanswered question costs a program its colour, while an answer read by
-    /// a shell becomes a command it runs.
+    /// Only `ESC ]` is matched, not the single-byte C1 form; a shell emitting
+    /// the latter leaves the default in place, which errs towards refusing.
+    fn scanColorAttribution(self: *Pod, data: []const u8) void {
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, data, i, "\x1b]")) |at| {
+            i = at + 2;
+            const body = oscBody(data[at..]) orelse continue;
+            if (std.mem.startsWith(u8, body, "133;")) {
+                self.marks_seen = true;
+                if (body.len > 4) switch (body[4]) {
+                    // A command is running and owns the terminal.
+                    'C' => self.at_prompt = false,
+                    // Prompt start, prompt end, command finished: the shell has it.
+                    'A', 'B', 'D' => self.at_prompt = true,
+                    else => {},
+                };
+                continue;
+            }
+            if (body.len >= 3 and body[body.len - 1] == '?' and isColorOscBody(body)) {
+                self.query_from_program = !(self.marks_seen and self.at_prompt);
+            }
+        }
+    }
+
+    /// May this colour answer be written to the pty?
     ///
-    /// A shell that marks its prompts is exempt, because the frontend retires
-    /// those questions precisely at the mark and anything still outstanding
-    /// really was asked by the shell.
+    /// The shell asking for itself is always answered. A program's answer is
+    /// only written while that program still holds the terminal: once it exits
+    /// the shell is the foreground group again, and an answer handed over then
+    /// is read by the shell as text the user never typed and run on the next
+    /// newline.
+    ///
+    /// `tcgetpgrp` is asked here, at the moment of writing, where it is current.
+    /// Retiring the question when the shell marks its next prompt does not
+    /// cover this: a terminal answers in about a millisecond and a shell needs
+    /// tens of them to reap its child and draw a prompt, so the answer almost
+    /// always wins that race.
     fn colorReplyHasAReader(self: *Pod) bool {
-        if (self.saw_prompt_mark) return true;
+        if (!self.query_from_program) return true;
         const fg = self.pty.foregroundPgid() orelse return true;
         // The shell is its own group leader (it calls setsid), so its process
         // group is its pid. Anything else means a program is in the foreground.
