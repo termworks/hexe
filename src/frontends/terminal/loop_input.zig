@@ -405,6 +405,7 @@ fn handleHostColorReport(state: *State, report: vaxis.Color.Report, raw: []const
             return true;
         },
         .pane => |uuid| {
+            terminal_main.debugLogUuid(&uuid, "colour report handed to the pane that asked", .{});
             if (state.findPaneByUuid(uuid)) |pane| state.writePaneInput(pane, raw);
             return true;
         },

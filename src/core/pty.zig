@@ -536,6 +536,17 @@ pub const Pty = struct {
         }
         return .{ .cols = ws.ws_col, .rows = ws.ws_row };
     }
+
+    /// Which process group is reading this terminal right now.
+    ///
+    /// The kernel's own answer, current at the moment it is asked, as opposed to
+    /// a `/proc` scan on a timer. `std.posix.tcgetpgrp` does not compile on this
+    /// Zig, so the ioctl it wraps is called directly.
+    pub fn foregroundPgid(self: Pty) ?posix.pid_t {
+        var pgrp: c_int = 0;
+        if (c.ioctl(self.master_fd, c.TIOCGPGRP, &pgrp) != 0) return null;
+        return @intCast(pgrp);
+    }
 };
 
 // Terminal size utilities
