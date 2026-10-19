@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.16] - 2026-10-19
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Refuse a colour reply with no reader
+- Retire colour queries at a prompt mark
+- Scale a colour query's deadline
+- Drop an OSC reply nobody asked for
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Retain five package revisions
+- Retain only latest binaries
+
 ## [0.4.15] - 2026-10-04
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
