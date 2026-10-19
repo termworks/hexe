@@ -411,6 +411,9 @@ fn finishOsc(self: *Pane) void {
         feedVtOutput(self, self.osc_buf.items);
         return;
     };
+    // Observed, not consumed: OSC 133 still goes wherever it went before.
+    if (code == 133) notePromptBoundary(self, self.osc_buf.items);
+
     if (code == self.vt.ns_table.osc) {
         consumePaletteOsc(self, self.osc_buf.items);
         return;
@@ -570,6 +573,34 @@ fn handleOscQuery(self: *Pane, code: u32) bool {
     _ = self;
     _ = code;
     return false;
+}
+
+/// A shell's prompt mark says the program that was in the foreground is gone,
+/// so its unanswered colour queries go with it.
+///
+/// A reply is attributed to a PANE, which is the finest grain hexe has. A query
+/// left outstanding by a program that has since exited would be answered into
+/// whatever reads the pane now -- the shell -- which shows the reply as text the
+/// user never typed and runs it on the next newline. Agentic CLIs ask for the
+/// background colour at startup and exit while the answer is still in flight,
+/// which is how `]11;rgb:1c1c/1c1c/1c1c` ends up on a command line.
+///
+/// The pane's own queue is cleared here rather than by the caller so that a
+/// query and a prompt mark inside one output chunk resolve in the order they
+/// were written: anything queued before the mark is dropped, anything after it
+/// survives.
+fn notePromptBoundary(self: *Pane, seq: []const u8) void {
+    const params = oscParams(seq) orelse return;
+    if (params.len == 0) return;
+    // `A` begins a prompt and `D` ends a command; either means the foreground
+    // program has finished. `B` and `C` are emitted while it is still running.
+    switch (params[0]) {
+        'A', 'D' => {},
+        else => return,
+    }
+    self.host_color_query_len = 0;
+    self.osc_expected_responses = 0;
+    self.prompt_boundary_seen = true;
 }
 
 fn parseHostColorQuery(seq: []const u8) ?host_colors.QueryKey {

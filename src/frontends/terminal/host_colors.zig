@@ -202,6 +202,28 @@ pub const HostColors = struct {
         };
     }
 
+    /// Forget every query this pane is still owed an answer to.
+    ///
+    /// Called when the pane's shell marks a new prompt: the program that asked
+    /// has exited, and a reply handed to the pane now reaches the shell instead.
+    /// Hexe's own pending queries are left alone -- they are not the pane's.
+    pub fn dropPane(self: *HostColors, uuid: [32]u8) usize {
+        var dropped: usize = 0;
+        var index: usize = 0;
+        while (index < self.pending_len) {
+            switch (self.pending[index].owner) {
+                .pane => |owner| if (std.mem.eql(u8, &owner, &uuid)) {
+                    _ = self.removePending(index);
+                    dropped += 1;
+                    continue;
+                },
+                .hexe => {},
+            }
+            index += 1;
+        }
+        return dropped;
+    }
+
     pub fn expire(self: *HostColors, now_ms: i64) void {
         var index: usize = 0;
         while (index < self.pending_len) {
@@ -418,6 +440,32 @@ test "a burst of queries is not all deadlined from the same instant" {
     const late = 1000 + QUERY_TIMEOUT_MS + 2000;
     try std.testing.expectEqual(ReportAction{ .cached = true }, colors.handleReport(last, late));
     try std.testing.expectEqual(core.palette.RGB{ .r = 4, .g = 5, .b = 6 }, colors.palette[255].?);
+}
+
+test "a prompt mark retires that pane's queries and nobody else's" {
+    var colors: HostColors = .{};
+    const gone: [32]u8 = @splat('a');
+    const other: [32]u8 = @splat('b');
+
+    var bytes: [64]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    // One of hexe's own, and one each for two panes, all on the same key.
+    try colors.queryKey(&writer, .background, 100);
+    try std.testing.expect(colors.registerPane(.background, gone, 100));
+    try std.testing.expect(colors.registerPane(.background, other, 100));
+
+    try std.testing.expectEqual(@as(usize, 1), colors.dropPane(gone));
+    // Dropping again finds nothing left to drop.
+    try std.testing.expectEqual(@as(usize, 0), colors.dropPane(gone));
+
+    const report: Report = .{ .key = .background, .value = .{ 7, 8, 9 } };
+    // Hexe's own query is not a pane's and survives.
+    try std.testing.expectEqual(ReportAction{ .cached = true }, colors.handleReport(report, 200));
+    // The other pane is still owed its answer.
+    try std.testing.expectEqual(ReportAction{ .pane = other }, colors.handleReport(report, 201));
+    // And the pane whose program exited is owed nothing, so the next reply has
+    // no owner at all -- which is what gets it dropped instead of delivered.
+    try std.testing.expectEqual(ReportAction.unowned, colors.handleReport(report, 202));
 }
 
 test "used cached colours refresh without invalidation" {
