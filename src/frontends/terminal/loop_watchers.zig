@@ -357,6 +357,18 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
                 terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ vt_event.pane_id, vt_event.payload_len });
                 pane.feedPodOutput(payload);
                 const now_ms = std.time.milliTimestamp();
+                // Before draining, so a query that arrived AFTER the prompt mark
+                // in this same chunk is still registered. The queries that came
+                // before it were already discarded as the mark was parsed.
+                if (pane.takePromptBoundary()) {
+                    const dropped = state.host_colors.dropPane(pane.uuid);
+                    if (dropped > 0) {
+                        terminal_main.debugLogUuid(&pane.uuid, "prompt mark dropped {d} outstanding colour quer{s}", .{
+                            dropped,
+                            if (dropped == 1) "y" else "ies",
+                        });
+                    }
+                }
                 while (pane.takeHostColorQuery()) |key| {
                     if (!state.host_colors.registerPane(key, pane.uuid, now_ms)) state.enqueueOscReplyTarget(pane.uuid);
                 }

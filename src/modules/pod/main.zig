@@ -537,6 +537,9 @@ const Pod = struct {
     // OSC 7 CWD tracking
     osc7_scanner: Osc7Scanner = .{},
     osc7_cwd: ?[]u8 = null,
+    /// This pane's shell marks its prompts, so the frontend can retire a dead
+    /// program's colour questions exactly and this pod need not guess.
+    saw_prompt_mark: bool = false,
     vt_client_ever_attached: bool = false,
 
     const RunOptions = struct {
@@ -1726,7 +1729,12 @@ const Pod = struct {
         const real = payload[INPUT_SEQ_PREFIX_LEN..];
 
         if (!self.input_dedup.accept(epoch, seq)) return; // replayed duplicate
-        if (real.len > 0) self.queuePtyWrite(real);
+        if (real.len == 0) return;
+        if (isHostColorReply(real) and !self.colorReplyHasAReader()) {
+            debugLog("applyInputFrame: dropping a colour answer, no program holds the pty", .{});
+            return;
+        }
+        self.queuePtyWrite(real);
     }
 
     /// Accept a VT client — replays backlog, then streams live output.
@@ -1966,9 +1974,38 @@ const Pod = struct {
     fn scanOutputMetadata(self: *Pod, data: []const u8) void {
         if (!self.shouldScanOutputMetadata(data)) return;
         self.scanOsc7(data);
+        if (!self.saw_prompt_mark and std.mem.indexOf(u8, data, "\x1b]133;") != null) {
+            self.saw_prompt_mark = true;
+        }
         if (containsClearSeq(data)) {
             self.backlog.clear();
         }
+    }
+
+    /// Is there anything in this pty that could have asked a colour question?
+    ///
+    /// Recording the asking process group and comparing it later does not work:
+    /// a program that writes the question and exits is already gone by the time
+    /// this pod reads that output, so the group recorded is the shell's and the
+    /// later comparison matches. The result was timing-dependent.
+    ///
+    /// What is left is the state at the moment of writing, and there only one
+    /// question can be answered: does a program hold the terminal. If one does,
+    /// it is the asker and it is still there. If the shell holds it, the asker
+    /// has exited -- or the shell asked on its own behalf, which from here looks
+    /// exactly the same. The two are indistinguishable, so the harm decides: an
+    /// unanswered question costs a program its colour, while an answer read by
+    /// a shell becomes a command it runs.
+    ///
+    /// A shell that marks its prompts is exempt, because the frontend retires
+    /// those questions precisely at the mark and anything still outstanding
+    /// really was asked by the shell.
+    fn colorReplyHasAReader(self: *Pod) bool {
+        if (self.saw_prompt_mark) return true;
+        const fg = self.pty.foregroundPgid() orelse return true;
+        // The shell is its own group leader (it calls setsid), so its process
+        // group is its pid. Anything else means a program is in the foreground.
+        return fg != self.pty.child_pid;
     }
 
     fn shouldScanOutputMetadata(self: *const Pod, data: []const u8) bool {
@@ -1980,6 +2017,47 @@ const Pod = struct {
         return false;
     }
 };
+
+/// The OSC parameter list, if these bytes begin an OSC.
+fn oscBody(data: []const u8) ?[]const u8 {
+    const start: usize = if (std.mem.startsWith(u8, data, "\x1b]"))
+        2
+    else if (data.len > 0 and data[0] == 0x9d)
+        1
+    else
+        return null;
+    const rest = data[start..];
+    const end = std.mem.indexOfAny(u8, rest, "\x1b\x07") orelse rest.len;
+    return rest[0..end];
+}
+
+/// `10;`, `11;`, `12;` or `4;` -- the terminal colours a program can ask about.
+fn isColorOscBody(body: []const u8) bool {
+    return std.mem.startsWith(u8, body, "10;") or
+        std.mem.startsWith(u8, body, "11;") or
+        std.mem.startsWith(u8, body, "12;") or
+        std.mem.startsWith(u8, body, "4;");
+}
+
+/// Is this injected input an answer to a colour question?
+///
+/// The frontend writes an answer as a frame of its own, so there is no need to
+/// find one inside a larger payload.
+///
+/// The value has to be in the `rgb:` form a terminal answers in. The same OSC
+/// codes also SET a colour, and a set carries `#rrggbb` -- something injecting
+/// one into a pane means it, and refusing it would be this check swallowing
+/// input nobody asked it to touch. Narrowing here cannot leak an answer that a
+/// terminal spells `rgb:`, and for one that spells an answer some other way the
+/// bytes are delivered as they always were, which is the safe direction for a
+/// filter sitting on the input path.
+fn isHostColorReply(data: []const u8) bool {
+    const body = oscBody(data) orelse return false;
+    if (!isColorOscBody(body)) return false;
+    // The value is the last `;` field, which also rules out a `?` question.
+    const semi = std.mem.lastIndexOfScalar(u8, body, ';') orelse return false;
+    return std.mem.startsWith(u8, body[semi + 1 ..], "rgb:");
+}
 
 fn podFrameCallback(ctx: *anyopaque, frame: pod_protocol.Frame) void {
     const pod: *Pod = @ptrCast(@alignCast(ctx));
