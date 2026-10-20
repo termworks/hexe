@@ -4,6 +4,8 @@ const core = @import("core");
 const state = @import("state.zig");
 const txlog = @import("txlog.zig");
 const persist = @import("persist.zig");
+const store_mod = @import("store.zig");
+const pane_spawn = @import("pane_spawn.zig");
 
 /// Test helper: failing allocator that fails after N allocations
 const FailingAllocator = struct {
@@ -4035,4 +4037,131 @@ test "findByNameOrPrefix: ambiguous uuid prefix matches nothing (kill safety)" {
     try testing.expectEqualSlices(u8, &sid1, &(detached_sessions.findByNameOrPrefix(store, full1[0..32]).?));
     // Exact names still resolve despite the shared uuid prefix.
     try testing.expectEqualSlices(u8, &sid2, &(detached_sessions.findByNameOrPrefix(store, "amb-two").?));
+}
+
+// ── per-session pane names ────────────────────────────────────────────────
+
+/// A pane in `store`, owned by `client_id` and/or stamped with `session_id`.
+fn putTestPane(
+    store: anytype,
+    uuid: [32]u8,
+    name: ?[]const u8,
+    attached_to: ?usize,
+    session_id: ?[16]u8,
+) !void {
+    try store.panes.put(uuid, .{
+        .uuid = uuid,
+        .pod_pid = 0,
+        .pod_socket_path = try store.allocator.dupe(u8, "/tmp/hexe-name-scope-test"),
+        .child_pid = 0,
+        .state = if (attached_to == null) .orphaned else .attached,
+        .pane_id = 0,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = attached_to,
+        .session_id = session_id,
+        .created_at = 0,
+        .orphaned_at = null,
+        .name = if (name) |n| try store.allocator.dupe(u8, n) else null,
+        .allocator = store.allocator,
+    });
+}
+
+test "a live pane's name scope comes from the client it is attached to" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    const sid_a = [_]u8{'A'} ** 16;
+    try store.clients.append(store.allocator, store_mod.Client.init(store.allocator, 7, -1));
+    store.clients.items[0].session_id = sid_a;
+
+    // A live pane carries no session_id of its own -- it is stamped only on
+    // detach -- so the scope has to come through `attached_to`.
+    const live = [_]u8{'1'} ** 32;
+    try putTestPane(store, live, "romeo", 7, null);
+    try testing.expectEqualSlices(
+        u8,
+        &sid_a,
+        &(pane_spawn.sessionScopeOf(store, store.panes.getPtr(live).?).?),
+    );
+
+    // A detached pane has the stamp and no client.
+    const sid_b = [_]u8{'B'} ** 16;
+    const detached = [_]u8{'2'} ** 32;
+    try putTestPane(store, detached, "romeo", null, sid_b);
+    try testing.expectEqualSlices(
+        u8,
+        &sid_b,
+        &(pane_spawn.sessionScopeOf(store, store.panes.getPtr(detached).?).?),
+    );
+
+    // A standalone pod belongs to no session at all.
+    const loose = [_]u8{'3'} ** 32;
+    try putTestPane(store, loose, "romeo", null, null);
+    try testing.expect(pane_spawn.sessionScopeOf(store, store.panes.getPtr(loose).?) == null);
+}
+
+test "one name is free in two sessions and taken in one" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    const sid_a = [_]u8{'A'} ** 16;
+    const sid_b = [_]u8{'B'} ** 16;
+    const a = [_]u8{'1'} ** 32;
+    const b = [_]u8{'2'} ** 32;
+    try putTestPane(store, a, "romeo", null, sid_a);
+    try putTestPane(store, b, "juliet", null, sid_b);
+
+    // The whole point: `romeo` is taken in A and free in B.
+    try testing.expect(pane_spawn.paneNameTaken(store, "romeo", sid_a));
+    try testing.expect(!pane_spawn.paneNameTaken(store, "romeo", sid_b));
+    // And free in the no-session scope, which is its own namespace.
+    try testing.expect(!pane_spawn.paneNameTaken(store, "romeo", null));
+
+    // A rename must not collide with the name the pane already holds.
+    try testing.expect(!pane_spawn.paneNameTakenByOther(store, "romeo", a, sid_a));
+    // But another pane in the same session does collide.
+    const c = [_]u8{'3'} ** 32;
+    try putTestPane(store, c, null, null, sid_a);
+    try testing.expect(pane_spawn.paneNameTakenByOther(store, "romeo", c, sid_a));
+    // The same name from the other session does not.
+    try testing.expect(!pane_spawn.paneNameTakenByOther(store, "romeo", b, sid_b));
+}
+
+test "a selector matching two panes is ambiguous, not the first one" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+    const store = &ses_state.store;
+
+    const sid_a = [_]u8{'A'} ** 16;
+    const sid_b = [_]u8{'B'} ** 16;
+    // Deliberately colliding uuid prefixes, which a live test cannot arrange:
+    // uuids are random, so a shared prefix cannot be provoked on demand.
+    var a = [_]u8{'f'} ** 32;
+    var b = [_]u8{'f'} ** 32;
+    a[8] = 'a';
+    b[8] = 'b';
+    try putTestPane(store, a, "romeo", null, sid_a);
+    try putTestPane(store, b, "romeo", null, sid_b);
+
+    // By name, across every session: both answer, so neither is chosen.
+    try testing.expect(pane_spawn.findPaneInScope(store, "romeo", false, null, false) == .ambiguous);
+    // Scoped to one session, exactly one answers.
+    try testing.expectEqualSlices(
+        u8,
+        &a,
+        &pane_spawn.findPaneInScope(store, "romeo", false, sid_a, true).one,
+    );
+
+    // By uuid prefix: the shared 8 characters are ambiguous, the 9th is not.
+    try testing.expect(pane_spawn.findPaneInScope(store, "ffffffff", true, null, false) == .ambiguous);
+    try testing.expectEqualSlices(
+        u8,
+        &b,
+        &pane_spawn.findPaneInScope(store, "ffffffffb", true, null, false).one,
+    );
+    try testing.expect(pane_spawn.findPaneInScope(store, "deadbeef", true, null, false) == .none);
+    try testing.expect(pane_spawn.findPaneInScope(store, "", true, null, false) == .none);
 }
