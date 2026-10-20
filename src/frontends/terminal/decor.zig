@@ -196,6 +196,31 @@ fn extraJson(buf: []u8, state: *State, pane: *const Pane, edge: Edge, slot: Slot
     // on whichever pane happens to be focused when the click lands.
     w.writeAll(",\"pane_uuid\":") catch return "";
     core.regions.writeJsonString(w, pane.uuid[0..]) catch return "";
+
+    // The float's family, for a row of chips: `family` lists every member's
+    // number, `family_index` says which one is on screen. Handed over rather
+    // than drawn, for the same reason the observer count is: the painter has no
+    // way to ask, and only it knows where the title lives. A top-level float
+    // sends `family:[0]`, so a painter can draw chips unconditionally and a
+    // lone float simply has one.
+    //
+    // hexe deliberately draws none of this. The title row is the painter's,
+    // and on a left/right strip it is a vertical surface where a horizontal row
+    // of chips would make no sense -- so the arrangement has to be the
+    // painter's decision, not a layout baked in here.
+    if (state.familyRootOf(pane)) |root| {
+        var members_buf: [16]State.FamilyMember = undefined;
+        const members = state.familyMembers(root, &members_buf);
+        w.writeAll(",\"family\":[") catch return "";
+        for (members, 0..) |m, i| {
+            if (i > 0) w.writeAll(",") catch return "";
+            w.print("{d}", .{m.index}) catch return "";
+        }
+        w.writeAll("]") catch return "";
+        if (state.paneFloatState(pane)) |fs| {
+            w.print(",\"family_index\":{d}", .{fs.family_index}) catch return "";
+        }
+    }
     return stream.getWritten();
 }
 

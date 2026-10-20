@@ -37,6 +37,7 @@ hexe terminal new [-n <name>] [-I <instance>] [-T] [--log <lvl>] [--logfile <pat
 hexe terminal attach <name-or-uuid-prefix>
 hexe terminal kill <id>            # a session, a pane, or a float
 hexe terminal float --command <cmd> [--title …] [--size w,h,x,y] [--isolation …] [--result-file …]
+hexe terminal float --sub --command <cmd>            # a sub-float of the calling float
 hexe terminal send <text> [--pane <n>|--uuid <u>|--last|--creator|--broadcast] [--enter] [--ctrl <key>]
 hexe terminal read [--pane <n>|--uuid <u>] [-n <lines>|-c <commands>]
 hexe terminal notify <msg> [--uuid <u>|--last|--broadcast]
@@ -167,6 +168,7 @@ Sessions additionally resolve by **prefix**, over both names and uuids, which is
 | `terminal new/attach --remote host[:port] [-u user] [-i identity]` | attach across a link; identity defaults to `~/.ssh/id_ed25519` |
 | `terminal new/attach --ses-socket <path>` / `--no-autostart-ses` | point at a specific daemon, or refuse to start one |
 | `terminal float --key <k>` | the key that dismisses the float; a dismissed float exits 130 and its output is discarded |
+| `terminal float --sub` | open a sub-float of the calling float: shares its key and rectangle, dies with it, does not block. See [floats](floats.md) |
 | `shell init <shell> --no-comms` | the prompt hooks without the shell→mux reporting |
 | `--log trace\|debug\|info` and `--logfile` / `-L` | on every daemon; the level name is the only accepted spelling |
 | `--help` / `-h` | on every command and subcommand, generated from the flag list |
