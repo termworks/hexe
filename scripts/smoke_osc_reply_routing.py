@@ -290,6 +290,30 @@ if not refusals:
 print("      via:", refusals[-1].split("] ", 1)[-1])
 print("asker exited: the prompt mark retired its query, reply dropped", flush=True)
 
+# ---- phase 4b: the answer BEATS the prompt mark ------------------------------
+#
+# The ordering that actually happens. A terminal answers a colour question in
+# about a millisecond, while a shell has to reap its child and render a prompt
+# before it emits `133;D`/`133;A` -- tens of milliseconds. So the answer arrives
+# while hexe still believes a command is running, and retiring the query at the
+# mark is too late to help.
+#
+# Phase 4 sent the marks first and therefore never exercised this. It is the
+# real case for any shell with prompt marks, which is to say the common one.
+mark = len(seen)
+os.write(master, (f"printf '\\033]133;C\\033\\\\'; {QUERY}").encode() + b"\r")
+time.sleep(0.5)
+os.write(master, REPLY_BG)          # answer first ...
+time.sleep(0.3)
+os.write(master, b"printf '\\033]133;D;0\\033\\\\\\033]133;A;aid=1\\033\\\\'\r")  # ... mark after
+time.sleep(2.0)
+if b"rgb:1c1c" in bytes(seen[mark:]):
+    print("      screen tail:", repr(bytes(seen[mark:])[-220:]))
+    fail("the answer arrived before the prompt mark and reached the shell's "
+         "command line — retiring at the mark is too late, and the pty check "
+         "that would have caught it is switched off for panes that mark prompts")
+print("answer before the mark: still refused", flush=True)
+
 # ---- phase 5: the shell itself asks, on a shell that marks its prompts ------
 #
 # A shell that picks its colours from the terminal's background asks on its own

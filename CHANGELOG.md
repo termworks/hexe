@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.17] - 2026-10-20
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- A prompt mark says who asked, not whether to check
+
 ## [0.4.16] - 2026-10-19
 
 ### <!-- 1 -->🐛 Bug Fixes
