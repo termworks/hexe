@@ -585,10 +585,18 @@ make.recipe{
 
 ---------------------------------------------------------------------------- releasing
 
+-- `nix-build` first, because a tag is pushed before anyone can look at it.
+--
+-- flake.nix pins the hash of a fixed-output derivation that runs the vendor scripts, so editing
+-- patches/ or scripts/vendor-*.sh invalidates it -- and `zig build` never touches that derivation,
+-- so a checkout can pass every local check and still fail the only build cachix runs. v0.4.18 was
+-- tagged that way: tarballs shipped, nix-cache failed on both arches, and the fix needed a new
+-- version number because the tag was already public.
 make.recipe{
   name = "release",
   desc = "cut a version: --type patch | minor | major | M.m.p",
   params = { { "--type", desc = "patch | minor | major | M.m.p", default = "patch" } },
+  deps = { "nix-build" },
   run = function(a)
     assert(oslo.run{ "sh", "-c", "command -v git-rel" }.ok,
            "git-rel is not installed. Please install it first.")
