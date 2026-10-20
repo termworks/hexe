@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.19] - 2026-10-20
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Re-pin the vendored dependency hash
+
+### Build
+
+- Gate release on the nix build
+
 ## [0.4.18] - 2026-10-20
 
 ### <!-- 0 -->⛰️  Features
