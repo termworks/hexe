@@ -924,7 +924,21 @@ pub fn connectSesCliChannel(allocator: std.mem.Allocator) ?std.posix.fd_t {
     };
 
     wire.sendCliHandshake(fd) catch |err| {
-        print("Error: failed to handshake with ses daemon: {s}\n", .{@errorName(err)});
+        switch (err) {
+            // The daemon rate-limits connections it did not open itself, and
+            // refuses with an error frame rather than a hello. Said plainly:
+            // reported as a handshake failure it reads as "wrong binary", and
+            // the fix looks like rebuilding rather than slowing down.
+            error.ServerRefusedConnection => {
+                print("Error: the ses daemon refused the connection (it is rate-limiting).\n", .{});
+                print("       Too many commands at once — retry, or batch the work.\n", .{});
+            },
+            error.RuntimeEpochMismatch => {
+                print("Error: this hexe speaks a different protocol than the running daemon.\n", .{});
+                print("       Restart it: hexe session kill <session>, or restart the daemon.\n", .{});
+            },
+            else => print("Error: failed to handshake with ses daemon: {s}\n", .{@errorName(err)}),
+        }
         client.close();
         return null;
     };

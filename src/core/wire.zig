@@ -1374,14 +1374,44 @@ pub fn sendServerHello(fd: posix.fd_t) !void {
     try writeAll(fd, RUNTIME_EPOCH);
 }
 
+/// Read the server's identity, telling "wrong build" apart from "refused".
+///
+/// A daemon that refuses the connection — the rate limiter does this — replies
+/// with an `error` control frame instead of a hello and hangs up. Those bytes
+/// are not the magic, so this used to report `RuntimeEpochMismatch`: the one
+/// diagnosis guaranteed to be wrong, and one that sends you off rebuilding and
+/// restarting daemons. A refusal is now its own error.
+///
+/// The two are told apart by the `HEXE` prefix rather than by parsing the frame:
+/// every hello begins with it whatever the generation, and a control header
+/// begins with a small integer, so no endianness or msg_type detail is relied
+/// on here.
 pub fn readAndValidateServerHello(fd: posix.fd_t) !void {
     var magic: [SERVER_HELLO_MAGIC.len]u8 = undefined;
     try readExact(fd, &magic);
-    if (!std.mem.eql(u8, magic[0..], SERVER_HELLO_MAGIC)) return error.RuntimeEpochMismatch;
+    if (!std.mem.eql(u8, magic[0..], SERVER_HELLO_MAGIC)) {
+        if (!std.mem.eql(u8, magic[0..4], SERVER_HELLO_MAGIC[0..4])) {
+            return error.ServerRefusedConnection;
+        }
+        return error.RuntimeEpochMismatch;
+    }
 
     var epoch: [RUNTIME_EPOCH.len]u8 = undefined;
     try readExact(fd, &epoch);
     if (!std.mem.eql(u8, epoch[0..], RUNTIME_EPOCH)) return error.RuntimeEpochMismatch;
+}
+
+test "a refused connection is not reported as a wrong build" {
+    const t = std.testing;
+    // The magic's first four bytes are what every hello generation shares, so
+    // they are what separates "a hello I do not understand" from "not a hello".
+    try t.expectEqualStrings("HEXE", SERVER_HELLO_MAGIC[0..4]);
+
+    // A control header starts with msg_type, a small integer, so its first four
+    // bytes cannot spell HEXE whichever way it is encoded.
+    const hdr: ControlHeader = .{ .msg_type = 0x0002, .payload_len = 48 };
+    const bytes = std.mem.asBytes(&hdr);
+    try t.expect(!std.mem.eql(u8, bytes[0..4], SERVER_HELLO_MAGIC[0..4]));
 }
 
 pub fn sendCliHandshake(fd: posix.fd_t) !void {
