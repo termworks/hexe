@@ -62,7 +62,7 @@
           nativeBuildInputs = [ zig pkgs.gitMinimal pkgs.cacert ];
           outputHashMode = "recursive";
           outputHashAlgo = "sha256";
-          outputHash = "sha256-q7hVAWvWZ3d/1o6ArAs/ixmapxZSSlnT94W2CxmTZaA=";
+          outputHash = "sha256-NJdbBj35S6bjGtjFhHPd5qZoR4FmDyCWwyPjAnwl9DE=";
         } ''
           export HOME="$TMPDIR/home"
           export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
