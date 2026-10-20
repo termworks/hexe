@@ -6,7 +6,7 @@ const layout_mod = @import("layout.zig");
 const actions = @import("loop_actions.zig");
 const focus_move = @import("focus_move.zig");
 const mouse_selection = @import("mouse_selection.zig");
-const prompt_navigation = @import("prompt_navigation.zig");
+const prompt_navigation = core.prompt_marks;
 const statusbar = @import("statusbar.zig");
 
 const state_mod = @import("state.zig");

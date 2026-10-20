@@ -583,7 +583,7 @@ pub fn build(b: *std.Build) void {
 
     const prompt_navigation_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/frontends/terminal/prompt_navigation.zig"),
+            .root_source_file = b.path("src/core/prompt_marks.zig"),
             .target = target,
             .optimize = optimize,
         }),
