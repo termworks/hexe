@@ -367,6 +367,15 @@ fn ensureArgDescriptions(command: *yazap.Command) void {
     }
 }
 
+/// `hexe --version` / `hexe version`, on stdout.
+///
+/// A pod keeps the binary it launched with, so "is this pane running the build I
+/// just installed" is a question that needs an answer a script can read.
+fn printVersion() !void {
+    var out = std.fs.File.stdout().deprecatedWriter();
+    try out.print("hexe {s}\n", .{core.build_options.version});
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -753,6 +762,11 @@ pub fn main() !void {
     // The first question when something misbehaves is "is it me or a plugin?",
     // and there has to be a way to answer it.
     try root.addArg(Arg.booleanOption("noplugin", null, "Start without running any plugin"));
+    // The second question is "which build is this?". A pod keeps the binary it
+    // launched with, so "did my update take effect" is unanswerable without it.
+    try root.addArg(Arg.booleanOption("version", 'V', "Print the version and exit"));
+
+    const version_cmd = app.createCommand("version", "Print the version and exit");
 
     var profile_cmd = app.createCommand("profile", "Profiles: separate daemons and sessions");
     profile_cmd.setProperty(.help_on_empty_args);
@@ -810,7 +824,7 @@ pub fn main() !void {
 
     try palette_cmd.addSubcommands(&[_]yazap.Command{ palette_list, palette_get, palette_set, palette_use, palette_end, palette_drop, palette_reset });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd, api_cmd, plugin_cmd, lua_api_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd, api_cmd, plugin_cmd, lua_api_cmd, version_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -852,6 +866,13 @@ pub fn main() !void {
     }
 
     const matches = try app.parseFrom(normalized_args.items);
+
+    // Before the profile is resolved: asking the version must not start a
+    // daemon, read a config or care which profile it would have used.
+    if (matches.containsArg("version") or matches.subcommandMatches("version") != null) {
+        try printVersion();
+        return;
+    }
 
     // Must run before any path is resolved: every socket/state/log path is
     // derived from HEXE_INSTANCE. A flag beats the environment; HEXE_PROFILE is

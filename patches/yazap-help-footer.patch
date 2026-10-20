@@ -1,0 +1,13 @@
+diff --git a/src/HelpMessageWriter.zig b/src/HelpMessageWriter.zig
+--- a/src/HelpMessageWriter.zig
++++ b/src/HelpMessageWriter.zig
+@@ -223,7 +223,7 @@
+ fn writeFooter(self: *HelpMessageWriter) !void {
+     const writer = &self.writer.interface;
+     if (self.command.deref().countSubcommands() >= 1) {
+         try writer.print(
+-            "\nRun '{s} <command>` with `-h/--h' flag to get help of any command.\n",
++            "\nRun '{s} <command> --help' for help on a command.\n",
+             .{self.command.name()},
+         );
+     }
