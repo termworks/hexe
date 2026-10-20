@@ -1978,13 +1978,13 @@ test "syncClientSessionFloat: upserts visibility and active float state" {
     try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 0 });
     client.updateSessionSnapshot(snapshot);
 
-    try ses_state.syncClientSessionFloat(client_id, [_]u8{'f'} ** 32, 0, null, true, 1, true, false, 7, 60, 50, 40, 30, 1, 0, true);
+    try ses_state.syncClientSessionFloat(client_id, [_]u8{'f'} ** 32, 0, null, true, 1, true, false, 7, 60, 50, 40, 30, 1, 0, true, null, 0);
 
     try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.floats.items.len);
     try testing.expectEqual([_]u8{'f'} ** 32, client.session_snapshot.?.active_float_uuid.?);
     try testing.expectEqual([_]u8{'f'} ** 32, client.session_snapshot.?.focused_pane_uuid.?);
 
-    try ses_state.syncClientSessionFloat(client_id, [_]u8{'f'} ** 32, 0, null, false, 0, true, false, 7, 60, 50, 40, 30, 1, 0, false);
+    try ses_state.syncClientSessionFloat(client_id, [_]u8{'f'} ** 32, 0, null, false, 0, true, false, 7, 60, 50, 40, 30, 1, 0, false, null, 0);
 
     try testing.expect(client.session_snapshot.?.active_float_uuid == null);
     try testing.expectEqual([_]u8{'1'} ** 32, client.session_snapshot.?.focused_pane_uuid.?);
@@ -3430,7 +3430,7 @@ test "client snapshot: syncFloat records a float (survives in the snapshot)" {
     try css.addTab(&ses_state, client_id, [_]u8{'t'} ** 32, [_]u8{'p'} ** 32, 0, "T");
 
     const fu = [_]u8{'f'} ** 32;
-    try css.syncFloat(&ses_state, client_id, fu, 0, null, true, std.math.maxInt(u64), true, true, 'g', 72, 48, 40, 30, 2, 1, true);
+    try css.syncFloat(&ses_state, client_id, fu, 0, null, true, std.math.maxInt(u64), true, true, 'g', 72, 48, 40, 30, 2, 1, true, null, 0);
 
     const client = ses_state.getClient(client_id) orelse return error.TestUnexpectedResult;
     const snap = &(client.session_snapshot orelse return error.TestUnexpectedResult);
@@ -3445,7 +3445,7 @@ test "client snapshot: syncFloat records a float (survives in the snapshot)" {
     try testing.expectEqual(core.session_model.SessionPaneKind.float, (snap.panes.get(fu) orelse return error.TestUnexpectedResult).kind);
 
     // A second sync with the same uuid updates in place (no duplicate).
-    try css.syncFloat(&ses_state, client_id, fu, 0, null, false, 3, true, true, 'g', 50, 50, 50, 50, 1, 0, true);
+    try css.syncFloat(&ses_state, client_id, fu, 0, null, false, 3, true, true, 'g', 50, 50, 50, 50, 1, 0, true, null, 0);
     try testing.expectEqual(@as(usize, 1), snap.floats.items.len);
     try testing.expect(!snap.floats.items[0].visible);
     try testing.expectEqual(@as(u64, 3), snap.floats.items[0].tab_visible);
@@ -3591,7 +3591,7 @@ test "client snapshot: replaceSplitPane / setSplitRatio / removeFloat" {
 
     // removeFloat drops the float from both the list and the pane map.
     const f = [_]u8{'f'} ** 32;
-    try css.syncFloat(&ses_state, cid, f, 0, null, true, 1, false, false, 'a', 60, 60, 50, 50, 1, 0, true);
+    try css.syncFloat(&ses_state, cid, f, 0, null, true, 1, false, false, 'a', 60, 60, 50, 50, 1, 0, true, null, 0);
     try testing.expectEqual(@as(usize, 1), ses_state.getClient(cid).?.session_snapshot.?.floats.items.len);
     css.removeFloat(&ses_state, cid, f);
     {
@@ -3960,7 +3960,7 @@ test "client snapshot mutations mark the store dirty (attached crash recovery)" 
     try testing.expect(ses_state.store.dirty);
 
     ses_state.store.dirty = false;
-    try css.syncFloat(&ses_state, cid, [_]u8{'f'} ** 32, 0, null, true, 1, false, false, 'a', 50, 50, 50, 50, 1, 0, true);
+    try css.syncFloat(&ses_state, cid, [_]u8{'f'} ** 32, 0, null, true, 1, false, false, 'a', 50, 50, 50, 50, 1, 0, true, null, 0);
     try testing.expect(ses_state.store.dirty);
 
     ses_state.store.dirty = false;

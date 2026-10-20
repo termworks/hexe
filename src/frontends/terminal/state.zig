@@ -2069,6 +2069,11 @@ pub const State = struct {
             self.paneFloatPadX(pane),
             self.paneFloatPadY(pane),
             active,
+            // Read from the float's own record, like visible/tab_visible above:
+            // the family is state the frontend owns, and a sync that dropped it
+            // would turn a sub-float back into a top-level one on the daemon.
+            if (self.paneFloatState(pane)) |float_state| float_state.parent_float else null,
+            if (self.paneFloatState(pane)) |float_state| float_state.family_index else 0,
         ) catch |err| {
             core.logging.logError("terminal", context, err);
             return false;

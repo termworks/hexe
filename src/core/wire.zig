@@ -444,6 +444,12 @@ pub const SessionSyncFloat = extern struct {
     pad_x: u8 align(1),
     pad_y: u8 align(1),
     active: u8 align(1),
+    /// The family this float belongs to: its parent's uuid, and which chip it
+    /// is. `has_parent_float` is 0 for a top-level float, whose
+    /// `parent_float` bytes are then meaningless rather than a uuid of zeros.
+    parent_float: [32]u8 align(1) = .{0} ** 32,
+    has_parent_float: u8 align(1) = 0,
+    family_index: u8 align(1) = 0,
 };
 
 /// SessionRemoveFloat: remove a float record from the canonical snapshot.
@@ -741,6 +747,15 @@ pub const FloatRequest = extern struct {
     shift_y: i16 align(1), // vertical shift from center (-50 to 50)
     // Source session ID as 32-char hex (zeroed if not called from within a mux session)
     source_session_id: [32]u8 align(1),
+    /// The float this one is a sub-float of, as 32-char hex; zeroed for a
+    /// top-level float.
+    ///
+    /// A sub-float joins its parent's family: it shares the parent's toggle
+    /// key and geometry, takes the next free chip number, and is closed when
+    /// the parent is. SES forwards this request to the owning frontend
+    /// unchanged, and the frontend owns float state, so the parent only has to
+    /// be named here — no daemon-side handling at all.
+    parent_pane: [32]u8 align(1) = .{0} ** 32,
 };
 
 /// FloatCreated: response when float is created (no wait).

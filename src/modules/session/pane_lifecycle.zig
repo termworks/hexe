@@ -424,12 +424,76 @@ pub fn suspendPane(self: anytype, uuid: [32]u8) !void {
     self.store.dirty = true;
 }
 
+/// The sub-floats whose parent is `uuid`, written into `out`.
+///
+/// Read from the snapshot that owns the pane, attached or detached, because
+/// that is where float records live -- `store.panes` knows a pane is a float
+/// but not which family it belongs to.
+fn collectSubFloats(self: anytype, uuid: [32]u8, out: *[MAX_SUB_FLOATS][32]u8) usize {
+    const floats = blk: {
+        if (self.store.panes.getPtr(uuid)) |pane| {
+            if (pane.attached_to) |client_id| {
+                if (self.getClient(client_id)) |client| {
+                    if (client.session_snapshot) |*snapshot| break :blk snapshot.floats.items;
+                }
+            } else if (pane.session_id) |session_id| {
+                if (self.store.detached_sessions.getPtr(session_id)) |detached| {
+                    break :blk detached.session_snapshot.floats.items;
+                }
+            }
+        }
+        return 0;
+    };
+
+    var n: usize = 0;
+    for (floats) |f| {
+        const parent = f.parent_float orelse continue;
+        if (!std.mem.eql(u8, &parent, &uuid)) continue;
+        if (n >= out.len) {
+            core.logging.warn("ses", "more than {d} sub-floats; the rest outlive their parent", .{out.len});
+            break;
+        }
+        out[n] = f.pane_uuid;
+        n += 1;
+    }
+    return n;
+}
+
+/// How many children one float may have closed with it in a single pass.
+///
+/// A fixed buffer rather than an allocation: this runs while a pane is being
+/// destroyed, and a kill that can fail on allocation is a kill that can leave
+/// the family half-dead. Nine is the chips a title row addresses.
+const MAX_SUB_FLOATS: usize = 9;
+
 pub fn killPane(self: anytype, uuid: [32]u8) !void {
     const hex_uuid: [32]u8 = std.fmt.bytesToHex(uuid[0..16], .lower);
+
+    // A sub-float cannot outlive its parent: it was opened to serve that float
+    // and has no toggle key, no chip and no way to be reached once the parent
+    // is gone. Collected BEFORE the parent is removed, because the lookup goes
+    // through the parent to find the snapshot holding the family.
+    //
+    // Here rather than at the call sites: `killPane` is the one place a pane is
+    // destroyed, so every route -- the close action, `kill_target`, orphan
+    // cleanup, a session being killed -- cascades without having to remember.
+    var children: [MAX_SUB_FLOATS][32]u8 = undefined;
+    const child_count = collectSubFloats(self, uuid, &children);
+
     var pane = self.store.panes.fetchRemove(uuid) orelse {
         ses.debugLog("killPane: {s} NOT FOUND", .{hex_uuid[0..8]});
         return error.PaneNotFound;
     };
+
+    // After the parent is out of the table, so a child whose own parent_float
+    // somehow points back cannot recurse for ever.
+    for (children[0..child_count]) |child| {
+        const child_hex: [32]u8 = std.fmt.bytesToHex(child[0..16], .lower);
+        ses.debugLog("killPane: {s} closing sub-float {s}", .{ hex_uuid[0..8], child_hex[0..8] });
+        killPane(self, child) catch |err| {
+            core.logging.logError("ses", "failed to close a sub-float with its parent", err);
+        };
+    }
     self.store.dirty = true;
     ses.debugLog("killPane: {s} pane_id={d} pod_pid={d} pod_vt_fd={?d} state={s}", .{
         hex_uuid[0..8],

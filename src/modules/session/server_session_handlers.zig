@@ -165,6 +165,8 @@ pub fn handleBinarySessionSyncFloat(self: *Server, fd: posix.fd_t, payload_len: 
         msg.pad_x,
         msg.pad_y,
         msg.active != 0,
+        if (msg.has_parent_float != 0) msg.parent_float else null,
+        msg.family_index,
     ) catch |err| {
         core.logging.logError("ses", "session_sync_float snapshot update failed", err);
         self.sendBinaryError(fd, "session_sync_float_failed");
