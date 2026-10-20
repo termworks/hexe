@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const ipc = core.ipc;
 const session_config = core.session_config;
+const shared = @import("shared.zig");
 
 pub const runMuxFloat = @import("mux_float.zig").runMuxFloat;
 pub const runMuxRecord = @import("mux_record.zig").runMuxRecord;
@@ -476,31 +477,12 @@ pub fn runSessionLayoutList(allocator: std.mem.Allocator, json_output: bool) !vo
     }
 }
 
-pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator: bool, show_last: bool) !void {
+pub fn runInfo(allocator: std.mem.Allocator, target: shared.PaneTarget) !void {
     const wire = core.wire;
     const posix = std.posix;
 
-    var target_uuid: [32]u8 = undefined;
-
-    if (uuid_arg.len > 0) {
-        target_uuid = parseUuid32Hex(uuid_arg) orelse {
-            print("Invalid UUID\n", .{});
-            std.process.exit(1);
-        };
-    } else if (show_creator or show_last) {
-        if (resolveRelatedPane(allocator, show_creator)) |resolved| {
-            target_uuid = resolved;
-        } else return;
-    } else {
-        const env_uuid = posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Not inside a hexe terminal session (use --uuid to query a specific pane)\n", .{});
-            std.process.exit(1);
-        };
-        target_uuid = parseUuid32Hex(env_uuid) orelse {
-            print("Invalid HEXE_PANE_UUID\n", .{});
-            std.process.exit(1);
-        };
-    }
+    const resolved = resolvePaneTarget(allocator, target) catch |err| exitUnresolved(err, target);
+    const target_uuid = resolved.uuid;
 
     // Query SES for pane info via binary protocol
     const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
@@ -669,7 +651,7 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
     }
 }
 
-pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, last: bool, broadcast: bool, message: []const u8) !void {
+pub fn runNotify(allocator: std.mem.Allocator, target: shared.PaneTarget, broadcast: bool, message: []const u8) !void {
     const wire = core.wire;
     const posix = std.posix;
 
@@ -682,27 +664,9 @@ pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, 
 
     var target_uuid: [32]u8 = undefined;
     var has_target = false;
-
-    if (uuid.len > 0) {
-        target_uuid = parseUuid32Hex(uuid) orelse {
-            print("Error: --uuid must be 32 hex chars\n", .{});
-            std.process.exit(1);
-        };
-        has_target = true;
-    } else if (creator or last) {
-        if (resolveRelatedPane(allocator, creator)) |resolved| {
-            target_uuid = resolved;
-            has_target = true;
-        } else return;
-    } else if (!broadcast) {
-        const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: no target (use --uuid, --creator, --last, --broadcast, or run inside mux)\n", .{});
-            std.process.exit(1);
-        };
-        target_uuid = parseUuid32Hex(env_uuid) orelse {
-            print("Error: invalid HEXE_PANE_UUID\n", .{});
-            std.process.exit(1);
-        };
+    if (!broadcast) {
+        const resolved = resolvePaneTarget(allocator, target) catch |err| exitUnresolved(err, target);
+        target_uuid = resolved.uuid;
         has_target = true;
     }
 
@@ -724,6 +688,138 @@ pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, 
             print("Error: failed to send broadcast notify: {s}\n", .{@errorName(err)});
         };
     }
+}
+
+// ─── Pane addressing ───────────────────────────────────────────────────────
+
+/// One pane, from however the command line named it.
+///
+/// The address is session → pane, and this is the only place it is interpreted.
+/// It used to be a ladder hand-copied into `runSend`, `runNotify` and `runInfo`,
+/// each with its own wording and none of them accepting a pane name — so the
+/// name a person actually knows was the one thing you could not type.
+///
+/// Resolution of a name or uuid prefix happens on the daemon
+/// (`resolve_pane_target`), because only the daemon sees every session: a
+/// session's control socket exists only while a frontend is attached, while its
+/// panes keep running. Ambiguity comes back as an error, never as a pick.
+pub fn resolvePaneTarget(
+    allocator: std.mem.Allocator,
+    target: shared.PaneTarget,
+) shared.ResolveError!shared.ResolvedPane {
+    // `--creator`/`--last` are about the pane this command runs in, so they are
+    // answered the old way: by asking SES about our own pane's lineage.
+    if (target.creator or target.last) {
+        const resolved = resolveRelatedPane(allocator, target.creator) orelse return shared.ResolveError.NoSuchPane;
+        return .{ .uuid = resolved, .attached = true };
+    }
+
+    // Even a full uuid is resolved rather than trusted: "that pane does not
+    // exist" has to be one answer with one exit code, and skipping the lookup
+    // here made a uuid nobody holds fail later, differently, further in.
+    if (target.uuid.len > 0) {
+        return askSesToResolve(allocator, target.session, target.uuid, true);
+    }
+    if (target.pane.len > 0) {
+        // A short pane name made of hex digits is also a plausible uuid prefix.
+        // Try it as a name first -- that is what the flag said -- and only fall
+        // back to a prefix when no pane answers to the name.
+        if (askSesToResolve(allocator, target.session, target.pane, false)) |hit| {
+            return hit;
+        } else |err| {
+            if (err != shared.ResolveError.NoSuchPane) return err;
+            if (!shared.looksLikeUuidPrefix(target.pane)) return err;
+            return askSesToResolve(allocator, target.session, target.pane, true);
+        }
+    }
+
+    // Inside a pane, the pane itself is the default target.
+    const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse return shared.ResolveError.NoTarget;
+    const u = parseUuid32Hex(env_uuid) orelse return shared.ResolveError.NoTarget;
+    return .{ .uuid = u, .attached = true };
+}
+
+fn askSesToResolve(
+    allocator: std.mem.Allocator,
+    session: []const u8,
+    pane: []const u8,
+    pane_is_uuid: bool,
+) shared.ResolveError!shared.ResolvedPane {
+    const wire = core.wire;
+    const posix = std.posix;
+
+    const fd = connectSesCliChannel(allocator) orelse return shared.ResolveError.Unreachable;
+    defer posix.close(fd);
+
+    const req = wire.ResolvePaneTarget{
+        .session_len = @intCast(session.len),
+        .pane_len = @intCast(pane.len),
+        .pane_is_uuid = @intFromBool(pane_is_uuid),
+    };
+    // One trail, session then pane, matching the order the handler reads them.
+    var trail: std.ArrayList(u8) = .empty;
+    defer trail.deinit(allocator);
+    trail.appendSlice(allocator, session) catch return shared.ResolveError.Unreachable;
+    trail.appendSlice(allocator, pane) catch return shared.ResolveError.Unreachable;
+
+    wire.writeControlWithTrail(fd, .resolve_pane_target, std.mem.asBytes(&req), trail.items) catch {
+        return shared.ResolveError.Unreachable;
+    };
+
+    const hdr = wire.readControlHeader(fd) catch return shared.ResolveError.Unreachable;
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    if (msg_type != .resolve_pane_target or hdr.payload_len < @sizeOf(wire.ResolvePaneTargetResult)) {
+        return shared.ResolveError.Unreachable;
+    }
+    const result = wire.readStruct(wire.ResolvePaneTargetResult, fd) catch {
+        return shared.ResolveError.Unreachable;
+    };
+
+    var err_buf: [256]u8 = undefined;
+    var err_msg: []const u8 = "";
+    if (result.error_len > 0) {
+        const n = @min(result.error_len, err_buf.len);
+        if (wire.readExact(fd, err_buf[0..n])) |_| {
+            err_msg = err_buf[0..n];
+        } else |_| {}
+    }
+
+    const outcome: wire.ResolvePaneOutcome = @enumFromInt(result.outcome);
+    switch (outcome) {
+        .ok => return .{ .uuid = result.uuid, .attached = result.attached != 0 },
+        .no_such_session => {
+            print("Error: no session matches '{s}'\n", .{session});
+            return shared.ResolveError.NoSuchSession;
+        },
+        .ambiguous_session => {
+            print("Error: '{s}' matches several sessions\n", .{session});
+            return shared.ResolveError.Ambiguous;
+        },
+        .ambiguous_pane => {
+            print("Error: {s}\n", .{if (err_msg.len > 0) err_msg else "several panes match"});
+            return shared.ResolveError.Ambiguous;
+        },
+        .no_such_pane => return shared.ResolveError.NoSuchPane,
+    }
+}
+
+/// Report a failed resolve and exit with the status that names the reason.
+pub fn exitUnresolved(err: shared.ResolveError, target: shared.PaneTarget) noreturn {
+    switch (err) {
+        shared.ResolveError.NoTarget => print(
+            "Error: no target (use --pane <name>, --uuid, --creator, --last, --broadcast, or run inside hexe)\n",
+            .{},
+        ),
+        shared.ResolveError.NoSuchPane => {
+            const named = if (target.pane.len > 0) target.pane else target.uuid;
+            print("Error: no pane matches '{s}'\n", .{named});
+            print("       `hexe session list --details` lists sessions and their panes.\n", .{});
+        },
+        shared.ResolveError.Unreachable => print("Error: cannot reach the ses daemon\n", .{}),
+        // Already reported, with the candidates, by the resolver.
+        shared.ResolveError.NoSuchSession, shared.ResolveError.Ambiguous => {},
+    }
+    std.process.exit(shared.resolveExitCode(err));
 }
 
 // ─── Binary CLI helpers ────────────────────────────────────────────────────
@@ -952,7 +1048,7 @@ pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: 
     }
 }
 
-pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, last: bool, broadcast: bool, enter: bool, ctrl: []const u8, text: []const u8) !void {
+pub fn runSend(allocator: std.mem.Allocator, target: shared.PaneTarget, broadcast: bool, enter: bool, ctrl: []const u8, text: []const u8) !void {
     const wire = core.wire;
     const posix = std.posix;
 
@@ -990,35 +1086,27 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
         std.process.exit(1);
     }
 
-    var target_uuid: [32]u8 = .{0} ** 32;
-
-    if (uuid.len > 0) {
-        target_uuid = parseUuid32Hex(uuid) orelse {
-            print("Error: --uuid must be 32 hex chars\n", .{});
-            std.process.exit(1);
+    // One pane goes straight to its pod, which owns the pty and outlives the
+    // frontend, so typing reaches a detached session too. Broadcast still goes
+    // through SES: only SES knows which panes a session has.
+    if (!broadcast) {
+        const resolved = resolvePaneTarget(allocator, target) catch |err| exitUnresolved(err, target);
+        shared.writePodInput(allocator, resolved.uuid, data_buf[0..data_len]) catch |err| {
+            if (err == error.PodNotRunning) {
+                print("Error: that pane's pod is not running\n", .{});
+                std.process.exit(2);
+            }
+            print("Error: failed to send keys: {s}\n", .{@errorName(err)});
+            std.process.exit(2);
         };
-    } else if (creator or last) {
-        if (resolveRelatedPane(allocator, creator)) |resolved| {
-            target_uuid = resolved;
-        } else return;
-    } else if (broadcast) {
-        // All-zeros UUID = broadcast.
-    } else {
-        const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: no target specified (use --uuid, --creator, --last, --broadcast, or run inside mux)\n", .{});
-            std.process.exit(1);
-        };
-        target_uuid = parseUuid32Hex(env_uuid) orelse {
-            print("Error: invalid HEXE_PANE_UUID\n", .{});
-            std.process.exit(1);
-        };
+        return;
     }
 
     const fd = connectSesCliChannel(allocator) orelse std.process.exit(1);
     defer posix.close(fd);
 
     const sk = wire.SendKeys{
-        .uuid = target_uuid,
+        .uuid = .{0} ** 32,
         .data_len = @intCast(data_len),
     };
     wire.writeControlWithTrail(fd, .send_keys, std.mem.asBytes(&sk), data_buf[0..data_len]) catch |err| {

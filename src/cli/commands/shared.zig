@@ -33,6 +33,83 @@ pub fn isUuid32Hex(uuid: []const u8) bool {
     return true;
 }
 
+/// Whether a selector looks like a uuid rather than a name.
+///
+/// Hex and at least 4 characters. A pane name is lowercase alphanumeric too, so
+/// the two alphabets overlap — but a name short enough to be confused with a
+/// prefix (`fade`, `beef`) is resolved as a uuid prefix first and falls through
+/// to a name only if nothing matches, which `resolvePaneTarget` handles by
+/// asking twice rather than by guessing here.
+pub fn looksLikeUuidPrefix(sel: []const u8) bool {
+    if (sel.len < 4 or sel.len > 32) return false;
+    for (sel) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+/// How a pane was named on the command line.
+pub const PaneTarget = struct {
+    /// `--uuid`: a full uuid or a prefix of one.
+    uuid: []const u8 = "",
+    /// `--pane`: a name, unique within its session.
+    pane: []const u8 = "",
+    /// `--session`: which session `pane` belongs to. Empty means any, which is
+    /// an error only if the name turns out to be ambiguous.
+    session: []const u8 = "",
+    /// `--creator` / `--last`, resolved against the pane this command runs in.
+    creator: bool = false,
+    last: bool = false,
+};
+
+/// What a resolved target is, and whether the whole-session verbs can reach it.
+pub const ResolvedPane = struct {
+    uuid: [32]u8,
+    /// False when the owning session has no frontend attached. Typing still
+    /// works (it goes to the pod); keys, focus and screen reads do not.
+    attached: bool,
+};
+
+pub const ResolveError = error{
+    NoTarget,
+    NoSuchSession,
+    NoSuchPane,
+    Ambiguous,
+    Unreachable,
+};
+
+/// Type into a pane, by writing to the pod that owns its pty.
+///
+/// The pod, not the session daemon, because the pod is what survives: a
+/// detached session has no frontend for SES to route input through, so
+/// `send_keys` reached nothing and still reported success. The pod holds the
+/// pty whether anyone is attached or not, so this is the one delivery that
+/// works in both cases.
+pub fn writePodInput(allocator: std.mem.Allocator, uuid: [32]u8, data: []const u8) !void {
+    const socket_path = try ipc.getPodSocketPath(allocator, &uuid);
+    defer allocator.free(socket_path);
+
+    var client = ipc.Client.connect(socket_path) catch |err| {
+        if (err == error.ConnectionRefused or err == error.FileNotFound) return error.PodNotRunning;
+        return err;
+    };
+    defer client.close();
+
+    try core.wire.sendHandshake(client.fd, core.wire.POD_HANDSHAKE_AUX_INPUT);
+    var conn = client.toConnection();
+    try core.pod_protocol.writeFrame(&conn, .input, data);
+}
+
+/// The exit status for a failed resolve, so a script can branch without parsing.
+pub fn resolveExitCode(err: ResolveError) u8 {
+    return switch (err) {
+        ResolveError.NoTarget => 1,
+        ResolveError.Unreachable => 2,
+        ResolveError.NoSuchSession, ResolveError.NoSuchPane => 3,
+        ResolveError.Ambiguous => 4,
+    };
+}
+
 pub fn resolvePodSocketTarget(
     allocator: std.mem.Allocator,
     uuid: []const u8,
@@ -77,6 +154,7 @@ fn findNewestPodMetaByName(allocator: std.mem.Allocator, name: []const u8) !?Pod
     defer allocator.free(dir);
 
     var best: ?PodMetaMatch = null;
+    var matches: usize = 0;
 
     var d = try std.fs.cwd().openDir(dir, .{ .iterate = true });
     defer d.close();
@@ -107,6 +185,13 @@ fn findNewestPodMetaByName(allocator: std.mem.Allocator, name: []const u8) !?Pod
         const created_at_text = parseField(line, "created_at") orelse "0";
         const created_at = std.fmt.parseInt(i64, created_at_text, 10) catch 0;
 
+        // Counted, not overwritten. This used to keep the NEWEST match with no
+        // diagnostic, which was harmless only while pane names were unique per
+        // daemon. They are unique per SESSION now, so two sessions may each
+        // have a `romeo` and picking the newer one would signal or type into
+        // whichever pane happened to start last -- `pod kill --name` sends a
+        // signal to the pid this returns.
+        matches += 1;
         if (best == null or created_at >= best.?.created_at) {
             var uuid_buf: [32]u8 = undefined;
             @memcpy(&uuid_buf, uuid_text[0..32]);
@@ -114,6 +199,7 @@ fn findNewestPodMetaByName(allocator: std.mem.Allocator, name: []const u8) !?Pod
         }
     }
 
+    if (matches > 1) return error.AmbiguousPodName;
     return best;
 }
 
