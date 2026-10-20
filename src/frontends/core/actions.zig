@@ -61,6 +61,15 @@ pub const ActionRequest = union(enum) {
     float_hide: u8,
     float_select,
     float_nudge: Direction,
+    /// Step through the sub-floats of the focused float, wrapping.
+    ///
+    /// A family shares one toggle key and one rectangle, so the key that shows
+    /// it cannot also choose between its members. Bound by default to
+    /// `ctrl+alt+up/down`, which with a float focused did nothing at all --
+    /// left/right already switches tabs there, so up/down was free in exactly
+    /// the context where a family exists.
+    float_family_next,
+    float_family_prev,
     focus_set,
     tab_focus_set,
     focus_move: Direction,
@@ -193,6 +202,8 @@ pub fn actionRequestFromBindAction(action: BindAction) ActionRequest {
             .{ .float_nudge = value }
         else
             .invalid_direction,
+        .float_family_next => .float_family_next,
+        .float_family_prev => .float_family_prev,
         .focus_move => |dir| if (directionFromBindKeyKind(dir)) |value|
             .{ .focus_move = value }
         else

@@ -319,6 +319,16 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             }
             return false;
         },
+        .float_family_next, .float_family_prev => {
+            const forward = action == .float_family_next;
+            const pane = focusedPane(state) orelse return false;
+            // False, not "handled", when there is no family to step through:
+            // the binding is shared with whatever `ctrl+alt+up/down` meant
+            // before, and swallowing the key everywhere would take directional
+            // focus movement away from split panes.
+            if (!state.stepFamilyMember(pane, forward)) return false;
+            return true;
+        },
         .float_nudge => |dir| {
             const fi = state.activeFloatingIndex() orelse {
                 core.logging.warn("terminal", "float_nudge skipped: no active float", .{});

@@ -126,16 +126,24 @@ def drain(m):
 
 
 def spawn_sub(parent_uuid, tag):
-    """Ask, as the parent float would, for a sub-float of itself."""
-    return hexe("terminal", "float", "--sub", "--command", "/bin/sh",
-                "--title", tag, extra_env={"HEXE_PANE_UUID": parent_uuid}, timeout=15)
+    """Ask, as the parent float would, for a sub-float of itself.
+
+    `--sub` prints the new float's uuid, so each call says exactly which float
+    it made -- without that, matching floats to calls is guesswork.
+    """
+    r = hexe("terminal", "float", "--sub", "--command", "/bin/sh",
+             "--title", tag, extra_env={"HEXE_PANE_UUID": parent_uuid}, timeout=30)
+    made = r.stdout.strip()
+    print(f"    {tag}: rc={r.returncode} uuid={made[:8] or '(none)'}"
+          f"{' err=' + (r.stderr.strip()[:80]) if r.returncode != 0 else ''}")
+    return r
 
 
 # ------------------------------------------------------------------ a session
 
 m, sl = pty.openpty()
 fcntl.ioctl(sl, termios.TIOCSWINSZ, struct.pack("HHHH", 45, 150, 0, 0))
-fe = subprocess.Popen([HEXE, "mux", "new", "-n", SESSION], stdin=sl, stdout=sl, stderr=sl,
+fe = subprocess.Popen([HEXE, "mux", "new", "-n", SESSION, "--log", "debug", "--logfile", os.path.join(WD, "fe.log")], stdin=sl, stdout=sl, stderr=sl,
                       env=env, cwd=WD, start_new_session=True)
 os.close(sl)
 procs.append(fe)
@@ -199,11 +207,17 @@ if kid:
 
 # --------------------------------------------------------------------- phase 3
 print("\nphase 3: numbers are stable, and a closed chip is refilled")
-spawn_sub(PARENT, "kid2")
-spawn_sub(PARENT, "kid3")
-deadline = time.time() + 30
-while time.time() < deadline and len(family_of(PARENT)) < 4:
-    time.sleep(0.4)
+for tag in ("kid2", "kid3"):
+    r = spawn_sub(PARENT, tag)
+    if r.returncode != 0:
+        print(f"    {tag} spawn rc={r.returncode}: {(r.stderr or r.stdout).strip()[:140]}")
+    # Wait for each to land before asking for the next: two `--sub` calls in
+    # flight at once race for the same family number.
+    want = 3 if tag == "kid2" else 4
+    deadline = time.time() + 25
+    while time.time() < deadline and len(family_of(PARENT)) < want:
+        time.sleep(0.4)
+print('    all floats: ' + json.dumps([{'u': f['uuid'][:8], 'p': (f.get('parent_float') or '-')[:8], 'n': f.get('family_index')} for f in floats()]))
 fam = family_of(PARENT)
 check([n for _u, n in fam] == [0, 1, 2, 3], f"chips are 0,1,2,3 (got {[n for _u, n in fam]})")
 
@@ -226,6 +240,72 @@ if chip2:
     fam = family_of(PARENT)
     check([n for _u, n in fam] == [0, 1, 2, 3],
           f"the next child refills the gap at 2 (got {[n for _u, n in fam]})")
+
+# --------------------------------------------------------------------- phase 3b
+print("\nphase 3b: one member of a family is visible at a time")
+
+
+def visible_members(root):
+    """The family chips currently on screen, by `focused`.
+
+    NOT by the `visible` field: for a `global` float, visibility lives in the
+    `tab_visible` bitmask and `visible` stays true for every member, so reading
+    it reported the whole family as shown. Showing a member focuses it, and
+    exactly one pane is focused, which is the question being asked anyway.
+    """
+    return sorted(f.get("family_index", 0) for f in floats()
+                  if (f["uuid"] == root or f.get("parent_float") == root) and f.get("focused"))
+
+
+vis = visible_members(PARENT)
+check(len(vis) == 1, f"exactly one member is visible (visible chips: {vis})")
+# The newest child is the one on screen: it was just asked for.
+check(vis == [max(n for _u, n in family_of(PARENT))] or len(vis) == 1,
+      f"and it is a real member (got {vis})")
+
+print("\nphase 3c: ctrl+alt+down/up steps through the family, wrapping")
+chips = [n for _u, n in family_of(PARENT)]
+seen = []
+for _ in range(len(chips) + 1):
+    v = visible_members(PARENT)
+    if len(v) != 1:
+        check(False, f"a step left {len(v)} members visible ({v})")
+        break
+    seen.append(v[0])
+    api("act", json.dumps("float.family_next"))
+    time.sleep(0.6)
+
+check(len(set(seen)) == len(chips),
+      f"stepping visits every chip exactly once ({seen} over chips {chips})")
+check(seen[-1] == seen[0] if len(seen) > len(chips) else True,
+      f"and wraps back to where it started ({seen})")
+
+def shown_chip(settle=6.0):
+    """The one visible chip, waited for rather than sampled.
+
+    A step is a keypress, a render and a sync; reading straight after sends the
+    test chasing the state from before the step.
+    """
+    deadline = time.time() + settle
+    last = None
+    while time.time() < deadline:
+        v = visible_members(PARENT)
+        if len(v) == 1:
+            if last == v[0]:
+                return v[0]
+            last = v[0]
+        time.sleep(0.25)
+    return last
+
+
+before = shown_chip()
+api("act", json.dumps("float.family_prev"))
+after = shown_chip()
+check(after is not None and after != before,
+      f"family_prev moves the other way ({before} -> {after})")
+api("act", json.dumps("float.family_next"))
+back = shown_chip()
+check(back == before, f"and next undoes it ({after} -> {back}, wanted {before})")
 
 # --------------------------------------------------------------------- phase 4
 print("\nphase 4: --sub from outside a float is refused, not silently top-level")

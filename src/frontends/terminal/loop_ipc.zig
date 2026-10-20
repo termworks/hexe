@@ -1090,10 +1090,13 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
                 "float --sub: parent is not a float; left the new float top-level",
                 .{},
             );
-        } else if (state.findPaneByUuid(new_uuid)) |child| {
-            // Push the family to SES, so a reattach finds the child under its
-            // parent rather than as a second top-level float.
-            _ = state.syncSessionFloatChecked(child, true);
+        } else {
+            // A family shows one member at a time, and the one just asked for
+            // is the one to show -- which also pushes the family to SES, so a
+            // reattach finds the child under its parent rather than as a
+            // second top-level float.
+            // Local-only for the siblings: this is inside the request handler.
+            _ = state.showFamilyMember(new_uuid, false);
         }
     }
 

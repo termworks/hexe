@@ -708,6 +708,8 @@ pub const Config = struct {
         float_show,
         float_hide,
         float_nudge,
+        float_family_next,
+        float_family_prev,
         focus_move,
         layout_save,
         layout_load,
@@ -751,6 +753,11 @@ pub const Config = struct {
         float_show: u8,
         float_hide: u8,
         float_nudge: BindKeyKind, // up/down/left/right
+        /// Step through the focused float's family. No payload: the family is
+        /// whichever one is focused, so unlike `float_toggle` there is no key
+        /// to name -- a family shares its parent's key.
+        float_family_next,
+        float_family_prev,
         focus_move: BindKeyKind, // up/down/left/right
         layout_save,
         layout_load,

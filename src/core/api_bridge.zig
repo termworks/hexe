@@ -310,6 +310,8 @@ fn parseSimpleAction(action_str: []const u8) ?config.Config.BindAction {
     if (std.mem.eql(u8, action_str, "clipboard.request")) return .clipboard_request;
     if (std.mem.eql(u8, action_str, "system.notify")) return .system_notify;
     if (std.mem.eql(u8, action_str, "overlay.sprite_toggle")) return .sprite_toggle;
+    if (std.mem.eql(u8, action_str, "float.family_next")) return .float_family_next;
+    if (std.mem.eql(u8, action_str, "float.family_prev")) return .float_family_prev;
     if (std.mem.eql(u8, action_str, "split.h")) return .split_h;
     if (std.mem.eql(u8, action_str, "split.v")) return .split_v;
     if (std.mem.eql(u8, action_str, "tab.new")) return .tab_new;
