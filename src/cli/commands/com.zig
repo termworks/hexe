@@ -803,6 +803,74 @@ fn askSesToResolve(
     }
 }
 
+/// `hexe terminal read` — a pane's text, on stdout.
+///
+/// Addressed and reached exactly like `send`: resolved through SES, answered by
+/// the pod. So it reads a pane in a detached session too, which is where
+/// reading back what a long job printed matters most.
+///
+/// Which text, in the order the flags are considered:
+///
+///   `-n <lines>`      the last N rows that have anything on them
+///   `-c <commands>`   the output of the last N commands (needs OSC 133)
+///   neither           the last command's output, if the pane has marks
+///
+/// With neither flag and no marks there is nothing sensible to return: the
+/// screen cannot say where a command began. That is an error naming `-n`
+/// rather than a screenful passed off as a command's output.
+pub fn runRead(
+    allocator: std.mem.Allocator,
+    target: shared.PaneTarget,
+    lines: u32,
+    commands: u32,
+) !void {
+    if (lines > 0 and commands > 0) {
+        print("Error: give -n or -c, not both\n", .{});
+        std.process.exit(1);
+    }
+
+    const resolved = resolvePaneTarget(allocator, target) catch |err| exitUnresolved(err, target);
+
+    const mode: core.wire.PodReadMode = if (lines > 0) .lines else .commands;
+    const count: u32 = if (lines > 0) lines else if (commands > 0) commands else 1;
+
+    const got = shared.readPod(allocator, resolved.uuid, mode, count) catch |err| {
+        switch (err) {
+            error.PodNotRunning => {
+                print("Error: that pane's pod is not running\n", .{});
+                std.process.exit(2);
+            },
+            error.NoPromptMarks => {
+                print("Error: this pane has no prompt marks, so there is no \"last command\".\n", .{});
+                print("       Read a fixed number of lines with -n <lines>, or turn on shell\n", .{});
+                print("       integration: eval \"$(hexe shell init <bash|zsh|fish>)\"\n", .{});
+                std.process.exit(3);
+            },
+            error.PaneUnreadable => {
+                print("Error: could not read that pane's screen\n", .{});
+                std.process.exit(2);
+            },
+            else => {
+                print("Error: read failed: {s}\n", .{@errorName(err)});
+                std.process.exit(2);
+            },
+        }
+    };
+    defer allocator.free(got.text);
+
+    // stdout, so `hexe terminal read … | grep` is the point of the command.
+    var out = std.fs.File.stdout().deprecatedWriter();
+    try out.writeAll(got.text);
+    if (got.text.len > 0 and got.text[got.text.len - 1] != '\n') try out.writeAll("\n");
+
+    // On stderr so it cannot corrupt what a pipeline is reading, but is still
+    // seen by a person: an answer that silently began mid-history would be
+    // taken for the whole of it.
+    if (got.truncated) {
+        print("note: the pane's history ring had wrapped; this may start mid-history\n", .{});
+    }
+}
+
 /// Report a failed resolve and exit with the status that names the reason.
 pub fn exitUnresolved(err: shared.ResolveError, target: shared.PaneTarget) noreturn {
     switch (err) {

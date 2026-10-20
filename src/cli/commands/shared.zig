@@ -100,6 +100,56 @@ pub fn writePodInput(allocator: std.mem.Allocator, uuid: [32]u8, data: []const u
     try core.pod_protocol.writeFrame(&conn, .input, data);
 }
 
+pub const PodRead = struct {
+    text: []u8,
+    /// The ring had already dropped its oldest bytes, so this may start
+    /// mid-history.
+    truncated: bool,
+};
+
+/// Read a pane's text back from the pod that owns its pty.
+///
+/// The same reach as `writePodInput`, and for the same reason: the pod holds
+/// the scrollback whether or not a frontend is attached.
+pub fn readPod(
+    allocator: std.mem.Allocator,
+    uuid: [32]u8,
+    mode: core.wire.PodReadMode,
+    count: u32,
+) !PodRead {
+    const socket_path = try ipc.getPodSocketPath(allocator, &uuid);
+    defer allocator.free(socket_path);
+
+    var client = ipc.Client.connect(socket_path) catch |err| {
+        if (err == error.ConnectionRefused or err == error.FileNotFound) return error.PodNotRunning;
+        return err;
+    };
+    defer client.close();
+
+    const hello = [_]u8{ core.wire.POD_HANDSHAKE_AUX_READ, core.wire.PROTOCOL_VERSION };
+    try core.wire.writeAll(client.fd, &hello);
+    const req: core.wire.PodReadRequest = .{ .mode = @intFromEnum(mode), .count = count };
+    try core.wire.writeAll(client.fd, std.mem.asBytes(&req));
+
+    var reply: core.wire.PodReadReply = undefined;
+    try core.wire.readExact(client.fd, std.mem.asBytes(&reply));
+
+    switch (@as(core.wire.PodReadOutcome, @enumFromInt(reply.outcome))) {
+        .no_marks => return error.NoPromptMarks,
+        .unreadable => return error.PaneUnreadable,
+        .ok => {},
+    }
+
+    if (reply.text_len == 0) {
+        return .{ .text = try allocator.alloc(u8, 0), .truncated = reply.truncated != 0 };
+    }
+    if (reply.text_len > core.wire.MAX_PAYLOAD_LEN) return error.ReplyTooLarge;
+    const text = try allocator.alloc(u8, reply.text_len);
+    errdefer allocator.free(text);
+    try core.wire.readExact(client.fd, text);
+    return .{ .text = text, .truncated = reply.truncated != 0 };
+}
+
 /// The exit status for a failed resolve, so a script can branch without parsing.
 pub fn resolveExitCode(err: ResolveError) u8 {
     return switch (err) {
