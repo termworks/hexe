@@ -438,9 +438,13 @@ fn finishOsc(self: *Pane) void {
     if (isOscQuery(self.osc_buf.items)) {
         if (handleOscQuery(self, code)) return;
         const registered = if (parseHostColorQuery(self.osc_buf.items)) |key| self.queueHostColorQuery(key) else false;
-        if (!registered) self.osc_expected_responses +|= 1;
+        // A registered colour query is left to the frontend, which answers it
+        // from its cache or relays it. Passing it through as well asked the
+        // host for an answer nobody would be waiting for.
+        if (registered) return;
+        self.osc_expected_responses +|= 1;
     }
-    if (hostColorInvalidation(self.osc_buf.items, code)) |invalidation| self.host_color_invalidation.merge(invalidation);
+    noteHostColorOsc(self.osc_buf.items, code, &self.host_color_invalidation, &self.host_color_observed);
     const stdout = std.fs.File.stdout();
     stdout.writeAll(self.osc_buf.items) catch |err| {
         core.logging.logError("terminal", "forward OSC sequence to terminal stdout", err);
@@ -619,8 +623,16 @@ fn parseHostColorQuery(seq: []const u8) ?host_colors.QueryKey {
     return .{ .palette = index };
 }
 
-fn hostColorInvalidation(seq: []const u8, code: u32) ?host_colors.Invalidation {
-    const params = oscParams(seq) orelse return null;
+/// What a colour OSC from a pane tells hexe about the host's palette: a set is
+/// recorded with its value, while a reset or an unparsable value leaves that
+/// colour unknown and worth a question.
+fn noteHostColorOsc(
+    seq: []const u8,
+    code: u32,
+    invalidation: *host_colors.Invalidation,
+    observed: *host_colors.Observed,
+) void {
+    const params = oscParams(seq) orelse return;
     var result: host_colors.Invalidation = .{};
     switch (code) {
         4 => {
@@ -629,7 +641,11 @@ fn hostColorInvalidation(seq: []const u8, code: u32) ?host_colors.Invalidation {
                 const value = fields.next() orelse break;
                 if (std.mem.eql(u8, value, "?")) continue;
                 const index = std.fmt.parseUnsigned(u8, index_text, 10) catch continue;
-                result.addPalette(index);
+                if (core.palette.parseHexColor(value)) |rgb| {
+                    observed.setPalette(index, rgb);
+                } else {
+                    result.addPalette(index);
+                }
             }
         },
         104 => {
@@ -643,13 +659,23 @@ fn hostColorInvalidation(seq: []const u8, code: u32) ?host_colors.Invalidation {
                 }
             }
         },
-        10 => result.foreground = !std.mem.eql(u8, params, "?"),
-        11 => result.background = !std.mem.eql(u8, params, "?"),
+        10, 11 => {
+            if (std.mem.eql(u8, params, "?")) return;
+            // `OSC 10;fg;bg` is legal; the first value is the one this code is.
+            var fields = std.mem.splitScalar(u8, params, ';');
+            const value = fields.next() orelse return;
+            const rgb = core.palette.parseHexColor(value);
+            if (code == 10) {
+                if (rgb) |c| observed.setForeground(c) else result.foreground = true;
+            } else {
+                if (rgb) |c| observed.setBackground(c) else result.background = true;
+            }
+        },
         110 => result.foreground = true,
         111 => result.background = true,
-        else => return null,
+        else => return,
     }
-    return if (result.empty()) null else result;
+    if (!result.empty()) invalidation.merge(result);
 }
 
 fn shouldPassthroughOsc(seq: []const u8) bool {
@@ -715,17 +741,46 @@ test "host colour query parsing names one reply owner" {
     try std.testing.expect(parseHostColorQuery("\x1b]4;7;#ffffff\x1b\\") == null);
 }
 
-test "host colour mutation parsing targets affected cache entries" {
-    const set = hostColorInvalidation("\x1b]4;7;#ffffff;9;rgb:00/00/00\x1b\\", 4).?;
-    try std.testing.expect(set.hasPalette(7));
-    try std.testing.expect(set.hasPalette(9));
-    try std.testing.expect(!set.hasPalette(8));
+test "a colour set is learned, and only a reset invalidates" {
+    var invalidation: host_colors.Invalidation = .{};
+    var observed: host_colors.Observed = .{};
 
-    const reset_all = hostColorInvalidation("\x1b]104\x1b\\", 104).?;
-    try std.testing.expect(reset_all.palette_all);
-    try std.testing.expect(hostColorInvalidation("\x1b]10;?\x1b\\", 10) == null);
-    try std.testing.expect(hostColorInvalidation("\x1b]110\x1b\\", 110).?.foreground);
-    try std.testing.expect(hostColorInvalidation("\x1b]111\x1b\\", 111).?.background);
+    // Being told a colour is not a reason to ask about it: the value is kept
+    // and nothing is marked unknown. This is the whole of a recolouring script.
+    noteHostColorOsc("\x1b]4;7;#ffffff;9;rgb:00/00/00\x1b\\", 4, &invalidation, &observed);
+    try std.testing.expectEqual(core.palette.RGB{ .r = 0xff, .g = 0xff, .b = 0xff }, observed.palette[7].?);
+    try std.testing.expectEqual(core.palette.RGB{ .r = 0, .g = 0, .b = 0 }, observed.palette[9].?);
+    try std.testing.expect(observed.palette[8] == null);
+    try std.testing.expect(invalidation.empty());
+
+    noteHostColorOsc("\x1b]10;#102030\x1b\\", 10, &invalidation, &observed);
+    noteHostColorOsc("\x1b]11;#405060\x1b\\", 11, &invalidation, &observed);
+    try std.testing.expectEqual(core.palette.RGB{ .r = 0x10, .g = 0x20, .b = 0x30 }, observed.foreground.?);
+    try std.testing.expectEqual(core.palette.RGB{ .r = 0x40, .g = 0x50, .b = 0x60 }, observed.background.?);
+    try std.testing.expect(invalidation.empty());
+
+    // A value hexe cannot read leaves that colour genuinely unknown.
+    noteHostColorOsc("\x1b]4;3;chartreuse\x1b\\", 4, &invalidation, &observed);
+    try std.testing.expect(invalidation.hasPalette(3));
+    try std.testing.expect(observed.palette[3] == null);
+
+    // A query is neither: it carries no value and changes nothing.
+    var untouched: host_colors.Invalidation = .{};
+    var unlearned: host_colors.Observed = .{};
+    noteHostColorOsc("\x1b]10;?\x1b\\", 10, &untouched, &unlearned);
+    noteHostColorOsc("\x1b]4;7;?\x1b\\", 4, &untouched, &unlearned);
+    try std.testing.expect(untouched.empty());
+    try std.testing.expect(unlearned.empty());
+
+    // Resets hand back the host's own defaults, which hexe does not know.
+    var reset: host_colors.Invalidation = .{};
+    noteHostColorOsc("\x1b]104\x1b\\", 104, &reset, &unlearned);
+    try std.testing.expect(reset.palette_all);
+    noteHostColorOsc("\x1b]110\x1b\\", 110, &reset, &unlearned);
+    noteHostColorOsc("\x1b]111\x1b\\", 111, &reset, &unlearned);
+    try std.testing.expect(reset.foreground);
+    try std.testing.expect(reset.background);
+    try std.testing.expect(unlearned.empty());
 }
 
 test "CSI scanner preserves query state across every split" {

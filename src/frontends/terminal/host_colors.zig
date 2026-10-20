@@ -64,6 +64,36 @@ pub const Invalidation = struct {
     }
 };
 
+/// Colours a pane was told to SET, with the values it was given.
+///
+/// The same bytes go on to the host, so the value in them is about to be the
+/// truth and there is nothing to ask about.
+pub const Observed = struct {
+    palette: [256]?core.palette.RGB = .{null} ** 256,
+    foreground: ?core.palette.RGB = null,
+    background: ?core.palette.RGB = null,
+    any: bool = false,
+
+    pub fn empty(self: *const Observed) bool {
+        return !self.any;
+    }
+
+    pub fn setPalette(self: *Observed, index: u8, rgb: core.palette.RGB) void {
+        self.palette[index] = rgb;
+        self.any = true;
+    }
+
+    pub fn setForeground(self: *Observed, rgb: core.palette.RGB) void {
+        self.foreground = rgb;
+        self.any = true;
+    }
+
+    pub fn setBackground(self: *Observed, rgb: core.palette.RGB) void {
+        self.background = rgb;
+        self.any = true;
+    }
+};
+
 const Owner = union(enum) {
     hexe,
     pane: [32]u8,
@@ -110,6 +140,45 @@ pub const HostColors = struct {
     pub fn resolveBackground(self: *HostColors) ?core.palette.RGB {
         self.used.background = true;
         return self.background;
+    }
+
+    /// The answer to `key` if it is already cached, written into `buf`.
+    ///
+    /// Answers a pane on the spot instead of relaying the question to the host.
+    /// Askers have deadlines -- oslo waits 100 ms for the background colour
+    /// (`TIMEOUT_MS` in its `term/negotiate.rs`) -- and an answer that arrives
+    /// after one lands on the asker's command line as text nobody typed.
+    ///
+    /// Four hex digits a channel, each byte doubled: the form a terminal
+    /// replies in and the one callers match on.
+    /// Reads the fields rather than `resolve`, which would mark the colour as
+    /// one hexe draws with and enrol it in the refresh poll.
+    pub fn cachedAnswer(self: *const HostColors, key: QueryKey, buf: []u8) ?[]const u8 {
+        const rgb: core.palette.RGB = switch (key) {
+            .foreground => self.foreground orelse return null,
+            .background => self.background orelse return null,
+            .palette => |index| self.palette[index] orelse return null,
+            // No cache for the cursor, so it still goes to the host.
+            .cursor => return null,
+        };
+        const prefix: []const u8 = switch (key) {
+            .foreground => "10",
+            .background => "11",
+            .palette => "4",
+            .cursor => unreachable,
+        };
+        return switch (key) {
+            .palette => |index| std.fmt.bufPrint(
+                buf,
+                "\x1b]4;{d};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\",
+                .{ index, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b },
+            ) catch null,
+            else => std.fmt.bufPrint(
+                buf,
+                "\x1b]{s};rgb:{x:0>2}{x:0>2}/{x:0>2}{x:0>2}/{x:0>2}{x:0>2}\x1b\\",
+                .{ prefix, rgb.r, rgb.r, rgb.g, rgb.g, rgb.b, rgb.b },
+            ) catch null,
+        };
     }
 
     /// When a query sent now should stop being waited for, given how many are
@@ -320,6 +389,34 @@ pub const HostColors = struct {
         }
         if (changed) self.generation +%= 1;
         return changed;
+    }
+
+    /// Take observed sets as the host's new colours. A question in flight about
+    /// one of them is dropped: its answer describes the colour before the set.
+    pub fn learn(self: *HostColors, observed: Observed) bool {
+        var changed = false;
+        if (observed.foreground) |rgb| changed = self.adopt(.foreground, rgb) or changed;
+        if (observed.background) |rgb| changed = self.adopt(.background, rgb) or changed;
+        for (observed.palette, 0..) |maybe_rgb, index| {
+            const rgb = maybe_rgb orelse continue;
+            changed = self.adopt(.{ .palette = @intCast(index) }, rgb) or changed;
+        }
+        return changed;
+    }
+
+    fn adopt(self: *HostColors, key: QueryKey, rgb: core.palette.RGB) bool {
+        self.removeHexePending(key);
+        return self.store(key, .{ rgb.r, rgb.g, rgb.b });
+    }
+
+    /// The query for `key`, for a caller that decides itself when to send it.
+    pub fn queryBytes(key: QueryKey, buf: []u8) ?[]const u8 {
+        return switch (key) {
+            .foreground => "\x1b]10;?\x1b\\",
+            .background => "\x1b]11;?\x1b\\",
+            .cursor => "\x1b]12;?\x1b\\",
+            .palette => |index| std.fmt.bufPrint(buf, "\x1b]4;{d};?\x1b\\", .{index}) catch null,
+        };
     }
 
     fn invalidate(self: *HostColors, invalidation: Invalidation) void {

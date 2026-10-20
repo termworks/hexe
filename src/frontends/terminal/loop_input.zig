@@ -367,6 +367,17 @@ const OscFeedbackRoute = enum {
 fn routePaneFeedbackOscBytes(state: *State, raw: []const u8) OscFeedbackRoute {
     if (state.terminal_query_in_flight) return .hexes_own;
 
+    // A colour answer is never routed by the queue below: that queue holds only
+    // a per-pane COUNT of outstanding OSC queries, so it would hand one to a
+    // pane waiting on a clipboard, title or cwd reply. Colour answers are kept
+    // by key and owner in `host_colors`; one that reaches here is unclaimed.
+    // Checked on the bytes, so an answer the event parser did not recognise as
+    // a colour report cannot slip past.
+    if (core.osc_colors.isColorReply(raw)) {
+        log.debug("dropping a colour answer nobody is waiting for, len={d}", .{raw.len});
+        return .dropped;
+    }
+
     harvestPendingOscReplies(state);
     if (dequeueLiveOscReplyTarget(state)) |uuid| {
         if (state.findPaneByUuid(uuid)) |pane| {
@@ -396,7 +407,14 @@ fn handleHostColorReport(state: *State, report: vaxis.Color.Report, raw: []const
         .index => |index| .{ .palette = index },
     };
     switch (state.host_colors.handleReport(.{ .key = key, .value = report.value }, std.time.milliTimestamp())) {
-        .unowned => return false,
+        // Nobody is waiting for this colour. Consumed, not declined: declining
+        // passed it to the pane-target FIFO, which would give it to whichever
+        // pane was waiting for some other reply. A pane that did ask is
+        // registered by key and uuid and comes back as `.pane` below.
+        .unowned => {
+            log.debug("dropping an unowned colour report, len={d}", .{raw.len});
+            return true;
+        },
         .cached => |changed| {
             if (changed) {
                 state.renderer.invalidate();
@@ -1261,7 +1279,16 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
                 state.needs_render = true;
             }
             if (forward_bytes) |bytes| {
-                forwardSanitizedToFocusedPane(state, bytes, parsed_event_for_popup);
+                // A colour answer is not typing. This is the last road into a
+                // pane: an answer nothing above consumed used to be delivered
+                // as input, showing up as `4;248;rgb:6e6e/ffff/5757` at the
+                // cursor for the shell to run. Every path that knows who asked
+                // has already had its chance.
+                if (core.osc_colors.containsColorReplyPayload(bytes)) {
+                    log.debug("not forwarding a colour answer to a pane, len={d}", .{bytes.len});
+                } else {
+                    forwardSanitizedToFocusedPane(state, bytes, parsed_event_for_popup);
+                }
             }
         }
         // Advance and keep draining. This used to `return`, abandoning
