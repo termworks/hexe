@@ -5,9 +5,10 @@
 # a dependency is the DEPENDENT's root -- so hexe having an `examples/`
 # directory made yazap iterate hexe's, and its `assert(kind == .file)` panicked
 # the build on any subdirectory there. Its help writer targets stderr, which
-# makes `hexe --help | less` print nothing. Both fixes are a couple of lines and
-# live in patches/ as files, so following yazap is: bump YAZAP_REV, re-run this,
-# fix whichever patch drifted.
+# makes `hexe --help | less` print nothing, and its footer closes the quotes it
+# opens with backticks. Each fix is a couple of lines and lives in patches/ as a
+# file, so following yazap is: bump YAZAP_REV, re-run this, fix whichever patch
+# drifted.
 #
 # `vendor/` is generated and not committed, so a fresh clone runs this once
 # before building. It lives in a script rather than in the build runner because
