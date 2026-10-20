@@ -37,7 +37,8 @@ hexe terminal new [-n <name>] [-I <instance>] [-T] [--log <lvl>] [--logfile <pat
 hexe terminal attach <name-or-uuid-prefix>
 hexe terminal kill <id>            # a session, a pane, or a float
 hexe terminal float --command <cmd> [--title …] [--size w,h,x,y] [--isolation …] [--result-file …]
-hexe terminal send <text> [--uuid <u>|--last|--creator|--broadcast] [--enter] [--ctrl <key>]
+hexe terminal send <text> [--pane <n>|--uuid <u>|--last|--creator|--broadcast] [--enter] [--ctrl <key>]
+hexe terminal read [--pane <n>|--uuid <u>] [-n <lines>|-c <commands>]
 hexe terminal notify <msg> [--uuid <u>|--last|--broadcast]
 hexe terminal info [--uuid <u>|--last|--creator]
 hexe terminal focus left|right|up|down
@@ -108,10 +109,46 @@ reading the message:
 | `3` | no such session, or no such pane |
 | `4` | ambiguous: say which |
 
-Typing (`terminal send`) is delivered to the pane's **pod**, which owns the pty
-and outlives the frontend — so it reaches a pane in a **detached** session too.
-Anything needing a frontend (keys through the keybinding machinery, focus,
-reading the screen) does not.
+Typing (`terminal send`) and reading (`terminal read`) are both served by the
+pane's **pod**, which owns the pty and outlives the frontend — so both reach a
+pane in a **detached** session. Anything that genuinely needs a frontend (keys
+through the keybinding machinery, focus) does not.
+
+### Reading a pane back
+
+```
+hexe terminal read --pane romeo              # the last command's output
+hexe terminal read --pane romeo -c 3         # the last three commands
+hexe terminal read --pane romeo -n 40        # the last 40 lines
+hexe terminal read --uuid b717c471 | grep FAIL
+```
+
+| | |
+|---|---|
+| `-n <lines>` | the last N rows that have anything on them |
+| `-c <commands>` | the output of the last N commands |
+| neither | the last command's output |
+
+The command-based modes need **OSC 133 prompt marks**, which come from your
+prompt, not from `hexe shell init` — that installs hexe's own IPC hooks. A
+prompt renderer that emits `133;A`/`B`/`C` gives hexe the row marks it needs; in
+plain bash, `PS1` and `PS0` are enough:
+
+```sh
+PS1=$'\033]133;A\007$ \033]133;B\007'
+PS0=$'\033]133;C\007'
+```
+
+Without marks, `-n` still works and the other two exit `3` telling you so,
+rather than handing back a screenful dressed up as a command's output.
+
+Output goes to **stdout** so it can be piped. `-c 1` and a bare read give the
+output alone; `-c 2` and above keep the prompt line *between* commands, because
+that is what separates one command's output from the next.
+
+The pod answers from a bounded **4 MiB** ring, so very old history is gone. When
+the ring has already wrapped, a note on **stderr** says the answer may begin
+mid-history — stdout stays clean for the pipe.
 
 Sessions additionally resolve by **prefix**, over both names and uuids, which is why
 `hexe terminal attach nido` and `hexe terminal attach a3f2` both work.
