@@ -7,6 +7,7 @@ const xev = @import("xev").Dynamic;
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const HostHooks = @import("loop_host_hooks.zig").HostHooks;
+const host_colors = @import("host_colors.zig");
 const terminal_main = @import("main.zig");
 const loop_ipc = @import("loop_ipc.zig");
 
@@ -370,7 +371,27 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
                     }
                 }
                 while (pane.takeHostColorQuery()) |key| {
+                    // Answered from the cache, with no pending left to be
+                    // delivered late to an asker that stopped waiting.
+                    var answer_buf: [48]u8 = undefined;
+                    if (state.host_colors.cachedAnswer(key, &answer_buf)) |answer| {
+                        state.writePaneInput(pane, answer);
+                        continue;
+                    }
+                    // On a miss the host is asked from here: the pane's own
+                    // query was not passed through.
                     if (!state.host_colors.registerPane(key, pane.uuid, now_ms)) state.enqueueOscReplyTarget(pane.uuid);
+                    if (host_colors.HostColors.queryBytes(key, &answer_buf)) |query| {
+                        const stdout = std.fs.File.stdout();
+                        stdout.writeAll(query) catch |err| {
+                            core.logging.logError("terminal", "relay a pane's colour query", err);
+                        };
+                    }
+                }
+                const observed = pane.takeHostColorObserved();
+                if (!observed.empty() and state.host_colors.learn(observed)) {
+                    state.renderer.invalidate();
+                    state.needs_render = true;
                 }
                 const color_invalidation = pane.takeHostColorInvalidation();
                 if (!color_invalidation.empty()) {
