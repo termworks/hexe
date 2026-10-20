@@ -714,9 +714,33 @@ pub const FrontendRuntime = struct {
         return self.projection.getPaneProc(uuid);
     }
 
+    /// Record a name the daemon already assigned (pane birth, reattach).
+    ///
+    /// No uniqueness check: the daemon picked this name, so questioning it here
+    /// would reject a name that is already in use for this very pane.
     pub fn setPaneNameOwned(self: *FrontendRuntime, uuid: [32]u8, name_owned: []u8) void {
         self.projection.setPaneNameOwned(uuid, name_owned);
         self.syncPaneNameToSes(uuid, name_owned);
+    }
+
+    /// Rename a pane on request, refusing when the daemon refuses.
+    ///
+    /// The daemon owns uniqueness — names are unique per session — so it is
+    /// asked FIRST and the projection is updated only once it agrees. Writing
+    /// locally first and logging the refusal, which is what `setPaneNameOwned`
+    /// does, made a rejected rename look like it had worked.
+    ///
+    /// Returns false WITHOUT taking ownership of `name_owned`, so the caller
+    /// still has to free it.
+    pub fn renamePane(self: *FrontendRuntime, uuid: [32]u8, name_owned: []u8) bool {
+        if (self.isConnected()) {
+            self.client.updatePaneName(uuid, name_owned) catch |err| {
+                logging.logError("frontend_runtime", "ses refused a pane rename", err);
+                return false;
+            };
+        }
+        self.projection.setPaneNameOwned(uuid, name_owned);
+        return true;
     }
 
     /// Mirror a pane name to SES so `hexe com <pane> info` and the session

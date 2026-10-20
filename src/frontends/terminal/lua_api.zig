@@ -418,7 +418,7 @@ fn focusedPane(state: *State) ?*Pane {
     if (state.api_pane_scope) |uuid| {
         var f = Finder{ .want_uuid = std.mem.sliceTo(uuid[0..], 0) };
         forEachPane(state, .{ .ctx = &f, .call = Finder.visit });
-        return f.found;
+        return f.matched();
     }
     if (state.activeFloatingIndex()) |idx| {
         if (idx < state.view.float_views.items.len) return state.view.float_views.items[idx];
@@ -432,11 +432,22 @@ const Finder = struct {
     want_ptr: ?*Pane = null,
     found: ?*Pane = null,
     found_index: usize = 0,
+    /// How many panes answered to a uuid PREFIX. A pointer or an index can only
+    /// ever match once; a prefix can match several, and taking the first in
+    /// layout order meant `send("b", ...)` wrote into whichever pane happened
+    /// to come first. `matched()` refuses instead.
+    uuid_hits: usize = 0,
+
+    /// The one pane that matched, or null when the selector was ambiguous.
+    fn matched(self: *const Finder) ?*Pane {
+        if (self.uuid_hits > 1) return null;
+        return self.found;
+    }
 
     fn visit(ctx: *anyopaque, pane: *Pane, index: usize) void {
         const self: *Finder = @ptrCast(@alignCast(ctx));
-        if (self.found != null) return;
         if (self.want_ptr) |wp| {
+            if (self.found != null) return;
             if (wp == pane) {
                 self.found = pane;
                 self.found_index = index;
@@ -444,6 +455,7 @@ const Finder = struct {
             return;
         }
         if (self.want_index) |wi| {
+            if (self.found != null) return;
             if (wi == index) {
                 self.found = pane;
                 self.found_index = index;
@@ -452,8 +464,12 @@ const Finder = struct {
         }
         if (self.want_uuid) |wu| {
             if (wu.len <= pane.uuid.len and std.mem.startsWith(u8, pane.uuid[0..], wu)) {
-                self.found = pane;
-                self.found_index = index;
+                // Every hit is counted, so the walk cannot stop at the first.
+                self.uuid_hits += 1;
+                if (self.uuid_hits == 1) {
+                    self.found = pane;
+                    self.found_index = index;
+                }
             }
         }
     }
@@ -491,7 +507,7 @@ fn resolvePaneUnscoped(lua: *Lua, state: *State, idx: i32) ?*Pane {
             if (n <= 0) return focusedPane(state);
             var f = Finder{ .want_index = @intCast(n) };
             forEachPane(state, .{ .ctx = &f, .call = Finder.visit });
-            return f.found;
+            return f.matched();
         },
         .string => {
             const sel = lua.toString(idx) catch "";
@@ -502,7 +518,7 @@ fn resolvePaneUnscoped(lua: *Lua, state: *State, idx: i32) ?*Pane {
                 const prev = state.prev_focused_pane_uuid orelse return null;
                 var f = Finder{ .want_uuid = prev[0..] };
                 forEachPane(state, .{ .ctx = &f, .call = Finder.visit });
-                return f.found;
+                return f.matched();
             }
             if (std.mem.startsWith(u8, sel, "tab:") and std.mem.endsWith(u8, sel, "/focus")) {
                 const digits = sel["tab:".len .. sel.len - "/focus".len];
@@ -512,7 +528,7 @@ fn resolvePaneUnscoped(lua: *Lua, state: *State, idx: i32) ?*Pane {
             }
             var f = Finder{ .want_uuid = sel };
             forEachPane(state, .{ .ctx = &f, .call = Finder.visit });
-            return f.found;
+            return f.matched();
         },
         else => return null,
     }
@@ -1250,7 +1266,14 @@ fn hexe_rename(lstate: ?*LuaState) callconv(.c) c_int {
         lua.pushBoolean(false);
         return 1;
     };
-    state.setPaneNameOwned(pane.uuid, owned);
+    // Names are unique per session and the daemon is the one that knows, so a
+    // refusal has to reach the caller. This used to store the name locally and
+    // log the refusal, which reported success for a rename that did not happen.
+    if (!state.runtime.renamePane(pane.uuid, owned)) {
+        state.allocator.free(owned);
+        lua.pushBoolean(false);
+        return 1;
+    }
     state.needs_render = true;
     lua.pushBoolean(true);
     return 1;
