@@ -75,6 +75,13 @@ jobs:
         run: |
           nix build --accept-flake-config --no-update-lock-file \
             --max-jobs 0 --builders '' .#hexe
-          result/bin/hexe --help
+          # Both on stdout: `hexe --help | less` and `hexe --version` in a
+          # script are the two ways anyone asks a CLI what it is.
+          result/bin/hexe --help > "$RUNNER_TEMP/hexe-help"
+          test -s "$RUNNER_TEMP/hexe-help"
+          result/bin/hexe --version > "$RUNNER_TEMP/hexe-version"
+          # The tag is the only thing that says which release this is, so a
+          # binary that reports a different version is the wrong binary.
+          echo "hexe ${GITHUB_REF_NAME#v}" | diff - "$RUNNER_TEMP/hexe-version"
           result/bin/hexe lua-api > "$RUNNER_TEMP/hexe-client.lua"
           test -s "$RUNNER_TEMP/hexe-client.lua"
