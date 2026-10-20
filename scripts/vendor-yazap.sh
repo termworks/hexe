@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Fetch the pinned yazap and apply hexe's patch into vendor/yazap.
+# Fetch the pinned yazap and apply hexe's patches into vendor/yazap.
 #
 # yazap's `examplesStep` opens `./examples/` through the process cwd, which for
 # a dependency is the DEPENDENT's root -- so hexe having an `examples/`
 # directory made yazap iterate hexe's, and its `assert(kind == .file)` panicked
-# the build on any subdirectory there. The fix is two lines and lives in
-# patches/ as a file, so following yazap is: bump YAZAP_REV, re-run this, fix
-# the patch if it drifted.
+# the build on any subdirectory there. Its help writer targets stderr, which
+# makes `hexe --help | less` print nothing. Both fixes are a couple of lines and
+# live in patches/ as files, so following yazap is: bump YAZAP_REV, re-run this,
+# fix whichever patch drifted.
 #
 # `vendor/` is generated and not committed, so a fresh clone runs this once
 # before building. It lives in a script rather than in the build runner because
@@ -19,9 +20,11 @@ YAZAP_URL="${YAZAP_URL:-https://github.com/PrajwalCH/yazap}"
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 dir="$root/vendor/yazap"
-patch="$root/patches/yazap-examples-cwd.patch"
 
-test -f "$patch" || { echo "missing $patch" >&2; exit 1; }
+# Every patches/yazap-*.patch, in name order, so adding one is adding a file.
+patches=()
+while IFS= read -r p; do patches+=("$p"); done < <(ls "$root"/patches/yazap-*.patch)
+test "${#patches[@]}" -gt 0 || { echo "no patches/yazap-*.patch found" >&2; exit 1; }
 
 rm -rf "$dir"
 mkdir -p "$dir"
@@ -32,6 +35,10 @@ git -C "$dir" init -q .
 git -C "$dir" remote add origin "$YAZAP_URL"
 git -C "$dir" fetch -q --depth 1 origin "$YAZAP_REV"
 git -C "$dir" checkout -q FETCH_HEAD
-git -C "$dir" apply --whitespace=nowarn "$patch"
+names=()
+for p in "${patches[@]}"; do
+  git -C "$dir" apply --whitespace=nowarn "$p"
+  names+=("$(basename "$p")")
+done
 
-echo "yazap $YAZAP_REV + patches/$(basename "$patch") -> vendor/yazap"
+echo "yazap $YAZAP_REV + ${names[*]} -> vendor/yazap"

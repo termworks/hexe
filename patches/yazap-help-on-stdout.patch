@@ -1,0 +1,20 @@
+diff --git a/src/HelpMessageWriter.zig b/src/HelpMessageWriter.zig
+--- a/src/HelpMessageWriter.zig
++++ b/src/HelpMessageWriter.zig
+@@ -11,13 +11,13 @@
+ /// **NOTE**: The argument refers to any argument not just the `Arg`.
+ const SIGNATURE_LEFT_PADDING = 4;
+ 
+-/// Used to store the help content before writing into the `stderr`.
++/// Used to store the help content before writing into the `stdout`.
+ writer: BufferedWriter = undefined,
+ /// Command whose help to write.
+ command: *const ParsedCommand = undefined,
+ 
+ pub fn init(command: *const ParsedCommand, buffer: []u8) HelpMessageWriter {
+     return HelpMessageWriter{
+-        .writer = .init(std.fs.File.stderr(), buffer),
++        .writer = .init(std.fs.File.stdout(), buffer),
+         .command = command,
+     };
+ }
