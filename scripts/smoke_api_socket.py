@@ -388,5 +388,62 @@ print("abuse: bad frames, huge lengths, vanished clients, non-readers, "
 if not alive():
     fail("the frontend died during the checks")
 
+# `hexe api` finding the session the way a pane's shell has to.
+#
+# Every pane gets the session's UUID in HEXE_SESSION, while the socket is named
+# for the session's NAME at bind time. `hexe api` built api@$HEXE_SESSION.sock
+# from the variable, so inside a pane it failed with FileNotFound -- the one
+# place it is most useful. Both spellings must reach the same session, and a
+# name that belongs to nobody must still be refused.
+ident = api("session")
+if not ident or not ident.get("ok"):
+    fail("could not read the session's own identity")
+sid = ident["result"]
+sess_uuid, sess_name = sid["uuid"], sid["name"]
+
+
+def cli_session(value=None, var=None):
+    """`hexe api session` with the session named by flag or by environment."""
+    e = dict(env)
+    e.pop("HEXE_SESSION", None)
+    e.pop("HEXE_API_SOCKET", None)
+    cmd = [HEXE, "api", "session"]
+    if var:
+        e[var] = value
+    elif value is not None:
+        cmd += ["--session", value]
+    p = subprocess.run(cmd, capture_output=True, text=True, env=e, cwd=WD, timeout=30)
+    return p.returncode, p.stdout, p.stderr
+
+
+for label, value, var in (
+    ("the uuid in HEXE_SESSION, as a pane gets it", sess_uuid, "HEXE_SESSION"),
+    ("the name in HEXE_SESSION", sess_name, "HEXE_SESSION"),
+    ("the socket path in HEXE_API_SOCKET", SOCK, "HEXE_API_SOCKET"),
+    ("the uuid via --session", sess_uuid, None),
+    ("the name via --session", sess_name, None),
+    ("nothing at all: the sole session", None, None),
+):
+    rc, outp, errp = cli_session(value, var)
+    if rc != 0:
+        fail(f"hexe api could not find the session by {label}: rc={rc} {errp.strip()}")
+    try:
+        got = json.loads(outp)["result"]
+    except (ValueError, KeyError):
+        fail(f"hexe api answered unparseably for {label}: {outp[:120]!r}")
+    if got.get("uuid") != sess_uuid:
+        fail(f"{label} reached session {got.get('uuid')}, wanted {sess_uuid}")
+print("discovery: uuid, name, socket path and bare invocation all reach the "
+      "same session")
+
+# A name nobody answers to must fail, or the lookup above is just "pick one".
+rc, _o, errp = cli_session("deadbeefdeadbeefdeadbeefdeadbeef", "HEXE_SESSION")
+if rc == 0:
+    fail("a session uuid that belongs to nobody was accepted; the lookup is "
+         "picking a session rather than matching one")
+if "answers to" not in errp:
+    fail(f"an unknown session should say so; got {errp.strip()[:120]!r}")
+print("discovery: an unknown session is refused, not silently substituted")
+
 cleanup()
 print("PASS: the live API answers outside the process, and no client can stall the mux")
