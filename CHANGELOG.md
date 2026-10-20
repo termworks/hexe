@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.1] - 2026-10-20
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Answer a pane's colour query from cache
+
 ## [0.5.0] - 2026-10-20
 
 ### <!-- 0 -->⛰️  Features
