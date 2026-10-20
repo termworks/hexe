@@ -169,6 +169,7 @@ pub const MsgType = enum(u16) {
     update_pane_palette = 0x0143, // MUX → SES: park a pane's palette namespaces as session metadata
     get_pane_palette = 0x0144, // MUX → SES: fetch them back when attaching
     set_name_pool = 0x0145, // MUX → SES: the vocabulary panes are named from
+    resolve_pane_target = 0x0146, // CLI → SES: (session?, pane name | uuid prefix) → one pane uuid
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -741,6 +742,41 @@ pub const KillTargetResult = extern struct {
     success: u8 align(1),
     kind: u8 align(1),
     killed_panes: u16 align(1),
+    error_len: u16 align(1),
+};
+
+/// ResolvePaneTarget request: the session selector then the pane selector
+/// follow, `session_len` bytes and `pane_len` bytes.
+///
+/// Names are unique per SESSION, so a pane name needs the session to be
+/// unambiguous; a uuid prefix does not, and an empty session means "any". The
+/// daemon answers rather than the CLI because only the daemon sees every
+/// session, attached or detached — the control socket exists only while a
+/// frontend is attached, and panes outlive that.
+pub const ResolvePaneTarget = extern struct {
+    session_len: u16 align(1),
+    /// The pane selector: a name, or a uuid prefix when `pane_is_uuid` is 1.
+    pane_len: u16 align(1),
+    pane_is_uuid: u8 align(1),
+};
+
+/// Why a resolve failed, so the CLI can pick an exit code without parsing prose.
+pub const ResolvePaneOutcome = enum(u8) {
+    ok = 0,
+    no_such_session = 1,
+    no_such_pane = 2,
+    ambiguous_session = 3,
+    ambiguous_pane = 4,
+};
+
+/// Followed by `error_len` bytes of message when `outcome != ok`.
+pub const ResolvePaneTargetResult = extern struct {
+    outcome: u8 align(1),
+    uuid: [32]u8 align(1),
+    /// Whether the owning session has a frontend attached. Typing reaches a pane
+    /// either way (it goes to the pod), but keys, focus and screen reads need a
+    /// frontend, so the caller has to be able to say why it refused.
+    attached: u8 align(1),
     error_len: u16 align(1),
 };
 

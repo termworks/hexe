@@ -14,6 +14,7 @@ const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
 const wire = core.wire;
+const pane_spawn_names = @import("pane_spawn.zig");
 const ses = @import("main.zig");
 const state = @import("state.zig");
 const server = @import("server.zig");
@@ -479,19 +480,27 @@ pub fn handleKillTarget(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []
         },
     };
 
-    // 3) Single pane/float by unique uuid prefix (any state).
+    // 3) Single pane/float by unique uuid prefix, else by name (any state).
+    //
+    // The name step is what the help has always advertised ("by name or uuid
+    // prefix"); only the uuid half was implemented, so a pane name silently
+    // matched nothing. Names are unique per session, so one name across two
+    // sessions is ambiguous here and refused rather than picked.
     var pane_match: ?[32]u8 = null;
-    var pane_count: usize = 0;
-    var pit = self.ses_state.store.panes.keyIterator();
-    while (pit.next()) |key| {
-        if (id.len <= key.len and std.mem.startsWith(u8, key, id)) {
-            pane_match = key.*;
-            pane_count += 1;
-        }
-    }
-    if (pane_count > 1) {
-        replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "ambiguous id: multiple panes match");
-        return;
+    switch (pane_spawn_names.findPaneInScope(&self.ses_state.store, id, true, null, false)) {
+        .ambiguous => {
+            replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "ambiguous id: multiple panes match");
+            return;
+        },
+        .one => |u| pane_match = u,
+        .none => switch (pane_spawn_names.findPaneInScope(&self.ses_state.store, id, false, null, false)) {
+            .ambiguous => {
+                replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "ambiguous name: panes in several sessions are called that");
+                return;
+            },
+            .one => |u| pane_match = u,
+            .none => {},
+        },
     }
     if (pane_match) |uuid| {
         self.ses_state.killPane(uuid) catch {
@@ -503,6 +512,121 @@ pub fn handleKillTarget(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []
     }
 
     replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "no session or pane matches");
+}
+
+/// `(session?, pane name | uuid prefix)` → exactly one pane uuid.
+///
+/// On the daemon because only the daemon sees every session: a session's control
+/// socket exists only while a frontend is attached, but its panes keep running,
+/// so resolving through the frontend could never reach a detached session.
+///
+/// Ambiguity is always an error, never a pick. Addressing the wrong pane writes
+/// into somebody's shell, which is worse than refusing to write at all.
+pub fn handleResolvePaneTarget(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
+
+    if (payload_len < @sizeOf(wire.ResolvePaneTarget)) {
+        self.skipBinaryPayload(fd, payload_len, buf);
+        replyResolve(self, fd, .no_such_pane, null, false, "invalid payload");
+        return;
+    }
+    const req = wire.readStructTimeout(wire.ResolvePaneTarget, fd, server.HANDLER_IO_TIMEOUT_MS) catch {
+        self.ctlStreamDesynced(fd, "mid-message read failed");
+        return;
+    };
+    const total = @as(usize, req.session_len) + @as(usize, req.pane_len);
+    if (total > buf.len) {
+        replyResolve(self, fd, .no_such_pane, null, false, "selector too long");
+        return;
+    }
+    if (total > 0) {
+        wire.readExactTimeout(fd, buf[0..total], server.HANDLER_IO_TIMEOUT_MS) catch {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
+            return;
+        };
+    }
+    const session_sel = buf[0..req.session_len];
+    const pane_sel = buf[req.session_len..total];
+    ses.debugLog("resolve_pane_target: session='{s}' pane='{s}' is_uuid={d}", .{
+        session_sel, pane_sel, req.pane_is_uuid,
+    });
+
+    // The session, if one was named. Unresolvable is distinct from "no pane":
+    // a typo in the session must not read as a missing pane.
+    var scope: ?[16]u8 = null;
+    var scope_given = false;
+    if (session_sel.len > 0) {
+        if (self.ses_state.findDetachedSessionByNameOrPrefix(session_sel)) |sid| {
+            scope = sid;
+            scope_given = true;
+        } else if (findAttachedSessionTarget(self, session_sel)) |resolution| switch (resolution) {
+            .ambiguous => {
+                replyResolve(self, fd, .ambiguous_session, null, false, "several sessions match that name");
+                return;
+            },
+            .client_index => |idx| {
+                scope = self.ses_state.store.clients.items[idx].session_id;
+                scope_given = true;
+            },
+        } else {
+            replyResolve(self, fd, .no_such_session, null, false, "no session matches");
+            return;
+        }
+    }
+
+    if (pane_sel.len == 0) {
+        replyResolve(self, fd, .no_such_pane, null, false, "no pane selector given");
+        return;
+    }
+
+    switch (pane_spawn_names.findPaneInScope(
+        &self.ses_state.store,
+        pane_sel,
+        req.pane_is_uuid == 1,
+        scope,
+        scope_given,
+    )) {
+        .ambiguous => replyResolve(self, fd, .ambiguous_pane, null, false, if (req.pane_is_uuid == 1)
+            "several panes share that uuid prefix; give more of it"
+        else
+            "several panes answer to that name; name the session with --session"),
+        .none => replyResolve(self, fd, .no_such_pane, null, false, "no pane matches"),
+        .one => |uuid| replyResolve(self, fd, .ok, uuid, paneHasFrontend(self, uuid), ""),
+    }
+}
+
+/// Whether a live frontend is attached to the session owning `uuid`.
+fn paneHasFrontend(self: *Server, uuid: [32]u8) bool {
+    const pane = self.ses_state.store.panes.getPtr(uuid) orelse return false;
+    const client_id = pane.attached_to orelse return false;
+    for (self.ses_state.store.clients.items) |*client| {
+        if (client.id == client_id) return client.mux_ctl_fd != null;
+    }
+    return false;
+}
+
+fn replyResolve(
+    self: *Server,
+    fd: posix.fd_t,
+    outcome: wire.ResolvePaneOutcome,
+    uuid: ?[32]u8,
+    attached: bool,
+    err_msg: []const u8,
+) void {
+    var r: wire.ResolvePaneTargetResult = .{
+        .outcome = @intFromEnum(outcome),
+        .uuid = uuid orelse [_]u8{'0'} ** 32,
+        .attached = @intFromBool(attached),
+        .error_len = @intCast(err_msg.len),
+    };
+    if (err_msg.len > 0) {
+        self.replyOrCloseWithTrail(fd, .resolve_pane_target, std.mem.asBytes(&r), err_msg);
+    } else {
+        self.replyOrClose(fd, .resolve_pane_target, std.mem.asBytes(&r));
+    }
 }
 
 const AttachedResolution = union(enum) {
