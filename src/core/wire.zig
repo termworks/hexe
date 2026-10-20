@@ -77,6 +77,51 @@ pub const POD_HANDSHAKE_AUX_OBSERVER: u8 = 0x04;
 /// the process it kills is not a kill switch.
 pub const POD_HANDSHAKE_AUX_CONTROL: u8 = 0x05;
 
+/// Read a pane's text back. Followed by a `PodReadRequest`; the pod answers
+/// with a `PodReadReply` and then `text_len` bytes.
+///
+/// On the pod for the same reason input is: the pod owns the pty and holds the
+/// scrollback ring, so it can answer whether or not a frontend is attached. A
+/// read routed through the frontend could not see a detached session at all,
+/// which is exactly where reading back what a long job printed is most useful.
+///
+/// The pod keeps raw bytes rather than a parsed screen, so it builds a VT from
+/// the ring only when a read arrives and throws it away afterwards. That keeps
+/// the cost off the output path entirely -- the pod must never be slowed down
+/// draining the pty.
+pub const POD_HANDSHAKE_AUX_READ: u8 = 0x06;
+
+pub const PodReadMode = enum(u8) {
+    /// The last `count` rows that have anything on them.
+    lines = 1,
+    /// The output of the last `count` commands. Needs OSC 133 marks.
+    commands = 2,
+};
+
+pub const PodReadRequest = extern struct {
+    mode: u8 align(1),
+    count: u32 align(1),
+};
+
+pub const PodReadOutcome = enum(u8) {
+    ok = 0,
+    /// The pane has no OSC 133 marks, so "the last command" is not a question
+    /// its screen can answer. Distinct from an empty answer so the caller can
+    /// say to use `-n` or turn on shell integration.
+    no_marks = 1,
+    /// The pod could not build a screen from its ring.
+    unreadable = 2,
+};
+
+pub const PodReadReply = extern struct {
+    outcome: u8 align(1),
+    /// Whether the ring had already dropped its oldest bytes, so the answer may
+    /// begin mid-history. Said rather than hidden: a truncated read that looks
+    /// complete is worse than one that admits it.
+    truncated: u8 align(1),
+    text_len: u32 align(1),
+};
+
 pub const PodShareCmd = enum(u8) {
     /// Report the current state without changing it.
     query = 0,
