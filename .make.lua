@@ -347,7 +347,7 @@ make.recipe{
 local SMOKES = {
   "smoke_reconnect.py", "smoke_detach_reattach.py", "smoke_fullscreen_reattach.py",
   "smoke_paste.py", "smoke_input_batch.py", "smoke_terminal_protocol.py",
-  "smoke_kill.py", "smoke_pane_info.py", "smoke_lua_api.py",
+  "smoke_kill.py", "smoke_pane_info.py", "smoke_lua_api.py", "smoke_pane_addressing.py", "smoke_pane_read.py", "smoke_pane_read_stress.py", "smoke_subfloats.py",
   "smoke_config_reload.py", "smoke_recording.py", "smoke_cli_waiter_release.py",
   "smoke_stalled_peer.py", "smoke_stalled_pod_peer.py", "smoke_rate_limit_attach.py",
   "smoke_log_not_in_tmp.py", "smoke_pod_attach.py", "smoke_wedged_ctl_reader.py",

@@ -77,6 +77,51 @@ pub const POD_HANDSHAKE_AUX_OBSERVER: u8 = 0x04;
 /// the process it kills is not a kill switch.
 pub const POD_HANDSHAKE_AUX_CONTROL: u8 = 0x05;
 
+/// Read a pane's text back. Followed by a `PodReadRequest`; the pod answers
+/// with a `PodReadReply` and then `text_len` bytes.
+///
+/// On the pod for the same reason input is: the pod owns the pty and holds the
+/// scrollback ring, so it can answer whether or not a frontend is attached. A
+/// read routed through the frontend could not see a detached session at all,
+/// which is exactly where reading back what a long job printed is most useful.
+///
+/// The pod keeps raw bytes rather than a parsed screen, so it builds a VT from
+/// the ring only when a read arrives and throws it away afterwards. That keeps
+/// the cost off the output path entirely -- the pod must never be slowed down
+/// draining the pty.
+pub const POD_HANDSHAKE_AUX_READ: u8 = 0x06;
+
+pub const PodReadMode = enum(u8) {
+    /// The last `count` rows that have anything on them.
+    lines = 1,
+    /// The output of the last `count` commands. Needs OSC 133 marks.
+    commands = 2,
+};
+
+pub const PodReadRequest = extern struct {
+    mode: u8 align(1),
+    count: u32 align(1),
+};
+
+pub const PodReadOutcome = enum(u8) {
+    ok = 0,
+    /// The pane has no OSC 133 marks, so "the last command" is not a question
+    /// its screen can answer. Distinct from an empty answer so the caller can
+    /// say to use `-n` or turn on shell integration.
+    no_marks = 1,
+    /// The pod could not build a screen from its ring.
+    unreadable = 2,
+};
+
+pub const PodReadReply = extern struct {
+    outcome: u8 align(1),
+    /// Whether the ring had already dropped its oldest bytes, so the answer may
+    /// begin mid-history. Said rather than hidden: a truncated read that looks
+    /// complete is worse than one that admits it.
+    truncated: u8 align(1),
+    text_len: u32 align(1),
+};
+
 pub const PodShareCmd = enum(u8) {
     /// Report the current state without changing it.
     query = 0,
@@ -169,6 +214,7 @@ pub const MsgType = enum(u16) {
     update_pane_palette = 0x0143, // MUX → SES: park a pane's palette namespaces as session metadata
     get_pane_palette = 0x0144, // MUX → SES: fetch them back when attaching
     set_name_pool = 0x0145, // MUX → SES: the vocabulary panes are named from
+    resolve_pane_target = 0x0146, // CLI → SES: (session?, pane name | uuid prefix) → one pane uuid
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -398,6 +444,12 @@ pub const SessionSyncFloat = extern struct {
     pad_x: u8 align(1),
     pad_y: u8 align(1),
     active: u8 align(1),
+    /// The family this float belongs to: its parent's uuid, and which chip it
+    /// is. `has_parent_float` is 0 for a top-level float, whose
+    /// `parent_float` bytes are then meaningless rather than a uuid of zeros.
+    parent_float: [32]u8 align(1) = .{0} ** 32,
+    has_parent_float: u8 align(1) = 0,
+    family_index: u8 align(1) = 0,
 };
 
 /// SessionRemoveFloat: remove a float record from the canonical snapshot.
@@ -695,6 +747,15 @@ pub const FloatRequest = extern struct {
     shift_y: i16 align(1), // vertical shift from center (-50 to 50)
     // Source session ID as 32-char hex (zeroed if not called from within a mux session)
     source_session_id: [32]u8 align(1),
+    /// The float this one is a sub-float of, as 32-char hex; zeroed for a
+    /// top-level float.
+    ///
+    /// A sub-float joins its parent's family: it shares the parent's toggle
+    /// key and geometry, takes the next free chip number, and is closed when
+    /// the parent is. SES forwards this request to the owning frontend
+    /// unchanged, and the frontend owns float state, so the parent only has to
+    /// be named here — no daemon-side handling at all.
+    parent_pane: [32]u8 align(1) = .{0} ** 32,
 };
 
 /// FloatCreated: response when float is created (no wait).
@@ -741,6 +802,41 @@ pub const KillTargetResult = extern struct {
     success: u8 align(1),
     kind: u8 align(1),
     killed_panes: u16 align(1),
+    error_len: u16 align(1),
+};
+
+/// ResolvePaneTarget request: the session selector then the pane selector
+/// follow, `session_len` bytes and `pane_len` bytes.
+///
+/// Names are unique per SESSION, so a pane name needs the session to be
+/// unambiguous; a uuid prefix does not, and an empty session means "any". The
+/// daemon answers rather than the CLI because only the daemon sees every
+/// session, attached or detached — the control socket exists only while a
+/// frontend is attached, and panes outlive that.
+pub const ResolvePaneTarget = extern struct {
+    session_len: u16 align(1),
+    /// The pane selector: a name, or a uuid prefix when `pane_is_uuid` is 1.
+    pane_len: u16 align(1),
+    pane_is_uuid: u8 align(1),
+};
+
+/// Why a resolve failed, so the CLI can pick an exit code without parsing prose.
+pub const ResolvePaneOutcome = enum(u8) {
+    ok = 0,
+    no_such_session = 1,
+    no_such_pane = 2,
+    ambiguous_session = 3,
+    ambiguous_pane = 4,
+};
+
+/// Followed by `error_len` bytes of message when `outcome != ok`.
+pub const ResolvePaneTargetResult = extern struct {
+    outcome: u8 align(1),
+    uuid: [32]u8 align(1),
+    /// Whether the owning session has a frontend attached. Typing reaches a pane
+    /// either way (it goes to the pod), but keys, focus and screen reads need a
+    /// frontend, so the caller has to be able to say why it refused.
+    attached: u8 align(1),
     error_len: u16 align(1),
 };
 
@@ -1293,14 +1389,44 @@ pub fn sendServerHello(fd: posix.fd_t) !void {
     try writeAll(fd, RUNTIME_EPOCH);
 }
 
+/// Read the server's identity, telling "wrong build" apart from "refused".
+///
+/// A daemon that refuses the connection — the rate limiter does this — replies
+/// with an `error` control frame instead of a hello and hangs up. Those bytes
+/// are not the magic, so this used to report `RuntimeEpochMismatch`: the one
+/// diagnosis guaranteed to be wrong, and one that sends you off rebuilding and
+/// restarting daemons. A refusal is now its own error.
+///
+/// The two are told apart by the `HEXE` prefix rather than by parsing the frame:
+/// every hello begins with it whatever the generation, and a control header
+/// begins with a small integer, so no endianness or msg_type detail is relied
+/// on here.
 pub fn readAndValidateServerHello(fd: posix.fd_t) !void {
     var magic: [SERVER_HELLO_MAGIC.len]u8 = undefined;
     try readExact(fd, &magic);
-    if (!std.mem.eql(u8, magic[0..], SERVER_HELLO_MAGIC)) return error.RuntimeEpochMismatch;
+    if (!std.mem.eql(u8, magic[0..], SERVER_HELLO_MAGIC)) {
+        if (!std.mem.eql(u8, magic[0..4], SERVER_HELLO_MAGIC[0..4])) {
+            return error.ServerRefusedConnection;
+        }
+        return error.RuntimeEpochMismatch;
+    }
 
     var epoch: [RUNTIME_EPOCH.len]u8 = undefined;
     try readExact(fd, &epoch);
     if (!std.mem.eql(u8, epoch[0..], RUNTIME_EPOCH)) return error.RuntimeEpochMismatch;
+}
+
+test "a refused connection is not reported as a wrong build" {
+    const t = std.testing;
+    // The magic's first four bytes are what every hello generation shares, so
+    // they are what separates "a hello I do not understand" from "not a hello".
+    try t.expectEqualStrings("HEXE", SERVER_HELLO_MAGIC[0..4]);
+
+    // A control header starts with msg_type, a small integer, so its first four
+    // bytes cannot spell HEXE whichever way it is encoded.
+    const hdr: ControlHeader = .{ .msg_type = 0x0002, .payload_len = 48 };
+    const bytes = std.mem.asBytes(&hdr);
+    try t.expect(!std.mem.eql(u8, bytes[0..4], SERVER_HELLO_MAGIC[0..4]));
 }
 
 pub fn sendCliHandshake(fd: posix.fd_t) !void {

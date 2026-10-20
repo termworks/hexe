@@ -30,10 +30,15 @@ pub const InFlightPane = struct {
 
 /// The next free pane name, from the dictionary a frontend supplied or the
 /// built-in pool when it supplied none.
-fn pickPaneName(self: anytype) ![]const u8 {
+///
+/// Free *within the creating client's session*: names are per-session, so two
+/// sessions independently take entries from the same vocabulary and may both
+/// hold `romeo`.
+fn pickPaneName(self: anytype, client_id: usize) ![]const u8 {
     const pool = self.name_pool orelse ipc.builtinPaneNames();
     const suffix = self.name_suffix orelse "-%d";
-    return pane_spawn.pickPaneName(self.allocator, &self.store, pool, self.name_order, suffix);
+    const scope = if (self.getClient(client_id)) |c| c.session_id else null;
+    return pane_spawn.pickPaneName(self.allocator, &self.store, pool, self.name_order, suffix, scope);
 }
 
 pub fn beginCreatePane(
@@ -50,7 +55,7 @@ pub fn beginCreatePane(
     _ = self.getClient(client_id) orelse return error.ClientNotFound;
 
     const uuid = ipc.generateUuid();
-    const name = try pickPaneName(self);
+    const name = try pickPaneName(self, client_id);
     errdefer self.allocator.free(name);
     const pod_socket_path = try ipc.getPodSocketPath(self.allocator, &uuid);
     errdefer self.allocator.free(pod_socket_path);
@@ -158,7 +163,7 @@ pub fn createPane(
 
     var pane_inserted = false;
     const uuid = ipc.generateUuid();
-    const name = try pickPaneName(self);
+    const name = try pickPaneName(self, client_id);
     ses.debugLog("createPane: generated name='{s}'", .{name});
     errdefer if (!pane_inserted) self.allocator.free(name);
     const pod_socket_path = try ipc.getPodSocketPath(self.allocator, &uuid);

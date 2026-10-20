@@ -64,6 +64,8 @@ pub fn sessionSyncFloat(
     pad_x: u8,
     pad_y: u8,
     active: bool,
+    parent_float: ?[32]u8,
+    family_index: u8,
 ) !void {
     const fd = self.ctl_fd orelse return error.NotConnected;
     var msg: wire.SessionSyncFloat = .{
@@ -84,6 +86,9 @@ pub fn sessionSyncFloat(
         .pad_x = pad_x,
         .pad_y = pad_y,
         .active = @intFromBool(active),
+        .parent_float = parent_float orelse .{0} ** 32,
+        .has_parent_float = @intFromBool(parent_float != null),
+        .family_index = family_index,
     };
     self.drainQueuedControlResponses(fd);
     const request_id = try self.writeControlRequest(fd, .session_sync_float, std.mem.asBytes(&msg));

@@ -1482,6 +1482,9 @@ const Pod = struct {
         } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_CONTROL) {
             debugLog("accept: share control fd={d}", .{conn.fd});
             self.acceptShareControl(conn);
+        } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_READ) {
+            debugLog("accept: read control fd={d}", .{conn.fd});
+            self.acceptReadControl(conn, backlog_tmp);
         } else {
             debugLog("accept: unknown handshake 0x{x:0>2} fd={d}", .{ handshake[0], conn.fd });
             var tmp_conn = conn;
@@ -1545,6 +1548,98 @@ const Pod = struct {
         };
         wire.writeAllTimeout(ctl.fd, std.mem.asBytes(&status), SHARE_CTL_TIMEOUT_MS) catch |err| {
             debugLog("share control: reply failed on fd={d}: {s}", .{ ctl.fd, @errorName(err) });
+        };
+    }
+
+    /// Answer a read of this pane's text, from the backlog ring.
+    ///
+    /// The ring is raw bytes, so a VT is built here, fed the ring, asked, and
+    /// thrown away. On demand rather than kept up to date: the pod's one hard
+    /// rule is that nothing may slow the pty drain, and a resident VT would
+    /// parse every byte of output forever to serve a read that may never come.
+    ///
+    /// Password mode reads as empty, the same rule the observer path follows:
+    /// output nobody recorded cannot be handed back.
+    fn acceptReadControl(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
+        var ctl = conn;
+        defer ctl.close();
+
+        var req: wire.PodReadRequest = undefined;
+        wire.readExactTimeout(ctl.fd, std.mem.asBytes(&req), SHARE_CTL_TIMEOUT_MS) catch |err| {
+            debugLog("read control: no request on fd={d}: {s}", .{ ctl.fd, @errorName(err) });
+            return;
+        };
+
+        const n = if (self.password_mode) 0 else self.backlog.copyOut(backlog_tmp);
+        const truncated = self.backlog_abs > self.backlog.len;
+
+        const text = self.renderRing(backlog_tmp[0..n], req) catch |err| {
+            debugLog("read control: render failed: {s}", .{@errorName(err)});
+            self.replyRead(ctl.fd, .unreadable, false, "");
+            return;
+        };
+        defer if (text) |t| self.allocator.free(t);
+
+        if (text) |t| {
+            self.replyRead(ctl.fd, .ok, truncated, t);
+        } else {
+            self.replyRead(ctl.fd, .no_marks, truncated, "");
+        }
+    }
+
+    /// Parse `bytes` as terminal output and pull out what the request asked for.
+    ///
+    /// Null means the screen could not answer -- no prompt marks for a
+    /// command-based read.
+    fn renderRing(self: *Pod, bytes: []const u8, req: wire.PodReadRequest) !?[]const u8 {
+        // A pty that will not report its size still has history worth reading,
+        // so fall back to a conventional screen rather than refusing.
+        var cols: u16 = 80;
+        var rows: u16 = 24;
+        if (self.pty.getSize()) |size| {
+            if (size.cols > 0) cols = size.cols;
+            if (size.rows > 0) rows = size.rows;
+        } else |_| {}
+
+        var vt: core.VT = .{};
+        try vt.init(self.allocator, cols, rows);
+        defer vt.deinit();
+        // A ring that wrapped mid-escape-sequence makes the first bytes
+        // garbage, which is the same trade the reattach replay already takes:
+        // a wrong first line beats losing the history behind it.
+        vt.feed(bytes) catch {};
+
+        const mode: wire.PodReadMode = @enumFromInt(req.mode);
+        const count: usize = req.count;
+        const owned = switch (mode) {
+            .lines => try core.prompt_marks.lastLinesAlloc(self.allocator, &vt, count),
+            .commands => try core.prompt_marks.lastCommandsAlloc(self.allocator, &vt, count),
+        } orelse return null;
+        // Hand back a plain slice: the sentinel is of no use over a socket, and
+        // the caller frees what it gets either way.
+        return owned;
+    }
+
+    fn replyRead(
+        self: *Pod,
+        fd: posix.fd_t,
+        outcome: wire.PodReadOutcome,
+        truncated: bool,
+        text: []const u8,
+    ) void {
+        _ = self;
+        var reply: wire.PodReadReply = .{
+            .outcome = @intFromEnum(outcome),
+            .truncated = @intFromBool(truncated),
+            .text_len = @intCast(text.len),
+        };
+        wire.writeAllTimeout(fd, std.mem.asBytes(&reply), SHARE_CTL_TIMEOUT_MS) catch |err| {
+            debugLog("read control: reply header failed: {s}", .{@errorName(err)});
+            return;
+        };
+        if (text.len == 0) return;
+        wire.writeAllTimeout(fd, text, SHARE_CTL_TIMEOUT_MS) catch |err| {
+            debugLog("read control: reply body failed: {s}", .{@errorName(err)});
         };
     }
 

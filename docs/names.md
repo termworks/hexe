@@ -55,18 +55,31 @@ would let two entries that do not look alike collide.
 
 Names are taken, not rolled:
 
-1. The first entry no live pane is using, walked in `order`. `random` only
-   changes where the walk starts — it still takes a free entry, so two panes can
-   never collide on one pod socket.
+1. The first entry no live pane **in that session** is using, walked in `order`.
+   `random` only changes where the walk starts — it still takes a free entry.
 2. Once every entry is taken, `suffix` is appended with the lowest free number:
    `nidorina-2`, then `nidorina-3`. A suffix without `%d` still gets the number
    appended, or exhaustion would never terminate.
 3. Sessions and panes draw from different dictionaries and are checked
    separately.
 
+**Unique per session, not per daemon.** Two sessions may each hold a `nidorina`,
+because the address is session → pane and a name only has to be unambiguous
+within the session that addresses it. That is also why `hexe terminal send
+--pane nidorina` asks for `--session` when both have one, instead of picking.
+
+Renaming obeys the same rule: `hexe api rename` **fails** if another pane in that
+session already answers to the name, and succeeds if only a pane in a different
+session does.
+
+A detached session keeps its pane names — its panes are still running and still
+addressable — so detaching does not free a name for reuse.
+
 The pane dictionary is sent to the session daemon when the frontend attaches,
 before the first pane exists. The daemon creates panes and never reads the
 config, so without that it would name the opening pane from its built-in pool.
+The dictionary itself is daemon-wide, so the last frontend to attach decides the
+vocabulary for every session; the *uniqueness* is still per session.
 
 ## Names and sprites
 

@@ -414,6 +414,8 @@ pub fn syncFloat(
     pad_x: u8,
     pad_y: u8,
     active: bool,
+    parent_float: ?[32]u8,
+    family_index: u8,
 ) !void {
     const client = self.getClient(client_id) orelse {
         core.logging.warn("ses", "client snapshot float sync failed: client {d} is not registered", .{client_id});
@@ -445,6 +447,8 @@ pub fn syncFloat(
         .pos_y_pct = pos_y_pct,
         .pad_x = pad_x,
         .pad_y = pad_y,
+        .parent_float = parent_float,
+        .family_index = family_index,
     };
 
     for (snapshot.floats.items) |*existing| {

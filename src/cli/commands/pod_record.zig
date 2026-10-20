@@ -111,6 +111,10 @@ fn resolveTargetSocket(allocator: std.mem.Allocator, uuid: []const u8, name: []c
         switch (err) {
             error.InvalidUuid => print("Error: --uuid must be 32 hex chars\n", .{}),
             error.MissingTarget => print("Error: must provide --socket, --uuid, or --name\n", .{}),
+            // Pane names are unique per session, so one name can belong to
+            // two panes in two sessions. Picking either could type into, or
+            // signal, the wrong one.
+            error.AmbiguousPodName => print("Error: several pods are called that; use --uuid\n", .{}),
             else => {},
         }
         return err;

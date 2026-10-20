@@ -169,6 +169,57 @@ stdout and exits with the float's exit code — which is what makes the command 
 work. The wait is deliberately unbounded: it was once capped at the ten-second wire default, so any
 interactive float open longer than that returned nothing.
 
+### Sub-floats
+
+A float can own floats. `--sub` opens one as a member of the caller's family:
+
+```sh
+# from inside a float — an agent opening a helper beside itself
+hexe terminal float --sub --command "git log --oneline -40"
+```
+
+A family is **one rectangle, one toggle key, one member on screen at a time**. The parent is chip
+`0`, children count up from `1`:
+
+```
+   ╭───claude──[0]─<1>─<2>─<3>──────────────────╮
+   │   whichever member is current              │
+   ╰────────────────────────────────────────────╯
+```
+
+| | |
+|---|---|
+| `alt+<key>` | toggles the **whole family**, parent and children together |
+| `ctrl+alt+down` / `up` | steps to the next/previous chip, **wrapping** |
+| geometry | inherited from the parent; a child never resizes or offsets |
+| lifetime | **a child cannot outlive its parent** — closing the parent closes every child |
+
+A child shares the parent's `float_key`, which is what makes one key reach the family: the key has
+always selected a float *definition*, and `per_cwd` already mapped one key to several panes.
+
+Chip numbers are **stable**. Closing `<2>` leaves that number empty and never renumbers `<3>` under
+your fingers; the next child fills the gap at 2 rather than becoming 4.
+
+`--sub` does not block, unlike a plain `hexe terminal float` — a family member is something you go
+on using, not a question you wait on. It prints the new float's uuid instead, so the caller can
+address it afterwards. Asked for from outside a float, it is refused rather than quietly making a
+top-level float.
+
+`ctrl+alt+up/down` is the default because with a float focused those keys did nothing at all:
+left/right already switches tabs there, and directional pane movement skips floats. The binds
+decline the key when the focused float has no family, so on a split pane they still move focus.
+
+**The chips are not drawn by hexe.** The family is published to whoever paints the title — the
+`family` list and `family_index` arrive beside `decor_edge` and `decor_slot` — because the title can
+sit on a top or bottom row or a left/right strip, and only the painter knows which. See
+[regions.md](regions.md).
+
+Children die with their parent by hexe's own bookkeeping, not `PR_SET_PDEATHSIG`: every pane's
+process is forked by the session daemon, so a child float's process is its parent's *sibling*, and a
+parent-death signal would fire when the daemon exited rather than when the parent float closed. The
+cascade lives in the daemon's single pane-destruction path, so every route to closing a float —
+the close action, `terminal kill`, orphan cleanup, a session being killed — takes the children too.
+
 ## What makes it different
 
 tmux popups (`display-popup`) are the nearest thing, and they are transient by design: a popup is a

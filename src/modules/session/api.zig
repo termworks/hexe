@@ -53,8 +53,8 @@ pub fn setClientSessionSplitRatio(self: anytype, client_id: usize, tab_uuid: [32
     return client_session_snapshot.setSplitRatio(self, client_id, tab_uuid, active_tab, first_anchor_uuid, second_anchor_uuid, ratio);
 }
 
-pub fn syncClientSessionFloat(self: anytype, client_id: usize, pane_uuid: [32]u8, active_tab_hint: ?u16, parent_tab_hint: ?u16, visible: bool, tab_visible: u64, sticky: bool, is_pwd: bool, float_key: u8, width_pct: u8, height_pct: u8, pos_x_pct: u8, pos_y_pct: u8, pad_x: u8, pad_y: u8, active: bool) !void {
-    return client_session_snapshot.syncFloat(self, client_id, pane_uuid, active_tab_hint, parent_tab_hint, visible, tab_visible, sticky, is_pwd, float_key, width_pct, height_pct, pos_x_pct, pos_y_pct, pad_x, pad_y, active);
+pub fn syncClientSessionFloat(self: anytype, client_id: usize, pane_uuid: [32]u8, active_tab_hint: ?u16, parent_tab_hint: ?u16, visible: bool, tab_visible: u64, sticky: bool, is_pwd: bool, float_key: u8, width_pct: u8, height_pct: u8, pos_x_pct: u8, pos_y_pct: u8, pad_x: u8, pad_y: u8, active: bool, parent_float: ?[32]u8, family_index: u8) !void {
+    return client_session_snapshot.syncFloat(self, client_id, pane_uuid, active_tab_hint, parent_tab_hint, visible, tab_visible, sticky, is_pwd, float_key, width_pct, height_pct, pos_x_pct, pos_y_pct, pad_x, pad_y, active, parent_float, family_index);
 }
 
 pub fn removeClientSessionFloat(self: anytype, client_id: usize, pane_uuid: [32]u8) void {

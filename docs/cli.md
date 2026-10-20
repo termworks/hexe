@@ -37,7 +37,9 @@ hexe terminal new [-n <name>] [-I <instance>] [-T] [--log <lvl>] [--logfile <pat
 hexe terminal attach <name-or-uuid-prefix>
 hexe terminal kill <id>            # a session, a pane, or a float
 hexe terminal float --command <cmd> [--title …] [--size w,h,x,y] [--isolation …] [--result-file …]
-hexe terminal send <text> [--uuid <u>|--last|--creator|--broadcast] [--enter] [--ctrl <key>]
+hexe terminal float --sub --command <cmd>            # a sub-float of the calling float
+hexe terminal send <text> [--pane <n>|--uuid <u>|--last|--creator|--broadcast] [--enter] [--ctrl <key>]
+hexe terminal read [--pane <n>|--uuid <u>] [-n <lines>|-c <commands>]
 hexe terminal notify <msg> [--uuid <u>|--last|--broadcast]
 hexe terminal info [--uuid <u>|--last|--creator]
 hexe terminal focus left|right|up|down
@@ -65,21 +67,92 @@ hexe record start|stop|status|toggle --scope pod|mux
 
 ### Addressing things
 
-Most commands take one of four ways to say *which*:
+The address is a hierarchy — **session → pane** — and a pane name is unique
+*within its session*, so two sessions may each have a `romeo`.
 
 | | |
 |---|---|
-| `--uuid <32 hex>` | exactly this pane or pod |
-| `--name <n>` | by pokemon name, or a session name |
-| `--last` | the previously focused pane |
+| `--uuid <hex>` | absolute: a full pane uuid or a unique prefix of one. Needs nothing else |
+| `--pane <name>` | by name, unique within its session |
+| `--session <s>` | which session `--pane` is in: its name, or a uuid prefix |
+| `--last` | the pane this one came from |
 | `--creator` | the pane the command was launched from |
-| `--broadcast` | all of them |
+| `--broadcast` | every pane in the session |
+
+Split or float is **not** part of the address: both are panes, drawn from one
+name pool, so the name alone is enough. Nor is the tab.
+
+```
+hexe terminal send --pane romeo --enter "make test"        # inside hexe
+hexe terminal send --session work --pane romeo --enter …   # another session
+hexe terminal send --uuid b717c471 --enter …               # from anywhere
+```
+
+Inside a pane, `HEXE_PANE_UUID` and `HEXE_SESSION` are already set, so a script
+usually needs no target at all.
+
+**Nothing is ever guessed.** A selector matching two panes is refused and lists
+them, rather than picking the first or the newest. That is why `--session`
+exists: without it, a name two sessions share is ambiguous.
+
+A **profile** (`-P`/`--profile`) is a level above all of this: a separate daemon
+with its own socket directory, so nothing in one can see the other. If you are
+not using the default profile you must say which — it cannot be discovered.
+
+The targeting commands exit with the reason, so a script can branch without
+reading the message:
+
+| | |
+|---|---|
+| `0` | done |
+| `1` | no target given |
+| `2` | the daemon or the pane's pod could not be reached |
+| `3` | no such session, or no such pane |
+| `4` | ambiguous: say which |
+
+Typing (`terminal send`) and reading (`terminal read`) are both served by the
+pane's **pod**, which owns the pty and outlives the frontend — so both reach a
+pane in a **detached** session. Anything that genuinely needs a frontend (keys
+through the keybinding machinery, focus) does not.
+
+### Reading a pane back
+
+```
+hexe terminal read --pane romeo              # the last command's output
+hexe terminal read --pane romeo -c 3         # the last three commands
+hexe terminal read --pane romeo -n 40        # the last 40 lines
+hexe terminal read --uuid b717c471 | grep FAIL
+```
+
+| | |
+|---|---|
+| `-n <lines>` | the last N rows that have anything on them |
+| `-c <commands>` | the output of the last N commands |
+| neither | the last command's output |
+
+The command-based modes need **OSC 133 prompt marks**, which come from your
+prompt, not from `hexe shell init` — that installs hexe's own IPC hooks. A
+prompt renderer that emits `133;A`/`B`/`C` gives hexe the row marks it needs; in
+plain bash, `PS1` and `PS0` are enough:
+
+```sh
+PS1=$'\033]133;A\007$ \033]133;B\007'
+PS0=$'\033]133;C\007'
+```
+
+Without marks, `-n` still works and the other two exit `3` telling you so,
+rather than handing back a screenful dressed up as a command's output.
+
+Output goes to **stdout** so it can be piped. `-c 1` and a bare read give the
+output alone; `-c 2` and above keep the prompt line *between* commands, because
+that is what separates one command's output from the next.
+
+The pod answers from a bounded **4 MiB** ring, so very old history is gone. When
+the ring has already wrapped, a note on **stderr** says the answer may begin
+mid-history — stdout stays clean for the pipe.
 
 Sessions additionally resolve by **prefix**, over both names and uuids, which is why
 `hexe terminal attach nido` and `hexe terminal attach a3f2` both work.
-
-Inside a pane, `HEXE_PANE_UUID` and `HEXE_SESSION` are already set, so a script usually needs no
-target at all.
 
 ### Flags the reference page never mentioned
 
@@ -95,6 +168,7 @@ target at all.
 | `terminal new/attach --remote host[:port] [-u user] [-i identity]` | attach across a link; identity defaults to `~/.ssh/id_ed25519` |
 | `terminal new/attach --ses-socket <path>` / `--no-autostart-ses` | point at a specific daemon, or refuse to start one |
 | `terminal float --key <k>` | the key that dismisses the float; a dismissed float exits 130 and its output is discarded |
+| `terminal float --sub` | open a sub-float of the calling float: shares its key and rectangle, dies with it, does not block. See [floats](floats.md) |
 | `shell init <shell> --no-comms` | the prompt hooks without the shell→mux reporting |
 | `--log trace\|debug\|info` and `--logfile` / `-L` | on every daemon; the level name is the only accepted spelling |
 | `--help` / `-h` | on every command and subcommand, generated from the flag list |
@@ -127,7 +201,7 @@ Nothing here is configured, but three environment variables change what a comman
 |---|---|
 | `HEXE_INSTANCE` | which stack — see [instances](instances.md) |
 | `HEXE_PANE_UUID` | set in every pane; the default target for `record`, `shp`, `layout save` |
-| `HEXE_SESSION` | set in every pane; the session's name |
+| `HEXE_SESSION` | set in every pane; the session's **uuid**, not its name. Commands that take `--session` accept either |
 
 A float as a picker, which is the pattern worth copying. The float's command writes the answer to
 the `--result-file` path; hexe reads that file, prints its contents on **stdout**, and exits with

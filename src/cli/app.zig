@@ -332,6 +332,43 @@ fn addProfileArgs(command: *yazap.Command) !void {
     try command.addArg(Arg.singleValueOption("profile", 'P', "Profile to act on: a separate daemon and sessions"));
 }
 
+/// How a command names the pane it acts on: session → pane, or a uuid.
+///
+/// `--uuid` is absolute and needs nothing else. A pane NAME is unique only
+/// within its session, so `--session` disambiguates it; without one, a name two
+/// sessions both use is refused rather than guessed at.
+fn addPaneTargetArgs(command: *yazap.Command) !void {
+    try command.addArg(Arg.singleValueOption("pane", 'p', "Pane name (unique within its session)"));
+    try command.addArg(Arg.singleValueOption("session", 'S', "Session holding --pane: name or uuid prefix"));
+}
+
+/// A positive count flag. Zero means "not given", so a literal `0` and a
+/// negative value are mistakes rather than a request for nothing.
+fn parseCountArg(value: ?[]const u8, field: []const u8) !u32 {
+    const raw = value orelse return 0;
+    if (raw.len == 0) return 0;
+    const n = std.fmt.parseInt(u32, raw, 10) catch {
+        print("Error: --{s} wants a positive whole number, not '{s}'\n", .{ field, raw });
+        return error.InvalidArgument;
+    };
+    if (n == 0) {
+        print("Error: --{s} must be at least 1\n", .{field});
+        return error.InvalidArgument;
+    }
+    return n;
+}
+
+/// The pane a subcommand was pointed at, however it was spelled.
+fn paneTargetOf(sub: anytype) commands.shared.PaneTarget {
+    return .{
+        .uuid = sub.getSingleValue("uuid") orelse "",
+        .pane = sub.getSingleValue("pane") orelse "",
+        .session = sub.getSingleValue("session") orelse "",
+        .creator = sub.containsArg("creator"),
+        .last = sub.containsArg("last"),
+    };
+}
+
 /// The profile named on a subcommand, under either spelling.
 fn profileArg(m: anytype) []const u8 {
     if (m.getSingleValue("profile")) |v| return v;
@@ -615,10 +652,12 @@ pub fn main() !void {
     try mux_float.addArg(Arg.singleValueOption("isolation", null, null));
     try mux_float.addArg(Arg.singleValueOption("size", null, null));
     try mux_float.addArg(Arg.singleValueOption("key", null, null));
+    try mux_float.addArg(Arg.booleanOption("sub", null, "A sub-float of the pane this runs in: shares its key, dies with it"));
     try addProfileArgs(&mux_float);
 
     var mux_notify = app.createCommand("notify", "Send notification");
     try mux_notify.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try addPaneTargetArgs(&mux_notify);
     try mux_notify.addArg(Arg.booleanOption("creator", 'c', null));
     try mux_notify.addArg(Arg.booleanOption("last", 'l', null));
     try mux_notify.addArg(Arg.booleanOption("broadcast", 'b', null));
@@ -627,6 +666,7 @@ pub fn main() !void {
 
     var mux_send = app.createCommand("send", "Send keystrokes to pane");
     try mux_send.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try addPaneTargetArgs(&mux_send);
     try mux_send.addArg(Arg.booleanOption("creator", 'c', null));
     try mux_send.addArg(Arg.booleanOption("last", 'l', null));
     try mux_send.addArg(Arg.booleanOption("broadcast", 'b', null));
@@ -635,8 +675,16 @@ pub fn main() !void {
     try mux_send.addArg(Arg.positional("text", null, null));
     try addProfileArgs(&mux_send);
 
+    var mux_read = app.createCommand("read", "Print a pane's text: last command, -n lines, or -c commands");
+    try mux_read.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try addPaneTargetArgs(&mux_read);
+    try mux_read.addArg(Arg.singleValueOption("lines", 'n', "The last N rows that have anything on them"));
+    try mux_read.addArg(Arg.singleValueOption("commands", 'c', "The output of the last N commands (needs OSC 133)"));
+    try addProfileArgs(&mux_read);
+
     var mux_info = app.createCommand("info", "Show information about a pane");
     try mux_info.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try addPaneTargetArgs(&mux_info);
     try mux_info.addArg(Arg.booleanOption("creator", 'c', null));
     try mux_info.addArg(Arg.booleanOption("last", 'l', null));
     try addProfileArgs(&mux_info);
@@ -657,7 +705,7 @@ pub fn main() !void {
     var mux_focus = app.createCommand("focus", "Move focus to adjacent pane");
     try mux_focus.addArg(Arg.positional("dir", null, null));
 
-    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_kill, mux_close, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
+    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_kill, mux_close, mux_record, mux_float, mux_notify, mux_send, mux_read, mux_info, mux_layout, mux_focus });
 
     var web_inspect = app.createCommand("inspect-snapshot", "Load a session snapshot through the web adapter");
     try web_inspect.addArg(Arg.positional("snapshot", null, null));
@@ -1290,6 +1338,7 @@ pub fn main() !void {
                 m.getSingleValue("isolation") orelse "",
                 m.getSingleValue("size") orelse "",
                 exit_key,
+                m.containsArg("sub"),
             );
             return;
         }
@@ -1298,9 +1347,7 @@ pub fn main() !void {
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runNotify(
                 allocator,
-                m.getSingleValue("uuid") orelse "",
-                m.containsArg("creator"),
-                m.containsArg("last"),
+                paneTargetOf(m),
                 m.containsArg("broadcast"),
                 m.getSingleValue("message") orelse "",
             );
@@ -1311,9 +1358,7 @@ pub fn main() !void {
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runSend(
                 allocator,
-                m.getSingleValue("uuid") orelse "",
-                m.containsArg("creator"),
-                m.containsArg("last"),
+                paneTargetOf(m),
                 m.containsArg("broadcast"),
                 m.containsArg("enter"),
                 m.getSingleValue("ctrl") orelse "",
@@ -1339,10 +1384,21 @@ pub fn main() !void {
             try cli_cmds.runFocusMove(allocator, m.getSingleValue("dir") orelse "");
             return;
         }
+        if (mux_matches.subcommandMatches("read")) |m| {
+            const instance = profileArg(m);
+            if (instance.len > 0) setInstanceFromCli(instance);
+            try cli_cmds.runRead(
+                allocator,
+                paneTargetOf(m),
+                try parseCountArg(m.getSingleValue("lines"), "lines"),
+                try parseCountArg(m.getSingleValue("commands"), "commands"),
+            );
+            return;
+        }
         if (mux_matches.subcommandMatches("info")) |m| {
             const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
-            try cli_cmds.runInfo(allocator, m.getSingleValue("uuid") orelse "", m.containsArg("creator"), m.containsArg("last"));
+            try cli_cmds.runInfo(allocator, paneTargetOf(m));
             return;
         }
     } else if (matches.subcommandMatches("web")) |web_matches| {

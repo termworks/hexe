@@ -17,6 +17,7 @@ pub fn runMuxFloat(
     isolation_profile: []const u8,
     size: []const u8,
     exit_key: []const u8,
+    sub: bool,
 ) !void {
     if (command.len == 0) {
         print("Error: --command is required\n", .{});
@@ -150,8 +151,31 @@ pub fn runMuxFloat(
         }
     }
 
+    // `--sub` means "a sub-float of the pane I am running in", which is the
+    // only parent an agent inside a float ever wants. Taken from the
+    // environment rather than asked for, because the caller cannot know its own
+    // uuid any other way, and naming someone else's float would let one agent
+    // hang panes off another's.
+    var parent_pane: [32]u8 = .{0} ** 32;
+    if (sub) {
+        const own = std.posix.getenv("HEXE_PANE_UUID") orelse {
+            print("Error: --sub needs a parent, and this is not running inside a hexe pane.\n", .{});
+            std.process.exit(1);
+        };
+        if (own.len != 32) {
+            print("Error: HEXE_PANE_UUID is not a pane uuid\n", .{});
+            std.process.exit(1);
+        }
+        @memcpy(&parent_pane, own);
+    }
+
     // Build FloatRequest.
-    const flags: u8 = 1 | // wait_for_exit always true for CLI
+    //
+    // `wait_for_exit` for an ordinary CLI float, because that caller wants the
+    // float's output: `dir=$(hexe terminal float … yazi …)`. NOT for `--sub`,
+    // which opens a lasting member of a family rather than asking a question —
+    // an agent that blocked until its helper closed could not go on using it.
+    const flags: u8 = (if (sub) @as(u8, 0) else 1) |
         (if (isolated) @as(u8, 2) else 0);
     const req = wire.FloatRequest{
         .flags = flags,
@@ -167,6 +191,7 @@ pub fn runMuxFloat(
         .shift_x = shift_x,
         .shift_y = shift_y,
         .source_session_id = source_session_id,
+        .parent_pane = parent_pane,
     };
 
     // Build trailing data: cmd + title + cwd + result_path + exit_key + isolation_profile + env entries (each: u16 len + bytes).
@@ -251,6 +276,18 @@ pub fn runMuxFloat(
             } else {
                 print("Error from ses\n", .{});
             }
+            return;
+        },
+        // `--sub` does not wait, so the answer is the new float's identity
+        // rather than its exit code. Printed on stdout so the caller can keep
+        // it: an agent that opened a helper wants to address it afterwards.
+        .float_created => {
+            const created = wire.readStruct(wire.FloatCreated, fd) catch {
+                print("Error reading float uuid\n", .{});
+                std.process.exit(1);
+            };
+            var out = std.fs.File.stdout().deprecatedWriter();
+            out.print("{s}\n", .{created.uuid[0..]}) catch {};
             return;
         },
         else => {

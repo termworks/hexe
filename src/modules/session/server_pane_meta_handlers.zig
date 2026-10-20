@@ -8,6 +8,7 @@ const wire = core.wire;
 const server = @import("server.zig");
 const Server = server.Server;
 const store = @import("store.zig");
+const pane_spawn = @import("pane_spawn.zig");
 
 /// Take the next `len` bytes of a trail, advancing `offset`. Null when the
 /// declared length runs past what was actually read.
@@ -58,6 +59,18 @@ pub fn handleBinaryUpdatePaneName(self: *Server, fd: posix.fd_t, payload_len: u3
     }
 
     if (self.ses_state.store.panes.getPtr(upn.uuid)) |pane| {
+        // A name is how a pane is addressed, so a duplicate inside one session
+        // would make `--pane <name>` ambiguous. Refused here rather than
+        // accepted-and-ignored: this used to always reply `.ok`, so a rename
+        // onto a taken name looked like it had worked.
+        if (upn.name_len > 0) {
+            const want = buf[0..upn.name_len];
+            const scope = pane_spawn.sessionScopeOf(&self.ses_state.store, pane);
+            if (pane_spawn.paneNameTakenByOther(&self.ses_state.store, want, upn.uuid, scope)) {
+                self.sendBinaryError(fd, "update_pane_name: another pane in this session has that name");
+                return;
+            }
+        }
         const new_name = if (upn.name_len > 0)
             self.allocator.dupe(u8, buf[0..upn.name_len]) catch |err| {
                 core.logging.logError("ses", "failed to store pane name", err);

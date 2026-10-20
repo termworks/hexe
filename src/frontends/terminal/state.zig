@@ -2069,6 +2069,11 @@ pub const State = struct {
             self.paneFloatPadX(pane),
             self.paneFloatPadY(pane),
             active,
+            // Read from the float's own record, like visible/tab_visible above:
+            // the family is state the frontend owns, and a sync that dropped it
+            // would turn a sub-float back into a top-level one on the daemon.
+            if (self.paneFloatState(pane)) |float_state| float_state.parent_float else null,
+            if (self.paneFloatState(pane)) |float_state| float_state.family_index else 0,
         ) catch |err| {
             core.logging.logError("terminal", context, err);
             return false;
@@ -2947,6 +2952,174 @@ pub const State = struct {
 
     pub fn clearLocalFloatState(self: *State, pane_uuid: [32]u8) void {
         self.runtime.removeLocalFloatState(pane_uuid);
+    }
+
+    /// Every float record this session holds, newest-last, into `out`.
+    ///
+    /// A fixed buffer because the only caller is picking a family number and a
+    /// session with more floats than this has bigger problems than numbering.
+    fn collectFloatStates(
+        self: *const State,
+        out: *[64]core.session_model.SessionFloat,
+    ) []core.session_model.SessionFloat {
+        var n: usize = 0;
+        for (self.view.float_views.items) |fp| {
+            if (n >= out.len) break;
+            out[n] = self.runtime.floatState(fp.uuid) orelse continue;
+            n += 1;
+        }
+        return out[0..n];
+    }
+
+    /// One member of a family, for navigating and drawing chips.
+    pub const FamilyMember = struct { uuid: [32]u8, index: u8, pane: *Pane };
+
+    /// Every member of the family `root` belongs to, in chip order.
+    ///
+    /// Chip order, not creation order: the numbers are what the user sees and
+    /// navigates by, so `ctrl+alt+down` must follow 0,1,2,3 even when chip 2
+    /// was opened last to refill a gap.
+    pub fn familyMembers(
+        self: *const State,
+        root: [32]u8,
+        out: *[16]FamilyMember,
+    ) []FamilyMember {
+        var n: usize = 0;
+        for (self.view.float_views.items) |fp| {
+            if (n >= out.len) break;
+            const fs = self.runtime.floatState(fp.uuid) orelse continue;
+            if (!std.mem.eql(u8, &core.session_model.familyRoot(fs), &root)) continue;
+            out[n] = .{ .uuid = fp.uuid, .index = fs.family_index, .pane = fp };
+            n += 1;
+        }
+        const slice = out[0..n];
+        std.mem.sort(FamilyMember, slice, {}, struct {
+            fn lt(_: void, a: FamilyMember, b: FamilyMember) bool {
+                return a.index < b.index;
+            }
+        }.lt);
+        return slice;
+    }
+
+    /// The family a pane belongs to, or null when it is not a float.
+    pub fn familyRootOf(self: *const State, pane: *const Pane) ?[32]u8 {
+        const fs = self.runtime.floatState(pane.uuid) orelse return null;
+        return core.session_model.familyRoot(fs);
+    }
+
+    /// Show exactly one member of a family and hide the others.
+    ///
+    /// A family occupies one rectangle, so two members visible at once would
+    /// draw over each other. Switching members is therefore a single operation
+    /// rather than a hide followed by a show -- those leave a frame with
+    /// nothing visible, which reads as the float having closed.
+    /// `sync_others` false keeps the siblings' new visibility local.
+    ///
+    /// Every sync is a BLOCKING round trip to SES, and this is called from
+    /// inside the float-request handler, where the caller is already waiting
+    /// and SES may be pushing a snapshot down the same socket. Syncing a whole
+    /// family there left the request unanswered often enough to time out.
+    ///
+    /// The shown member still syncs whatever happens -- that is what records
+    /// the family, and without it the next pushed snapshot undoes the adoption.
+    /// The siblings' `visible` flag stays local: SES's copy matters only on
+    /// reattach, where a stale flag costs a redraw, while a stalled request
+    /// costs the whole float.
+    pub fn showFamilyMember(self: *State, member_uuid: [32]u8, sync_others: bool) bool {
+        const target = self.findPaneByUuid(member_uuid) orelse return false;
+        const root = self.familyRootOf(target) orelse return false;
+        const tab = self.activeTabIndex();
+
+        var buf: [16]FamilyMember = undefined;
+        const members = self.familyMembers(root, &buf);
+        if (members.len == 0) return false;
+
+        for (members) |m| {
+            const want = std.mem.eql(u8, &m.uuid, &member_uuid);
+            const changed = self.paneVisibleOnTab(m.pane, tab) != want;
+            if (!want and !changed) continue;
+            self.runtime.setFloatVisibleOnTab(m.uuid, tab, want);
+            if (want or sync_others) {
+                _ = self.syncSessionFloatChecked(m.pane, want);
+            }
+        }
+        self.setActiveFloatingUuid(member_uuid);
+        for (self.view.float_views.items, 0..) |fp, i| {
+            if (std.mem.eql(u8, &fp.uuid, &member_uuid)) {
+                self.setActiveFloatingIndex(i);
+                break;
+            }
+        }
+        self.syncPaneFocus(target, null);
+        self.needs_render = true;
+        self.force_full_render = true;
+        return true;
+    }
+
+    /// Step to the next or previous chip in the family holding `pane`, wrapping.
+    ///
+    /// Wraps because a family is a short ring the user flicks through, and
+    /// stopping at the ends would make `ctrl+alt+down` feel broken on the last
+    /// member. Returns false when the pane is not in a family of two or more,
+    /// so the caller can leave the keypress to whatever it meant before.
+    pub fn stepFamilyMember(self: *State, pane: *const Pane, forward: bool) bool {
+        const root = self.familyRootOf(pane) orelse return false;
+        var buf: [16]FamilyMember = undefined;
+        const members = self.familyMembers(root, &buf);
+        if (members.len < 2) return false;
+
+        var at: usize = 0;
+        for (members, 0..) |m, i| {
+            if (std.mem.eql(u8, &m.uuid, &pane.uuid)) {
+                at = i;
+                break;
+            }
+        }
+        const next = if (forward)
+            (at + 1) % members.len
+        else
+            (at + members.len - 1) % members.len;
+        return self.showFamilyMember(members[next].uuid, true);
+    }
+
+    /// Make `child` a member of `parent`'s family.
+    ///
+    /// The child takes the family's identity, not its own: the parent's toggle
+    /// key (so one key reaches the whole family), the parent's rectangle and
+    /// tab binding (so a member appears exactly where the family lives), and
+    /// the lowest free chip number.
+    ///
+    /// A sub-float opened BY a sub-float joins the same family rather than
+    /// nesting a level deeper: the design is one row of chips per float, and a
+    /// tree of unbounded depth has no way to show itself in a title row.
+    pub fn adoptIntoFloatFamily(self: *State, child: [32]u8, parent: [32]u8) bool {
+        const parent_state = self.runtime.floatState(parent) orelse {
+            core.logging.warn("terminal", "adopt: no float record for the parent", .{});
+            return false;
+        };
+        var child_state = self.runtime.floatState(child) orelse {
+            core.logging.warn("terminal", "adopt: no float record for the child", .{});
+            return false;
+        };
+        const root = core.session_model.familyRoot(parent_state);
+
+        var buf: [64]core.session_model.SessionFloat = undefined;
+        const floats = self.collectFloatStates(&buf);
+
+        child_state.parent_float = root;
+        child_state.family_index = core.session_model.nextFamilyIndex(floats, root);
+        child_state.float_key = parent_state.float_key;
+        child_state.parent_tab = parent_state.parent_tab;
+        child_state.tab_visible = parent_state.tab_visible;
+        child_state.width_pct = parent_state.width_pct;
+        child_state.height_pct = parent_state.height_pct;
+        child_state.pos_x_pct = parent_state.pos_x_pct;
+        child_state.pos_y_pct = parent_state.pos_y_pct;
+        child_state.pad_x = parent_state.pad_x;
+        child_state.pad_y = parent_state.pad_y;
+
+        self.runtime.syncFloatState(child_state, true);
+        return true;
     }
 
     pub fn setPaneVisibleOnTab(self: *State, pane: *const Pane, tab: usize, visible: bool) void {

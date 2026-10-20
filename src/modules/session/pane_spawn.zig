@@ -13,18 +13,112 @@ pub const SpawnResult = struct {
     env_fd: ?posix.fd_t = null,
 };
 
-/// Whether any pane already answers to this name.
+/// Which session a pane's name belongs to.
 ///
-/// A pane name is also its pod socket filename, so a duplicate is not a display
-/// nuisance — the two panes collide on `pod@<name>.sock`.
-pub fn paneNameTaken(store: *store_mod.SessionStore, candidate: []const u8) bool {
+/// Names are unique per session, not per daemon, so `romeo` may exist in two
+/// sessions at once. That needs a scope key, and a pane carries it two different
+/// ways: `session_id` is stamped only on DETACH, so a live pane has none and is
+/// identified by the client it is attached to instead.
+///
+/// `null` is a scope of its own, not "any": a standalone `hexe pod new` pane
+/// belongs to no session, and those share one pool among themselves.
+pub fn sessionScopeOf(store: *store_mod.SessionStore, pane: *const store_mod.Pane) ?[16]u8 {
+    if (pane.session_id) |sid| return sid;
+    const client_id = pane.attached_to orelse return null;
+    for (store.clients.items) |*client| {
+        if (client.id == client_id) return client.session_id;
+    }
+    return null;
+}
+
+fn sameScope(a: ?[16]u8, b: ?[16]u8) bool {
+    if (a == null and b == null) return true;
+    const x = a orelse return false;
+    const y = b orelse return false;
+    return std.mem.eql(u8, &x, &y);
+}
+
+/// Whether a pane in `scope` already answers to this name.
+///
+/// Scoped rather than daemon-wide because the hierarchy is session → pane: a
+/// name only has to be unambiguous within the session that addresses it.
+pub fn paneNameTaken(
+    store: *store_mod.SessionStore,
+    candidate: []const u8,
+    scope: ?[16]u8,
+) bool {
     var it = store.panes.valueIterator();
     while (it.next()) |p| {
-        if (p.name) |n| {
-            if (std.mem.eql(u8, n, candidate)) return true;
-        }
+        const n = p.name orelse continue;
+        if (!std.mem.eql(u8, n, candidate)) continue;
+        if (sameScope(sessionScopeOf(store, p), scope)) return true;
     }
     return false;
+}
+
+/// Whether a name is free for `pane` to take, ignoring the name it holds now.
+///
+/// A rename that keeps the same name, or re-sends it, must not collide with
+/// itself.
+pub fn paneNameTakenByOther(
+    store: *store_mod.SessionStore,
+    candidate: []const u8,
+    uuid: [32]u8,
+    scope: ?[16]u8,
+) bool {
+    var it = store.panes.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.key_ptr, &uuid)) continue;
+        const p = entry.value_ptr;
+        const n = p.name orelse continue;
+        if (!std.mem.eql(u8, n, candidate)) continue;
+        if (sameScope(sessionScopeOf(store, p), scope)) return true;
+    }
+    return false;
+}
+
+/// The outcome of looking a pane up by name or uuid prefix.
+///
+/// `ambiguous` is its own answer rather than a pick: addressing resolves to a
+/// write into somebody's shell, so two candidates must stop the command, not
+/// pick the first or the newest.
+pub const PaneMatch = union(enum) {
+    none,
+    one: [32]u8,
+    ambiguous,
+};
+
+/// The one pane in `scope` that `selector` names.
+///
+/// `by_uuid` chooses the alphabet: a uuid prefix, or an exact name. When
+/// `scope_given` is false every session is searched, which is why a name two
+/// sessions share comes back `ambiguous` instead of silently picking one.
+pub fn findPaneInScope(
+    store: *store_mod.SessionStore,
+    selector: []const u8,
+    by_uuid: bool,
+    scope: ?[16]u8,
+    scope_given: bool,
+) PaneMatch {
+    if (selector.len == 0) return .none;
+    var found: ?[32]u8 = null;
+    var count: usize = 0;
+    var it = store.panes.iterator();
+    while (it.next()) |entry| {
+        const pane = entry.value_ptr;
+        if (scope_given and !sameScope(sessionScopeOf(store, pane), scope)) continue;
+        const hit = if (by_uuid)
+            selector.len <= entry.key_ptr.len and std.mem.startsWith(u8, entry.key_ptr, selector)
+        else if (pane.name) |n|
+            std.mem.eql(u8, n, selector)
+        else
+            false;
+        if (!hit) continue;
+        found = entry.key_ptr.*;
+        count += 1;
+        if (count > 1) return .ambiguous;
+    }
+    return if (found) |u| .{ .one = u } else .none;
 }
 
 /// Take the first free entry from `pool`, in `order`, suffixing on exhaustion.
@@ -34,42 +128,14 @@ pub fn pickPaneName(
     pool: []const []const u8,
     order: core.names.Order,
     suffix: []const u8,
+    scope: ?[16]u8,
 ) ![]const u8 {
-    const Ctx = struct { store: *store_mod.SessionStore };
-    return core.names.pick(allocator, pool, order, suffix, Ctx{ .store = store }, struct {
+    const Ctx = struct { store: *store_mod.SessionStore, scope: ?[16]u8 };
+    return core.names.pick(allocator, pool, order, suffix, Ctx{ .store = store, .scope = scope }, struct {
         fn taken(ctx: Ctx, candidate: []const u8) bool {
-            return paneNameTaken(ctx.store, candidate);
+            return paneNameTaken(ctx.store, candidate, ctx.scope);
         }
     }.taken);
-}
-
-pub fn generateUniquePaneName(
-    allocator: std.mem.Allocator,
-    store: *store_mod.SessionStore,
-    base: []const u8,
-) ![]const u8 {
-    // Names are per-ses daemon, so keep them unique among all panes we track.
-    var attempt: usize = 0;
-    while (true) : (attempt += 1) {
-        const candidate = if (attempt == 0)
-            try allocator.dupe(u8, base)
-        else
-            try std.fmt.allocPrint(allocator, "{s}-{d}", .{ base, attempt + 1 });
-
-        var used = false;
-        var it = store.panes.valueIterator();
-        while (it.next()) |p| {
-            if (p.name) |n| {
-                if (std.mem.eql(u8, n, candidate)) {
-                    used = true;
-                    break;
-                }
-            }
-        }
-
-        if (!used) return candidate;
-        allocator.free(candidate);
-    }
 }
 
 /// Variables that describe the frontend *process*, not the session it opens.

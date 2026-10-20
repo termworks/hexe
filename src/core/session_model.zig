@@ -327,7 +327,60 @@ pub const SessionFloat = struct {
     pos_y_pct: u8 = 50,
     pad_x: u8 = 1,
     pad_y: u8 = 0,
+
+    /// The float this one belongs under, if it is a sub-float.
+    ///
+    /// A family is a parent and its children: one rectangle, one toggle key,
+    /// one member on screen at a time. Floats are stored flat, so a parent
+    /// pointer is the entire hierarchy — there is no separate tree to keep in
+    /// step with this list.
+    ///
+    /// Null for a top-level float, which is every float that existed before
+    /// sub-floats, so an older snapshot loads as a session of lone parents.
+    parent_float: ?[32]u8 = null,
+
+    /// Which chip this member is: the parent is 0, children count up from 1.
+    ///
+    /// Stored rather than derived from position, because the numbers are
+    /// STABLE: closing `<2>` leaves that chip empty and never renumbers `<3>`
+    /// under the user's fingers. A new child takes the lowest number no live
+    /// member holds, so the gap is reused rather than leaked for ever.
+    family_index: u8 = 0,
 };
+
+/// Whether `float_state` is a sub-float rather than a top-level one.
+pub fn isSubFloat(float_state: SessionFloat) bool {
+    return float_state.parent_float != null;
+}
+
+/// The uuid that identifies the family `float_state` belongs to.
+///
+/// Its parent's uuid for a child, its own for a parent — so one comparison
+/// groups a family without caring which member is in hand.
+pub fn familyRoot(float_state: SessionFloat) [32]u8 {
+    return float_state.parent_float orelse float_state.pane_uuid;
+}
+
+/// The lowest family number no float in `floats` already holds for `root`.
+///
+/// Walks for a gap rather than taking `count + 1`: numbers are stable, so after
+/// `<2>` closes the next child should fill 2 instead of becoming 4 and leaving a
+/// hole nothing can ever occupy.
+pub fn nextFamilyIndex(floats: []const SessionFloat, root: [32]u8) u8 {
+    var candidate: u8 = 1;
+    while (candidate < 255) : (candidate += 1) {
+        var taken = false;
+        for (floats) |f| {
+            if (!std.mem.eql(u8, &familyRoot(f), &root)) continue;
+            if (f.family_index == candidate) {
+                taken = true;
+                break;
+            }
+        }
+        if (!taken) return candidate;
+    }
+    return 255;
+}
 
 /// Shift a per-tab-index visibility bitmask when a tab is inserted at `index`.
 /// Bits at or above `index` move up one; the new tab starts hidden.
@@ -538,6 +591,12 @@ pub const SessionSnapshot = struct {
             try writer.print(",\"pos_y_pct\":{d}", .{float_state.pos_y_pct});
             try writer.print(",\"pad_x\":{d}", .{float_state.pad_x});
             try writer.print(",\"pad_y\":{d}", .{float_state.pad_y});
+            if (float_state.parent_float) |parent| {
+                try writer.writeAll(",\"parent_float\":\"");
+                try writer.writeAll(parent[0..]);
+                try writer.writeAll("\"");
+            }
+            try writer.print(",\"family_index\":{d}", .{float_state.family_index});
             try writer.writeAll("}");
         }
         try writer.writeAll("]");
@@ -656,6 +715,13 @@ fn fromMuxRoot(allocator: std.mem.Allocator, root: std.json.ObjectMap) !SessionS
             .pos_y_pct = if (intField(float_obj, "float_pos_y_pct")) |v| @intCast(v) else 50,
             .pad_x = if (intField(float_obj, "float_pad_x")) |v| @intCast(v) else 1,
             .pad_y = if (intField(float_obj, "float_pad_y")) |v| @intCast(v) else 0,
+            // Absent in a snapshot written before sub-floats, which then loads
+            // as a session of top-level floats rather than failing to load.
+            .parent_float = if (stringField(float_obj, "parent_float")) |hex|
+                parseUuid(hex) catch null
+            else
+                null,
+            .family_index = if (intField(float_obj, "family_index")) |v| @intCast(v) else 0,
         };
 
         try snapshot.floats.append(allocator, float_state);
@@ -774,6 +840,15 @@ fn fromCanonicalRoot(allocator: std.mem.Allocator, root: std.json.ObjectMap) !Se
             .pos_y_pct = if (intField(float_obj, "pos_y_pct")) |v| @intCast(v) else 50,
             .pad_x = if (intField(float_obj, "pad_x")) |v| @intCast(v) else 1,
             .pad_y = if (intField(float_obj, "pad_y")) |v| @intCast(v) else 0,
+            // The second of two float parsers in this file. A field added to
+            // only one of them round-trips in one direction and silently
+            // resets in the other -- which for `parent_float` would turn a
+            // sub-float into a second top-level float on reload.
+            .parent_float = if (stringField(float_obj, "parent_float")) |hex|
+                parseUuid(hex) catch null
+            else
+                null,
+            .family_index = if (intField(float_obj, "family_index")) |v| @intCast(v) else 0,
         });
     }
 
@@ -1028,6 +1103,12 @@ fn expectSnapshotEq(a: *const SessionSnapshot, b: *const SessionSnapshot) !void 
         try testing.expectEqual(fa.sticky, fb.sticky);
         try testing.expectEqual(fa.is_pwd, fb.is_pwd);
         try testing.expectEqual(fa.float_key, fb.float_key);
+        try testing.expectEqual(fa.family_index, fb.family_index);
+        if (fa.parent_float) |pa| {
+            try testing.expectEqualSlices(u8, &pa, &(fb.parent_float orelse return error.TestExpectedParentFloat));
+        } else {
+            try testing.expect(fb.parent_float == null);
+        }
         try testing.expectEqual(fa.width_pct, fb.width_pct);
         try testing.expectEqual(fa.height_pct, fb.height_pct);
         try testing.expectEqual(fa.pos_x_pct, fb.pos_x_pct);
@@ -1630,4 +1711,120 @@ test "SessionSnapshot.fromJson mux-root: every float field is read (distinct val
     try testing.expectEqual(@as(u8, 44), f.pos_y_pct);
     try testing.expectEqual(@as(u8, 55), f.pad_x);
     try testing.expectEqual(@as(u8, 66), f.pad_y);
+}
+
+test "a family is grouped by its root, parent or child in hand" {
+    const t = testing;
+    const parent_uuid = [_]u8{'p'} ** 32;
+    const child_uuid = [_]u8{'c'} ** 32;
+
+    const parent: SessionFloat = .{ .pane_uuid = parent_uuid, .family_index = 0 };
+    const child: SessionFloat = .{
+        .pane_uuid = child_uuid,
+        .parent_float = parent_uuid,
+        .family_index = 1,
+    };
+
+    try t.expect(!isSubFloat(parent));
+    try t.expect(isSubFloat(child));
+    // Both answer with the same root, which is what makes one comparison group
+    // a family however you reached it.
+    try t.expectEqualSlices(u8, &parent_uuid, &familyRoot(parent));
+    try t.expectEqualSlices(u8, &parent_uuid, &familyRoot(child));
+}
+
+test "family numbers are stable: a closed chip is refilled, not renumbered" {
+    const t = testing;
+    const root = [_]u8{'p'} ** 32;
+    const other_root = [_]u8{'o'} ** 32;
+
+    var floats: std.ArrayList(SessionFloat) = .empty;
+    defer floats.deinit(t.allocator);
+    try floats.append(t.allocator, .{ .pane_uuid = root, .family_index = 0 });
+
+    // First child is 1, then 2, then 3.
+    try t.expectEqual(@as(u8, 1), nextFamilyIndex(floats.items, root));
+    try floats.append(t.allocator, .{ .pane_uuid = [_]u8{'a'} ** 32, .parent_float = root, .family_index = 1 });
+    try t.expectEqual(@as(u8, 2), nextFamilyIndex(floats.items, root));
+    try floats.append(t.allocator, .{ .pane_uuid = [_]u8{'b'} ** 32, .parent_float = root, .family_index = 2 });
+    try floats.append(t.allocator, .{ .pane_uuid = [_]u8{'c'} ** 32, .parent_float = root, .family_index = 3 });
+    try t.expectEqual(@as(u8, 4), nextFamilyIndex(floats.items, root));
+
+    // Close <2>. The others keep their numbers, and the gap is what the next
+    // child takes -- not 4, which would leave a chip nothing can ever fill.
+    _ = floats.orderedRemove(2);
+    try t.expectEqual(@as(u8, 1), floats.items[1].family_index);
+    try t.expectEqual(@as(u8, 3), floats.items[2].family_index);
+    try t.expectEqual(@as(u8, 2), nextFamilyIndex(floats.items, root));
+
+    // Another family's numbers are its own business.
+    try floats.append(t.allocator, .{ .pane_uuid = other_root, .family_index = 0 });
+    try t.expectEqual(@as(u8, 1), nextFamilyIndex(floats.items, other_root));
+}
+
+test "a float snapshot carries its family through json, both ways" {
+    const allocator = testing.allocator;
+    const su = "s" ** 32;
+    const tu = "t" ** 32;
+    const au = "a" ** 32;
+    const pu = "p" ** 32;
+    const cu = "c" ** 32;
+
+    // A parent and one child, the child sharing the parent's float_key -- which
+    // is what makes a single toggle key reach the whole family.
+    const json = "{\"uuid\":\"" ++ su ++ "\",\"session_name\":\"r\",\"active_tab\":0," ++
+        "\"tabs\":[{\"uuid\":\"" ++ tu ++ "\",\"name\":\"T\",\"splits\":[{\"uuid\":\"" ++ au ++ "\",\"id\":1}],\"tree\":{\"type\":\"pane\",\"id\":1}}]," ++
+        "\"floats\":[" ++
+        "{\"uuid\":\"" ++ pu ++ "\",\"parent_tab\":0,\"float_key\":50,\"family_index\":0}," ++
+        "{\"uuid\":\"" ++ cu ++ "\",\"parent_tab\":0,\"float_key\":50," ++
+        "\"parent_float\":\"" ++ pu ++ "\",\"family_index\":7}" ++
+        "]}";
+
+    var snap = try SessionSnapshot.fromJson(allocator, json);
+    defer snap.deinit();
+    try testing.expectEqual(@as(usize, 2), snap.floats.items.len);
+
+    const parent = snap.floats.items[0];
+    const child = snap.floats.items[1];
+    try testing.expect(!isSubFloat(parent));
+    try testing.expect(isSubFloat(child));
+    try testing.expectEqualSlices(u8, pu, &(child.parent_float.?));
+    try testing.expectEqual(@as(u8, 7), child.family_index);
+    try testing.expectEqual(parent.float_key, child.float_key);
+    // Both resolve to the same family.
+    try testing.expectEqualSlices(u8, &familyRoot(parent), &familyRoot(child));
+
+    // And it survives being written back out: a child that lost its parent on
+    // save would silently become a second top-level float on reattach.
+    const out = try snap.toJson(allocator);
+    defer allocator.free(out);
+    var again = try SessionSnapshot.fromJson(allocator, out);
+    defer again.deinit();
+    try testing.expectEqual(@as(usize, 2), again.floats.items.len);
+    var found_child = false;
+    for (again.floats.items) |f| {
+        if (!isSubFloat(f)) continue;
+        found_child = true;
+        try testing.expectEqualSlices(u8, pu, &(f.parent_float.?));
+        try testing.expectEqual(@as(u8, 7), f.family_index);
+    }
+    try testing.expect(found_child);
+}
+
+test "a snapshot without family fields loads as top-level floats" {
+    const allocator = testing.allocator;
+    const su = "s" ** 32;
+    const fu = "f" ** 32;
+    // Exactly what a pre-sub-float daemon wrote: no parent_float, no
+    // family_index. It must load, not fail, and look like a lone parent.
+    const legacy = "{\"uuid\":\"" ++ su ++ "\",\"session_name\":\"old\",\"active_tab\":0," ++
+        "\"tabs\":[],\"floats\":[{\"uuid\":\"" ++ fu ++ "\",\"parent_tab\":null," ++
+        "\"visible\":true,\"tab_visible\":1,\"sticky\":false,\"is_pwd\":false,\"float_key\":50}]}";
+
+    var snap = try SessionSnapshot.fromJson(allocator, legacy);
+    defer snap.deinit();
+    try testing.expectEqual(@as(usize, 1), snap.floats.items.len);
+    try testing.expect(snap.floats.items[0].parent_float == null);
+    try testing.expectEqual(@as(u8, 0), snap.floats.items[0].family_index);
+    try testing.expect(!isSubFloat(snap.floats.items[0]));
 }

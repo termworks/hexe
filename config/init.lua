@@ -66,6 +66,16 @@ hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, nil, { when = focused_pro
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only })
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only })
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.right }, nil, { when = focused_process_is_editor, mode = hexe.mode.passthrough_only })
+-- Step through a float's sub-floats, BEFORE the focus.move binds below.
+--
+-- The first matching bind wins, and these decline the key when the focused
+-- float has no family -- so on a split pane, or a lone float, the key falls
+-- through to focus.move exactly as it always did. With a float focused,
+-- left/right already switches tabs and up/down did nothing at all, which is
+-- what makes this pair the natural place for family navigation.
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down }, hexe.action.float.family_next())
+hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, hexe.action.float.family_prev())
+
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, hexe.action.focus.move("up"))
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.down }, hexe.action.focus.move("down"))
 hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.left }, hexe.action.focus.move("left"))

@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const core = @import("core");
-const prompt_navigation = @import("prompt_navigation.zig");
+const prompt_navigation = core.prompt_marks;
 
 /// The private DSR a shell uses to ask where its own prompt block begins.
 ///

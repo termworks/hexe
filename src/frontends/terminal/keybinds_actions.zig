@@ -6,7 +6,7 @@ const layout_mod = @import("layout.zig");
 const actions = @import("loop_actions.zig");
 const focus_move = @import("focus_move.zig");
 const mouse_selection = @import("mouse_selection.zig");
-const prompt_navigation = @import("prompt_navigation.zig");
+const prompt_navigation = core.prompt_marks;
 const statusbar = @import("statusbar.zig");
 
 const state_mod = @import("state.zig");
@@ -318,6 +318,16 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 return true;
             }
             return false;
+        },
+        .float_family_next, .float_family_prev => {
+            const forward = action == .float_family_next;
+            const pane = focusedPane(state) orelse return false;
+            // False, not "handled", when there is no family to step through:
+            // the binding is shared with whatever `ctrl+alt+up/down` meant
+            // before, and swallowing the key everywhere would take directional
+            // focus movement away from split panes.
+            if (!state.stepFamilyMember(pane, forward)) return false;
+            return true;
         },
         .float_nudge => |dir| {
             const fi = state.activeFloatingIndex() orelse {

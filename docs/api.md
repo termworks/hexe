@@ -63,6 +63,15 @@ value)`, which a single `arg` cannot express:
 -> {"call":"ratio","args":["904dd85…",0.25]}
 ```
 
+**A selector** is a pane uuid or a unique **prefix** of one, a 1-based index in
+`panes()` order, or one of `focused`/`current`/`last`/`tab:N/focus`; omitted or
+`nil` means the focused pane. A prefix matching more than one pane resolves to
+**nothing** rather than to the first in layout order, so a verb returns `false`
+instead of acting on whichever pane happened to come first.
+
+A selector is not a pane *name* — names are unique per session, and the API
+speaks to one session, so naming is the CLI's job (`hexe terminal send --pane`).
+
 From the shell those are the second and third words:
 
 ```console
@@ -212,6 +221,12 @@ alive strands the process waiting on it.
 `rename(selector, name)` names a pane. Names reach socket paths and CLI
 arguments, so the same `[a-z0-9][a-z0-9._-]*` rule the name pool uses applies
 here; an invalid name is refused and the old one is kept.
+
+It also returns **false** when another pane *in the same session* already
+answers to that name — a pane name is how a pane is addressed, so a duplicate
+would make `--pane <name>` ambiguous. The same name in a different session is
+fine. Check the return value: this used to report success for a rename the
+daemon had refused.
 
 ## Drawing on the mux
 

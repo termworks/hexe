@@ -3331,7 +3331,7 @@ pub const Server = struct {
             // Enumerated explicitly so adding a new MsgType is a compile error
             // here until it's categorized (PLAN.md 2.1 — no silently-dropped
             // messages). Behavior matches the former `else`: skip + error.
-            .registered, .pane_created, .destroy_pane, .session_state, .notify, .pop_confirm, .pop_choose, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .send_keys, .broadcast_notify, .targeted_notify, .status, .focus_move, .exit_intent, .float_request, .float_created, .pane_exited, .kill_session, .kill_target, .clear_sessions, .clear_orphaned_panes, .get_layout, .apply_layout, .get_session_state, .session_stolen, .bell, .shp_shell_event => {
+            .registered, .pane_created, .destroy_pane, .session_state, .notify, .pop_confirm, .pop_choose, .pong, .ok, .@"error", .pane_found, .pane_not_found, .orphaned_panes, .sessions_list, .session_reattached, .session_detached, .send_keys, .broadcast_notify, .targeted_notify, .status, .focus_move, .exit_intent, .float_request, .float_created, .pane_exited, .kill_session, .kill_target, .resolve_pane_target, .clear_sessions, .clear_orphaned_panes, .get_layout, .apply_layout, .get_session_state, .session_stolen, .bell, .shp_shell_event => {
                 self.skipPayloadRest();
                 self.replyOrClose(fd, .@"error", &.{});
             },
@@ -3739,6 +3739,9 @@ pub const Server = struct {
             },
             .kill_target => {
                 server_cli_layout_handlers.handleKillTarget(self, fd, hdr.payload_len, &buf);
+            },
+            .resolve_pane_target => {
+                server_cli_layout_handlers.handleResolvePaneTarget(self, fd, hdr.payload_len, &buf);
             },
             .clear_sessions => {
                 server_cli_layout_handlers.handleClearSessions(self, fd);
