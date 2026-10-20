@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.5.0] - 2026-10-20
+
+### <!-- 0 -->⛰️  Features
+
+- Publish a float's family to the painter
+- One family member on screen, and step it
+- Open a sub-float with --sub
+- Carry a float's family over the wire
+- Floats can belong to a family
+- Hexe terminal read
+- Answer a read from the scrollback ring
+- Address a pane by --session/--pane
+- Resolve a pane target on the daemon
+- Pane names unique per session
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- A refused connection is not a bad build
+- Close the fd after resolving a pane
+- Exit non-zero when nothing happened
+- Refuse a rename onto a taken name
+- Find the session by uuid or name
+
+### <!-- 2 -->🚜 Refactor
+
+- Move prompt marks out of the frontend
+
+### <!-- 3 -->📚 Documentation
+
+- Reading a pane back
+- The session-to-pane address model
+- HEXE_SESSION is the uuid, not the name
+
+### <!-- 6 -->🧪 Testing
+
+- Stress the pane read path
+- Cover reading a pane via the pod
+- Cover session-to-pane addressing
+- Cover session discovery as a pane sees it
+
 ## [0.4.19] - 2026-10-20
 
 ### <!-- 1 -->🐛 Bug Fixes
