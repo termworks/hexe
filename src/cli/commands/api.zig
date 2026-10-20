@@ -257,6 +257,18 @@ pub fn run(
     // The exit code follows the call, so a script can branch on it without
     // parsing the body.
     if (std.mem.startsWith(u8, reply, "{\"ok\":false")) return error.CallFailed;
+
+    // A verb that acts on a pane answers `false` when the selector named no
+    // pane. The call itself succeeded, so `ok` stays true -- but nothing
+    // happened, and exiting 0 for that made a write into a mistyped pane look
+    // like a write that landed.
+    if (actsOnAPane(call) and std.mem.eql(u8, reply, "{\"ok\":true,\"n\":1,\"result\":[false]}")) {
+        // Deliberately does not name the cause: `false` covers both "no pane
+        // matched that selector" and "the session refused it", and asserting
+        // one of them would be wrong half the time.
+        print("Error: `{s}` did not take effect (no pane matched, or it was refused)\n", .{call});
+        return error.CallDidNothing;
+    }
 }
 
 /// One framed request/response against a control socket.
@@ -310,6 +322,18 @@ fn request(
         got += n;
     }
     return reply;
+}
+
+/// Verbs whose `false` means "no pane matched" rather than a legitimate answer.
+///
+/// Listed rather than inferred: `share(sel)` and `capture(sel)` also return a
+/// boolean, and theirs is the real state of the pane, so turning that into a
+/// failure would break a caller that is simply reading it.
+fn actsOnAPane(call: []const u8) bool {
+    for ([_][]const u8{ "send", "focus", "rename", "close", "scroll" }) |v| {
+        if (std.mem.eql(u8, call, v)) return true;
+    }
+    return false;
 }
 
 /// Turn `{"ok":true,"n":1,"result":[V]}` back into `{"ok":true,"result":V}`.
