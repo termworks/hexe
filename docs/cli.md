@@ -127,7 +127,7 @@ Nothing here is configured, but three environment variables change what a comman
 |---|---|
 | `HEXE_INSTANCE` | which stack — see [instances](instances.md) |
 | `HEXE_PANE_UUID` | set in every pane; the default target for `record`, `shp`, `layout save` |
-| `HEXE_SESSION` | set in every pane; the session's name |
+| `HEXE_SESSION` | set in every pane; the session's **uuid**, not its name. Commands that take `--session` accept either |
 
 A float as a picker, which is the pattern worth copying. The float's command writes the answer to
 the `--result-file` path; hexe reads that file, prints its contents on **stdout**, and exits with
