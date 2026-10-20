@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.18] - 2026-10-20
+
+### <!-- 0 -->⛰️  Features
+
+- Add --version/-V and a version command
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Balance the quotes in the help footer
+- Print help on stdout, not stderr
+
 ## [0.4.17] - 2026-10-20
 
 ### <!-- 1 -->🐛 Bug Fixes
