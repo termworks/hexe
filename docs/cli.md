@@ -65,21 +65,56 @@ hexe record start|stop|status|toggle --scope pod|mux
 
 ### Addressing things
 
-Most commands take one of four ways to say *which*:
+The address is a hierarchy — **session → pane** — and a pane name is unique
+*within its session*, so two sessions may each have a `romeo`.
 
 | | |
 |---|---|
-| `--uuid <32 hex>` | exactly this pane or pod |
-| `--name <n>` | by pokemon name, or a session name |
-| `--last` | the previously focused pane |
+| `--uuid <hex>` | absolute: a full pane uuid or a unique prefix of one. Needs nothing else |
+| `--pane <name>` | by name, unique within its session |
+| `--session <s>` | which session `--pane` is in: its name, or a uuid prefix |
+| `--last` | the pane this one came from |
 | `--creator` | the pane the command was launched from |
-| `--broadcast` | all of them |
+| `--broadcast` | every pane in the session |
+
+Split or float is **not** part of the address: both are panes, drawn from one
+name pool, so the name alone is enough. Nor is the tab.
+
+```
+hexe terminal send --pane romeo --enter "make test"        # inside hexe
+hexe terminal send --session work --pane romeo --enter …   # another session
+hexe terminal send --uuid b717c471 --enter …               # from anywhere
+```
+
+Inside a pane, `HEXE_PANE_UUID` and `HEXE_SESSION` are already set, so a script
+usually needs no target at all.
+
+**Nothing is ever guessed.** A selector matching two panes is refused and lists
+them, rather than picking the first or the newest. That is why `--session`
+exists: without it, a name two sessions share is ambiguous.
+
+A **profile** (`-P`/`--profile`) is a level above all of this: a separate daemon
+with its own socket directory, so nothing in one can see the other. If you are
+not using the default profile you must say which — it cannot be discovered.
+
+The targeting commands exit with the reason, so a script can branch without
+reading the message:
+
+| | |
+|---|---|
+| `0` | done |
+| `1` | no target given |
+| `2` | the daemon or the pane's pod could not be reached |
+| `3` | no such session, or no such pane |
+| `4` | ambiguous: say which |
+
+Typing (`terminal send`) is delivered to the pane's **pod**, which owns the pty
+and outlives the frontend — so it reaches a pane in a **detached** session too.
+Anything needing a frontend (keys through the keybinding machinery, focus,
+reading the screen) does not.
 
 Sessions additionally resolve by **prefix**, over both names and uuids, which is why
 `hexe terminal attach nido` and `hexe terminal attach a3f2` both work.
-
-Inside a pane, `HEXE_PANE_UUID` and `HEXE_SESSION` are already set, so a script usually needs no
-target at all.
 
 ### Flags the reference page never mentioned
 
