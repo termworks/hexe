@@ -20,6 +20,65 @@ fn socketPath(allocator: std.mem.Allocator, session: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/api@{s}.sock", .{ dir, session });
 }
 
+/// Every session with a control socket, keyed the way its socket is named.
+fn listeningSessions(allocator: std.mem.Allocator) ![][]u8 {
+    const dir = try core.ipc.getSocketDir(allocator);
+    defer allocator.free(dir);
+
+    var d = std.fs.cwd().openDir(dir, .{ .iterate = true }) catch return error.NoControlSocket;
+    defer d.close();
+
+    var keys: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (keys.items) |k| allocator.free(k);
+        keys.deinit(allocator);
+    }
+    var it = d.iterate();
+    while (try it.next()) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "api@")) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".sock")) continue;
+        try keys.append(allocator, try allocator.dupe(u8, entry.name["api@".len .. entry.name.len - ".sock".len]));
+    }
+    return keys.toOwnedSlice(allocator);
+}
+
+fn freeKeys(allocator: std.mem.Allocator, keys: [][]u8) void {
+    for (keys) |k| allocator.free(k);
+    allocator.free(keys);
+}
+
+/// Whether the session listening on `path` calls itself `wanted`.
+///
+/// Asked of the session rather than read off the socket's filename, because the
+/// filename is only its name at bind time -- `hexe.live.session` says so
+/// itself -- while a caller may hold either spelling.
+fn answersTo(allocator: std.mem.Allocator, path: []const u8, wanted: []const u8) bool {
+    const reply = request(allocator, path, path, "{\"call\":\"session\"}", true) catch return false;
+    defer allocator.free(reply);
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, reply, .{}) catch return false;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |o| o,
+        else => return false,
+    };
+    const list = switch (root.get("result") orelse return false) {
+        .array => |a| a,
+        else => return false,
+    };
+    if (list.items.len == 0) return false;
+    const rec = switch (list.items[0]) {
+        .object => |o| o,
+        else => return false,
+    };
+    for ([_][]const u8{ "name", "uuid" }) |field| {
+        if (rec.get(field)) |v| switch (v) {
+            .string => |s| if (std.mem.eql(u8, s, wanted)) return true,
+            else => {},
+        };
+    }
+    return false;
+}
+
 /// The only session with a control socket, when the caller did not name one.
 ///
 /// Guessing among several would act on the wrong session sooner or later, so
@@ -52,6 +111,85 @@ fn soleSession(allocator: std.mem.Allocator) ![]u8 {
     return found orelse error.NoControlSocket;
 }
 
+/// Which socket to call, and what to call it in an error.
+pub const Endpoint = struct {
+    label: []u8,
+    path: []u8,
+
+    pub fn deinit(self: Endpoint, allocator: std.mem.Allocator) void {
+        allocator.free(self.label);
+        allocator.free(self.path);
+    }
+};
+
+/// The socket a call should go to.
+///
+/// In order: an explicit `--session`, then `HEXE_API_SOCKET` (a path, so no
+/// guessing -- it is what a plugin is handed), then `HEXE_SESSION`, then the
+/// only session listening.
+///
+/// `HEXE_SESSION` is NOT the socket's filename, which is what this used to
+/// assume. Every pane gets the session's UUID there, while the socket is named
+/// for the session's name at bind time, so `api@$HEXE_SESSION.sock` did not
+/// exist and `hexe api` failed inside a pane with "FileNotFound" -- the one
+/// place it is most useful. `hexe.live.session` already warns that the name is
+/// not a reliable key either, since a renamed or reattached session keeps its
+/// old file. So a key with no socket of its own is not an error yet: the
+/// sessions that ARE listening are asked whether they answer to it.
+pub fn resolveEndpoint(allocator: std.mem.Allocator, session_opt: ?[]const u8) !Endpoint {
+    if (session_opt == null) {
+        if (std.posix.getenv("HEXE_API_SOCKET")) |sock| {
+            if (sock.len > 0) return .{
+                .label = try allocator.dupe(u8, "HEXE_API_SOCKET"),
+                .path = try allocator.dupe(u8, sock),
+            };
+        }
+    }
+
+    const from_env: ?[]const u8 = if (session_opt == null) std.posix.getenv("HEXE_SESSION") else null;
+    if (session_opt orelse from_env) |want| {
+        if (want.len > 0) {
+            const direct = try socketPath(allocator, want);
+            if (std.fs.cwd().access(direct, .{})) |_| {
+                return .{ .label = try allocator.dupe(u8, want), .path = direct };
+            } else |_| {
+                allocator.free(direct);
+            }
+
+            const keys = listeningSessions(allocator) catch try allocator.alloc([]u8, 0);
+            defer freeKeys(allocator, keys);
+            for (keys) |key| {
+                const candidate = try socketPath(allocator, key);
+                if (answersTo(allocator, candidate, want)) {
+                    return .{ .label = try allocator.dupe(u8, key), .path = candidate };
+                }
+                allocator.free(candidate);
+            }
+
+            print("Error: no listening session answers to '{s}'\n", .{want});
+            if (keys.len == 0) {
+                print("       Nothing is listening; is hexe attached?\n", .{});
+            } else {
+                print("       Listening:", .{});
+                for (keys) |key| print(" {s}", .{key});
+                print("\n", .{});
+            }
+            return error.NoSession;
+        }
+    }
+
+    const sole = soleSession(allocator) catch |err| {
+        switch (err) {
+            error.NoControlSocket => print("Error: no running session is listening; is hexe attached?\n", .{}),
+            error.AmbiguousSession => {},
+            else => print("Error: {s}\n", .{@errorName(err)}),
+        }
+        return error.NoSession;
+    };
+    errdefer allocator.free(sole);
+    return .{ .label = sole, .path = try socketPath(allocator, sole) };
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     call: []const u8,
@@ -64,22 +202,8 @@ pub fn run(
         return error.InvalidArgument;
     }
 
-    // A script running inside a pane means its own session, not whichever one
-    // happens to be the only listener. Scanning is the fallback for callers
-    // outside hexe entirely.
-    const from_env: ?[]const u8 = if (session_opt == null) std.posix.getenv("HEXE_SESSION") else null;
-    const session = if (session_opt orelse from_env) |s| try allocator.dupe(u8, s) else soleSession(allocator) catch |err| {
-        switch (err) {
-            error.NoControlSocket => print("Error: no running session is listening; is hexe attached?\n", .{}),
-            error.AmbiguousSession => {},
-            else => print("Error: {s}\n", .{@errorName(err)}),
-        }
-        return error.NoSession;
-    };
-    defer allocator.free(session);
-
-    const path = try socketPath(allocator, session);
-    defer allocator.free(path);
+    const endpoint = try resolveEndpoint(allocator, session_opt);
+    defer endpoint.deinit(allocator);
 
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
@@ -119,44 +243,8 @@ pub fn run(
     }
     try w.writeAll("}");
 
-    const stream = std.net.connectUnixSocket(path) catch |err| {
-        print("Error: cannot reach session '{s}': {s}\n", .{ session, @errorName(err) });
-        return error.NotConnected;
-    };
-    defer stream.close();
-
-    var hdr: [4]u8 = undefined;
-    std.mem.writeInt(u32, &hdr, @intCast(body.items.len), .big);
-    try stream.writeAll(&hdr);
-    try stream.writeAll(body.items);
-
-    var len_buf: [4]u8 = undefined;
-    var got: usize = 0;
-    while (got < 4) {
-        const n = try stream.read(len_buf[got..]);
-        if (n == 0) {
-            print("Error: session closed the connection without replying\n", .{});
-            return error.UnexpectedEof;
-        }
-        got += n;
-    }
-    const len = std.mem.readInt(u32, &len_buf, .big);
-    if (len > MAX_REPLY) {
-        print("Error: reply is implausibly large ({d} bytes)\n", .{len});
-        return error.StreamTooLong;
-    }
-
-    const reply = try allocator.alloc(u8, len);
+    const reply = try request(allocator, endpoint.label, endpoint.path, body.items, false);
     defer allocator.free(reply);
-    got = 0;
-    while (got < len) {
-        const n = try stream.read(reply[got..]);
-        if (n == 0) {
-            print("Error: reply was truncated\n", .{});
-            return error.UnexpectedEof;
-        }
-        got += n;
-    }
 
     // `hexe api` is a client like any other, so it unwraps. The wire carries a
     // list of return values (`n` + `result`), which is what lets a sibling's
@@ -169,6 +257,59 @@ pub fn run(
     // The exit code follows the call, so a script can branch on it without
     // parsing the body.
     if (std.mem.startsWith(u8, reply, "{\"ok\":false")) return error.CallFailed;
+}
+
+/// One framed request/response against a control socket.
+///
+/// `quiet` is for probing: working out which of several sessions answers to a
+/// name means connecting to each, and reporting every miss would bury the one
+/// message the caller needs.
+fn request(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    path: []const u8,
+    body: []const u8,
+    quiet: bool,
+) ![]u8 {
+    const stream = std.net.connectUnixSocket(path) catch |err| {
+        if (!quiet) print("Error: cannot reach session '{s}': {s}\n", .{ label, @errorName(err) });
+        return error.NotConnected;
+    };
+    defer stream.close();
+
+    var hdr: [4]u8 = undefined;
+    std.mem.writeInt(u32, &hdr, @intCast(body.len), .big);
+    try stream.writeAll(&hdr);
+    try stream.writeAll(body);
+
+    var len_buf: [4]u8 = undefined;
+    var got: usize = 0;
+    while (got < 4) {
+        const n = try stream.read(len_buf[got..]);
+        if (n == 0) {
+            if (!quiet) print("Error: session closed the connection without replying\n", .{});
+            return error.UnexpectedEof;
+        }
+        got += n;
+    }
+    const len = std.mem.readInt(u32, &len_buf, .big);
+    if (len > MAX_REPLY) {
+        if (!quiet) print("Error: reply is implausibly large ({d} bytes)\n", .{len});
+        return error.StreamTooLong;
+    }
+
+    const reply = try allocator.alloc(u8, len);
+    errdefer allocator.free(reply);
+    got = 0;
+    while (got < len) {
+        const n = try stream.read(reply[got..]);
+        if (n == 0) {
+            if (!quiet) print("Error: reply was truncated\n", .{});
+            return error.UnexpectedEof;
+        }
+        got += n;
+    }
+    return reply;
 }
 
 /// Turn `{"ok":true,"n":1,"result":[V]}` back into `{"ok":true,"result":V}`.
