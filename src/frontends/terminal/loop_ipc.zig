@@ -74,6 +74,34 @@ fn sendFailedFloatResult(state: *State, request_id: u32, exit_code: i32, comptim
     };
 }
 
+/// Answer a float request that is not waiting for the float to exit.
+///
+/// A `--sub` caller wants the new float's identity and then to carry on, so it
+/// gets a result straight away with the uuid as the output. Without this the
+/// request got no reply at all -- the non-waiting path had never been used,
+/// because the CLI always waited -- and the caller blocked for ever on a float
+/// that had in fact been created.
+fn sendFloatCreatedResult(state: *State, request_id: u32, uuid: [32]u8) void {
+    const ctl_fd = state.runtime.getCtlFd() orelse {
+        core.logging.warn("terminal", "float created: SES CTL channel is unavailable", .{});
+        return;
+    };
+    const result = wire.FloatResult{
+        .uuid = uuid,
+        .exit_code = 0,
+        .output_len = @intCast(uuid.len),
+    };
+    wire.writeControlWithTrailAndRequestId(
+        ctl_fd,
+        .float_result,
+        request_id,
+        std.mem.asBytes(&result),
+        uuid[0..],
+    ) catch |err| {
+        core.logging.logError("terminal", "failed to answer a non-waiting float request", err);
+    };
+}
+
 /// Roll widgets.pokemon.shiny_chance for a freshly shown sprite.
 fn rollShiny(state: *State) bool {
     const chance = state.pop_config.widgets.pokemon.shiny_chance;
@@ -1050,6 +1078,25 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         return;
     };
 
+    // `--sub`: join the family of the float that asked for this one. After
+    // creation rather than during, so the adhoc path stays one thing and a
+    // parent that turns out not to be a float leaves an ordinary float behind
+    // instead of failing the request.
+    const zero_parent: [32]u8 = .{0} ** 32;
+    if (!std.mem.eql(u8, &fr.parent_pane, &zero_parent)) {
+        if (!state.adoptIntoFloatFamily(new_uuid, fr.parent_pane)) {
+            terminal_main.debugLogUuid(
+                &fr.parent_pane,
+                "float --sub: parent is not a float; left the new float top-level",
+                .{},
+            );
+        } else if (state.findPaneByUuid(new_uuid)) |child| {
+            // Push the family to SES, so a reattach finds the child under its
+            // parent rather than as a second top-level float.
+            _ = state.syncSessionFloatChecked(child, true);
+        }
+    }
+
     if (state.view.float_views.items.len > 0) {
         state.syncPaneFocus(state.view.float_views.items[state.view.float_views.items.len - 1], old_uuid);
         // Only swallow input that is already in flight with the float request
@@ -1079,6 +1126,10 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
             state.notifications.show("Float result tracking failed");
             sendFailedFloatResult(state, request_id, 127, "failed to send failed float result after tracking failure");
         };
+    } else {
+        // Not waiting: answer now with the uuid, or the caller blocks for ever
+        // on a float that was created perfectly well.
+        sendFloatCreatedResult(state, request_id, new_uuid);
     }
 }
 

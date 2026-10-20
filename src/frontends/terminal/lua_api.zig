@@ -337,6 +337,21 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     setOptStr(lua, "exit_key", state.paneExitKey(pane));
     setOptStr(lua, "title", if (is_float) state.paneFloatTitle(pane) else null);
 
+    // The family: which float this one hangs under, and which chip it is. The
+    // parent is chip 0 and has no `parent_float`, so a caller can tell a lone
+    // float from a family of one by the chip count rather than by the key.
+    if (is_float) {
+        if (state.paneFloatState(pane)) |float_state| {
+            if (float_state.parent_float) |parent| {
+                setStr(lua, "parent_float", parent[0..]);
+            } else {
+                lua.pushNil();
+                lua.setField(-2, "parent_float");
+            }
+            setInt(lua, "family_index", @intCast(float_state.family_index));
+        }
+    }
+
     // Who is watching this pane, straight from the pod that holds their
     // sockets. `shared` is the question a privacy indicator actually asks, and
     // deriving it from a count every caller would get subtly wrong on the

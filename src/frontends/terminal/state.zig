@@ -2954,6 +2954,57 @@ pub const State = struct {
         self.runtime.removeLocalFloatState(pane_uuid);
     }
 
+    /// Every float record this session holds, newest-last, into `out`.
+    ///
+    /// A fixed buffer because the only caller is picking a family number and a
+    /// session with more floats than this has bigger problems than numbering.
+    fn collectFloatStates(
+        self: *const State,
+        out: *[64]core.session_model.SessionFloat,
+    ) []core.session_model.SessionFloat {
+        var n: usize = 0;
+        for (self.view.float_views.items) |fp| {
+            if (n >= out.len) break;
+            out[n] = self.runtime.floatState(fp.uuid) orelse continue;
+            n += 1;
+        }
+        return out[0..n];
+    }
+
+    /// Make `child` a member of `parent`'s family.
+    ///
+    /// The child takes the family's identity, not its own: the parent's toggle
+    /// key (so one key reaches the whole family), the parent's rectangle and
+    /// tab binding (so a member appears exactly where the family lives), and
+    /// the lowest free chip number.
+    ///
+    /// A sub-float opened BY a sub-float joins the same family rather than
+    /// nesting a level deeper: the design is one row of chips per float, and a
+    /// tree of unbounded depth has no way to show itself in a title row.
+    pub fn adoptIntoFloatFamily(self: *State, child: [32]u8, parent: [32]u8) bool {
+        const parent_state = self.runtime.floatState(parent) orelse return false;
+        var child_state = self.runtime.floatState(child) orelse return false;
+        const root = core.session_model.familyRoot(parent_state);
+
+        var buf: [64]core.session_model.SessionFloat = undefined;
+        const floats = self.collectFloatStates(&buf);
+
+        child_state.parent_float = root;
+        child_state.family_index = core.session_model.nextFamilyIndex(floats, root);
+        child_state.float_key = parent_state.float_key;
+        child_state.parent_tab = parent_state.parent_tab;
+        child_state.tab_visible = parent_state.tab_visible;
+        child_state.width_pct = parent_state.width_pct;
+        child_state.height_pct = parent_state.height_pct;
+        child_state.pos_x_pct = parent_state.pos_x_pct;
+        child_state.pos_y_pct = parent_state.pos_y_pct;
+        child_state.pad_x = parent_state.pad_x;
+        child_state.pad_y = parent_state.pad_y;
+
+        self.runtime.syncFloatState(child_state, true);
+        return true;
+    }
+
     pub fn setPaneVisibleOnTab(self: *State, pane: *const Pane, tab: usize, visible: bool) void {
         self.runtime.setFloatVisibleOnTab(pane.uuid, tab, visible);
     }

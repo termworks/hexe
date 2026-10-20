@@ -652,6 +652,7 @@ pub fn main() !void {
     try mux_float.addArg(Arg.singleValueOption("isolation", null, null));
     try mux_float.addArg(Arg.singleValueOption("size", null, null));
     try mux_float.addArg(Arg.singleValueOption("key", null, null));
+    try mux_float.addArg(Arg.booleanOption("sub", null, "A sub-float of the pane this runs in: shares its key, dies with it"));
     try addProfileArgs(&mux_float);
 
     var mux_notify = app.createCommand("notify", "Send notification");
@@ -1337,6 +1338,7 @@ pub fn main() !void {
                 m.getSingleValue("isolation") orelse "",
                 m.getSingleValue("size") orelse "",
                 exit_key,
+                m.containsArg("sub"),
             );
             return;
         }
