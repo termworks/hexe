@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.2] - 2026-10-21
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Restore v0.4.15 colour handling
+
 ## [0.5.1] - 2026-10-20
 
 ### <!-- 1 -->🐛 Bug Fixes
