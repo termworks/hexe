@@ -1368,6 +1368,14 @@ fn harvestPendingOscReplies(state: *State) void {
     }
 }
 
+/// Device attributes are the only CSI query `pane_respond` forwards to the host;
+/// every other shape it answers itself, so one arriving here is hexe's own.
+fn parseForwardedPaneCsiReplyLen(inp: []const u8, start: usize) usize {
+    const n = parseLikelyTerminalCsiReplyLen(inp, start);
+    if (n == 0) return 0;
+    return if (inp[start + n - 1] == 'c') n else 0;
+}
+
 fn parseLikelyTerminalCsiReplyLen(inp: []const u8, start: usize) usize {
     if (start >= inp.len) return 0;
 
@@ -1683,13 +1691,15 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
 
     var i: usize = 0;
     while (i < inp.len) {
-        if (!state.csi_reply_in_progress and state.csi_reply_targets.items.len == 0) {
+        if (!state.csi_reply_in_progress and state.csi_reply_targets.items.len == 0 and
+            !state.terminal_query_in_flight)
+        {
             if (state.activeFloatingIndex()) |idx| {
                 if (idx < state.view.float_views.items.len) {
                     const fp = state.view.float_views.items[idx];
                     const can_interact = if (state.paneParentTab(fp)) |parent| parent == state.activeTabIndex() else true;
                     if (state.paneVisibleOnTab(fp, state.activeTabIndex()) and can_interact) {
-                        const n = parseLikelyTerminalCsiReplyLen(inp, i);
+                        const n = parseForwardedPaneCsiReplyLen(inp, i);
                         if (n > 0) {
                             fp.write(inp[i .. i + n]) catch |err| {
                                 terminal_main.debugLogUuid(&fp.uuid, "CSI reply forwarding write failed: {s}", .{@errorName(err)});

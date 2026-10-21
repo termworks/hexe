@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.3] - 2026-10-21
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Keep hexe's own replies out of floats
+
 ## [0.5.2] - 2026-10-21
 
 ### <!-- 1 -->🐛 Bug Fixes
