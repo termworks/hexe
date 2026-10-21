@@ -537,23 +537,6 @@ const Pod = struct {
     // OSC 7 CWD tracking
     osc7_scanner: Osc7Scanner = .{},
     osc7_cwd: ?[]u8 = null,
-    /// This pane's shell marks its prompts (OSC 133), so the marks can say
-    /// whether a colour question came from the shell or from a program.
-    marks_seen: bool = false,
-    /// Between `133;C` and `133;D` a command is running; otherwise the shell
-    /// holds the terminal. Only meaningful once `marks_seen`.
-    at_prompt: bool = false,
-    /// Was the last colour question asked by a program rather than the shell?
-    ///
-    /// Taken from the marks in output order, not from `tcgetpgrp` at the time
-    /// the question is read: a program that asks and exits is already gone by
-    /// then, so a live check would call it the shell's. The marks and the
-    /// question are in one ordered stream, so their order is not a race.
-    ///
-    /// Defaults to true, so a pane whose shell marks nothing is treated as a
-    /// program having asked -- which is what makes the check below refuse a
-    /// dead asker's answer on a shell with no integration.
-    query_from_program: bool = true,
     vt_client_ever_attached: bool = false,
 
     const RunOptions = struct {
@@ -1838,12 +1821,7 @@ const Pod = struct {
         const real = payload[INPUT_SEQ_PREFIX_LEN..];
 
         if (!self.input_dedup.accept(epoch, seq)) return; // replayed duplicate
-        if (real.len == 0) return;
-        if (isHostColorReply(real) and !self.colorReplyHasAReader()) {
-            debugLog("applyInputFrame: dropping a colour answer, no program holds the pty", .{});
-            return;
-        }
-        self.queuePtyWrite(real);
+        if (real.len > 0) self.queuePtyWrite(real);
     }
 
     /// Accept a VT client — replays backlog, then streams live output.
@@ -2083,61 +2061,9 @@ const Pod = struct {
     fn scanOutputMetadata(self: *Pod, data: []const u8) void {
         if (!self.shouldScanOutputMetadata(data)) return;
         self.scanOsc7(data);
-        self.scanColorAttribution(data);
         if (containsClearSeq(data)) {
             self.backlog.clear();
         }
-    }
-
-    /// Walk this chunk in order, tracking who the terminal is talking to.
-    ///
-    /// One pass, because the order of a mark and a question inside a single
-    /// chunk is what decides who asked: `133;C` then a question means a program
-    /// asked it, while a question after `133;A` is the shell asking for itself.
-    ///
-    /// Only `ESC ]` is matched, not the single-byte C1 form; a shell emitting
-    /// the latter leaves the default in place, which errs towards refusing.
-    fn scanColorAttribution(self: *Pod, data: []const u8) void {
-        var i: usize = 0;
-        while (std.mem.indexOfPos(u8, data, i, "\x1b]")) |at| {
-            i = at + 2;
-            const body = oscBody(data[at..]) orelse continue;
-            if (std.mem.startsWith(u8, body, "133;")) {
-                self.marks_seen = true;
-                if (body.len > 4) switch (body[4]) {
-                    // A command is running and owns the terminal.
-                    'C' => self.at_prompt = false,
-                    // Prompt start, prompt end, command finished: the shell has it.
-                    'A', 'B', 'D' => self.at_prompt = true,
-                    else => {},
-                };
-                continue;
-            }
-            if (body.len >= 3 and body[body.len - 1] == '?' and isColorOscBody(body)) {
-                self.query_from_program = !(self.marks_seen and self.at_prompt);
-            }
-        }
-    }
-
-    /// May this colour answer be written to the pty?
-    ///
-    /// The shell asking for itself is always answered. A program's answer is
-    /// only written while that program still holds the terminal: once it exits
-    /// the shell is the foreground group again, and an answer handed over then
-    /// is read by the shell as text the user never typed and run on the next
-    /// newline.
-    ///
-    /// `tcgetpgrp` is asked here, at the moment of writing, where it is current.
-    /// Retiring the question when the shell marks its next prompt does not
-    /// cover this: a terminal answers in about a millisecond and a shell needs
-    /// tens of them to reap its child and draw a prompt, so the answer almost
-    /// always wins that race.
-    fn colorReplyHasAReader(self: *Pod) bool {
-        if (!self.query_from_program) return true;
-        const fg = self.pty.foregroundPgid() orelse return true;
-        // The shell is its own group leader (it calls setsid), so its process
-        // group is its pid. Anything else means a program is in the foreground.
-        return fg != self.pty.child_pid;
     }
 
     fn shouldScanOutputMetadata(self: *const Pod, data: []const u8) bool {
@@ -2149,47 +2075,6 @@ const Pod = struct {
         return false;
     }
 };
-
-/// The OSC parameter list, if these bytes begin an OSC.
-fn oscBody(data: []const u8) ?[]const u8 {
-    const start: usize = if (std.mem.startsWith(u8, data, "\x1b]"))
-        2
-    else if (data.len > 0 and data[0] == 0x9d)
-        1
-    else
-        return null;
-    const rest = data[start..];
-    const end = std.mem.indexOfAny(u8, rest, "\x1b\x07") orelse rest.len;
-    return rest[0..end];
-}
-
-/// `10;`, `11;`, `12;` or `4;` -- the terminal colours a program can ask about.
-fn isColorOscBody(body: []const u8) bool {
-    return std.mem.startsWith(u8, body, "10;") or
-        std.mem.startsWith(u8, body, "11;") or
-        std.mem.startsWith(u8, body, "12;") or
-        std.mem.startsWith(u8, body, "4;");
-}
-
-/// Is this injected input an answer to a colour question?
-///
-/// The frontend writes an answer as a frame of its own, so there is no need to
-/// find one inside a larger payload.
-///
-/// The value has to be in the `rgb:` form a terminal answers in. The same OSC
-/// codes also SET a colour, and a set carries `#rrggbb` -- something injecting
-/// one into a pane means it, and refusing it would be this check swallowing
-/// input nobody asked it to touch. Narrowing here cannot leak an answer that a
-/// terminal spells `rgb:`, and for one that spells an answer some other way the
-/// bytes are delivered as they always were, which is the safe direction for a
-/// filter sitting on the input path.
-fn isHostColorReply(data: []const u8) bool {
-    const body = oscBody(data) orelse return false;
-    if (!isColorOscBody(body)) return false;
-    // The value is the last `;` field, which also rules out a `?` question.
-    const semi = std.mem.lastIndexOfScalar(u8, body, ';') orelse return false;
-    return std.mem.startsWith(u8, body[semi + 1 ..], "rgb:");
-}
 
 fn podFrameCallback(ctx: *anyopaque, frame: pod_protocol.Frame) void {
     const pod: *Pod = @ptrCast(@alignCast(ctx));
