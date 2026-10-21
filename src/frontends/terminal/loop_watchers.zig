@@ -7,7 +7,6 @@ const xev = @import("xev").Dynamic;
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const HostHooks = @import("loop_host_hooks.zig").HostHooks;
-const host_colors = @import("host_colors.zig");
 const terminal_main = @import("main.zig");
 const loop_ipc = @import("loop_ipc.zig");
 
@@ -358,40 +357,8 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
                 terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ vt_event.pane_id, vt_event.payload_len });
                 pane.feedPodOutput(payload);
                 const now_ms = std.time.milliTimestamp();
-                // Before draining, so a query that arrived AFTER the prompt mark
-                // in this same chunk is still registered. The queries that came
-                // before it were already discarded as the mark was parsed.
-                if (pane.takePromptBoundary()) {
-                    const dropped = state.host_colors.dropPane(pane.uuid);
-                    if (dropped > 0) {
-                        terminal_main.debugLogUuid(&pane.uuid, "prompt mark dropped {d} outstanding colour quer{s}", .{
-                            dropped,
-                            if (dropped == 1) "y" else "ies",
-                        });
-                    }
-                }
                 while (pane.takeHostColorQuery()) |key| {
-                    // Answered from the cache, with no pending left to be
-                    // delivered late to an asker that stopped waiting.
-                    var answer_buf: [48]u8 = undefined;
-                    if (state.host_colors.cachedAnswer(key, &answer_buf)) |answer| {
-                        state.writePaneInput(pane, answer);
-                        continue;
-                    }
-                    // On a miss the host is asked from here: the pane's own
-                    // query was not passed through.
                     if (!state.host_colors.registerPane(key, pane.uuid, now_ms)) state.enqueueOscReplyTarget(pane.uuid);
-                    if (host_colors.HostColors.queryBytes(key, &answer_buf)) |query| {
-                        const stdout = std.fs.File.stdout();
-                        stdout.writeAll(query) catch |err| {
-                            core.logging.logError("terminal", "relay a pane's colour query", err);
-                        };
-                    }
-                }
-                const observed = pane.takeHostColorObserved();
-                if (!observed.empty() and state.host_colors.learn(observed)) {
-                    state.renderer.invalidate();
-                    state.needs_render = true;
                 }
                 const color_invalidation = pane.takeHostColorInvalidation();
                 if (!color_invalidation.empty()) {

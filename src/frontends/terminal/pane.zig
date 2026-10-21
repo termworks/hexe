@@ -116,10 +116,7 @@ pub const Pane = struct {
     host_color_queries: [64]host_colors.QueryKey = undefined,
     host_color_query_len: u8 = 0,
     host_color_invalidation: host_colors.Invalidation = .{},
-    host_color_observed: host_colors.Observed = .{},
     host_color_refresh_requested: bool = false,
-    /// A shell prompt mark arrived, so this pane's foreground program is gone.
-    prompt_boundary_seen: bool = false,
     /// Last observed alt-screen state, for the palette stack save/restore.
     /// Palette colours changed and SES has not been told yet.
     palette_dirty: bool = false,
@@ -166,12 +163,6 @@ pub const Pane = struct {
         return changed;
     }
 
-    pub fn takePromptBoundary(self: *Pane) bool {
-        const seen = self.prompt_boundary_seen;
-        self.prompt_boundary_seen = false;
-        return seen;
-    }
-
     pub fn queueHostColorQuery(self: *Pane, key: host_colors.QueryKey) bool {
         if (self.host_color_query_len >= self.host_color_queries.len) return false;
         self.host_color_queries[self.host_color_query_len] = key;
@@ -192,12 +183,6 @@ pub const Pane = struct {
         const invalidation = self.host_color_invalidation;
         self.host_color_invalidation = .{};
         return invalidation;
-    }
-
-    pub fn takeHostColorObserved(self: *Pane) host_colors.Observed {
-        const observed = self.host_color_observed;
-        self.host_color_observed = .{};
-        return observed;
     }
 
     pub fn takeHostColorRefresh(self: *Pane) bool {
@@ -302,7 +287,6 @@ pub const Pane = struct {
         self.osc_progress_changed = false;
         self.host_color_query_len = 0;
         self.host_color_invalidation = .{};
-        self.host_color_observed = .{};
         self.host_color_refresh_requested = false;
         self.dcs_query_state = .idle;
         self.dcs_query_len = 0;

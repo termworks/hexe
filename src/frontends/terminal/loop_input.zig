@@ -355,48 +355,22 @@ fn isPaneFeedbackOscEvent(parsed_event: ?vaxis.Event, raw: []const u8) bool {
     return std.meta.activeTag(ev) == .color_report;
 }
 
-const OscFeedbackRoute = enum {
-    /// One of hexe's own probes is outstanding, so the reply is hexe's to read.
-    hexes_own,
-    /// Handed to the pane that asked for it.
-    delivered,
-    /// Nobody asked. Dropped here, rather than offered to a pane that did not.
-    dropped,
-};
-
-fn routePaneFeedbackOscBytes(state: *State, raw: []const u8) OscFeedbackRoute {
-    if (state.terminal_query_in_flight) return .hexes_own;
-
-    // A colour answer is never routed by the queue below: that queue holds only
-    // a per-pane COUNT of outstanding OSC queries, so it would hand one to a
-    // pane waiting on a clipboard, title or cwd reply. Colour answers are kept
-    // by key and owner in `host_colors`; one that reaches here is unclaimed.
-    // Checked on the bytes, so an answer the event parser did not recognise as
-    // a colour report cannot slip past.
-    if (core.osc_colors.isColorReply(raw)) {
-        log.debug("dropping a colour answer nobody is waiting for, len={d}", .{raw.len});
-        return .dropped;
-    }
+fn routePaneFeedbackOscBytes(state: *State, raw: []const u8) bool {
+    if (state.terminal_query_in_flight) return false;
 
     harvestPendingOscReplies(state);
     if (dequeueLiveOscReplyTarget(state)) |uuid| {
         if (state.findPaneByUuid(uuid)) |pane| {
             state.writePaneInput(pane, raw);
             terminal_main.debugLogUuid(&uuid, "OSC feedback routed from terminal input len={d}", .{raw.len});
-            return .delivered;
+            return true;
         }
     }
 
-    // Nothing asked for this, so there is nowhere for it to go.
-    //
-    // This used to fall back on the focused pane. A reply has exactly one
-    // correct destination -- the pane that asked -- and the focused pane is a
-    // guess that is wrong whenever the asker was another pane, had its deadline
-    // pass, or never existed because the host volunteered the report. Being
-    // wrong writes the reply into a shell's input, where `]4;198;rgb:...`
-    // shows up as text the user never typed.
-    log.debug("dropping an unowned OSC reply, len={d}", .{raw.len});
-    return .dropped;
+    const pane = resolveFocusedPaneForInput(state) orelse return false;
+    state.writePaneInput(pane, raw);
+    terminal_main.debugLogUuid(&pane.uuid, "OSC feedback routed to focused pane len={d}", .{raw.len});
+    return true;
 }
 
 fn handleHostColorReport(state: *State, report: vaxis.Color.Report, raw: []const u8) bool {
@@ -407,14 +381,7 @@ fn handleHostColorReport(state: *State, report: vaxis.Color.Report, raw: []const
         .index => |index| .{ .palette = index },
     };
     switch (state.host_colors.handleReport(.{ .key = key, .value = report.value }, std.time.milliTimestamp())) {
-        // Nobody is waiting for this colour. Consumed, not declined: declining
-        // passed it to the pane-target FIFO, which would give it to whichever
-        // pane was waiting for some other reply. A pane that did ask is
-        // registered by key and uuid and comes back as `.pane` below.
-        .unowned => {
-            log.debug("dropping an unowned colour report, len={d}", .{raw.len});
-            return true;
-        },
+        .unowned => return false,
         .cached => |changed| {
             if (changed) {
                 state.renderer.invalidate();
@@ -423,7 +390,6 @@ fn handleHostColorReport(state: *State, report: vaxis.Color.Report, raw: []const
             return true;
         },
         .pane => |uuid| {
-            terminal_main.debugLogUuid(&uuid, "colour report handed to the pane that asked", .{});
             if (state.findPaneByUuid(uuid)) |pane| state.writePaneInput(pane, raw);
             return true;
         },
@@ -1222,19 +1188,10 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
                     continue;
                 }
             }
-            if (isPaneFeedbackOscEvent(res.event, raw_event)) {
-                // A delivered reply is done with, and so is a dropped one: both
-                // are consumed here so neither can reach the raw-byte forward
-                // at the end of the loop, which would put it in the focused
-                // pane by another road.
-                switch (routePaneFeedbackOscBytes(state, raw_event)) {
-                    .delivered, .dropped => {
-                        freeParsedEventPayload(state, res.event);
-                        i += res.n;
-                        continue;
-                    },
-                    .hexes_own => {},
-                }
+            if (isPaneFeedbackOscEvent(res.event, raw_event) and routePaneFeedbackOscBytes(state, raw_event)) {
+                freeParsedEventPayload(state, res.event);
+                i += res.n;
+                continue;
             }
 
             const dispatch = dispatchParsedEvent(state, res);
@@ -1279,16 +1236,7 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
                 state.needs_render = true;
             }
             if (forward_bytes) |bytes| {
-                // A colour answer is not typing. This is the last road into a
-                // pane: an answer nothing above consumed used to be delivered
-                // as input, showing up as `4;248;rgb:6e6e/ffff/5757` at the
-                // cursor for the shell to run. Every path that knows who asked
-                // has already had its chance.
-                if (core.osc_colors.containsColorReplyPayload(bytes)) {
-                    log.debug("not forwarding a colour answer to a pane, len={d}", .{bytes.len});
-                } else {
-                    forwardSanitizedToFocusedPane(state, bytes, parsed_event_for_popup);
-                }
+                forwardSanitizedToFocusedPane(state, bytes, parsed_event_for_popup);
             }
         }
         // Advance and keep draining. This used to `return`, abandoning

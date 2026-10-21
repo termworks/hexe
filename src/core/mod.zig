@@ -24,7 +24,6 @@ pub const palette = @import("palette.zig");
 pub const blend = @import("blend.zig");
 pub const stretch = @import("stretch.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
-pub const osc_colors = @import("osc_colors.zig");
 pub const regions = @import("regions.zig");
 pub const pod_protocol = @import("pod_protocol.zig");
 pub const pod_meta = @import("pod_meta.zig");
@@ -118,7 +117,6 @@ test {
     _ = @import("palette.zig");
     _ = @import("blend.zig");
     _ = @import("stretch.zig");
-    _ = @import("osc_colors.zig");
     _ = @import("config.zig");
     _ = @import("logging.zig");
     _ = @import("config_v2.zig");
