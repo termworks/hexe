@@ -355,17 +355,21 @@ fn isPaneFeedbackOscEvent(parsed_event: ?vaxis.Event, raw: []const u8) bool {
     return std.meta.activeTag(ev) == .color_report;
 }
 
-fn routePaneFeedbackOscBytes(state: *State, raw: []const u8) bool {
+/// Hand `raw` to the pane whose turn it is in the reply queue.
+fn routeOscReplyToQueuedPane(state: *State, raw: []const u8) bool {
     if (state.terminal_query_in_flight) return false;
 
     harvestPendingOscReplies(state);
-    if (dequeueLiveOscReplyTarget(state)) |uuid| {
-        if (state.findPaneByUuid(uuid)) |pane| {
-            state.writePaneInput(pane, raw);
-            terminal_main.debugLogUuid(&uuid, "OSC feedback routed from terminal input len={d}", .{raw.len});
-            return true;
-        }
-    }
+    const uuid = dequeueLiveOscReplyTarget(state) orelse return false;
+    const pane = state.findPaneByUuid(uuid) orelse return false;
+    state.writePaneInput(pane, raw);
+    terminal_main.debugLogUuid(&uuid, "OSC feedback routed from terminal input len={d}", .{raw.len});
+    return true;
+}
+
+fn routePaneFeedbackOscBytes(state: *State, raw: []const u8) bool {
+    if (state.terminal_query_in_flight) return false;
+    if (routeOscReplyToQueuedPane(state, raw)) return true;
 
     const pane = resolveFocusedPaneForInput(state) orelse return false;
     state.writePaneInput(pane, raw);
@@ -1182,7 +1186,13 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
 
             const raw_event = inp[i .. i + res.n];
             if (res.event) |event| {
-                if (event == .color_report and handleHostColorReport(state, event.color_report, raw_event)) {
+                if (event == .color_report) {
+                    // Hexe's own, or the pane that asked. An answer later than
+                    // `host_colors.QUERY_TIMEOUT_MS` is nobody's, and handing one to the focused
+                    // pane is how `rgb:` text reached a command line after a palette change.
+                    if (!handleHostColorReport(state, event.color_report, raw_event)) {
+                        _ = routeOscReplyToQueuedPane(state, raw_event);
+                    }
                     freeParsedEventPayload(state, res.event);
                     i += res.n;
                     continue;
