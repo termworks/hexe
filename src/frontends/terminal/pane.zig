@@ -113,8 +113,10 @@ pub const Pane = struct {
     osc_notifications: std.ArrayList(pane_osc.Notification) = .empty,
     osc_progress: pane_osc.Progress = .{},
     osc_progress_changed: bool = false,
-    host_color_queries: [64]host_colors.QueryKey = undefined,
-    host_color_query_len: u8 = 0,
+    /// A whole palette plus the two dynamic colours, because programs ask for all of them in one
+    /// burst and the overflow used to be relayed to the host instead of answered from cache.
+    host_color_queries: [260]host_colors.QueryKey = undefined,
+    host_color_query_len: u16 = 0,
     host_color_invalidation: host_colors.Invalidation = .{},
     host_color_refresh_requested: bool = false,
     /// Last observed alt-screen state, for the palette stack save/restore.
@@ -168,6 +170,10 @@ pub const Pane = struct {
         self.host_color_queries[self.host_color_query_len] = key;
         self.host_color_query_len += 1;
         return true;
+    }
+
+    pub fn hasHostColorQuery(self: *const Pane) bool {
+        return self.host_color_query_len > 0;
     }
 
     pub fn takeHostColorQuery(self: *Pane) ?host_colors.QueryKey {

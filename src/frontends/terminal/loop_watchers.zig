@@ -6,6 +6,7 @@ const xev = @import("xev").Dynamic;
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
+const host_colors = @import("host_colors.zig");
 const HostHooks = @import("loop_host_hooks.zig").HostHooks;
 const terminal_main = @import("main.zig");
 const loop_ipc = @import("loop_ipc.zig");
@@ -349,6 +350,41 @@ fn sesVtCallback(
     return .disarm;
 }
 
+/// Answer the colour queries a pane made, from the cache where there is one.
+///
+/// A terminal answers these in microseconds and the asker reads with a budget to match — oslo
+/// allows 100 ms for its whole startup exchange. A relayed answer costs the round trip to the host
+/// on top of two daemons, so it can arrive after the asker stopped reading, where the line
+/// discipline prints it as text. Hexe already holds the host's palette; where it does, the pane
+/// gets its answer without leaving the frontend.
+fn answerPaneColorQueries(state: *State, pane: *Pane, now_ms: i64) void {
+    var answer: [64]u8 = undefined;
+    var query_buf: [256]u8 = undefined;
+    var query_writer = std.fs.File.stdout().writer(&query_buf);
+    var asked_host = false;
+
+    while (pane.takeHostColorQuery()) |key| {
+        if (state.host_colors.cachedAnswer(key, &answer)) |reply| {
+            pane.write(reply) catch |err| {
+                core.logging.logError("terminal", "answer a pane's colour query from cache", err);
+            };
+            continue;
+        }
+        host_colors.HostColors.writeQuery(&query_writer.interface, key) catch |err| {
+            core.logging.logError("terminal", "ask the host for a pane's colour", err);
+            continue;
+        };
+        asked_host = true;
+        if (!state.host_colors.registerPane(key, pane.uuid, now_ms)) state.enqueueOscReplyTarget(pane.uuid);
+    }
+
+    if (asked_host) {
+        query_writer.interface.flush() catch |err| {
+            core.logging.logError("terminal", "flush a pane's colour queries", err);
+        };
+    }
+}
+
 fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrameEvent, payload: []const u8) bool {
     const state = ctx.state;
     if (state.findPaneByPaneId(vt_event.pane_id)) |pane| {
@@ -357,9 +393,7 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
                 terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ vt_event.pane_id, vt_event.payload_len });
                 pane.feedPodOutput(payload);
                 const now_ms = std.time.milliTimestamp();
-                while (pane.takeHostColorQuery()) |key| {
-                    if (!state.host_colors.registerPane(key, pane.uuid, now_ms)) state.enqueueOscReplyTarget(pane.uuid);
-                }
+                if (pane.hasHostColorQuery()) answerPaneColorQueries(state, pane, now_ms);
                 const color_invalidation = pane.takeHostColorInvalidation();
                 if (!color_invalidation.empty()) {
                     const stdout = std.fs.File.stdout();
