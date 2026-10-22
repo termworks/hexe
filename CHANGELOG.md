@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.5] - 2026-10-22
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Answer a pane's colour query from cache
+
+### <!-- 6 -->🧪 Testing
+
+- Cover a whole palette dump
+
 ## [0.5.4] - 2026-10-22
 
 ### <!-- 1 -->🐛 Bug Fixes
