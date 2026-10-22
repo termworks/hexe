@@ -102,6 +102,37 @@ pub const HostColors = struct {
         return self.background;
     }
 
+    /// The reply to `key` from what the host has already said, or null if it has not said it.
+    ///
+    /// Reads the stored colour rather than going through `resolve*`, which marks it used and so
+    /// enrols it in the refresh poll: answering a pane is not hexe drawing with the colour.
+    pub fn cachedAnswer(self: *const HostColors, key: QueryKey, buf: []u8) ?[]const u8 {
+        const rgb: core.palette.RGB = switch (key) {
+            .foreground => self.foreground orelse return null,
+            .background => self.background orelse return null,
+            .palette => |index| self.palette[index] orelse return null,
+            // Never cached: hexe does not draw with the host's cursor colour.
+            .cursor => return null,
+        };
+        // Two hex digits per channel, written twice, which is the width terminals reply in.
+        return switch (key) {
+            .foreground => std.fmt.bufPrint(buf, "\x1b]10;rgb:{0x:0>2}{0x:0>2}/{1x:0>2}{1x:0>2}/{2x:0>2}{2x:0>2}\x1b\\", .{ rgb.r, rgb.g, rgb.b }),
+            .background => std.fmt.bufPrint(buf, "\x1b]11;rgb:{0x:0>2}{0x:0>2}/{1x:0>2}{1x:0>2}/{2x:0>2}{2x:0>2}\x1b\\", .{ rgb.r, rgb.g, rgb.b }),
+            .palette => |index| std.fmt.bufPrint(buf, "\x1b]4;{0d};rgb:{1x:0>2}{1x:0>2}/{2x:0>2}{2x:0>2}/{3x:0>2}{3x:0>2}\x1b\\", .{ index, rgb.r, rgb.g, rgb.b }),
+            .cursor => unreachable,
+        } catch null;
+    }
+
+    /// The query for `key`, with no pending recorded: the caller owns the answer.
+    pub fn writeQuery(writer: anytype, key: QueryKey) !void {
+        switch (key) {
+            .foreground => try writer.writeAll("\x1b]10;?\x1b\\"),
+            .background => try writer.writeAll("\x1b]11;?\x1b\\"),
+            .cursor => try writer.writeAll("\x1b]12;?\x1b\\"),
+            .palette => |index| try writer.print("\x1b]4;{d};?\x1b\\", .{index}),
+        }
+    }
+
     pub fn registerPane(self: *HostColors, key: QueryKey, uuid: [32]u8, now_ms: i64) bool {
         self.expire(now_ms);
         return self.appendPending(.{ .key = key, .owner = .{ .pane = uuid }, .deadline_ms = now_ms + QUERY_TIMEOUT_MS });
@@ -368,6 +399,40 @@ test "invalidations target only affected entries" {
     try std.testing.expect(colors.palette[2] == null);
     try std.testing.expect(colors.foreground == null);
     try std.testing.expectEqualStrings("\x1b]10;?\x1b\\\x1b]4;2;?\x1b\\", writer.buffered());
+}
+
+test "a cached answer carries the colour in the width terminals reply in" {
+    var colors: HostColors = .{};
+    var buf: [64]u8 = undefined;
+
+    try std.testing.expect(colors.cachedAnswer(.background, &buf) == null);
+
+    colors.background = .{ .r = 0x10, .g = 0x0c, .b = 0x12 };
+    colors.foreground = .{ .r = 0xf8, .g = 0xf3, .b = 0xfb };
+    colors.palette[7] = .{ .r = 0x7f, .g = 0x77, .b = 0x85 };
+
+    try std.testing.expectEqualStrings("\x1b]11;rgb:1010/0c0c/1212\x1b\\", colors.cachedAnswer(.background, &buf).?);
+    try std.testing.expectEqualStrings("\x1b]10;rgb:f8f8/f3f3/fbfb\x1b\\", colors.cachedAnswer(.foreground, &buf).?);
+    try std.testing.expectEqualStrings("\x1b]4;7;rgb:7f7f/7777/8585\x1b\\", colors.cachedAnswer(.{ .palette = 7 }, &buf).?);
+
+    // The host's cursor colour is never stored, so it is always asked for.
+    try std.testing.expect(colors.cachedAnswer(.cursor, &buf) == null);
+    try std.testing.expect(colors.cachedAnswer(.{ .palette = 8 }, &buf) == null);
+}
+
+test "answering a pane does not enrol the colour in the refresh poll" {
+    var colors: HostColors = .{};
+    var buf: [64]u8 = undefined;
+    colors.background = .{ .r = 1, .g = 2, .b = 3 };
+    colors.palette[4] = .{ .r = 4, .g = 5, .b = 6 };
+    colors.beginFrame();
+
+    try std.testing.expect(colors.cachedAnswer(.background, &buf) != null);
+    try std.testing.expect(colors.cachedAnswer(.{ .palette = 4 }, &buf) != null);
+
+    // `resolve*` marks a colour used, which is what keeps hexe's own palette fresh. Answering a
+    // pane is not hexe drawing with the colour, and marking it here polled the host for ever.
+    try std.testing.expect(colors.used.empty());
 }
 
 test "expired ownership is never reused" {

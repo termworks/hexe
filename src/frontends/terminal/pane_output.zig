@@ -435,7 +435,10 @@ fn finishOsc(self: *Pane) void {
     if (isOscQuery(self.osc_buf.items)) {
         if (handleOscQuery(self, code)) return;
         const registered = if (parseHostColorQuery(self.osc_buf.items)) |key| self.queueHostColorQuery(key) else false;
-        if (!registered) self.osc_expected_responses +|= 1;
+        // The frontend answers a registered one, from its cache or by asking the host itself.
+        // Forwarding here as well would ask twice and answer the pane twice.
+        if (registered) return;
+        self.osc_expected_responses +|= 1;
     }
     if (hostColorInvalidation(self.osc_buf.items, code)) |invalidation| self.host_color_invalidation.merge(invalidation);
     const stdout = std.fs.File.stdout();
