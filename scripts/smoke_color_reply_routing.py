@@ -51,6 +51,23 @@ LEAK = re.compile(r"rgb:[0-9a-fA-F]{2,4}/|\^\[\]1[012];|\^\[\]4;\d+;")
 
 # An answer that arrives after hexe stopped waiting looks exactly like this.
 UNASKED = b"\x1b]11;rgb:2222/5050/1818\x1b\\\x1b]10;rgb:cdcd/d6d6/f4f4\x1b\\\x1b]4;3;rgb:f0f0/c6c6/7474\x1b\\"
+
+
+def full_palette_dump():
+    """What the host answers a whole `queryAll`: foreground, background, 0..255.
+
+    The reported shape, and three of these arrived at once — 774 reports, which
+    is far past `MAX_PENDING`, so most of them can only be unclaimed.
+    """
+    out = b"\x1b]10;rgb:f8f8/f3f3/fbfb\x1b\\\x1b]11;rgb:1010/0c0c/1212\x1b\\"
+    for index in range(256):
+        out += b"\x1b]4;%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\" % (
+            index, index, index, 255 - index, 255 - index, index // 2, index // 2
+        )
+    return out
+
+
+BULK = full_palette_dump() * 3
 # A pywal-style recolour: sets, not queries, which is what makes hexe re-ask.
 RECOLOUR = (b"\x1b]4;1;#e06c75\x07\x1b]4;2;#98c379\x07\x1b]4;3;#e5c07b\x07"
             b"\x1b]10;#abb2bf\x07\x1b]11;#282c34\x07\x1b]12;#528bff\x07")
@@ -277,6 +294,17 @@ time.sleep(6.0)
 recoloured = leaks()
 if recoloured:
     fail(f"a late answer to hexe's own re-query was typed into a pane: {recoloured}")
+
+# 3. The reported shape: three whole palettes at once, into a pane whose
+#    foreground process is reading in cooked mode and echoes what it is given.
+color_delay[0] = 0.0
+quiesce()
+os.write(master, BULK)
+time.sleep(4.0)
+bulk = leaks()
+if bulk:
+    sample = {pane: hits[:4] for pane, hits in bulk.items()}
+    fail(f"a whole palette dump was typed into a pane: {sample}")
 
 print("PASS: a colour report reaches a pane only when a pane asked for it")
 cleanup()
