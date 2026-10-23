@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.7] - 2026-10-23
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Read's no-marks error tells the truth
+- Bash init no longer calls dead hooks
+
 ## [0.5.6] - 2026-10-23
 
 ### <!-- 0 -->⛰️  Features
