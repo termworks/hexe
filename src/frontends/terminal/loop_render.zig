@@ -208,6 +208,7 @@ fn collectFloatRects(state: *State, out: *[MAX_TRACKED_FLOATS]vt_bridge.Rect) []
         if (n >= out.len) break;
         if (active == i) continue; // drawn last, appended below
         if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
+        if (!state.isCurrentFamilyMember(pane)) continue;
         if (state.paneParentTab(pane)) |parent| {
             if (parent != state.activeTabIndex()) continue;
         }
@@ -227,7 +228,9 @@ fn collectFloatRects(state: *State, out: *[MAX_TRACKED_FLOATS]vt_bridge.Rect) []
                 parent == state.activeTabIndex()
             else
                 true;
-            if (on_tab and state.paneVisibleOnTab(pane, state.activeTabIndex())) {
+            if (on_tab and state.paneVisibleOnTab(pane, state.activeTabIndex()) and
+                state.isCurrentFamilyMember(pane))
+            {
                 out[n] = .{
                     .x = state.paneBorderX(pane),
                     .y = state.paneBorderY(pane),
@@ -428,6 +431,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     var drawn_floats: usize = 0;
     for (state.view.float_views.items, 0..) |pane, i| {
         if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
+        if (!state.isCurrentFamilyMember(pane)) continue;
         if (state.activeFloatingIndex() == i) continue; // Skip active, draw it last.
         // Skip tab-bound floats on wrong tab.
         if (state.paneParentTab(pane)) |parent| {
@@ -484,7 +488,9 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             parent == state.activeTabIndex()
         else
             true;
-        if (state.paneVisibleOnTab(pane, state.activeTabIndex()) and can_render) {
+        if (state.paneVisibleOnTab(pane, state.activeTabIndex()) and can_render and
+            state.isCurrentFamilyMember(pane))
+        {
             var active_float_label_compose: [256]u8 = undefined;
             const active_float_label_raw = composeFloatBorderLabel(state, pane, &active_float_label_compose);
             var active_float_label_buf: [128]u8 = undefined;

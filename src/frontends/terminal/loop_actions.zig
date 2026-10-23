@@ -37,7 +37,7 @@ pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
         // Normal float - just hide it.
         const was_visible = state.paneVisibleOnTab(pane, tab);
         state.setPaneVisibleOnTab(pane, tab, false);
-        if (!state.syncSessionFloatChecked(pane, false)) {
+        if (!state.syncFamilyFloats(pane, false)) {
             // Sticky/per-CWD floats may be visible in more than one mux/session,
             // but SES only allows the current live owner to update the canonical
             // snapshot. A non-owner hide is still a valid local UI action, so do
@@ -624,7 +624,7 @@ fn revealExistingFloatLocally(state: *State, pane: *Pane, existing_idx: usize, f
     state.setActiveFloatingIndex(existing_idx);
     state.syncPaneFocus(pane, old_uuid);
 
-    if (!state.syncSessionFloatChecked(pane, true)) {
+    if (!state.syncFamilyFloats(pane, true)) {
         // The local pane is no longer owned by this mux. Leave the UI repair to
         // the caller's ownership-handoff path; importantly, do not keep trying
         // to reveal through session sync because SES will reject it.
@@ -709,7 +709,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
     // Find existing float by key (and directory if per_cwd).
     var existing_idx: usize = 0;
     while (existing_idx < state.view.float_views.items.len) {
-        const pane = state.view.float_views.items[existing_idx];
+        var pane = state.view.float_views.items[existing_idx];
         if (state.paneFloatKey(pane) == float_def.key) {
             // Only tab-bound floats use parent_tab filtering.
             // per_cwd/global floats are shared across tabs.
@@ -737,6 +737,16 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
                 if (!dirs_match) {
                     existing_idx += 1;
                     continue;
+                }
+            }
+
+            // A key names the family, and a family shows one member at a
+            // time: act on the one inside the frame, not on whichever member's
+            // record happened to match the key first.
+            if (state.familyCurrentIndex(pane)) |current| {
+                if (current != existing_idx) {
+                    existing_idx = current;
+                    pane = state.view.float_views.items[current];
                 }
             }
 
@@ -874,7 +884,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
                 }
             }
 
-            if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() == existing_idx and state.paneVisibleOnTab(pane, state.activeTabIndex()))) {
+            if (!state.syncFamilyFloats(pane, state.activeFloatingIndex() == existing_idx and state.paneVisibleOnTab(pane, state.activeTabIndex()))) {
                 if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
                     terminal_main.debugLogUuid(
                         &pane.uuid,

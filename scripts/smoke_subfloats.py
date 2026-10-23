@@ -50,7 +50,8 @@ open(os.path.join(CF, "hexe", "init.lua"), "w").write(
     "    hexe.float('host', { key = '2', enabled = true, title = 'host',\n"
     "                         command = '/bin/sh', attrs = { global = true } }),\n"
     "  },\n"
-    "})\n")
+    "})\n"
+    "hexe.key({ hexe.key.alt, hexe.key['2'] }, hexe.action.float.toggle('2'))\n")
 
 env = os.environ.copy()
 env.update({"HEXE_INSTANCE": INST, "XDG_STATE_HOME": os.path.join(WD, "state"),
@@ -255,6 +256,41 @@ if kid:
 print("\nphase 2b: the family's chips reach the screen")
 check(screen_has("[1]"), "the member on screen is drawn as [1]")
 check(screen_has("<0>"), "and its sibling as <0>")
+
+# -------------------------------------------------------------------- phase 2c
+print("\nphase 2c: the toggle key hides the whole family, from any member")
+
+
+def family_focus():
+    """The chips the family reports as focused: one while it is on screen."""
+    return sorted(f.get("family_index", 0) for f in floats()
+                  if (f["uuid"] == PARENT or f.get("parent_float") == PARENT) and f.get("focused"))
+
+
+def settled_focus(settle=8.0):
+    deadline = time.time() + settle
+    last = None
+    while time.time() < deadline:
+        v = family_focus()
+        if v == last:
+            return v
+        last = v
+        time.sleep(0.4)
+    return last
+
+
+check(settled_focus() == [1], f"the sub-float is the member on screen (got {family_focus()})")
+
+# The toggle used to resolve to the parent's record, so this walked to the
+# parent instead of hiding: press, parent; press, sub-float; never gone.
+os.write(m, b"\x1b2")
+check(settled_focus() == [], f"alt+2 from the sub-float hides the float (got {family_focus()})")
+tiled_focus = [p for p in api("panes") if not p.get("is_float") and p.get("focused")]
+check(len(tiled_focus) == 1, f"and the focus leaves the family (tiled focused: {len(tiled_focus)})")
+check(len(family_of(PARENT)) == 2, "with both members still alive")
+
+os.write(m, b"\x1b2")
+check(settled_focus() == [1], f"alt+2 brings it back on the member it was left on (got {family_focus()})")
 
 # --------------------------------------------------------------------- phase 3
 print("\nphase 3: numbers are stable, and a closed chip is refilled")
