@@ -88,6 +88,15 @@ print(f"phase1: session up, pane={pane_uuid[:8]}")
 os.write(master, b"cd /tmp && echo hexe-smoke-marker\n")
 time.sleep(2.5)
 
+# The report belongs on stdout, so `hexe terminal info | grep` works. It used
+# to go to stderr, where a pipeline saw nothing at all.
+piped = subprocess.run([HEXE, "terminal", "info", "--uuid", pane_uuid],
+                       capture_output=True, text=True, env=env, cwd=SCRATCH, timeout=30)
+if "Pane Info:" not in piped.stdout:
+    fail(f"pane info is not on stdout; stdout={piped.stdout.strip()[:80]!r} "
+         f"stderr={piped.stderr.strip()[:80]!r}")
+print("ok: the report is on stdout")
+
 info = hexe("terminal", "info", "--uuid", pane_uuid)
 print("--- pane info ---")
 print(info)
