@@ -25,7 +25,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\    [[ -n "$__hexe_start" ]] && return 0
         \\    local cmd="$BASH_COMMAND"
         \\    case "$cmd" in
-        \\        __shp_precmd|__shp_preexec|__hexe_precmd|__hexe_preexec) return 0 ;;
+        \\        __hexe_precmd|__hexe_preexec) return 0 ;;
         \\        hexe\ shell\ shell-event*|hexe\ shell\ exit-intent*) return 0 ;;
         \\    esac
         \\    __hexe_last_cmd="$cmd"
@@ -79,9 +79,9 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\
         \\bind -x '"\\C-d":__hexe_ctrl_d'
         \\
-        \\# Extend existing timing hooks with comms.
-        \\PROMPT_COMMAND="__shp_precmd;__hexe_precmd"
-        \\trap '__shp_preexec;__hexe_preexec' DEBUG
+        \\# Appended to whatever PROMPT_COMMAND already runs, rather than replacing it.
+        \\PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__hexe_precmd"
+        \\trap '__hexe_preexec' DEBUG
         \\
     );
 }
