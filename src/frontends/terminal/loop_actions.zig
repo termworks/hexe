@@ -580,21 +580,52 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
 fn applyFloatExclusivity(state: *State, float_def: *const core.LayoutFloatDef) void {
     if (!float_def.attributes.exclusive) return;
 
-    var to_hide: std.ArrayList([32]u8) = .empty;
-    defer to_hide.deinit(state.allocator);
+    // What survives is a family, not a key. Matching on the key alone spared
+    // the family only because a sub-float inherits its parent's key; a member
+    // with a key of its own would have been hidden by the float it belongs to.
+    //
+    // The float being shown is the active one: every caller focuses it first.
+    const keep: ?[32]u8 = blk: {
+        const uuid = state.runtime.activeFloatUuid() orelse break :blk null;
+        const pane = state.findPaneByUuid(uuid) orelse break :blk null;
+        break :blk state.familyRootOf(pane);
+    };
+
+    // One entry per family: hiding is family-wide, so a family of four would
+    // otherwise be hidden four times over, each with its own session sync.
+    var roots: std.ArrayList([32]u8) = .empty;
+    defer roots.deinit(state.allocator);
 
     for (state.view.float_views.items) |other| {
-        if (state.paneFloatKey(other) != float_def.key) {
-            to_hide.append(state.allocator, other.uuid) catch |err| {
-                terminal_main.debugLogUuid(&other.uuid, "applyFloatExclusivity: failed to queue exclusive float hide: {s}", .{@errorName(err)});
-                state.notifications.show("Float exclusivity incomplete: couldn't queue hide");
-            };
+        if (state.paneFloatKey(other) == float_def.key) continue;
+        const root = state.familyRootOf(other) orelse other.uuid;
+        if (keep) |kept| {
+            if (std.mem.eql(u8, &root, &kept)) continue;
         }
+        var seen = false;
+        for (roots.items) |already| {
+            if (std.mem.eql(u8, &already, &root)) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        roots.append(state.allocator, root) catch |err| {
+            terminal_main.debugLogUuid(&other.uuid, "applyFloatExclusivity: failed to queue exclusive float hide: {s}", .{@errorName(err)});
+            state.notifications.show("Float exclusivity incomplete: couldn't queue hide");
+        };
     }
 
-    for (to_hide.items) |target_uuid| {
+    for (roots.items) |root| {
+        // By the root, so a `destroy` float takes its children with it rather
+        // than leaving whichever members the loop had not reached yet.
+        if (state.findPaneByUuid(root)) |pane| {
+            hideOrDestroyFloat(state, pane, state.activeTabIndex());
+            continue;
+        }
         for (state.view.float_views.items) |candidate| {
-            if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
+            const candidate_root = state.familyRootOf(candidate) orelse candidate.uuid;
+            if (std.mem.eql(u8, &candidate_root, &root)) {
                 hideOrDestroyFloat(state, candidate, state.activeTabIndex());
                 break;
             }

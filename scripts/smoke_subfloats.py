@@ -49,6 +49,11 @@ open(os.path.join(CF, "hexe", "init.lua"), "w").write(
     "  floats = {\n"
     "    hexe.float('host', { key = '2', enabled = true, title = 'host',\n"
     "                         command = '/bin/sh', attrs = { global = true } }),\n"
+    # An exclusive float, to prove that showing it hides a whole family rather
+    # than whichever members a key comparison happened to reach.
+    "    hexe.float('other', { key = '3', enabled = true, title = 'other',\n"
+    "                          command = '/bin/sh',\n"
+    "                          attrs = { global = true, exclusive = true } }),\n"
     "  },\n"
     "})\n"
     "hexe.key({ hexe.key.alt, hexe.key['2'] }, hexe.action.float.toggle('2'))\n")
@@ -291,6 +296,24 @@ check(len(family_of(PARENT)) == 2, "with both members still alive")
 
 os.write(m, b"\x1b2")
 check(settled_focus() == [1], f"alt+2 brings it back on the member it was left on (got {family_focus()})")
+
+# -------------------------------------------------------------------- phase 2d
+print("\nphase 2d: an exclusive float hides a whole family, not part of one")
+api("act", json.dumps({"type": "float.show", "float": "3"}))
+other = None
+deadline = time.time() + 20
+while time.time() < deadline:
+    other = next((f for f in floats() if f.get("title") == "other"), None)
+    if other is not None and other.get("focused"):
+        break
+    time.sleep(0.5)
+check(other is not None, "the exclusive float opened")
+check(settled_focus() == [], f"it hid every member of the family (family focus {family_focus()})")
+check(len(family_of(PARENT)) == 2, "and hid them rather than closing them")
+
+api("act", json.dumps({"type": "float.show", "float": "2"}))
+check(settled_focus() == [1], f"the family comes back on the member it was left on (got {family_focus()})")
+api("act", json.dumps({"type": "float.hide", "float": "3"}))
 
 # --------------------------------------------------------------------- phase 3
 print("\nphase 3: numbers are stable, and a closed chip is refilled")
