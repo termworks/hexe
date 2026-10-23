@@ -873,9 +873,11 @@ pub fn runRead(
                 std.process.exit(2);
             },
             error.NoPromptMarks => {
-                print("Error: this pane has no prompt marks, so there is no \"last command\".\n", .{});
-                print("       Read a fixed number of lines with -n <lines>, or turn on shell\n", .{});
-                print("       integration: eval \"$(hexe shell init <bash|zsh|fish>)\"\n", .{});
+                print("Error: this pane has no \"last command\": either it carries no OSC 133\n", .{});
+                print("       prompt marks, or the marks on it do not frame a finished command.\n", .{});
+                print("       Read a fixed number of lines with -n <lines> instead.\n", .{});
+                print("       -c needs a shell that emits OSC 133; oslo does, bash and zsh\n", .{});
+                print("       emit none of their own.\n", .{});
                 std.process.exit(3);
             },
             error.PaneUnreadable => {
