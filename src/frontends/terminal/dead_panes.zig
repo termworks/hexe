@@ -14,6 +14,14 @@ pub fn cleanupDeadFloat(state: *State, index: usize) void {
     const exit_code = state.paneExitCode(pane.uuid);
     const pane_uuid = pane.uuid;
 
+    // The family a dying child belonged to, read while its record is still
+    // there. A dying parent takes the family with it, so it has no survivor.
+    const family_root: ?[32]u8 = blk: {
+        const root = state.familyRootOf(pane) orelse break :blk null;
+        if (std.mem.eql(u8, &root, &pane_uuid)) break :blk null;
+        break :blk root;
+    };
+
     _ = state.view.float_views.orderedRemove(index);
 
     terminal_main.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane_uuid[0..8], exit_code, was_active });
@@ -53,6 +61,13 @@ pub fn cleanupDeadFloat(state: *State, index: usize) void {
     }
 
     if (was_active) {
+        // Back to the family, lowest chip first, rather than out to the tiled
+        // pane behind it.
+        if (family_root) |root| {
+            var members_buf: [16]State.FamilyMember = undefined;
+            const members = state.familyMembers(root, &members_buf);
+            if (members.len > 0 and state.showFamilyMember(members[0].uuid, true)) return;
+        }
         state.setActiveFloatingIndex(null);
         state.cursor_needs_restore = true;
         if (state.currentLayout().getFocusedPane()) |tiled| {

@@ -3119,6 +3119,18 @@ pub const State = struct {
         child_state.pad_y = parent_state.pad_y;
 
         self.runtime.syncFloatState(child_state, true);
+        // The rectangle lives in the pane's own UI geometry as well as in the
+        // session record, and the child was built with the adhoc defaults.
+        self.setPaneFloatGeometryUi(
+            child,
+            parent_state.width_pct,
+            parent_state.height_pct,
+            parent_state.pos_x_pct,
+            parent_state.pos_y_pct,
+            parent_state.pad_x,
+            parent_state.pad_y,
+        );
+        self.resizeFloatingPanes();
         return true;
     }
 

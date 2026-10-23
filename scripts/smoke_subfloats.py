@@ -37,7 +37,12 @@ open(os.path.join(CF, "hexe", "init.lua"), "w").write(
     "local hexe = require('hexe')\n"
     # A title position, or the border draws no title at all and the chips have
     # nowhere to appear.
-    "hexe.mux = { floats = { defaults = { style = { position = 'topcenter' } } } }\n"
+    # The adhoc size differs from the named one on purpose: a sub-float is built
+    # by the adhoc path, so identical sizes would make the rectangle check pass
+    # whether the family's geometry is inherited or not.
+    "hexe.mux = { floats = { defaults = { size = { width = 80, height = 70 },\n"
+    "                                     style = { position = 'topcenter' } },\n"
+    "                         adhoc = { size = { width = 40, height = 40 } } } }\n"
     "hexe.layout('default', {\n"
     "  enabled = true,\n"
     "  tabs = { hexe.tab('main', { enabled = true, root = hexe.pane({ cwd = '.' }) }) },\n"
@@ -232,6 +237,10 @@ if kid:
     check(kid.get("width_pct") == parent_rec.get("width_pct") and
           kid.get("height_pct") == parent_rec.get("height_pct"),
           "it inherits the parent's rectangle")
+    check(kid.get("width") == parent_rec.get("width") and
+          kid.get("height") == parent_rec.get("height"),
+          f"down to the cell ({kid.get('width')}x{kid.get('height')} "
+          f"vs {parent_rec.get('width')}x{parent_rec.get('height')})")
     check(parent_rec.get("family_index") == 0, "and the parent is chip 0")
 
     # A child inherits the parent's toggle key, and the title used to be looked
@@ -357,6 +366,26 @@ check(p.returncode != 0, f"a --sub with no pane exits non-zero (got {p.returncod
 check("not running inside" in (p.stderr + p.stdout),
       f"and says why (got {(p.stderr + p.stdout).strip()[:120]!r})")
 check(len(floats()) == before, "and created nothing")
+
+# -------------------------------------------------------------------- phase 4b
+print("\nphase 4b: a child that exits hands the screen back to the family")
+on_screen = shown_chip()
+if on_screen == 0:
+    api("act", json.dumps("float.family_next"))
+    on_screen = shown_chip()
+check(on_screen not in (None, 0), f"a child is on screen to close (chip {on_screen})")
+if on_screen not in (None, 0):
+    victim = next((u for u, n in family_of(PARENT) if n == on_screen), None)
+    hexe("terminal", "send", "--uuid", victim, "--enter", "exit")
+    deadline = time.time() + 25
+    while time.time() < deadline and any(f["uuid"] == victim for f in floats()):
+        time.sleep(0.5)
+    check(not any(f["uuid"] == victim for f in floats()), "the child is gone")
+    # The lowest surviving chip, which is the parent while it lives. Without
+    # this the rectangle went to the tiled pane behind the float instead.
+    check(shown_chip() == 0, "and the parent float is what is left on screen")
+    rec = next((f for f in floats() if f["uuid"] == PARENT), None)
+    check(rec is not None and rec.get("focused") is True, "with the focus on it")
 
 # --------------------------------------------------------------------- phase 5
 print("\nphase 5: closing the parent closes the whole family")
