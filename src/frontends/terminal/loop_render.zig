@@ -208,6 +208,7 @@ fn collectFloatRects(state: *State, out: *[MAX_TRACKED_FLOATS]vt_bridge.Rect) []
         if (n >= out.len) break;
         if (active == i) continue; // drawn last, appended below
         if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
+        if (!state.isCurrentFamilyMember(pane)) continue;
         if (state.paneParentTab(pane)) |parent| {
             if (parent != state.activeTabIndex()) continue;
         }
@@ -227,7 +228,9 @@ fn collectFloatRects(state: *State, out: *[MAX_TRACKED_FLOATS]vt_bridge.Rect) []
                 parent == state.activeTabIndex()
             else
                 true;
-            if (on_tab and state.paneVisibleOnTab(pane, state.activeTabIndex())) {
+            if (on_tab and state.paneVisibleOnTab(pane, state.activeTabIndex()) and
+                state.isCurrentFamilyMember(pane))
+            {
                 out[n] = .{
                     .x = state.paneBorderX(pane),
                     .y = state.paneBorderY(pane),
@@ -247,7 +250,6 @@ fn collectFloatRects(state: *State, out: *[MAX_TRACKED_FLOATS]vt_bridge.Rect) []
 const MAX_TRACKED_FLOATS = 32;
 
 fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []const u8 {
-    _ = out;
     const title = blk: {
         if (state.paneFloatTitle(pane)) |t| break :blk t;
         const float_key = state.paneFloatKey(pane);
@@ -259,9 +261,27 @@ fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []co
         break :blk "";
     };
     const pokemon = state.paneName(pane.uuid) orelse "";
+    const base = if (title.len > 0) title else pokemon;
 
-    if (title.len > 0) return title;
-    return pokemon;
+    // The family's chips after the title: the member on screen in brackets,
+    // its siblings in angles. A float with no siblings draws none.
+    const root = state.familyRootOf(pane) orelse return base;
+    var members_buf: [16]State.FamilyMember = undefined;
+    const members = state.familyMembers(root, &members_buf);
+    if (members.len < 2) return base;
+    const own: u8 = if (state.paneFloatState(pane)) |fs| fs.family_index else 0;
+
+    var stream = std.io.fixedBufferStream(out);
+    const w = stream.writer();
+    w.writeAll(base) catch return base;
+    for (members) |m| {
+        if (m.index == own) {
+            w.print(" [{d}]", .{m.index}) catch break;
+        } else {
+            w.print(" <{d}>", .{m.index}) catch break;
+        }
+    }
+    return stream.getWritten();
 }
 
 /// Push a namespace's cursor colour to the host terminal, or take it back.
@@ -411,6 +431,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     var drawn_floats: usize = 0;
     for (state.view.float_views.items, 0..) |pane, i| {
         if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
+        if (!state.isCurrentFamilyMember(pane)) continue;
         if (state.activeFloatingIndex() == i) continue; // Skip active, draw it last.
         // Skip tab-bound floats on wrong tab.
         if (state.paneParentTab(pane)) |parent| {
@@ -467,7 +488,9 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             parent == state.activeTabIndex()
         else
             true;
-        if (state.paneVisibleOnTab(pane, state.activeTabIndex()) and can_render) {
+        if (state.paneVisibleOnTab(pane, state.activeTabIndex()) and can_render and
+            state.isCurrentFamilyMember(pane))
+        {
             var active_float_label_compose: [256]u8 = undefined;
             const active_float_label_raw = composeFloatBorderLabel(state, pane, &active_float_label_compose);
             var active_float_label_buf: [128]u8 = undefined;

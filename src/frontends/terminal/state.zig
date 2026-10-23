@@ -304,6 +304,14 @@ pub const State = struct {
     active_layout_floats: []const core.LayoutFloatDef,
     view: TerminalViewState,
     float_ui: std.AutoHashMap([32]u8, FloatUiState),
+
+    /// Which chip each family is showing, keyed by the family root.
+    ///
+    /// Not in `float_ui`: that is rebuilt from the session snapshot whenever
+    /// the set of floats changes, and adding a sub-float is exactly such a
+    /// change -- the frame would snap back to the parent the moment a child
+    /// opened. An absent entry means chip 0.
+    family_shown: std.AutoHashMap([32]u8, u8),
     running: bool,
     needs_render: bool,
     /// Whether SES has been told this config's pane-name dictionary on the
@@ -559,6 +567,7 @@ pub const State = struct {
             .active_layout_floats = layout_floats,
             .view = TerminalViewState.init(),
             .float_ui = std.AutoHashMap([32]u8, FloatUiState).init(allocator),
+            .family_shown = std.AutoHashMap([32]u8, u8).init(allocator),
             .running = true,
             .needs_render = true,
             .force_full_render = true,
@@ -1331,6 +1340,7 @@ pub const State = struct {
                 entry.value_ptr.deinit(self.allocator);
             }
             self.float_ui.deinit();
+            self.family_shown.deinit();
         }
         self.config.deinit();
         // After view/empty_layout: setPanePopConfig hands layouts a pointer
@@ -2495,6 +2505,96 @@ pub const State = struct {
         return self.runtime.floatState(pane.uuid);
     }
 
+    /// The record that owns `pane`'s OUTER state: its family's, which is the
+    /// root's. A float with no family is its own root, so this is the same
+    /// record for every float that has no sub-floats.
+    ///
+    /// The frame, where it sits and whether it is on screen belong to the
+    /// family. Stepping chips changes only what is drawn inside it.
+    pub fn outerFloatState(self: *const State, pane: *const Pane) ?core.session_model.SessionFloat {
+        const own = self.runtime.floatState(pane.uuid) orelse return null;
+        const root = core.session_model.familyRoot(own);
+        if (std.mem.eql(u8, &root, &pane.uuid)) return own;
+        return self.runtime.floatState(root) orelse own;
+    }
+
+    /// The float UI state that owns `pane`'s outer appearance: the family's.
+    ///
+    /// A member keeps its own entry for what belongs to it alone — its title,
+    /// its sticky directory, its exit key — and that is read through
+    /// `floatUiConst`.
+    fn outerUi(self: *const State, pane: *const Pane) ?*const FloatUiState {
+        if (self.runtime.floatState(pane.uuid)) |own| {
+            const root = core.session_model.familyRoot(own);
+            if (!std.mem.eql(u8, &root, &pane.uuid)) {
+                if (self.float_ui.getPtr(root)) |ui| return ui;
+            }
+        }
+        return self.float_ui.getPtr(pane.uuid);
+    }
+
+    /// Whether `pane` is the member of its family currently inside the frame.
+    ///
+    /// True for a float with no family: it is the only member it has.
+    pub fn isCurrentFamilyMember(self: *const State, pane: *const Pane) bool {
+        const own = self.runtime.floatState(pane.uuid) orelse return true;
+        const root = core.session_model.familyRoot(own);
+        return own.family_index == (self.family_shown.get(root) orelse 0);
+    }
+
+    /// Push every member of `pane`'s family to the session.
+    ///
+    /// Visibility belongs to the family, so a change to it has to reach every
+    /// member's record: syncing only the one in hand left the siblings' records
+    /// saying the opposite, and the next snapshot handed that back as the
+    /// family's state.
+    ///
+    /// Returns what the sync of `pane` itself reported, which is what the
+    /// callers already branch on.
+    pub fn syncFamilyFloats(self: *State, pane: *Pane, active: bool) bool {
+        const root = self.familyRootOf(pane) orelse return self.syncSessionFloatChecked(pane, active);
+        var buf: [16]FamilyMember = undefined;
+        const members = self.familyMembers(root, &buf);
+        var own = true;
+        for (members) |m| {
+            const is_pane = std.mem.eql(u8, &m.uuid, &pane.uuid);
+            const ok = self.syncSessionFloatChecked(m.pane, if (is_pane) active else false);
+            if (is_pane) own = ok;
+        }
+        return own;
+    }
+
+    /// Where the family's current member sits in the float view list.
+    ///
+    /// Null when `pane` has no family, so a caller that matched a float by key
+    /// keeps the pane it found.
+    pub fn familyCurrentIndex(self: *const State, pane: *const Pane) ?usize {
+        const root = self.familyRootOf(pane) orelse return null;
+        var buf: [16]FamilyMember = undefined;
+        const members = self.familyMembers(root, &buf);
+        if (members.len < 2) return null;
+        const want: u8 = self.family_shown.get(root) orelse 0;
+        var target = members[0].uuid;
+        for (members) |m| {
+            if (m.index == want) {
+                target = m.uuid;
+                break;
+            }
+        }
+        for (self.view.float_views.items, 0..) |fp, i| {
+            if (std.mem.eql(u8, &fp.uuid, &target)) return i;
+        }
+        return null;
+    }
+
+    /// Point the family's frame at `member`, without touching whether the
+    /// family is on screen.
+    fn setFamilyShown(self: *State, root: [32]u8, index: u8) void {
+        self.family_shown.put(root, index) catch |err| {
+            core.logging.logError("terminal", "failed to record the family's current chip", err);
+        };
+    }
+
     pub fn paneIsFloating(self: *const State, pane: *const Pane) bool {
         return self.runtime.floatState(pane.uuid) != null;
     }
@@ -2512,7 +2612,9 @@ pub const State = struct {
     }
 
     pub fn paneVisibleOnTab(self: *const State, pane: *const Pane, tab: usize) bool {
-        if (self.paneFloatState(pane)) |float_state| {
+        // A family is one float: on screen or not as a whole, whichever member
+        // is inside the frame. Every member answers from the root's record.
+        if (self.outerFloatState(pane)) |float_state| {
             if (float_state.parent_tab != null) {
                 return float_state.visible;
             }
@@ -2685,32 +2787,32 @@ pub const State = struct {
     }
 
     pub fn paneBorderX(self: *const State, pane: *const Pane) u16 {
-        if (self.floatUiConst(pane)) |ui| return ui.border_x;
+        if (self.outerUi(pane)) |ui| return ui.border_x;
         return 0;
     }
 
     pub fn paneBorderY(self: *const State, pane: *const Pane) u16 {
-        if (self.floatUiConst(pane)) |ui| return ui.border_y;
+        if (self.outerUi(pane)) |ui| return ui.border_y;
         return 0;
     }
 
     pub fn paneBorderW(self: *const State, pane: *const Pane) u16 {
-        if (self.floatUiConst(pane)) |ui| return ui.border_w;
+        if (self.outerUi(pane)) |ui| return ui.border_w;
         return 0;
     }
 
     pub fn paneBorderH(self: *const State, pane: *const Pane) u16 {
-        if (self.floatUiConst(pane)) |ui| return ui.border_h;
+        if (self.outerUi(pane)) |ui| return ui.border_h;
         return 0;
     }
 
     pub fn paneBorderColor(self: *const State, pane: *const Pane) core.BorderColor {
-        if (self.floatUiConst(pane)) |ui| return ui.border_color;
+        if (self.outerUi(pane)) |ui| return ui.border_color;
         return .{};
     }
 
     pub fn paneFloatStyle(self: *const State, pane: *const Pane) ?*const core.FloatStyle {
-        if (self.floatUiConst(pane)) |ui| return ui.float_style;
+        if (self.outerUi(pane)) |ui| return ui.float_style;
         return null;
     }
 
@@ -2887,32 +2989,32 @@ pub const State = struct {
     }
 
     pub fn paneFloatWidthPct(self: *const State, pane: *const Pane) u8 {
-        if (self.floatUiConst(pane)) |ui| return ui.width_pct;
+        if (self.outerUi(pane)) |ui| return ui.width_pct;
         return 60;
     }
 
     pub fn paneFloatHeightPct(self: *const State, pane: *const Pane) u8 {
-        if (self.floatUiConst(pane)) |ui| return ui.height_pct;
+        if (self.outerUi(pane)) |ui| return ui.height_pct;
         return 60;
     }
 
     pub fn paneFloatPosXPct(self: *const State, pane: *const Pane) u8 {
-        if (self.floatUiConst(pane)) |ui| return ui.pos_x_pct;
+        if (self.outerUi(pane)) |ui| return ui.pos_x_pct;
         return 50;
     }
 
     pub fn paneFloatPosYPct(self: *const State, pane: *const Pane) u8 {
-        if (self.floatUiConst(pane)) |ui| return ui.pos_y_pct;
+        if (self.outerUi(pane)) |ui| return ui.pos_y_pct;
         return 50;
     }
 
     pub fn paneFloatPadX(self: *const State, pane: *const Pane) u8 {
-        if (self.floatUiConst(pane)) |ui| return ui.pad_x;
+        if (self.outerUi(pane)) |ui| return ui.pad_x;
         return 1;
     }
 
     pub fn paneFloatPadY(self: *const State, pane: *const Pane) u8 {
-        if (self.floatUiConst(pane)) |ui| return ui.pad_y;
+        if (self.outerUi(pane)) |ui| return ui.pad_y;
         return 0;
     }
 
@@ -3034,15 +3136,21 @@ pub const State = struct {
         const members = self.familyMembers(root, &buf);
         if (members.len == 0) return false;
 
+        // Which member is inside the frame, and nothing else: the family's
+        // visibility is the float's and a step must not disturb it. The float
+        // is put on screen if it was not, because asking for a member is
+        // asking to see it.
         for (members) |m| {
-            const want = std.mem.eql(u8, &m.uuid, &member_uuid);
-            const changed = self.paneVisibleOnTab(m.pane, tab) != want;
-            if (!want and !changed) continue;
-            self.runtime.setFloatVisibleOnTab(m.uuid, tab, want);
-            if (want or sync_others) {
-                _ = self.syncSessionFloatChecked(m.pane, want);
+            if (std.mem.eql(u8, &m.uuid, &member_uuid)) {
+                self.setFamilyShown(root, m.index);
+                break;
             }
         }
+        if (!self.paneVisibleOnTab(target, tab)) {
+            self.setPaneVisibleOnTab(target, tab, true);
+        }
+        _ = self.syncFamilyFloats(target, true);
+        _ = sync_others;
         self.setActiveFloatingUuid(member_uuid);
         for (self.view.float_views.items, 0..) |fp, i| {
             if (std.mem.eql(u8, &fp.uuid, &member_uuid)) {
@@ -3111,6 +3219,8 @@ pub const State = struct {
         child_state.float_key = parent_state.float_key;
         child_state.parent_tab = parent_state.parent_tab;
         child_state.tab_visible = parent_state.tab_visible;
+        // The rectangle is mirrored into the child's record for the daemon and
+        // for a reattach; the frontend reads the family's, never this copy.
         child_state.width_pct = parent_state.width_pct;
         child_state.height_pct = parent_state.height_pct;
         child_state.pos_x_pct = parent_state.pos_x_pct;
@@ -3119,15 +3229,26 @@ pub const State = struct {
         child_state.pad_y = parent_state.pad_y;
 
         self.runtime.syncFloatState(child_state, true);
+        self.setFamilyShown(root, child_state.family_index);
+        self.resizeFloatingPanes();
         return true;
     }
 
+    /// Show or hide the float `pane` belongs to — every member of its family,
+    /// so the daemon's records agree with the one frame the family draws.
     pub fn setPaneVisibleOnTab(self: *State, pane: *const Pane, tab: usize, visible: bool) void {
-        self.runtime.setFloatVisibleOnTab(pane.uuid, tab, visible);
+        const root = self.familyRootOf(pane) orelse {
+            self.runtime.setFloatVisibleOnTab(pane.uuid, tab, visible);
+            return;
+        };
+        var buf: [16]FamilyMember = undefined;
+        for (self.familyMembers(root, &buf)) |m| {
+            self.runtime.setFloatVisibleOnTab(m.uuid, tab, visible);
+        }
     }
 
     pub fn togglePaneVisibleOnTab(self: *State, pane: *const Pane, tab: usize) void {
-        self.runtime.toggleFloatVisibleOnTab(pane.uuid, tab);
+        self.setPaneVisibleOnTab(pane, tab, !self.paneVisibleOnTab(pane, tab));
     }
 
     pub fn setPaneFloatGeometry(

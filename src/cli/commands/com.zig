@@ -3,6 +3,7 @@ const core = @import("core");
 const ipc = core.ipc;
 const session_config = core.session_config;
 const shared = @import("shared.zig");
+const api_cmd = @import("api.zig");
 
 pub const runMuxFloat = @import("mux_float.zig").runMuxFloat;
 pub const runMuxRecord = @import("mux_record.zig").runMuxRecord;
@@ -591,63 +592,66 @@ pub fn runInfo(allocator: std.mem.Allocator, target: shared.PaneTarget) !void {
     }
     _ = trail_buf[off .. off + resp.sticky_pwd_len]; // sticky_pwd (not displayed currently)
 
-    // Display
-    print("Pane Info:\n", .{});
-    print("  UUID: {s}\n", .{&target_uuid});
-    print("  Shell PID: {d}\n", .{resp.pid});
+    // The report goes to stdout: `hexe terminal info | grep Name` is a
+    // reasonable thing to do, and the errors above are on stderr because
+    // they are not the answer.
+    var out = std.fs.File.stdout().deprecatedWriter();
+    try out.print("Pane Info:\n", .{});
+    try out.print("  UUID: {s}\n", .{&target_uuid});
+    try out.print("  Shell PID: {d}\n", .{resp.pid});
 
     if (resp.base_process_len > 0) {
-        print("  Base Process: {s} (pid={d})\n", .{ base_process, resp.base_pid });
+        try out.print("  Base Process: {s} (pid={d})\n", .{ base_process, resp.base_pid });
     }
     if (resp.fg_len > 0) {
-        print("  Active Process: {s} (pid={d})\n", .{ fg_process, resp.fg_pid });
+        try out.print("  Active Process: {s} (pid={d})\n", .{ fg_process, resp.fg_pid });
     }
     if (resp.cwd_len > 0) {
-        print("  CWD: {s}\n", .{cwd_str});
+        try out.print("  CWD: {s}\n", .{cwd_str});
     }
     if (resp.name_len > 0) {
-        print("  Name: {s}\n", .{name});
+        try out.print("  Name: {s}\n", .{name});
     }
     if (resp.tty_len > 0) {
-        print("  TTY: {s}\n", .{tty_str});
+        try out.print("  TTY: {s}\n", .{tty_str});
     }
     if (resp.cols > 0 and resp.rows > 0) {
-        print("  Window: {d}x{d}\n", .{ resp.cols, resp.rows });
+        try out.print("  Window: {d}x{d}\n", .{ resp.cols, resp.rows });
     }
     if (resp.session_name_len > 0) {
-        print("  Session: {s}\n", .{session_name});
+        try out.print("  Session: {s}\n", .{session_name});
     }
     if (resp.has_created_from != 0) {
-        print("  Creator: {s}\n", .{resp.created_from[0..8]});
+        try out.print("  Creator: {s}\n", .{resp.created_from[0..8]});
     }
     if (resp.has_focused_from != 0) {
-        print("  Last: {s}\n", .{resp.focused_from[0..8]});
+        try out.print("  Last: {s}\n", .{resp.focused_from[0..8]});
     }
     if (resp.layout_path_len > 0) {
-        print("  Layout: {s}\n", .{layout_path});
+        try out.print("  Layout: {s}\n", .{layout_path});
     }
     if (resp.socket_path_len > 0) {
-        print("  Socket: {s}\n", .{socket_path});
+        try out.print("  Socket: {s}\n", .{socket_path});
     }
-    print("  Focused: {}\n", .{resp.is_focused != 0});
+    try out.print("  Focused: {}\n", .{resp.is_focused != 0});
     const pane_type_str: []const u8 = if (resp.pane_type == 1) "float" else "split";
-    print("  Type: {s}\n", .{pane_type_str});
-    print("  Cursor: {d},{d}\n", .{ resp.cursor_x, resp.cursor_y });
-    print("  Cursor Style: {d}\n", .{resp.cursor_style});
-    print("  Cursor Visible: {}\n", .{resp.cursor_visible != 0});
-    print("  Alt Screen: {}\n", .{resp.alt_screen != 0});
+    try out.print("  Type: {s}\n", .{pane_type_str});
+    try out.print("  Cursor: {d},{d}\n", .{ resp.cursor_x, resp.cursor_y });
+    try out.print("  Cursor Style: {d}\n", .{resp.cursor_style});
+    try out.print("  Cursor Visible: {}\n", .{resp.cursor_visible != 0});
+    try out.print("  Alt Screen: {}\n", .{resp.alt_screen != 0});
 
     if (resp.last_cmd_len > 0) {
-        print("  Last Cmd: {s}\n", .{last_cmd});
+        try out.print("  Last Cmd: {s}\n", .{last_cmd});
     }
     if (resp.has_last_status != 0) {
-        print("  Last Status: {d}\n", .{resp.last_status});
+        try out.print("  Last Status: {d}\n", .{resp.last_status});
     }
     if (resp.has_last_duration != 0) {
-        print("  Last Duration: {d}ms\n", .{resp.last_duration_ms});
+        try out.print("  Last Duration: {d}ms\n", .{resp.last_duration_ms});
     }
     if (resp.has_last_jobs != 0) {
-        print("  Last Jobs: {d}\n", .{resp.last_jobs});
+        try out.print("  Last Jobs: {d}\n", .{resp.last_jobs});
     }
 }
 
@@ -712,6 +716,34 @@ pub fn resolvePaneTarget(
     if (target.creator or target.last) {
         const resolved = resolveRelatedPane(allocator, target.creator) orelse return shared.ResolveError.NoSuchPane;
         return .{ .uuid = resolved, .attached = true };
+    }
+
+    // `--chip` is relative to a family, so it is resolved before the selectors
+    // that name a pane outright: `--uuid` beside it names which family, not
+    // which pane.
+    if (target.chip) |chip| {
+        const base = if (target.uuid.len == 32)
+            target.uuid
+        else if (target.uuid.len > 0) blk: {
+            const hit = askSesToResolve(allocator, target.session, target.uuid, true) catch |err| return err;
+            break :blk &hit.uuid;
+        } else std.posix.getenv("HEXE_PANE_UUID") orelse {
+            print("Error: --chip addresses this float's family, so it needs a pane:\n", .{});
+            print("       run it inside a float, or name the family with --uuid\n", .{});
+            return shared.ResolveError.NoTarget;
+        };
+        if (base.len != 32) return shared.ResolveError.NoTarget;
+
+        const session: ?[]const u8 = if (target.session.len > 0) target.session else null;
+        const found = api_cmd.resolveFamilyChip(allocator, session, base, chip) catch {
+            return shared.ResolveError.Unreachable;
+        };
+        const member = found orelse {
+            print("Error: this float's family has no chip {d}\n", .{chip});
+            print("       `hexe api floats` lists the family and its chip numbers.\n", .{});
+            return shared.ResolveError.NoSuchPane;
+        };
+        return askSesToResolve(allocator, target.session, &member, true);
     }
 
     // Even a full uuid is resolved rather than trusted: "that pane does not

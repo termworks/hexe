@@ -340,6 +340,25 @@ fn addProfileArgs(command: *yazap.Command) !void {
 fn addPaneTargetArgs(command: *yazap.Command) !void {
     try command.addArg(Arg.singleValueOption("pane", 'p', "Pane name (unique within its session)"));
     try command.addArg(Arg.singleValueOption("session", 'S', "Session holding --pane: name or uuid prefix"));
+    try command.addArg(Arg.singleValueOption("chip", null, "A member of this float's family, by chip number"));
+}
+
+/// A chip number: 0..9, where 0 is the family's parent.
+///
+/// Null rather than 0 for "not given", because 0 addresses the parent and a
+/// count-style zero-means-absent would have made `--chip 0` unsayable.
+fn parseChipArg(value: ?[]const u8) !?u8 {
+    const raw = value orelse return null;
+    if (raw.len == 0) return null;
+    const n = std.fmt.parseInt(u8, raw, 10) catch {
+        print("Error: --chip wants a chip number from the title row, not '{s}'\n", .{raw});
+        return error.InvalidArgument;
+    };
+    if (n > 9) {
+        print("Error: --chip {d} is out of range; a family holds chips 0 to 9\n", .{n});
+        return error.InvalidArgument;
+    }
+    return n;
 }
 
 /// A positive count flag. Zero means "not given", so a literal `0` and a
@@ -359,13 +378,14 @@ fn parseCountArg(value: ?[]const u8, field: []const u8) !u32 {
 }
 
 /// The pane a subcommand was pointed at, however it was spelled.
-fn paneTargetOf(sub: anytype) commands.shared.PaneTarget {
+fn paneTargetOf(sub: anytype) !commands.shared.PaneTarget {
     return .{
         .uuid = sub.getSingleValue("uuid") orelse "",
         .pane = sub.getSingleValue("pane") orelse "",
         .session = sub.getSingleValue("session") orelse "",
         .creator = sub.containsArg("creator"),
         .last = sub.containsArg("last"),
+        .chip = try parseChipArg(sub.getSingleValue("chip")),
     };
 }
 
@@ -1347,7 +1367,7 @@ pub fn main() !void {
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runNotify(
                 allocator,
-                paneTargetOf(m),
+                try paneTargetOf(m),
                 m.containsArg("broadcast"),
                 m.getSingleValue("message") orelse "",
             );
@@ -1358,7 +1378,7 @@ pub fn main() !void {
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runSend(
                 allocator,
-                paneTargetOf(m),
+                try paneTargetOf(m),
                 m.containsArg("broadcast"),
                 m.containsArg("enter"),
                 m.getSingleValue("ctrl") orelse "",
@@ -1389,7 +1409,7 @@ pub fn main() !void {
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runRead(
                 allocator,
-                paneTargetOf(m),
+                try paneTargetOf(m),
                 try parseCountArg(m.getSingleValue("lines"), "lines"),
                 try parseCountArg(m.getSingleValue("commands"), "commands"),
             );
@@ -1398,7 +1418,7 @@ pub fn main() !void {
         if (mux_matches.subcommandMatches("info")) |m| {
             const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
-            try cli_cmds.runInfo(allocator, paneTargetOf(m));
+            try cli_cmds.runInfo(allocator, try paneTargetOf(m));
             return;
         }
     } else if (matches.subcommandMatches("web")) |web_matches| {

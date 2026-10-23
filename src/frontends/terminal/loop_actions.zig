@@ -37,7 +37,7 @@ pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
         // Normal float - just hide it.
         const was_visible = state.paneVisibleOnTab(pane, tab);
         state.setPaneVisibleOnTab(pane, tab, false);
-        if (!state.syncSessionFloatChecked(pane, false)) {
+        if (!state.syncFamilyFloats(pane, false)) {
             // Sticky/per-CWD floats may be visible in more than one mux/session,
             // but SES only allows the current live owner to update the canonical
             // snapshot. A non-owner hide is still a valid local UI action, so do
@@ -580,21 +580,52 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
 fn applyFloatExclusivity(state: *State, float_def: *const core.LayoutFloatDef) void {
     if (!float_def.attributes.exclusive) return;
 
-    var to_hide: std.ArrayList([32]u8) = .empty;
-    defer to_hide.deinit(state.allocator);
+    // What survives is a family, not a key. Matching on the key alone spared
+    // the family only because a sub-float inherits its parent's key; a member
+    // with a key of its own would have been hidden by the float it belongs to.
+    //
+    // The float being shown is the active one: every caller focuses it first.
+    const keep: ?[32]u8 = blk: {
+        const uuid = state.runtime.activeFloatUuid() orelse break :blk null;
+        const pane = state.findPaneByUuid(uuid) orelse break :blk null;
+        break :blk state.familyRootOf(pane);
+    };
+
+    // One entry per family: hiding is family-wide, so a family of four would
+    // otherwise be hidden four times over, each with its own session sync.
+    var roots: std.ArrayList([32]u8) = .empty;
+    defer roots.deinit(state.allocator);
 
     for (state.view.float_views.items) |other| {
-        if (state.paneFloatKey(other) != float_def.key) {
-            to_hide.append(state.allocator, other.uuid) catch |err| {
-                terminal_main.debugLogUuid(&other.uuid, "applyFloatExclusivity: failed to queue exclusive float hide: {s}", .{@errorName(err)});
-                state.notifications.show("Float exclusivity incomplete: couldn't queue hide");
-            };
+        if (state.paneFloatKey(other) == float_def.key) continue;
+        const root = state.familyRootOf(other) orelse other.uuid;
+        if (keep) |kept| {
+            if (std.mem.eql(u8, &root, &kept)) continue;
         }
+        var seen = false;
+        for (roots.items) |already| {
+            if (std.mem.eql(u8, &already, &root)) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        roots.append(state.allocator, root) catch |err| {
+            terminal_main.debugLogUuid(&other.uuid, "applyFloatExclusivity: failed to queue exclusive float hide: {s}", .{@errorName(err)});
+            state.notifications.show("Float exclusivity incomplete: couldn't queue hide");
+        };
     }
 
-    for (to_hide.items) |target_uuid| {
+    for (roots.items) |root| {
+        // By the root, so a `destroy` float takes its children with it rather
+        // than leaving whichever members the loop had not reached yet.
+        if (state.findPaneByUuid(root)) |pane| {
+            hideOrDestroyFloat(state, pane, state.activeTabIndex());
+            continue;
+        }
         for (state.view.float_views.items) |candidate| {
-            if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
+            const candidate_root = state.familyRootOf(candidate) orelse candidate.uuid;
+            if (std.mem.eql(u8, &candidate_root, &root)) {
                 hideOrDestroyFloat(state, candidate, state.activeTabIndex());
                 break;
             }
@@ -624,7 +655,7 @@ fn revealExistingFloatLocally(state: *State, pane: *Pane, existing_idx: usize, f
     state.setActiveFloatingIndex(existing_idx);
     state.syncPaneFocus(pane, old_uuid);
 
-    if (!state.syncSessionFloatChecked(pane, true)) {
+    if (!state.syncFamilyFloats(pane, true)) {
         // The local pane is no longer owned by this mux. Leave the UI repair to
         // the caller's ownership-handoff path; importantly, do not keep trying
         // to reveal through session sync because SES will reject it.
@@ -709,7 +740,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
     // Find existing float by key (and directory if per_cwd).
     var existing_idx: usize = 0;
     while (existing_idx < state.view.float_views.items.len) {
-        const pane = state.view.float_views.items[existing_idx];
+        var pane = state.view.float_views.items[existing_idx];
         if (state.paneFloatKey(pane) == float_def.key) {
             // Only tab-bound floats use parent_tab filtering.
             // per_cwd/global floats are shared across tabs.
@@ -737,6 +768,16 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
                 if (!dirs_match) {
                     existing_idx += 1;
                     continue;
+                }
+            }
+
+            // A key names the family, and a family shows one member at a
+            // time: act on the one inside the frame, not on whichever member's
+            // record happened to match the key first.
+            if (state.familyCurrentIndex(pane)) |current| {
+                if (current != existing_idx) {
+                    existing_idx = current;
+                    pane = state.view.float_views.items[current];
                 }
             }
 
@@ -874,7 +915,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
                 }
             }
 
-            if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() == existing_idx and state.paneVisibleOnTab(pane, state.activeTabIndex()))) {
+            if (!state.syncFamilyFloats(pane, state.activeFloatingIndex() == existing_idx and state.paneVisibleOnTab(pane, state.activeTabIndex()))) {
                 if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
                     terminal_main.debugLogUuid(
                         &pane.uuid,

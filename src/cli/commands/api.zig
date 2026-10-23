@@ -357,3 +357,94 @@ fn writeUnwrapped(out: anytype, reply: []const u8) !void {
     try out.writeAll(reply[head.len .. reply.len - 2]);
     try out.writeAll("}");
 }
+
+/// The uuid of chip `chip` in the family holding `pane_uuid`, or null when the
+/// family has no such member.
+///
+/// Answered by the frontend rather than by SES: the family lives in the float
+/// records the frontend owns, and `floats` already publishes `parent_float` and
+/// `family_index`. That keeps the wire protocol untouched, at the cost of
+/// needing a frontend — a chip is a thing on screen, so that is the same
+/// condition as there being chips to address.
+pub fn resolveFamilyChip(
+    allocator: std.mem.Allocator,
+    session_opt: ?[]const u8,
+    pane_uuid: []const u8,
+    chip: u8,
+) !?[32]u8 {
+    const endpoint = try resolveEndpoint(allocator, session_opt);
+    defer endpoint.deinit(allocator);
+
+    const reply = try request(allocator, endpoint.label, endpoint.path, "{\"call\":\"floats\"}", false);
+    defer allocator.free(reply);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, reply, .{}) catch {
+        print("Error: the session's answer to `floats` was not JSON\n", .{});
+        return error.CallFailed;
+    };
+    defer parsed.deinit();
+
+    const root_obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.CallFailed,
+    };
+    const result = root_obj.get("result") orelse return error.CallFailed;
+    // The wire carries a list of return values; `floats` returns one, which is
+    // itself the list of floats.
+    const floats = switch (result) {
+        .array => |outer| blk: {
+            if (outer.items.len == 0) break :blk null;
+            break :blk switch (outer.items[0]) {
+                .array => |inner| inner,
+                else => outer,
+            };
+        },
+        else => null,
+    } orelse return error.CallFailed;
+
+    const field = struct {
+        fn str(item: std.json.Value, name: []const u8) ?[]const u8 {
+            const obj = switch (item) {
+                .object => |o| o,
+                else => return null,
+            };
+            return switch (obj.get(name) orelse return null) {
+                .string => |s| s,
+                else => null,
+            };
+        }
+        fn int(item: std.json.Value, name: []const u8) ?i64 {
+            const obj = switch (item) {
+                .object => |o| o,
+                else => return null,
+            };
+            return switch (obj.get(name) orelse return null) {
+                .integer => |i| i,
+                else => null,
+            };
+        }
+    };
+
+    // The family this pane belongs to: its parent's uuid if it is a sub-float,
+    // its own if it is the parent.
+    var root: []const u8 = pane_uuid;
+    for (floats.items) |item| {
+        const uuid = field.str(item, "uuid") orelse continue;
+        if (!std.mem.eql(u8, uuid, pane_uuid)) continue;
+        if (field.str(item, "parent_float")) |parent| root = parent;
+        break;
+    }
+
+    for (floats.items) |item| {
+        const uuid = field.str(item, "uuid") orelse continue;
+        const own_root = field.str(item, "parent_float") orelse uuid;
+        if (!std.mem.eql(u8, own_root, root)) continue;
+        const idx = field.int(item, "family_index") orelse continue;
+        if (idx != @as(i64, chip)) continue;
+        if (uuid.len != 32) continue;
+        var out: [32]u8 = undefined;
+        @memcpy(&out, uuid[0..32]);
+        return out;
+    }
+    return null;
+}

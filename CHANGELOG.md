@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.6] - 2026-10-23
+
+### <!-- 0 -->⛰️  Features
+
+- Address a family member with --chip
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Terminal info reports on stdout
+- Exclusivity spares the family, not the key
+- The family owns the float's outside
+- A family shares one rectangle
+- A sub-float's own title, and chips
+
 ## [0.5.5] - 2026-10-22
 
 ### <!-- 1 -->🐛 Bug Fixes

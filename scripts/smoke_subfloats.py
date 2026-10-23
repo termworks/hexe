@@ -35,14 +35,28 @@ SESSION = "subs"
 # `float.show` answered false.
 open(os.path.join(CF, "hexe", "init.lua"), "w").write(
     "local hexe = require('hexe')\n"
+    # A title position, or the border draws no title at all and the chips have
+    # nowhere to appear.
+    # The adhoc size differs from the named one on purpose: a sub-float is built
+    # by the adhoc path, so identical sizes would make the rectangle check pass
+    # whether the family's geometry is inherited or not.
+    "hexe.mux = { floats = { defaults = { size = { width = 80, height = 70 },\n"
+    "                                     style = { position = 'topcenter' } },\n"
+    "                         adhoc = { size = { width = 40, height = 40 } } } }\n"
     "hexe.layout('default', {\n"
     "  enabled = true,\n"
     "  tabs = { hexe.tab('main', { enabled = true, root = hexe.pane({ cwd = '.' }) }) },\n"
     "  floats = {\n"
     "    hexe.float('host', { key = '2', enabled = true, title = 'host',\n"
     "                         command = '/bin/sh', attrs = { global = true } }),\n"
+    # An exclusive float, to prove that showing it hides a whole family rather
+    # than whichever members a key comparison happened to reach.
+    "    hexe.float('other', { key = '3', enabled = true, title = 'other',\n"
+    "                          command = '/bin/sh',\n"
+    "                          attrs = { global = true, exclusive = true } }),\n"
     "  },\n"
-    "})\n")
+    "})\n"
+    "hexe.key({ hexe.key.alt, hexe.key['2'] }, hexe.action.float.toggle('2'))\n")
 
 env = os.environ.copy()
 env.update({"HEXE_INSTANCE": INST, "XDG_STATE_HOME": os.path.join(WD, "state"),
@@ -117,13 +131,38 @@ def socket_for(s):
     return None
 
 
+SCREEN = bytearray()
+SCREEN_CAP = 1 << 20
+
+
 def drain(m):
+    """Read the frontend's pty and keep the tail of it.
+
+    Kept rather than discarded because the border label is drawn by hexe to the
+    host terminal, not published over the API: the chips can only be checked by
+    looking at what the frontend actually wrote.
+    """
     while True:
         try:
-            if not os.read(m, 65536):
+            chunk = os.read(m, 65536)
+            if not chunk:
                 return
+            SCREEN.extend(chunk)
+            if len(SCREEN) > SCREEN_CAP:
+                del SCREEN[:len(SCREEN) - SCREEN_CAP]
         except OSError:
             return
+
+
+def screen_has(needle, settle=6.0):
+    """Whether `needle` reaches the pty within `settle` seconds."""
+    deadline = time.time() + settle
+    probe = needle.encode()
+    while time.time() < deadline:
+        if probe in SCREEN:
+            return True
+        time.sleep(0.25)
+    return False
 
 
 def spawn_sub(parent_uuid, tag):
@@ -204,7 +243,77 @@ if kid:
     check(kid.get("width_pct") == parent_rec.get("width_pct") and
           kid.get("height_pct") == parent_rec.get("height_pct"),
           "it inherits the parent's rectangle")
+    check(kid.get("width") == parent_rec.get("width") and
+          kid.get("height") == parent_rec.get("height"),
+          f"down to the cell ({kid.get('width')}x{kid.get('height')} "
+          f"vs {parent_rec.get('width')}x{parent_rec.get('height')})")
     check(parent_rec.get("family_index") == 0, "and the parent is chip 0")
+
+    # A child inherits the parent's toggle key, and the title used to be looked
+    # up by that key: every snapshot rebuild renamed the child to the layout
+    # float's title, so a `--sub --title x` float called itself `host`.
+    check(kid.get("title") == "kid1",
+          f"it keeps its own --title rather than the parent's (got {kid.get('title')!r})")
+    check(parent_rec.get("title") == "host",
+          f"and the parent keeps its layout title (got {parent_rec.get('title')!r})")
+
+# --------------------------------------------------------------- phase 2b
+print("\nphase 2b: the family's chips reach the screen")
+check(screen_has("[1]"), "the member on screen is drawn as [1]")
+check(screen_has("<0>"), "and its sibling as <0>")
+
+# -------------------------------------------------------------------- phase 2c
+print("\nphase 2c: the toggle key hides the whole family, from any member")
+
+
+def family_focus():
+    """The chips the family reports as focused: one while it is on screen."""
+    return sorted(f.get("family_index", 0) for f in floats()
+                  if (f["uuid"] == PARENT or f.get("parent_float") == PARENT) and f.get("focused"))
+
+
+def settled_focus(settle=8.0):
+    deadline = time.time() + settle
+    last = None
+    while time.time() < deadline:
+        v = family_focus()
+        if v == last:
+            return v
+        last = v
+        time.sleep(0.4)
+    return last
+
+
+check(settled_focus() == [1], f"the sub-float is the member on screen (got {family_focus()})")
+
+# The toggle used to resolve to the parent's record, so this walked to the
+# parent instead of hiding: press, parent; press, sub-float; never gone.
+os.write(m, b"\x1b2")
+check(settled_focus() == [], f"alt+2 from the sub-float hides the float (got {family_focus()})")
+tiled_focus = [p for p in api("panes") if not p.get("is_float") and p.get("focused")]
+check(len(tiled_focus) == 1, f"and the focus leaves the family (tiled focused: {len(tiled_focus)})")
+check(len(family_of(PARENT)) == 2, "with both members still alive")
+
+os.write(m, b"\x1b2")
+check(settled_focus() == [1], f"alt+2 brings it back on the member it was left on (got {family_focus()})")
+
+# -------------------------------------------------------------------- phase 2d
+print("\nphase 2d: an exclusive float hides a whole family, not part of one")
+api("act", json.dumps({"type": "float.show", "float": "3"}))
+other = None
+deadline = time.time() + 20
+while time.time() < deadline:
+    other = next((f for f in floats() if f.get("title") == "other"), None)
+    if other is not None and other.get("focused"):
+        break
+    time.sleep(0.5)
+check(other is not None, "the exclusive float opened")
+check(settled_focus() == [], f"it hid every member of the family (family focus {family_focus()})")
+check(len(family_of(PARENT)) == 2, "and hid them rather than closing them")
+
+api("act", json.dumps({"type": "float.show", "float": "2"}))
+check(settled_focus() == [1], f"the family comes back on the member it was left on (got {family_focus()})")
+api("act", json.dumps({"type": "float.hide", "float": "3"}))
 
 # --------------------------------------------------------------------- phase 3
 print("\nphase 3: numbers are stable, and a closed chip is refilled")
@@ -316,6 +425,26 @@ check(p.returncode != 0, f"a --sub with no pane exits non-zero (got {p.returncod
 check("not running inside" in (p.stderr + p.stdout),
       f"and says why (got {(p.stderr + p.stdout).strip()[:120]!r})")
 check(len(floats()) == before, "and created nothing")
+
+# -------------------------------------------------------------------- phase 4b
+print("\nphase 4b: a child that exits hands the screen back to the family")
+on_screen = shown_chip()
+if on_screen == 0:
+    api("act", json.dumps("float.family_next"))
+    on_screen = shown_chip()
+check(on_screen not in (None, 0), f"a child is on screen to close (chip {on_screen})")
+if on_screen not in (None, 0):
+    victim = next((u for u, n in family_of(PARENT) if n == on_screen), None)
+    hexe("terminal", "send", "--uuid", victim, "--enter", "exit")
+    deadline = time.time() + 25
+    while time.time() < deadline and any(f["uuid"] == victim for f in floats()):
+        time.sleep(0.5)
+    check(not any(f["uuid"] == victim for f in floats()), "the child is gone")
+    # The lowest surviving chip, which is the parent while it lives. Without
+    # this the rectangle went to the tiled pane behind the float instead.
+    check(shown_chip() == 0, "and the parent float is what is left on screen")
+    rec = next((f for f in floats() if f["uuid"] == PARENT), None)
+    check(rec is not None and rec.get("focused") is True, "with the focus on it")
 
 # --------------------------------------------------------------------- phase 5
 print("\nphase 5: closing the parent closes the whole family")
