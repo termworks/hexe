@@ -35,6 +35,9 @@ SESSION = "subs"
 # `float.show` answered false.
 open(os.path.join(CF, "hexe", "init.lua"), "w").write(
     "local hexe = require('hexe')\n"
+    # A title position, or the border draws no title at all and the chips have
+    # nowhere to appear.
+    "hexe.mux = { floats = { defaults = { style = { position = 'topcenter' } } } }\n"
     "hexe.layout('default', {\n"
     "  enabled = true,\n"
     "  tabs = { hexe.tab('main', { enabled = true, root = hexe.pane({ cwd = '.' }) }) },\n"
@@ -117,13 +120,38 @@ def socket_for(s):
     return None
 
 
+SCREEN = bytearray()
+SCREEN_CAP = 1 << 20
+
+
 def drain(m):
+    """Read the frontend's pty and keep the tail of it.
+
+    Kept rather than discarded because the border label is drawn by hexe to the
+    host terminal, not published over the API: the chips can only be checked by
+    looking at what the frontend actually wrote.
+    """
     while True:
         try:
-            if not os.read(m, 65536):
+            chunk = os.read(m, 65536)
+            if not chunk:
                 return
+            SCREEN.extend(chunk)
+            if len(SCREEN) > SCREEN_CAP:
+                del SCREEN[:len(SCREEN) - SCREEN_CAP]
         except OSError:
             return
+
+
+def screen_has(needle, settle=6.0):
+    """Whether `needle` reaches the pty within `settle` seconds."""
+    deadline = time.time() + settle
+    probe = needle.encode()
+    while time.time() < deadline:
+        if probe in SCREEN:
+            return True
+        time.sleep(0.25)
+    return False
 
 
 def spawn_sub(parent_uuid, tag):
@@ -205,6 +233,19 @@ if kid:
           kid.get("height_pct") == parent_rec.get("height_pct"),
           "it inherits the parent's rectangle")
     check(parent_rec.get("family_index") == 0, "and the parent is chip 0")
+
+    # A child inherits the parent's toggle key, and the title used to be looked
+    # up by that key: every snapshot rebuild renamed the child to the layout
+    # float's title, so a `--sub --title x` float called itself `host`.
+    check(kid.get("title") == "kid1",
+          f"it keeps its own --title rather than the parent's (got {kid.get('title')!r})")
+    check(parent_rec.get("title") == "host",
+          f"and the parent keeps its layout title (got {parent_rec.get('title')!r})")
+
+# --------------------------------------------------------------- phase 2b
+print("\nphase 2b: the family's chips reach the screen")
+check(screen_has("[1]"), "the member on screen is drawn as [1]")
+check(screen_has("<0>"), "and its sibling as <0>")
 
 # --------------------------------------------------------------------- phase 3
 print("\nphase 3: numbers are stable, and a closed chip is refilled")

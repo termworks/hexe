@@ -584,6 +584,11 @@ fn restoreFloatPane(
     }
 
     const restored_title = blk: {
+        // A sub-float carries its parent's key, so the layout title under that
+        // key is the parent's name. The float's own title wins for a child.
+        if (session_model.isSubFloat(float_state)) {
+            if (preserved_title) |title| break :blk title;
+        }
         if (float_state.float_key != 0) {
             if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
                 if (float_def.title) |title| break :blk title;
