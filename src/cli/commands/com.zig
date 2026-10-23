@@ -3,6 +3,7 @@ const core = @import("core");
 const ipc = core.ipc;
 const session_config = core.session_config;
 const shared = @import("shared.zig");
+const api_cmd = @import("api.zig");
 
 pub const runMuxFloat = @import("mux_float.zig").runMuxFloat;
 pub const runMuxRecord = @import("mux_record.zig").runMuxRecord;
@@ -712,6 +713,34 @@ pub fn resolvePaneTarget(
     if (target.creator or target.last) {
         const resolved = resolveRelatedPane(allocator, target.creator) orelse return shared.ResolveError.NoSuchPane;
         return .{ .uuid = resolved, .attached = true };
+    }
+
+    // `--chip` is relative to a family, so it is resolved before the selectors
+    // that name a pane outright: `--uuid` beside it names which family, not
+    // which pane.
+    if (target.chip) |chip| {
+        const base = if (target.uuid.len == 32)
+            target.uuid
+        else if (target.uuid.len > 0) blk: {
+            const hit = askSesToResolve(allocator, target.session, target.uuid, true) catch |err| return err;
+            break :blk &hit.uuid;
+        } else std.posix.getenv("HEXE_PANE_UUID") orelse {
+            print("Error: --chip addresses this float's family, so it needs a pane:\n", .{});
+            print("       run it inside a float, or name the family with --uuid\n", .{});
+            return shared.ResolveError.NoTarget;
+        };
+        if (base.len != 32) return shared.ResolveError.NoTarget;
+
+        const session: ?[]const u8 = if (target.session.len > 0) target.session else null;
+        const found = api_cmd.resolveFamilyChip(allocator, session, base, chip) catch {
+            return shared.ResolveError.Unreachable;
+        };
+        const member = found orelse {
+            print("Error: this float's family has no chip {d}\n", .{chip});
+            print("       `hexe api floats` lists the family and its chip numbers.\n", .{});
+            return shared.ResolveError.NoSuchPane;
+        };
+        return askSesToResolve(allocator, target.session, &member, true);
     }
 
     // Even a full uuid is resolved rather than trusted: "that pane does not

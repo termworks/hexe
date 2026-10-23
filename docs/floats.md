@@ -200,6 +200,19 @@ always selected a float *definition*, and `per_cwd` already mapped one key to se
 Chip numbers are **stable**. Closing `<2>` leaves that number empty and never renumbers `<3>` under
 your fingers; the next child fills the gap at 2 rather than becoming 4.
 
+A family member is addressable by its chip number, which is the point of the
+numbers being stable:
+
+```sh
+hexe terminal send --chip 1 --enter "make test"   # my first sub-float
+hexe terminal read --chip 1 -c 1                  # what that command printed
+hexe terminal info --chip 0                       # the parent
+```
+
+The family is the one holding the calling pane, so a sub-float can address its
+siblings the same way. `hexe api floats` lists a family with its `parent_float`
+and `family_index` for anything that wants the whole picture.
+
 `--sub` does not block, unlike a plain `hexe terminal float` — a family member is something you go
 on using, not a question you wait on. It prints the new float's uuid instead, so the caller can
 address it afterwards. Asked for from outside a float, it is refused rather than quietly making a

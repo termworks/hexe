@@ -75,6 +75,7 @@ The address is a hierarchy — **session → pane** — and a pane name is uniqu
 | `--uuid <hex>` | absolute: a full pane uuid or a unique prefix of one. Needs nothing else |
 | `--pane <name>` | by name, unique within its session |
 | `--session <s>` | which session `--pane` is in: its name, or a uuid prefix |
+| `--chip <n>` | a member of **this float's family**, by the number the title row shows: `0` is the parent, children count up |
 | `--last` | the pane this one came from |
 | `--creator` | the pane the command was launched from |
 | `--broadcast` | every pane in the session |
@@ -86,7 +87,16 @@ name pool, so the name alone is enough. Nor is the tab.
 hexe terminal send --pane romeo --enter "make test"        # inside hexe
 hexe terminal send --session work --pane romeo --enter …   # another session
 hexe terminal send --uuid b717c471 --enter …               # from anywhere
+hexe terminal send --chip 1 --enter "make test"            # a sub-float of mine
+hexe terminal read --chip 1 -c 1                           # and what it printed
 ```
+
+`--chip` is how a float drives its own sub-floats: the family is the one holding
+the calling pane, so an agent that opened helpers beside itself addresses them by
+the number on screen instead of carrying uuids. `--uuid` beside it names *which*
+family rather than which pane. It is answered by the frontend, so unlike the rest
+it needs the session attached — a chip is a thing on screen, so that is the same
+condition as there being chips to address.
 
 Inside a pane, `HEXE_PANE_UUID` and `HEXE_SESSION` are already set, so a script
 usually needs no target at all.

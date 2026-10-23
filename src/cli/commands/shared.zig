@@ -60,6 +60,9 @@ pub const PaneTarget = struct {
     /// `--creator` / `--last`, resolved against the pane this command runs in.
     creator: bool = false,
     last: bool = false,
+    /// `--chip`: a member of the caller's float family, by the number the title
+    /// row shows. Null means not given; 0 is the parent and a valid answer.
+    chip: ?u8 = null,
 };
 
 /// What a resolved target is, and whether the whole-session verbs can reach it.
