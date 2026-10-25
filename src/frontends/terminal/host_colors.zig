@@ -207,6 +207,11 @@ pub const HostColors = struct {
         return queried;
     }
 
+    /// Whether an answer is still owed, so bytes arriving now may be one.
+    pub fn hasPending(self: *const HostColors) bool {
+        return self.pending_len > 0;
+    }
+
     pub fn handleReport(self: *HostColors, report: Report, now_ms: i64) ReportAction {
         self.expire(now_ms);
         const index = self.findPending(report.key) orelse return .unowned;
