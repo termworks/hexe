@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.8] - 2026-10-25
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Never type a split reply into a pane
+
+## [0.5.7] - 2026-10-23
+
 ## [0.5.7] - 2026-10-23
 
 ### <!-- 1 -->🐛 Bug Fixes

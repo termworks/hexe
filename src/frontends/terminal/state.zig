@@ -447,6 +447,11 @@ pub const State = struct {
     bracketed_paste_target_uuid: ?[32]u8 = null,
     bracketed_paste_buf: std.ArrayList(u8) = .empty,
 
+    /// When a lone trailing escape must be delivered as a key press after all.
+    held_escape_deadline_ms: i64 = 0,
+    /// Set while that held escape is being delivered, so it is not held again.
+    delivering_held_escape: bool = false,
+
     // Terminal capability query lifecycle for custom event loop mode.
     terminal_query_in_flight: bool = false,
     terminal_query_deadline_ms: i64 = 0,
@@ -617,6 +622,9 @@ pub const State = struct {
             .regions = core.regions.Registry.init(allocator),
             .region_surfaces = @import("region_render.zig").SurfaceCache.init(allocator),
             .mux_vt_write_overflow_notified = false,
+
+            .held_escape_deadline_ms = 0,
+            .delivering_held_escape = false,
 
             .terminal_query_in_flight = false,
             .terminal_query_deadline_ms = 0,

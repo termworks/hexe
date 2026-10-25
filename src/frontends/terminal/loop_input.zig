@@ -85,6 +85,9 @@ fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8, parsed_event:
 fn mergeStdinTail(state: *State, input_bytes: []const u8) struct { merged: []const u8, owned: ?[]u8 } {
     if (state.stdin_tail.items.len == 0) return .{ .merged = input_bytes, .owned = null };
 
+    // The continuation arrived, so the hold is over however this merge turns out.
+    state.held_escape_deadline_ms = 0;
+
     const tl = state.stdin_tail.items.len;
     const total = tl + input_bytes.len;
     var tmp = state.allocator.alloc(u8, total) catch {
@@ -124,9 +127,30 @@ fn firstControlTrafficIndex(bytes: []const u8) ?usize {
     return first;
 }
 
+/// How long a lone trailing escape is held before it counts as a key press.
+const HELD_ESCAPE_MS: i64 = 30;
+
+/// Whether a lone escape ending a read may be the first byte of a terminal reply.
+///
+/// The parser reports a single escape as the escape KEY, so without this the rest of a reply
+/// split across reads arrives as text and is typed into the focused pane -- which is how
+/// `]4;155;rgb:9b9b/7575/8282` reaches a command line during a palette sweep.
+///
+/// Held whatever hexe is waiting for: the answers that arrive latest are the ones whose query has
+/// already been retired, so "a reply is owed" is false in exactly the window that matters.
+fn heldEscapeEndsRead(state: *State, inp: []const u8, at: usize) bool {
+    if (state.delivering_held_escape) return false;
+    return at + 1 == inp.len and inp[at] == 0x1b;
+}
+
 fn stashIncompleteParserTail(state: *State, inp: []const u8) []const u8 {
     var i: usize = 0;
     while (i < inp.len) {
+        if (heldEscapeEndsRead(state, inp, i)) {
+            state.held_escape_deadline_ms = std.time.milliTimestamp() + HELD_ESCAPE_MS;
+            return stashFromIndex(state, inp, i);
+        }
+
         const res = vaxis_parser.parse(inp[i..], state.allocator) catch {
             i += 1;
             continue;
@@ -1430,6 +1454,30 @@ fn parseLikelyTerminalCsiReplyLen(inp: []const u8, start: usize) usize {
     }
 
     return 0;
+}
+
+/// Deliver a held escape once nothing has followed it.
+///
+/// Called from the loop body so the hold cannot outlive its window: the continuation it waits for
+/// either arrives in the next read or never does, and an escape the user pressed must still reach
+/// the pane.
+pub fn flushHeldEscape(state: *State) void {
+    if (state.held_escape_deadline_ms == 0) return;
+    if (std.time.milliTimestamp() < state.held_escape_deadline_ms) return;
+    state.held_escape_deadline_ms = 0;
+    if (state.stdin_tail.items.len == 0) return;
+
+    const held = state.allocator.dupe(u8, state.stdin_tail.items) catch |err| {
+        core.logging.logError("terminal", "failed to copy a held escape", err);
+        state.stdin_tail.clearRetainingCapacity();
+        return;
+    };
+    defer state.allocator.free(held);
+    state.stdin_tail.clearRetainingCapacity();
+
+    state.delivering_held_escape = true;
+    defer state.delivering_held_escape = false;
+    handleInput(state, held);
 }
 
 pub fn handleInput(state: *State, input_bytes: []const u8) void {

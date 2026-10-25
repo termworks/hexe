@@ -5,6 +5,7 @@ const xev = @import("xev").Dynamic;
 const State = @import("state.zig").State;
 const HostHooks = @import("loop_host_hooks.zig").HostHooks;
 
+const loop_input = @import("loop_input.zig");
 const loop_watchers = @import("loop_watchers.zig");
 const runtime_events = @import("runtime_events.zig");
 const dead_panes = @import("dead_panes.zig");
@@ -43,6 +44,9 @@ fn tickDelayMs(state: *const State) u64 {
     }
     if (state.drawings.nextExpiry()) |at| {
         delay = @min(delay, @as(u64, @intCast(@max(at - now_ms, 16))));
+    }
+    if (state.held_escape_deadline_ms != 0) {
+        delay = @min(delay, @as(u64, @intCast(@max(state.held_escape_deadline_ms - now_ms, 16))));
     }
     return delay;
 }
@@ -110,6 +114,7 @@ fn loopTimerCallback(
     };
 
     const now = std.time.milliTimestamp();
+    loop_input.flushHeldEscape(timer_ctx.state);
     if (now - timer_ctx.last_pane_sync >= timer_ctx.pane_sync_interval) {
         timer_ctx.last_pane_sync = now;
         timer_ctx.state.syncFocusedPaneInfo();
