@@ -180,3 +180,26 @@ test "a key that never produces text is reportable under report_events alone" {
     const up = releaseFor(&vt, vaxis.Key.up, &rbuf) orelse return error.MissingEncoding;
     try testing.expect(std.mem.indexOf(u8, up, ":3") != null);
 }
+
+fn shiftedFor(vt: *core.VT, key: u8, buf: *[64]u8) ?[]const u8 {
+    const bk: core.Config.BindKey = .{ .char = key };
+    return key_translate.encodeKey(buf, 4, bk, null, .press, &vt.terminal);
+}
+
+test "shift+tab and shift+enter keep their modifier under kitty flags" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+    var buf: [64]u8 = undefined;
+
+    const legacy = shiftedFor(&vt, '\t', &buf) orelse return error.MissingEncoding;
+    try testing.expectEqualStrings("\x1b[Z", legacy);
+
+    try vt.feed("\x1b[>5u");
+    const tab = shiftedFor(&vt, '\t', &buf) orelse return error.MissingEncoding;
+    try testing.expectEqualStrings("\x1b[9;2u", tab);
+    const enter = shiftedFor(&vt, '\r', &buf) orelse return error.MissingEncoding;
+    try testing.expectEqualStrings("\x1b[13;2u", enter);
+    const a = shiftedFor(&vt, 'A', &buf) orelse return error.MissingEncoding;
+    try testing.expectEqualStrings("A", a);
+}
