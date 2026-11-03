@@ -45,7 +45,7 @@ pub fn encodeKey(
         // text is sent as-is under the Kitty protocol. Leaving this empty made
         // every shifted character encode as a CSI-u sequence instead — so with
         // a pane in Kitty mode, no symbol or capital reached the application.
-        .consumed_mods = .{ .shift = shift and utf8.len > 0 },
+        .consumed_mods = .{ .shift = shift and utf8.len > 0 and !isControlText(utf8) },
     };
 
     var writer = std.Io.Writer.fixed(out);
@@ -153,4 +153,9 @@ fn charToGhosttyKey(ch: u8) ghostty.input.Key {
         0x1b => .escape,
         else => .unidentified,
     };
+}
+
+fn isControlText(text: []const u8) bool {
+    if (text.len != 1) return false;
+    return text[0] < 0x20 or text[0] == 0x7f;
 }
