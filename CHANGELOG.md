@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.9] - 2026-11-20
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Shift_tab_fix
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Publish to cache.bresilla.com
+
 ## [0.5.8] - 2026-10-25
 
 ### <!-- 1 -->🐛 Bug Fixes
