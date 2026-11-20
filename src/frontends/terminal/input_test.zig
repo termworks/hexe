@@ -180,3 +180,97 @@ test "a key that never produces text is reportable under report_events alone" {
     const up = releaseFor(&vt, vaxis.Key.up, &rbuf) orelse return error.MissingEncoding;
     try testing.expect(std.mem.indexOf(u8, up, ":3") != null);
 }
+
+fn expectKeyEncoding(vt: *core.VT, key: vaxis.Key, expected: []const u8) !void {
+    const ev = input.keyEventFromVaxisEvent(.{ .key_press = key }) orelse return error.NotDecoded;
+    var buf: [64]u8 = undefined;
+    const encoded = key_translate.encodeKey(&buf, ev.mods, ev.key, ev.text_codepoint, .press, &vt.terminal) orelse
+        return error.MissingEncoding;
+    try testing.expectEqualStrings(expected, encoded);
+}
+
+test "legacy and kitty Shift+Tab wire sequences round trip without consuming the next key" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+    var parser: vaxis.Parser = .{};
+
+    for ([_][]const u8{ "\x1b[Z", "\x1b[9;2u" }) |sequence| {
+        var bytes: [16]u8 = undefined;
+        @memcpy(bytes[0..sequence.len], sequence);
+        bytes[sequence.len] = 'x';
+        const parsed = try input.parseEvent(&parser, bytes[0 .. sequence.len + 1], testing.allocator);
+        try testing.expectEqual(sequence.len, parsed.n);
+        const event = parsed.event orelse return error.NotDecoded;
+        const key = event.key_press;
+        try testing.expectEqual(vaxis.Key.tab, key.codepoint);
+        try testing.expect(key.mods.shift);
+        try expectKeyEncoding(&vt, key, "\x1b[Z");
+        try vt.feed("\x1b[>5u");
+        try expectKeyEncoding(&vt, key, "\x1b[9;2u");
+        try vt.feed("\x1b[<u");
+    }
+
+    const partial = try input.parseEvent(&parser, "\x1b[", testing.allocator);
+    try testing.expectEqual(@as(usize, 0), partial.n);
+    try testing.expect(partial.event == null);
+    const plain = try input.parseEvent(&parser, "\t", testing.allocator);
+    try testing.expect(!plain.event.?.key_press.mods.shift);
+}
+
+test "shifted control keys retain Shift in legacy and kitty panes" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+
+    try expectKeyEncoding(&vt, .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } }, "\x1b[Z");
+
+    const cases = [_]struct { codepoint: u21, expected: []const u8 }{
+        .{ .codepoint = vaxis.Key.tab, .expected = "\x1b[9;2u" },
+        .{ .codepoint = vaxis.Key.enter, .expected = "\x1b[13;2u" },
+        .{ .codepoint = vaxis.Key.backspace, .expected = "\x1b[127;2u" },
+        .{ .codepoint = vaxis.Key.escape, .expected = "\x1b[27;2u" },
+    };
+    for ([_][]const u8{ "\x1b[>1u", "\x1b[>5u", "\x1b[>9u" }) |flags| {
+        try vt.feed(flags);
+        for (cases) |case| {
+            try expectKeyEncoding(&vt, .{ .codepoint = case.codepoint, .mods = .{ .shift = true } }, case.expected);
+        }
+        try vt.feed("\x1b[<u");
+    }
+}
+
+test "kitty panes preserve plain control keys and printable shifted text" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+    try vt.feed("\x1b[>5u");
+
+    try expectKeyEncoding(&vt, .{ .codepoint = vaxis.Key.tab }, "\t");
+    try expectKeyEncoding(&vt, .{ .codepoint = vaxis.Key.enter }, "\r");
+    try expectKeyEncoding(&vt, .{ .codepoint = vaxis.Key.backspace }, "\x7f");
+    try expectKeyEncoding(&vt, .{ .codepoint = 'A', .mods = .{ .shift = true } }, "A");
+    try expectKeyEncoding(&vt, .{ .codepoint = '2', .shifted_codepoint = '@', .mods = .{ .shift = true } }, "@");
+    try expectKeyEncoding(&vt, .{ .codepoint = 'e', .text = "É", .mods = .{ .shift = true } }, "É");
+}
+
+test "kitty control text does not consume Shift when supplied explicitly" {
+    var vt: core.VT = .{};
+    try vt.init(testing.allocator, 80, 24);
+    defer vt.deinit();
+    try vt.feed("\x1b[>5u");
+
+    const cases = [_]struct { char: u8, expected: []const u8 }{
+        .{ .char = '\t', .expected = "\x1b[9;2u" },
+        .{ .char = '\r', .expected = "\x1b[13;2u" },
+        .{ .char = 0x08, .expected = "\x1b[127;2u" },
+        .{ .char = 0x7f, .expected = "\x1b[127;2u" },
+        .{ .char = 0x1b, .expected = "\x1b[27;2u" },
+    };
+    for (cases) |case| {
+        var buf: [64]u8 = undefined;
+        const encoded = key_translate.encodeKey(&buf, 4, .{ .char = case.char }, case.char, .press, &vt.terminal) orelse
+            return error.MissingEncoding;
+        try testing.expectEqualStrings(case.expected, encoded);
+    }
+}

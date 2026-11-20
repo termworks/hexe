@@ -31,7 +31,7 @@ const ParsedEventHead = struct {
 };
 
 fn parseEventHead(state: *State, bytes: []const u8) ?ParsedEventHead {
-    const parsed = vaxis_parser.parse(bytes, state.allocator) catch |err| {
+    const parsed = input.parseEvent(&vaxis_parser, bytes, state.allocator) catch |err| {
         log.debug("failed to parse input event head: {}", .{err});
         return null;
     };
@@ -151,7 +151,7 @@ fn stashIncompleteParserTail(state: *State, inp: []const u8) []const u8 {
             return stashFromIndex(state, inp, i);
         }
 
-        const res = vaxis_parser.parse(inp[i..], state.allocator) catch {
+        const res = input.parseEvent(&vaxis_parser, inp[i..], state.allocator) catch {
             i += 1;
             continue;
         };
@@ -1111,7 +1111,6 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
         .repeat, .hold => return .unhandled,
     }
 }
-
 
 fn firstOrParseAt(state: *State, inp: []const u8, offset: usize, first: ?ParsedEventHead) ?ParsedEventHead {
     if (offset == 0) return first;

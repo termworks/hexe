@@ -4,6 +4,16 @@ const pop = @import("pop");
 const vaxis = @import("vaxis");
 const log = std.log.scoped(.terminal_input);
 
+pub fn parseEvent(parser: *vaxis.Parser, bytes: []const u8, allocator: std.mem.Allocator) !vaxis.Parser.Result {
+    if (std.mem.startsWith(u8, bytes, "\x1b[Z")) {
+        return .{
+            .event = .{ .key_press = .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } } },
+            .n = 3,
+        };
+    }
+    return parser.parse(bytes, allocator);
+}
+
 pub fn handlePopupEvent(popups: *pop.PopupManager, event: vaxis.Event) bool {
     const key = popupKeyFromVaxisEvent(event) orelse return false;
     const result = popups.handleInput(key);

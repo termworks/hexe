@@ -39,13 +39,8 @@ pub fn encodeKey(
             .shift = shift,
             .super = (mods & 8) != 0,
         },
-        // Shift is spent producing the character itself: `2` gives `@`, `a`
-        // gives `A`. The encoder subtracts consumed mods before deciding
-        // whether a key still counts as unmodified text, and only unmodified
-        // text is sent as-is under the Kitty protocol. Leaving this empty made
-        // every shifted character encode as a CSI-u sequence instead — so with
-        // a pane in Kitty mode, no symbol or capital reached the application.
-        .consumed_mods = .{ .shift = shift and utf8.len > 0 },
+        // Only printable text consumes Shift; control keys retain the modifier.
+        .consumed_mods = .{ .shift = shift and utf8.len > 0 and !isControlText(utf8) },
     };
 
     var writer = std.Io.Writer.fixed(out);
@@ -56,6 +51,10 @@ pub fn encodeKey(
         return null;
     };
     return writer.buffered();
+}
+
+fn isControlText(text: []const u8) bool {
+    return text.len == 1 and std.ascii.isControl(text[0]);
 }
 
 fn bindKeyCodepoint(key: BindKey) u21 {

@@ -193,13 +193,19 @@ Lua files are installed under the package's `share/hexe/`; they are not copied i
 your home directory automatically.
 
 Each package and architecture uses one stable pin, such as
-`hexe-x86_64-linux`, with `--keep-revisions 5`. The five newest pin revisions
-are protected from cache cleanup; each binary retains its actual package version.
-Older revisions become eligible for garbage collection and may need rebuilding.
+`hexe-x86_64-linux`, listed at <https://cache.bresilla.com/-/pins>. The pinned
+build is protected from cache cleanup; each binary retains its actual package
+version. Builds that are no longer pinned are removed and may need rebuilding.
 
-**Binary cache.** The shared cache is `termworks`. Accept the flake's cache
-configuration when prompted, or run `cachix use termworks` on the consumer machine.
-When using Hexe as an input of another flake, configure the consumer's cache too.
+**Binary cache.** The cache is `https://cache.bresilla.com/bresilla`. Accept the
+flake's cache configuration when prompted. When using Hexe as an input of another
+flake, configure the consumer's cache too, in `/etc/nix/nix.conf`:
+
+```ini
+extra-substituters = https://cache.bresilla.com/bresilla
+extra-trusted-public-keys = bresilla:zsecaZYIrjCJQS4AuGPmEVU5PRkiMmB/Mds3KaCzTvE=
+```
+
 Use a release tag whose cache workflow has succeeded:
 
 ```sh
@@ -208,11 +214,15 @@ nix build github:termworks/hexe/vX.Y.Z
 
 Replace `vX.Y.Z` with the desired published tag. Only pushed `v*` tags trigger
 `.github/workflows/nix-cache.yml`; branch pushes do not publish. The workflow builds
-on native x86_64 and ARM64 Linux runners, uploads and pins the runtime closures,
-then checks downloads and CLI startup on fresh runners with builders disabled.
-Create a Cachix per-cache write token and store it as the GitHub Actions secret
-`CACHIX_AUTH_TOKEN` for this repository. Never commit the token. Modified build
-inputs or features can require a new build rather than a cached download.
+on native x86_64 and ARM64 Linux runners; the shared
+[`attic-push`](https://github.com/bresilla/nixos/tree/main/.github/actions/attic-push)
+action uploads only the paths cache.nixos.org does not have and sets the pins,
+then fresh runners check downloads and CLI startup with builders disabled.
+Publishing uses the organization Actions secrets `ATTIC_TOKEN` (an Attic token
+that may push to the `bresilla` cache) and `PIN_TOKEN` (the cache's pins API
+token); `NETBIRD_SETUP_KEY` is only needed for uploads over 95 MB. Never commit
+the tokens. Modified build inputs or features can require a new build rather
+than a cached download.
 
 **Build.** Needs Zig 0.15.2. A static musl binary:
 
