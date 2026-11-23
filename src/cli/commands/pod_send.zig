@@ -4,8 +4,7 @@ const ipc = core.ipc;
 const wire = core.wire;
 const pod_protocol = core.pod_protocol;
 const shared = @import("shared.zig");
-
-const print = std.debug.print;
+const cli_ui = core.cli_ui;
 
 pub fn runPodSend(
     allocator: std.mem.Allocator,
@@ -26,12 +25,12 @@ pub fn runPodSend(
             data_buf[0] = cch - 'a' + 1;
             data_len = 1;
         } else {
-            print("Error: --ctrl requires a single letter (a-z)\n", .{});
+            cli_ui.printErr("--ctrl requires a single letter (a-z)", .{});
             std.process.exit(1);
         }
     } else if (text.len > 0) {
         if (text.len > data_buf.len - 1) {
-            print("Error: text too long\n", .{});
+            cli_ui.printErr("text too long", .{});
             std.process.exit(1);
         }
         @memcpy(data_buf[0..text.len], text);
@@ -44,7 +43,7 @@ pub fn runPodSend(
     }
 
     if (data_len == 0) {
-        print("Error: no data to send (use text argument, --ctrl, or --enter)\n", .{});
+        cli_ui.printErr("no data to send (use text argument, --ctrl, or --enter)", .{});
         std.process.exit(1);
     }
 
@@ -53,7 +52,7 @@ pub fn runPodSend(
 
     var client = ipc.Client.connect(target_socket) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
-            print("pod is not running\n", .{});
+            cli_ui.printErr("pod is not running", .{});
             std.process.exit(1);
         }
         return err;
@@ -62,7 +61,7 @@ pub fn runPodSend(
 
     // Send versioned handshake for auxiliary input.
     wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_INPUT) catch |err| {
-        print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("failed to handshake with pod: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
 
@@ -73,12 +72,12 @@ pub fn runPodSend(
 fn resolveTargetSocket(allocator: std.mem.Allocator, uuid: []const u8, name: []const u8, socket_path: []const u8) ![]const u8 {
     return shared.resolvePodSocketTarget(allocator, uuid, name, socket_path) catch |err| {
         switch (err) {
-            error.InvalidUuid => print("Error: --uuid must be 32 hex chars\n", .{}),
-            error.MissingTarget => print("Error: must provide --socket, --uuid, or --name\n", .{}),
+            error.InvalidUuid => cli_ui.printErr("--uuid must be 32 hex chars", .{}),
+            error.MissingTarget => cli_ui.printErr("must provide --socket, --uuid, or --name", .{}),
             // Pane names are unique per session, so one name can belong to
             // two panes in two sessions. Picking either could type into, or
             // signal, the wrong one.
-            error.AmbiguousPodName => print("Error: several pods are called that; use --uuid\n", .{}),
+            error.AmbiguousPodName => cli_ui.printErr("several pods are called that; use --uuid", .{}),
             else => {},
         }
         return err;

@@ -47,34 +47,81 @@ pub fn runPodList(allocator: std.mem.Allocator, where_lua: []const u8, probe: bo
 
     if (json_output) {
         outputJson(records.items) catch |err| {
-            print("Error: failed to write pod JSON: {s}\n", .{@errorName(err)});
+            core.cli_ui.printErr("failed to write pod JSON: {s}", .{@errorName(err)});
         };
         return;
     }
 
-    // Output: one line per pod, stable + grep-friendly.
+    var out = std.fs.File.stdout().deprecatedWriter();
+
+    // When stdout is a TTY, render a clean ANSI 16-color aligned table.
+    // When piped/scripted, preserve the stable grep-friendly `HEXE_POD k=v` format.
+    if (std.posix.isatty(std.posix.STDOUT_FILENO)) {
+        const p = core.cli_ui.Palette.forStdout();
+        if (records.items.len == 0) {
+            try out.print("{s}No pods found.{s}\n", .{ p.dim, p.reset });
+            return;
+        }
+        if (probe) {
+            try out.print("{s}{s:<10} {s:<14} {s:<8} {s:<7} {s:<26} {s}{s}\n", .{
+                p.dim, "UUID", "NAME", "PID", "STATE", "CWD", "LABELS", p.reset,
+            });
+        } else {
+            try out.print("{s}{s:<10} {s:<14} {s:<8} {s:<26} {s}{s}\n", .{
+                p.dim, "UUID", "NAME", "PID", "CWD", "LABELS", p.reset,
+            });
+        }
+        for (records.items) |r| {
+            var cwd_buf: [256]u8 = undefined;
+            const cwd_disp = core.cli_ui.compactHome(r.cwd, &cwd_buf);
+            try out.print("{s}{s:<10}{s} {s}{s:<14}{s} {s}{d:<8}{s} ", .{
+                p.muted, r.uuid[0..8], p.reset,
+                p.bold,  r.name,       p.reset,
+                p.dim,   r.child_pid,  p.reset,
+            });
+            if (probe) {
+                const is_alive = r.alive orelse false;
+                const sc: []const u8 = if (is_alive) p.success else p.err;
+                const st: []const u8 = if (is_alive) "alive" else "dead";
+                try out.print("{s}{s:<7}{s} ", .{ sc, st, p.reset });
+            }
+            try out.print("{s}{s:<26}{s} ", .{ p.accent, cwd_disp, p.reset });
+            if (r.labels.len == 0) {
+                try out.print("{s}-{s}", .{ p.muted, p.reset });
+            } else {
+                for (r.labels, 0..) |lab, i| {
+                    if (i > 0) try out.writeAll(",");
+                    try out.print("{s}{s}{s}", .{ p.special, lab, p.reset });
+                }
+            }
+            try out.writeAll("\n");
+        }
+        return;
+    }
+
+    // Output: one line per pod, stable + grep-friendly (on stdout).
     for (records.items) |r| {
-        print(
+        try out.print(
             "{s} uuid={s} name={s} pid={d} child_pid={d} cwd={s}",
             .{ pod_meta.POD_META_PREFIX, r.uuid[0..], r.name, r.pid, r.child_pid, r.cwd },
         );
 
         if (r.shell.len > 0) {
-            print(" shell={s}", .{r.shell});
+            try out.print(" shell={s}", .{r.shell});
         }
 
-        print(" isolated={d}", .{if (r.isolated) @as(u8, 1) else 0});
+        try out.print(" isolated={d}", .{if (r.isolated) @as(u8, 1) else 0});
 
         if (r.alive) |a| {
-            print(" alive={d}", .{if (a) @as(u8, 1) else 0});
+            try out.print(" alive={d}", .{if (a) @as(u8, 1) else 0});
         }
 
-        print(" labels=", .{});
+        try out.writeAll(" labels=");
         for (r.labels, 0..) |lab, i| {
-            if (i > 0) print(",", .{});
-            print("{s}", .{lab});
+            if (i > 0) try out.writeAll(",");
+            try out.print("{s}", .{lab});
         }
-        print(" created_at={d}\n", .{r.created_at});
+        try out.print(" created_at={d}\n", .{r.created_at});
     }
 }
 

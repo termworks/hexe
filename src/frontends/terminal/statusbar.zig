@@ -458,13 +458,59 @@ pub fn noteHover(state: *State, config: *const core.Config, term_width: u16, ter
 
 /// Ask the painter for a pane or float title. Empty until the first response.
 pub fn titleRuns(state: *const State, title: []const u8, width: u16, is_float: bool, active: bool) []const regions.Run {
+    return titleRunsWithFamily(state, title, width, is_float, active, .{}, "");
+}
+
+/// Ask the painter for a float/pane title, optionally carrying float family
+/// chip metadata (`family`, `family_index`, `border_horizontal`) so the
+/// painter can draw the constant float title alongside highlighted chip pills.
+pub fn titleRunsWithFamily(
+    state: *const State,
+    title: []const u8,
+    width: u16,
+    is_float: bool,
+    active: bool,
+    family: @import("borders.zig").FloatFamilyChips,
+    border_horizontal: []const u8,
+) []const regions.Run {
     const registry = regions.active orelse return &.{};
     const cfg = &state.config.tabs.status;
     const view = if (is_float) cfg.float_title_view else cfg.container_title_view;
-    // Keyed by the title: every float would otherwise share one entry and
-    // overwrite each other's frame.
+
+    var key_buf: [256]u8 = undefined;
+    var extra_buf: [256]u8 = undefined;
+    var key_suffix: []const u8 = title;
+    var extra_json: []const u8 = "";
+
+    if (is_float and family.len >= 2) {
+        var ks = std.io.fixedBufferStream(&key_buf);
+        const kw = ks.writer();
+        kw.print("{s}#f{d}:", .{ title, family.active_index }) catch {};
+        for (family.slice(), 0..) |idx, i| {
+            if (i > 0) kw.writeByte(',') catch break;
+            kw.print("{d}", .{idx}) catch break;
+        }
+        key_suffix = ks.getWritten();
+
+        var es = std.io.fixedBufferStream(&extra_buf);
+        const ew = es.writer();
+        ew.writeAll("\"family\":[") catch {};
+        for (family.slice(), 0..) |idx, i| {
+            if (i > 0) ew.writeByte(',') catch break;
+            ew.print("{d}", .{idx}) catch break;
+        }
+        ew.print("],\"family_index\":{d}", .{family.active_index}) catch {};
+        if (border_horizontal.len > 0) {
+            ew.writeAll(",\"border_horizontal\":") catch {};
+            regions.writeJsonString(ew, border_horizontal) catch {};
+        }
+        extra_json = es.getWritten();
+    }
+
+    // Keyed by the title + family state: every float and chip selection gets
+    // its own entry so stepping between sub-floats repaints immediately.
     var spec = specFor(cfg, view, width, 1);
-    spec.key_suffix = title;
+    spec.key_suffix = key_suffix;
     const snap = registry.snapshot(spec, .{
         .now_ms = @intCast(std.time.milliTimestamp()),
         .home = std.posix.getenv("HOME"),
@@ -472,6 +518,7 @@ pub fn titleRuns(state: *const State, title: []const u8, width: u16, is_float: b
         // The focused float and a background one must be distinguishable by the
         // painter; this used to report is_float, i.e. always true for floats.
         .active = active,
+        .extra_json = extra_json,
     });
     return snap.runs;
 }

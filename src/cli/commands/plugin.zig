@@ -42,20 +42,23 @@ pub fn runList(allocator: std.mem.Allocator, json: bool) !void {
         return;
     }
 
-    try w.writeAll("runtimepath\n");
+    const p = core.cli_ui.Palette.forStdout();
+    try w.print("{s}runtimepath{s}\n", .{ p.bold, p.reset });
     for (roots) |r| {
         // Saying which of them exist turns "my plugin does not load" into one
         // look: the directory it is in is usually not on the path at all.
-        const there = if (std.fs.cwd().statFile(r.path)) |_| " " else |_| "-";
-        try w.print("  {s} {s}\n", .{ there, r.path });
+        const exists = if (std.fs.cwd().statFile(r.path)) |_| true else |_| false;
+        const there: []const u8 = if (exists) " " else "-";
+        const col: []const u8 = if (exists) p.reset else p.dim;
+        try w.print("  {s}{s}{s} {s}{s}{s}\n", .{ p.muted, there, p.reset, col, r.path, p.reset });
     }
 
-    try w.writeAll("\nplugins, in load order\n");
+    try w.print("\n{s}plugins, in load order{s}\n", .{ p.bold, p.reset });
     if (files.len == 0) {
-        try w.writeAll("    none\n");
+        try w.print("    {s}none{s}\n", .{ p.dim, p.reset });
     } else {
-        for (files, 0..) |f, i| try w.print("  {d: >3}. {s}\n", .{ i + 1, f.path });
+        for (files, 0..) |f, i| try w.print("  {s}{d: >3}.{s} {s}\n", .{ p.accent, i + 1, p.reset, f.path });
     }
-    try w.writeAll("\n  a `-` marks a directory that is not there; nothing else is needed to\n" ++
-        "  install a plugin than putting it on this path. `--noplugin` skips them all.\n");
+    try w.print("\n  {s}a `-` marks a directory that is not there; nothing else is needed to\n" ++
+        "  install a plugin than putting it on this path. `--noplugin` skips them all.{s}\n", .{ p.dim, p.reset });
 }

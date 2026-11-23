@@ -2,32 +2,58 @@ const std = @import("std");
 const core = @import("core");
 const ipc = core.ipc;
 const pod_meta = core.pod_meta;
+const cli_ui = core.cli_ui;
 const shared = @import("shared.zig");
-
-const print = std.debug.print;
+const pod_list = @import("pod_list.zig");
+const terminal = @import("terminal");
 
 pub fn runPodKill(allocator: std.mem.Allocator, uuid: []const u8, name: []const u8, signal_name: []const u8, force: bool) !void {
-    const pid = resolvePodPid(allocator, uuid, name) catch |err| {
+    var picked_uuid_buf: [32]u8 = undefined;
+    var picked_name_owned: ?[]u8 = null;
+    defer if (picked_name_owned) |n| allocator.free(n);
+
+    var eff_uuid = uuid;
+    var eff_name = name;
+
+    if (uuid.len == 0 and name.len == 0) {
+        if (std.posix.isatty(std.posix.STDIN_FILENO) and std.posix.isatty(std.posix.STDOUT_FILENO)) {
+            if (try pickPodToKill(allocator, &picked_uuid_buf, &picked_name_owned)) {
+                eff_uuid = picked_uuid_buf[0..];
+                if (picked_name_owned) |pn| eff_name = pn;
+            } else {
+                return;
+            }
+        } else {
+            cli_ui.printErr("must provide --uuid or --name (or run interactively on a TTY)", .{});
+            std.process.exit(1);
+        }
+    }
+
+    const pid = resolvePodPid(allocator, eff_uuid, eff_name) catch |err| {
         if (err == error.InvalidUuid) {
-            print("Error: --uuid must be 32 hex chars\n", .{});
+            cli_ui.printErr("--uuid must be 32 hex chars", .{});
+        } else if (err == error.AmbiguousPodName) {
+            cli_ui.printErr("several pods are called '{s}'; use --uuid", .{eff_name});
+        } else {
+            cli_ui.printErr("failed to resolve pod: {s}", .{@errorName(err)});
         }
         return err;
     };
     if (pid == null) {
-        print("pod not found\n", .{});
+        cli_ui.printErr("pod not found", .{});
+        cli_ui.printErrHint("List running pods with: hexe pod list", .{});
         std.process.exit(1);
     }
 
     const sig = parseSignal(signal_name);
     if (sig == null) {
-        print("Error: invalid --signal\n", .{});
+        cli_ui.printErr("invalid --signal '{s}'", .{signal_name});
         std.process.exit(1);
     }
 
     const rc = std.c.kill(@intCast(pid.?), sig.?);
     if (rc != 0) {
-        // errno not surfaced here in a nice way; keep message simple.
-        print("kill failed\n", .{});
+        cli_ui.printErr("kill failed for pid {d}", .{pid.?});
         std.process.exit(1);
     }
 
@@ -36,6 +62,101 @@ pub fn runPodKill(allocator: std.mem.Allocator, uuid: []const u8, name: []const 
         std.Thread.sleep(50 * std.time.ns_per_ms);
         _ = std.c.kill(@intCast(pid.?), std.c.SIG.KILL);
     }
+
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    const sig_disp: []const u8 = if (signal_name.len > 0) signal_name else "TERM";
+    const label: []const u8 = if (eff_name.len > 0) eff_name else if (eff_uuid.len >= 8) eff_uuid[0..8] else "pod";
+    try out.print("{s}✓{s} Sent {s}{s}{s} to pod {s}{s}{s} {s}(pid={d}){s}\n", .{
+        p.success, p.reset,
+        p.warn,    sig_disp, p.reset,
+        p.bold,    label,    p.reset,
+        p.dim,     pid.?,    p.reset,
+    });
+}
+
+fn pickPodToKill(
+    allocator: std.mem.Allocator,
+    out_uuid: *[32]u8,
+    out_name: *?[]u8,
+) !bool {
+    const dir = try ipc.getSocketDir(allocator);
+    defer allocator.free(dir);
+
+    var records = std.ArrayList(pod_list.PodRecord).empty;
+    defer {
+        for (records.items) |r| pod_list.freeRecord(allocator, r);
+        records.deinit(allocator);
+    }
+    pod_list.scanMetaFiles(allocator, dir, &records) catch {};
+
+    var live = std.ArrayList(pod_list.PodRecord).empty;
+    defer live.deinit(allocator);
+    for (records.items) |rec| {
+        const sock = ipc.getPodSocketPath(allocator, &rec.uuid) catch continue;
+        defer allocator.free(sock);
+        if (ipc.Client.connect(sock)) |conn_val| {
+            var c = conn_val;
+            c.close();
+            try live.append(allocator, rec);
+        } else |_| {}
+    }
+
+    if (live.items.len == 0) {
+        const p = cli_ui.Palette.forStderr();
+        std.debug.print("{s}○{s} No running pods found\n", .{ p.warn, p.reset });
+        return false;
+    }
+
+    var labels = try allocator.alloc([]const u8, live.items.len);
+    var labels_built: usize = 0;
+    defer {
+        for (labels[0..labels_built]) |l| allocator.free(l);
+        allocator.free(labels);
+    }
+
+    var badges = try allocator.alloc([]const u8, live.items.len);
+    var badges_built: usize = 0;
+    defer {
+        for (badges[0..badges_built]) |b| allocator.free(b);
+        allocator.free(badges);
+    }
+
+    var details = try allocator.alloc([]const u8, live.items.len);
+    var details_built: usize = 0;
+    defer {
+        for (details[0..details_built]) |d| allocator.free(d);
+        allocator.free(details);
+    }
+
+    for (live.items, 0..) |rec, i| {
+        labels[i] = try std.fmt.allocPrint(allocator, "{s:<14} [{s}]", .{ rec.name, rec.uuid[0..8] });
+        labels_built = i + 1;
+        badges[i] = try std.fmt.allocPrint(allocator, "pid {d}", .{rec.child_pid});
+        badges_built = i + 1;
+        var home_buf: [256]u8 = undefined;
+        const cwd_disp = cli_ui.compactHome(rec.cwd, &home_buf);
+        details[i] = try std.fmt.allocPrint(allocator, "cwd: {s}{s}{s}", .{
+            cwd_disp,
+            if (rec.shell.len > 0) " · " else "",
+            rec.shell,
+        });
+        details_built = i + 1;
+    }
+
+    const chosen = try terminal.runStandalonePicker(allocator, labels, .{
+        .title = "Kill pod",
+        .badges = badges,
+        .details = details,
+        .hint = "↑↓/jk move · / filter · Enter kill · Esc cancel",
+        .filterable = true,
+    });
+    const idx = chosen orelse return false;
+    out_uuid.* = live.items[idx].uuid;
+    if (live.items[idx].name.len > 0 and !std.mem.eql(u8, live.items[idx].name, "-")) {
+        out_name.* = try allocator.dupe(u8, live.items[idx].name);
+    }
+    return true;
 }
 
 fn parseSignal(name: []const u8) ?c_int {

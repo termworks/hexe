@@ -705,3 +705,139 @@ fn replyKillTarget(self: *Server, fd: posix.fd_t, result: wire.KillTargetResult,
         self.replyOrClose(fd, .kill_target, std.mem.asBytes(&r));
     }
 }
+
+fn replyDetachSession(
+    self: *Server,
+    fd: posix.fd_t,
+    result: wire.DetachSessionResult,
+    name: []const u8,
+    err_msg: []const u8,
+) void {
+    var r = result;
+    r.name_len = @intCast(name.len);
+    r.error_len = @intCast(err_msg.len);
+    if (name.len > 0 or err_msg.len > 0) {
+        var trail_buf: [512]u8 = undefined;
+        const n_len = @min(name.len, trail_buf.len);
+        @memcpy(trail_buf[0..n_len], name[0..n_len]);
+        const e_len = @min(err_msg.len, trail_buf.len - n_len);
+        @memcpy(trail_buf[n_len .. n_len + e_len], err_msg[0..e_len]);
+        r.name_len = @intCast(n_len);
+        r.error_len = @intCast(e_len);
+        self.replyOrCloseWithTrail(fd, .detach_session, std.mem.asBytes(&r), trail_buf[0 .. n_len + e_len]);
+    } else {
+        self.replyOrClose(fd, .detach_session, std.mem.asBytes(&r));
+    }
+}
+
+/// Handle `detach_session` CLI request: cleanly detach an attached session
+/// (by exact name, unique name/UUID prefix, or the sole attached session when
+/// id is empty) and notify its frontend with `.session_detached` so it exits
+/// with a clean detach banner rather than "session stolen".
+pub fn handleDetachSession(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+    defer {
+        self.ses_state.store.noteClosedFd(fd);
+        posix.close(fd);
+    }
+
+    if (payload_len < @sizeOf(wire.DetachSession)) {
+        self.skipBinaryPayload(fd, payload_len, buf);
+        replyDetachSession(self, fd, .{ .success = 0 }, "", "invalid payload");
+        return;
+    }
+    const req = wire.readStructTimeout(wire.DetachSession, fd, server.HANDLER_IO_TIMEOUT_MS) catch {
+        self.ctlStreamDesynced(fd, "mid-message read failed");
+        return;
+    };
+    if (req.id_len > buf.len) {
+        self.skipBinaryPayload(fd, payload_len - @sizeOf(wire.DetachSession), buf);
+        replyDetachSession(self, fd, .{ .success = 0 }, "", "session target too long");
+        return;
+    }
+    if (req.id_len > 0) {
+        wire.readExactTimeout(fd, buf[0..req.id_len], server.HANDLER_IO_TIMEOUT_MS) catch {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
+            return;
+        };
+    }
+    const id = buf[0..req.id_len];
+
+    var matched_idx: ?usize = null;
+    if (id.len == 0) {
+        var attached_count: usize = 0;
+        for (self.ses_state.store.clients.items, 0..) |client, i| {
+            if (!client.keepalive or client.session_id == null) continue;
+            matched_idx = i;
+            attached_count += 1;
+        }
+        if (attached_count == 0) {
+            replyDetachSession(self, fd, .{ .success = 0 }, "", "no attached sessions");
+            return;
+        }
+        if (attached_count > 1) {
+            replyDetachSession(self, fd, .{ .success = 0 }, "", "multiple attached sessions; specify a session name or UUID prefix");
+            return;
+        }
+    } else {
+        // 1) Exact name or UUID prefix via existing helper
+        if (findAttachedSessionTarget(self, id)) |res| switch (res) {
+            .ambiguous => {
+                replyDetachSession(self, fd, .{ .success = 0 }, "", "ambiguous target: multiple attached sessions match");
+                return;
+            },
+            .client_index => |i| matched_idx = i,
+        } else {
+            // 2) Case-insensitive name prefix among attached keepalive clients
+            var count: usize = 0;
+            for (self.ses_state.store.clients.items, 0..) |client, i| {
+                if (!client.keepalive or client.session_id == null) continue;
+                const sname = client.session_name orelse continue;
+                if (sname.len >= id.len and std.ascii.eqlIgnoreCase(sname[0..id.len], id)) {
+                    matched_idx = i;
+                    count += 1;
+                }
+            }
+            if (count > 1) {
+                replyDetachSession(self, fd, .{ .success = 0 }, "", "ambiguous target: multiple attached sessions match");
+                return;
+            }
+        }
+    }
+
+    const idx = matched_idx orelse {
+        replyDetachSession(self, fd, .{ .success = 0 }, "", "no attached session matches");
+        return;
+    };
+
+    const client = &self.ses_state.store.clients.items[idx];
+    const sid = client.session_id orelse {
+        replyDetachSession(self, fd, .{ .success = 0 }, "", "session has no id");
+        return;
+    };
+    const hex_id: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+    const pane_count: u16 = @intCast(@min(client.pane_uuids.items.len, std.math.maxInt(u16)));
+    var name_copy_buf: [128]u8 = undefined;
+    const raw_name = client.session_name orelse "";
+    const name_len = @min(raw_name.len, name_copy_buf.len);
+    @memcpy(name_copy_buf[0..name_len], raw_name[0..name_len]);
+    const name_copy = name_copy_buf[0..name_len];
+
+    if (self.ses_state.isSessionLocked(sid)) {
+        replyDetachSession(self, fd, .{ .success = 0 }, "", "session is busy (another client is attaching)");
+        return;
+    }
+
+    self.purgeClientFdState(client.id);
+    if (!self.ses_state.forceDetachAttachedSessionWithNotify(sid, .session_detached)) {
+        replyDetachSession(self, fd, .{ .success = 0 }, "", "failed to detach session");
+        return;
+    }
+    self.ses_state.markDirty();
+    self.persistNow();
+
+    replyDetachSession(self, fd, .{
+        .success = 1,
+        .session_id = hex_id,
+        .pane_count = pane_count,
+    }, name_copy, "");
+}

@@ -258,9 +258,11 @@ if kid:
           f"and the parent keeps its layout title (got {parent_rec.get('title')!r})")
 
 # --------------------------------------------------------------- phase 2b
-print("\nphase 2b: the family's chips reach the screen")
-check(screen_has("[1]"), "the member on screen is drawn as [1]")
-check(screen_has("<0>"), "and its sibling as <0>")
+print("\nphase 2b: the family keeps the parent title and draws chip sections")
+check(screen_has(" host "), "the parent's title stays on the border while a sub-float is active")
+check(screen_has(" 0 "), "chip 0 reaches the screen")
+check(screen_has(" 1 "), "chip 1 reaches the screen")
+check(not screen_has("[1]") and not screen_has("<0>"), "chips do not draw literal brackets")
 
 # -------------------------------------------------------------------- phase 2c
 print("\nphase 2c: the toggle key hides the whole family, from any member")

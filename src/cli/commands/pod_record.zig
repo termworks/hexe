@@ -5,8 +5,7 @@ const wire = core.wire;
 const pod_protocol = core.pod_protocol;
 const AsciicastWriter = core.recording.asciicast.AsciicastWriter;
 const shared = @import("shared.zig");
-
-const print = std.debug.print;
+const cli_ui = core.cli_ui;
 
 const RecordContext = struct {
     writer: *AsciicastWriter,
@@ -24,7 +23,7 @@ pub fn runPodRecord(
     capture_input: bool,
 ) !void {
     if (out_path.len == 0) {
-        print("Error: --out is required\n", .{});
+        cli_ui.printErr("--out is required", .{});
         std.process.exit(1);
     }
 
@@ -33,7 +32,7 @@ pub fn runPodRecord(
 
     var client = ipc.Client.connect(target_socket) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
-            print("pod is not running\n", .{});
+            cli_ui.printErr("pod is not running", .{});
             std.process.exit(1);
         }
         return err;
@@ -41,7 +40,7 @@ pub fn runPodRecord(
     defer client.close();
 
     wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_OBSERVER) catch |err| {
-        print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("failed to handshake with pod: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     const conn = client.toConnection();
@@ -109,12 +108,12 @@ fn parseEnvU16(name: []const u8, default: u16) u16 {
 fn resolveTargetSocket(allocator: std.mem.Allocator, uuid: []const u8, name: []const u8, socket_path: []const u8) ![]const u8 {
     return shared.resolvePodSocketTarget(allocator, uuid, name, socket_path) catch |err| {
         switch (err) {
-            error.InvalidUuid => print("Error: --uuid must be 32 hex chars\n", .{}),
-            error.MissingTarget => print("Error: must provide --socket, --uuid, or --name\n", .{}),
+            error.InvalidUuid => cli_ui.printErr("--uuid must be 32 hex chars", .{}),
+            error.MissingTarget => cli_ui.printErr("must provide --socket, --uuid, or --name", .{}),
             // Pane names are unique per session, so one name can belong to
             // two panes in two sessions. Picking either could type into, or
             // signal, the wrong one.
-            error.AmbiguousPodName => print("Error: several pods are called that; use --uuid\n", .{}),
+            error.AmbiguousPodName => cli_ui.printErr("several pods are called that; use --uuid", .{}),
             else => {},
         }
         return err;

@@ -18,6 +18,7 @@ pub const config_v2 = @import("config_v2.zig");
 pub const names = @import("names.zig");
 pub const ipc = @import("ipc.zig");
 pub const wire = @import("wire.zig");
+pub const cli_ui = @import("cli_ui.zig");
 pub const style = @import("style.zig");
 pub const segment_render = @import("segment_render.zig");
 pub const palette = @import("palette.zig");
@@ -130,4 +131,5 @@ test {
     _ = @import("recording/asciicast.zig");
     _ = @import("pod_protocol.zig");
     _ = @import("resource_limits.zig");
+    _ = @import("cli_ui.zig");
 }

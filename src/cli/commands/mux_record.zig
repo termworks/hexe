@@ -2,17 +2,16 @@ const std = @import("std");
 const core = @import("core");
 const AsciicastWriter = core.recording.asciicast.AsciicastWriter;
 const tty = @import("tty.zig");
-
-const print = std.debug.print;
+const cli_ui = core.cli_ui;
 const posix = std.posix;
 
 pub fn runMuxRecord(session: []const u8, out_path: []const u8, capture_input: bool) !void {
     if (out_path.len == 0) {
-        print("Error: --out is required for terminal record\n", .{});
+        cli_ui.printErr("--out is required for terminal record", .{});
         std.process.exit(1);
     }
     if (session.len == 0) {
-        print("Error: session name required\n", .{});
+        cli_ui.printErr("session name required", .{});
         std.process.exit(1);
     }
 
@@ -30,7 +29,7 @@ pub fn runMuxRecord(session: []const u8, out_path: []const u8, capture_input: bo
 
     var cmd_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
     const attach_cmd = std.fmt.bufPrint(&cmd_buf, "'{s}' terminal attach {s}", .{ exe, session }) catch {
-        print("Error: attach command too long\n", .{});
+        cli_ui.printErr("attach command too long", .{});
         std.process.exit(1);
     };
 
@@ -51,7 +50,7 @@ pub fn runMuxRecord(session: []const u8, out_path: []const u8, capture_input: bo
     var pty = try core.Pty.spawn(attach_cmd);
     defer pty.close();
     pty.setSize(term_size.cols, term_size.rows, 0, 0) catch |err| {
-        print("Warning: failed to set PTY size: {s}\n", .{@errorName(err)});
+        cli_ui.printWarn("failed to set PTY size: {s}", .{@errorName(err)});
     };
 
     const stdin_is_tty = posix.isatty(posix.STDIN_FILENO);

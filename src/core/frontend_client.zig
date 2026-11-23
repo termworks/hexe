@@ -255,6 +255,7 @@ pub const SesClient = struct {
                 return;
             }
             try wire.readExact(fd, dest);
+            self.offset += dest.len;
             _ = client;
         }
 
@@ -271,6 +272,7 @@ pub const SesClient = struct {
                 return;
             }
             client.skipPayload(fd, @intCast(len));
+            self.offset += len;
         }
 
         pub fn skipRemaining(self: *ControlResponseRead, client: *SesClient, fd: posix.fd_t) void {
@@ -311,6 +313,11 @@ pub const SesClient = struct {
     /// Set when a session_stolen push is consumed by a synchronous reader
     /// instead of the IPC loop; the loop drains it so the steal is never lost.
     pending_session_stolen: bool = false,
+    /// Last server error text returned by `reattachSession` (e.g., ambiguous
+    /// candidate list, prefix_too_short, session_locked), so callers can
+    /// present a real diagnostic instead of "not found".
+    last_reattach_error: [512]u8 = undefined,
+    last_reattach_error_len: usize = 0,
     /// Async pushes (float_request, notify, shell_event, pane_exited, ...)
     /// consumed by a synchronous reader instead of the IPC loop. Dropping
     /// them loses user-visible events — a float_request drop hangs the
@@ -1468,8 +1475,13 @@ pub const SesClient = struct {
         pane_uuids: [][32]u8, // Owned — caller must free
     };
 
+    pub fn lastReattachError(self: *const SesClient) []const u8 {
+        return self.last_reattach_error[0..self.last_reattach_error_len];
+    }
+
     /// Reattach to a detached session.
     pub fn reattachSession(self: *SesClient, session_id: []const u8) !?ReattachResult {
+        self.last_reattach_error_len = 0;
         const fd = self.ctl_fd orelse {
             self.debugLog("reattachSession: not connected (ctl_fd is null)", .{});
             return error.NotConnected;
@@ -1518,23 +1530,29 @@ pub const SesClient = struct {
         const resp_type = read.msgType();
         self.debugLog("reattachSession: final response type={d}", .{hdr.msg_type});
         if (resp_type == .@"error") {
-            // Read the error text: a "session_locked" refusal is TRANSIENT
-            // (another client is between resolve and commit); callers retry
-            // instead of giving up — otherwise two simultaneous attaches
-            // both walked away empty-handed.
+            // Read the error text so callers can distinguish transient lock
+            // contention from non-retryable ambiguity or short prefixes and
+            // surface the daemon's real message to the user.
             var busy = false;
+            var ambiguous = false;
+            var prefix_too_short = false;
             if (read.readStruct(self, fd, wire.Error)) |err_hdr| {
-                var msg_buf: [64]u8 = undefined;
-                const n: usize = @min(err_hdr.msg_len, msg_buf.len);
+                const n: usize = @min(err_hdr.msg_len, self.last_reattach_error.len);
                 if (n > 0) {
-                    if (read.readExact(self, fd, msg_buf[0..n])) {
-                        busy = std.mem.startsWith(u8, msg_buf[0..n], "session_locked");
-                        self.debugLog("reattachSession: server error: {s}", .{msg_buf[0..n]});
+                    if (read.readExact(self, fd, self.last_reattach_error[0..n])) {
+                        self.last_reattach_error_len = n;
+                        const err_text = self.last_reattach_error[0..n];
+                        busy = std.mem.startsWith(u8, err_text, "session_locked");
+                        ambiguous = std.mem.startsWith(u8, err_text, "ambiguous");
+                        prefix_too_short = std.mem.startsWith(u8, err_text, "prefix_too_short");
+                        self.debugLog("reattachSession: server error: {s}", .{err_text});
                     } else |_| {}
                 }
             } else |_| {}
             read.skipRemaining(self, fd);
             if (busy) return error.SessionBusy;
+            if (ambiguous) return error.SessionAmbiguous;
+            if (prefix_too_short) return error.PrefixTooShort;
             return null;
         }
         if (resp_type != .session_reattached) {

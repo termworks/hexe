@@ -622,33 +622,62 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                 .startup_attach_confirm => {
                     // Bare `hexe`, level 1 with a single same-cwd session.
                     const attach = state.popups.getConfirmResult() orelse false;
+                    const cancelled = state.popups.wasConfirmCancelled();
                     state.pending_action = null;
                     state.popups.clearResults();
                     if (attach) {
                         startup_chooser.attachSelected(state, 0);
+                    } else if (cancelled) {
+                        startup_chooser.abortChooser(state);
                     } else {
                         startup_chooser.levelTwo(state);
                     }
                 },
                 .startup_attach_choose => {
-                    // Bare `hexe`, level 1 with several same-cwd sessions.
+                    // Bare `hexe`, level 1 with several sessions.
                     const selected = state.popups.getPickerResult();
+                    const act = state.popups.getPickerAction();
                     state.pending_action = null;
                     state.popups.clearResults();
                     if (selected) |idx| {
                         startup_chooser.attachSelected(state, idx);
+                    } else if (act) |picker_act| {
+                        startup_chooser.handlePickerAction(state, picker_act);
                     } else {
                         startup_chooser.levelTwo(state);
                     }
                 },
+                .attach_choose => {
+                    // Interactive `hexe attach` (no args, `attach .`, or ambiguous prefix).
+                    const selected = state.popups.getPickerResult();
+                    const act = state.popups.getPickerAction();
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    if (selected) |idx| {
+                        startup_chooser.attachSelected(state, idx);
+                    } else if (act) |picker_act| {
+                        startup_chooser.handlePickerAction(state, picker_act);
+                    } else {
+                        startup_chooser.abortChooser(state);
+                    }
+                },
+                .chooser_kill_confirm => {
+                    const confirmed = state.popups.getConfirmResult() orelse false;
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    startup_chooser.confirmKillSelected(state, confirmed);
+                },
                 .startup_layout_confirm => {
                     // Bare `hexe`, level 2: local .hexe.lua.
                     const load = state.popups.getConfirmResult() orelse false;
+                    const cancelled = state.popups.wasConfirmCancelled();
                     state.pending_action = null;
                     state.popups.clearResults();
                     if (load) {
                         replaceFromLocalLayout(state);
                         startup_chooser.finishLayout(state, true);
+                    } else if (cancelled) {
+                        startup_chooser.abortChooser(state);
                     } else {
                         startup_chooser.finishPlain(state);
                     }
@@ -722,6 +751,7 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
 }
 
 fn handleTabLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
+    if (state.view.tab_views.items.len == 0) return false;
     const current_tab = &state.view.tab_views.items[state.activeTabIndex()];
     if (!current_tab.popups.isBlocked()) return false;
     defer freeParsedEventPayload(state, parsed_event);
@@ -1549,12 +1579,41 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     // was pressed even when a binding consumes it.
     loop_input_keys.emitKeyPresses(state, inp);
 
-    const first_parsed = parseEventHead(state, inp);
-    const popup_event: ?vaxis.Event = if (first_parsed) |h| h.event else null;
+    // If any popup level is blocked, dispatch every parsed event in this read
+    // batch through the active popup until either the batch is exhausted or the
+    // popup dismisses. Dispatching only the first event dropped fast/batched
+    // keystrokes (e.g., `/query` typed into a filterable picker).
+    const any_popup_blocked = state.popups.isBlocked() or
+        (state.view.tab_views.items.len > 0 and state.view.tab_views.items[state.activeTabIndex()].popups.isBlocked()) or
+        (if (resolveFocusedPaneForInput(state)) |p| p.popups.isBlocked() else false);
+    if (any_popup_blocked) {
+        var pos: usize = 0;
+        while (pos < inp.len) {
+            const parsed = parseEventHead(state, inp[pos..]) orelse break;
+            pos += parsed.n;
+            const ev = parsed.event;
+            if (handleMuxLevelPopup(state, ev)) {
+                if (!state.popups.isBlocked()) break;
+                continue;
+            }
+            if (handleTabLevelPopup(state, ev)) {
+                if (state.view.tab_views.items.len == 0 or
+                    !state.view.tab_views.items[state.activeTabIndex()].popups.isBlocked()) break;
+                continue;
+            }
+            if (handlePaneLevelPopup(state, ev)) {
+                if (resolveFocusedPaneForInput(state)) |p| {
+                    if (!p.popups.isBlocked()) break;
+                } else break;
+                continue;
+            }
+            freeParsedEventPayload(state, ev);
+            break;
+        }
+        return;
+    }
 
-    if (handleMuxLevelPopup(state, popup_event)) return;
-    if (handleTabLevelPopup(state, popup_event)) return;
-    if (handlePaneLevelPopup(state, popup_event)) return;
+    const first_parsed = parseEventHead(state, inp);
 
     // A message overlay -- a link, a QR, whatever a plugin put up -- is
     // dismissed by the next keypress, which is then swallowed. Anything else

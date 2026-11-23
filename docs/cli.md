@@ -5,9 +5,11 @@ pane, open a float, render a prompt, record a cast. A session is not a black box
 processes with names, and the CLI is how a script talks to them.
 
 ```sh
-hexe                        # bare: attach here, or load .hexe.lua, or start fresh
-hexe terminal new -n work
-hexe ses list --details
+hexe                        # bare: attach here, or pick interactively, or start fresh
+hexe new -n work            # start a new session
+hexe attach                 # interactive session picker (or `hexe attach work`, `hexe attach .`)
+hexe detach                 # cleanly detach current/selected session
+hexe ls --details           # list running sessions and pane trees (stdout)
 hexe terminal send --last --enter "make test"
 ```
 
@@ -17,10 +19,15 @@ hexe terminal send --last --enter "make test"
 
 ## How it works
 
-Eleven top-level commands, each with subcommands, and a short alias for the ones you type often:
+Five ergonomic top-level shortcuts for everyday session management (`attach`/`a`, `detach`/`d`, `new`, `list`/`ls`, `kill`), plus the full layered command groups:
 
 | command | alias | what it is |
 |---|---|---|
+| `attach` | `a` | attach to a session (interactive picker when omitted, `.` for current directory) |
+| `detach` | `d` | cleanly detach an attached session (defaults to `$HEXE_SESSION` or interactive picker) |
+| `new` | | create a new session |
+| `list` | `ls` | list sessions, panes, and roots |
+| `kill` | | kill a session, pane, or float |
 | `terminal` | `mux`, `multiplexer` | the frontend and everything it owns |
 | `session` | `ses` | the session daemon |
 | `layout` | `lay` | project session configs |
@@ -33,8 +40,16 @@ Eleven top-level commands, each with subcommands, and a short alias for the ones
 | `web`, `syslink` | | frontend adapters (probes and serving loops) |
 
 ```sh
+hexe new [-n <name>] [-P <profile>] [-T] [--log <lvl>] [--logfile <path>]
+hexe attach [<name-or-uuid-prefix|.>]   # omit target on a TTY to open the interactive picker
+hexe detach [<name-or-uuid-prefix>]     # cleanly detach current ($HEXE_SESSION) or target session
+hexe ls [--details] [--json] [<dir>]    # alias for `hexe session list` / `hexe terminal list`
+hexe kill <id>                          # a session, a pane, or a float
+
 hexe terminal new [-n <name>] [-I <instance>] [-T] [--log <lvl>] [--logfile <path>]
-hexe terminal attach <name-or-uuid-prefix>
+hexe terminal attach [<name-or-uuid-prefix|.>]
+hexe terminal detach [<name-or-uuid-prefix>]
+hexe terminal list [--details] [--json] [<dir>]
 hexe terminal kill <id>            # a session, a pane, or a float
 hexe terminal float --command <cmd> [--title …] [--size w,h,x,y] [--isolation …] [--result-file …]
 hexe terminal float --sub --command <cmd>            # a sub-float of the calling float
@@ -46,18 +61,19 @@ hexe terminal focus left|right|up|down
 hexe terminal layout save|load|list [<name>]
 hexe terminal record --out <file.cast> [--capture-input]
 
-hexe session list [--details] [--json]      hexe session status
-hexe session kill <uuid>                    hexe session clear [--force]
-hexe session export <uuid>                  hexe session daemon [--foreground]
+hexe session list [--details] [--json] [<dir>]  hexe session status
+hexe session detach [<target>]                  hexe session kill <uuid>
+hexe session clear [--orphans] [--force]        hexe session export <uuid>
+hexe session daemon [--foreground]
 
-hexe layout open <target>[:<tab>]           hexe layout save --scope local|global|both
+hexe layout open <target>[:<tab>]           hexe layout save [--name <name>] --scope local|global|both
 hexe layout list [--json]
 
 hexe pod list [--where <lua>] [--probe] [--alive] [--json]
-hexe pod new [-n <name>] [--shell …] [--cwd …] [--labels a,b] [--alias]
+hexe pod new [-n <name>] [--shell …] [--cwd …] [--labels a,b] [--alias] [--json]
 hexe pod send <text> [--uuid|--name] [--enter] [--ctrl <letter>]
 hexe pod attach [--uuid|--name] [--detach <key>] [--record <f.cast>] [--capture-input]
-hexe pod record --out <file.cast>                     hexe pod kill --uuid <u>|--name <n> [--signal <n|NAME>] [--force]
+hexe pod record --out <file.cast>                     hexe pod kill [--uuid <u>|--name <n>] [--signal <n|NAME>] [--force]
 hexe pod gc [--dry-run]                               hexe pod daemon --uuid <32hex> --socket <path> […]
 
 hexe shell init bash|zsh|fish               hexe shell prompt [--status …] [--right]
@@ -183,11 +199,13 @@ Sessions additionally resolve by **prefix**, over both names and uuids, which is
 | `--log trace\|debug\|info` and `--logfile` / `-L` | on every daemon; the level name is the only accepted spelling |
 | `--help` / `-h` | on every command and subcommand, generated from the flag list |
 
-### Two gotchas worth knowing
+### Output, color, and interactive pickers
 
-`-I` / `--instance` belongs to the **subcommand**, not to `hexe`: `hexe ses list -I dev` is right,
-`hexe -I dev ses list` is an error. And most of these commands print to **stderr**, not stdout, so
-`hexe ses list > file` writes an empty file; use `2>&1` when capturing.
+- **Listings and status output go to stdout** (`hexe --help`, `hexe --version`, `hexe ls`, `hexe ses list`, `hexe pod list|new|gc|share`, `hexe profile list`, `hexe layout list|save`, `hexe terminal info|layout list|save|load`, `hexe palette list|get`, `hexe record start|stop|status`, `hexe config validate|dump|paths`, `hexe plugin list`, `hexe allow`), while errors and warnings go to stderr (`✗ Error:` / `! Warning:` on color TTYs, plain `Error:` / `Warning:` when piped).
+- **ANSI 16-color styling** (plus 24-bit color swatches in `hexe palette get`) is enabled automatically on TTYs and disabled when piped, when `NO_COLOR` is set, or when `TERM=dumb` (use `CLICOLOR_FORCE=1` to force color). Machine-readable pipe contracts are preserved when stdout is not a TTY (`pod list` emits `HEXE_POD uuid=...`, `pod new` emits JSON, `palette list` emits `pane uuid=...`, `palette get` emits `uuid slot idx=#rrggbb`, `record status` emits `0`/`1`).
+- **Grouped `--help` screens**: `hexe --help` groups commands into `Session Shortcuts`, `Core Subsystems`, `Tools & Integration`, and `Adapters` with alias badges and aligned descriptions; every subsystem (`hexe ses`, `hexe pod`, `hexe terminal`, etc.) renders colored subcommand help on empty args or `--help`.
+- **Interactive pickers on a TTY**: omitting a target in `hexe attach`, `hexe pod attach`, `hexe pod kill`, `hexe terminal layout load`, or `hexe detach` (outside a session with multiple attached sessions), or passing an ambiguous prefix to `hexe attach <prefix>`, opens the interactive `vaxis` picker with `/` live filtering, arrow/`j`/`k` navigation, `1-9` quick select, and inline session actions (`a` all/here, `n` new, `x` kill, `r` refresh, `q`/`Esc` cancel). On non-TTY stdin/stdout, commands fail fast with actionable error messages and exit codes.
+- **Profile flags work both at root and on subcommands**: `hexe -P dev ls` and `hexe ls -P dev` both target the `dev` profile.
 
 ## What makes it different
 
@@ -232,7 +250,6 @@ dir=$(hexe terminal float --title picker --size 60,40 \
 - **`hexe session stats` prints nothing** and exits non-zero.
 - **`--json` is not everywhere.** `session list`, `pod list` and `layout list` have it; most others
   print for humans.
-- **Output goes to stderr.** Piping the human-readable listings needs `2>&1`.
 - **`terminal send` is not `expect`.** It writes bytes to a pane; nothing waits for a result.
 - **The web and syslink adapters are not user interfaces.** They are probes and serving loops
   against the same runtime.
@@ -242,6 +259,7 @@ dir=$(hexe terminal float --title picker --size 60,40 \
 | | |
 |---|---|
 | `src/cli/app.zig` | every command, its flags, the alias table, and dispatch |
-| `src/cli/commands/` | one file per command family: `pod_*`, `mux_*`, `ses_*`, `record_ctl`, `com*` |
+| `src/cli/help.zig` | grouped, ANSI-styled `--help` renderer over the yazap command tree |
+| `src/cli/commands/` | one file per command family: `pod_*`, `mux_*`, `ses_*`, `record_ctl`, `com*`, `palette` |
 | `src/cli/main.zig` | the entry point |
 | `src/cli/pop_handlers.zig` | `hexe popup …` |

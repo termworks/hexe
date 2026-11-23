@@ -26,6 +26,8 @@ const ses = @import("ses");
 const pod = @import("pod");
 const shell_hooks = @import("shp");
 const pop_handlers = @import("pop_handlers.zig");
+const help = @import("help.zig");
+const cli_ui = core.cli_ui;
 // The subcommands are their own module so they can be built for size: they run
 // once and exit, where the frontend they sit in front of has to keep up with a
 // pane. See `cold` in build.zig.
@@ -84,13 +86,14 @@ fn setGeneratedTestInstance() void {
     @memcpy(buf[5..13], uuid[0..8]);
     setEnvVar("HEXE_INSTANCE", buf[0..13]);
     setTestOnlyEnv();
-    print("test instance: {s}\n", .{buf[0..13]});
+    const p = cli_ui.Palette.forStderr();
+    print("{s}•{s} test instance: {s}{s}{s}\n", .{ p.accent, p.reset, p.bold, buf[0..13], p.reset });
 }
 
 fn parseOptionalI64(value: ?[]const u8, field_name: []const u8) !i64 {
     if (value) |raw| {
         return std.fmt.parseInt(i64, raw, 10) catch {
-            print("Error: invalid integer for --{s}: {s}\n", .{ field_name, raw });
+            cli_ui.printErr("invalid integer for --{s}: {s}", .{ field_name, raw });
             return error.InvalidArgument;
         };
     }
@@ -103,11 +106,11 @@ fn parseOptionalI64(value: ?[]const u8, field_name: []const u8) !i64 {
 fn parseOptionalTimeoutMs(value: ?[]const u8) !i32 {
     const raw = value orelse return 0;
     const ms = std.fmt.parseInt(i64, raw, 10) catch {
-        print("Error: invalid integer for --timeout: {s}\n", .{raw});
+        cli_ui.printErr("invalid integer for --timeout: {s}", .{raw});
         return error.InvalidArgument;
     };
     if (ms < 0 or ms > std.math.maxInt(i32)) {
-        print("Error: --timeout out of range (0..{d} ms): {s}\n", .{ std.math.maxInt(i32), raw });
+        cli_ui.printErr("--timeout out of range (0..{d} ms): {s}", .{ std.math.maxInt(i32), raw });
         return error.InvalidArgument;
     }
     return @intCast(ms);
@@ -116,7 +119,7 @@ fn parseOptionalTimeoutMs(value: ?[]const u8) !i32 {
 fn parseCliLogLevel(value: ?[]const u8) !?core.logging.Level {
     if (value) |raw| {
         const level = core.logging.parseLevel(raw) orelse {
-            print("Error: invalid --log level '{s}' (use trace|debug|info|warn|err)\n", .{raw});
+            cli_ui.printErr("invalid --log level '{s}' (use trace|debug|info|warn|err)", .{raw});
             return error.InvalidArgument;
         };
         return level;
@@ -125,24 +128,36 @@ fn parseCliLogLevel(value: ?[]const u8) !?core.logging.Level {
 }
 
 fn printFrontendViewSummary(kind: []const u8, view: *const frontend_core.SessionView) void {
-    print("{s} frontend snapshot\n", .{kind});
-    print("  session: {s} name={s}\n", .{ view.session_uuid[0..8], view.session_name });
+    const p = cli_ui.Palette.forStderr();
+    print("{s}{s}{s} frontend snapshot{s}\n", .{ p.bold, p.accent, kind, p.reset });
+    print("  {s}session:{s}   {s}{s}{s} {s}name={s}{s}{s}{s}\n", .{
+        p.dim, p.reset, p.muted, view.session_uuid[0..8], p.reset,
+        p.dim, p.reset, p.bold,  view.session_name,       p.reset,
+    });
     if (view.base_root) |root| {
-        print("  base_root: {s}\n", .{root});
+        print("  {s}base_root:{s} {s}{s}{s}\n", .{ p.dim, p.reset, p.accent, root, p.reset });
     } else {
-        print("  base_root: -\n", .{});
+        print("  {s}base_root:{s} {s}-{s}\n", .{ p.dim, p.reset, p.muted, p.reset });
     }
-    print("  active_tab: {d}\n", .{view.active_tab});
-    print("  tabs: {d}\n", .{view.tabs.items.len});
-    print("  panes: {d}\n", .{view.panes.items.len});
-    print("  floats: {d}\n", .{view.floats.items.len});
+    print("  {s}active_tab:{s} {d}  {s}tabs:{s} {d}  {s}panes:{s} {d}  {s}floats:{s} {d}\n", .{
+        p.dim, p.reset, view.active_tab,
+        p.dim, p.reset, view.tabs.items.len,
+        p.dim, p.reset, view.panes.items.len,
+        p.dim, p.reset, view.floats.items.len,
+    });
     for (view.tabs.items, 0..) |tab, idx| {
-        print("    tab[{d}]: {s} name={s} layout={}\n", .{ idx, tab.uuid[0..8], tab.name, tab.hasLayout() });
+        print("    {s}tab[{d}]:{s} {s}{s}{s} name={s}{s}{s} layout={}\n", .{
+            p.info, idx, p.reset, p.muted, tab.uuid[0..8], p.reset, p.bold, tab.name, p.reset, tab.hasLayout(),
+        });
     }
     for (view.panes.items, 0..) |pane, idx| {
-        print("    pane[{d}]: {s} kind={s} parent_tab={?d} sticky={} pwd={} key={d}\n", .{
+        print("    {s}pane[{d}]:{s} {s}{s}{s} kind={s} parent_tab={?d} sticky={} pwd={} key={d}\n", .{
+            p.success,
             idx,
+            p.reset,
+            p.muted,
             pane.uuid[0..8],
+            p.reset,
             @tagName(pane.kind),
             pane.parent_tab,
             pane.sticky,
@@ -154,7 +169,7 @@ fn printFrontendViewSummary(kind: []const u8, view: *const frontend_core.Session
 
 fn runWebInspectSnapshot(allocator: std.mem.Allocator, snapshot_path: []const u8) !void {
     if (snapshot_path.len == 0) {
-        print("Error: snapshot path is required\n", .{});
+        cli_ui.printErr("snapshot path is required", .{});
         return error.InvalidArgument;
     }
     const json = try std.fs.cwd().readFileAlloc(allocator, snapshot_path, 16 * 1024 * 1024);
@@ -167,16 +182,27 @@ fn runWebInspectSnapshot(allocator: std.mem.Allocator, snapshot_path: []const u8
 }
 
 fn printFrontendProbeSummary(kind: []const u8, caps: frontend_core.HostCapabilities, runtime: *core.FrontendRuntime) void {
-    print("{s} frontend probe\n", .{kind});
-    print("  session: {s} name={s}\n", .{ runtime.sessionUuid()[0..8], runtime.sessionName() });
-    print("  base_root: {s}\n", .{runtime.baseRoot()});
-    print("  capabilities:\n", .{});
-    print("    cell_render: {}\n", .{caps.cell_render});
-    print("    pixel_render: {}\n", .{caps.pixel_render});
-    print("    mouse: {}\n", .{caps.mouse});
-    print("    clipboard: {}\n", .{caps.clipboard});
-    print("    reconnect: {}\n", .{caps.reconnect});
-    print("    remote_transport: {}\n", .{caps.remote_transport});
+    const p = cli_ui.Palette.forStderr();
+    print("{s}{s}{s} frontend probe{s}\n", .{ p.bold, p.accent, kind, p.reset });
+    print("  {s}session:{s}   {s}{s}{s} {s}name={s}{s}{s}{s}\n", .{
+        p.dim, p.reset, p.muted, runtime.sessionUuid()[0..8], p.reset,
+        p.dim, p.reset, p.bold,  runtime.sessionName(),       p.reset,
+    });
+    print("  {s}base_root:{s} {s}{s}{s}\n", .{ p.dim, p.reset, p.accent, runtime.baseRoot(), p.reset });
+    print("  {s}capabilities:{s}\n", .{ p.dim, p.reset });
+    const CapRow = struct { name: []const u8, val: bool };
+    const rows = [_]CapRow{
+        .{ .name = "cell_render", .val = caps.cell_render },
+        .{ .name = "pixel_render", .val = caps.pixel_render },
+        .{ .name = "mouse", .val = caps.mouse },
+        .{ .name = "clipboard", .val = caps.clipboard },
+        .{ .name = "reconnect", .val = caps.reconnect },
+        .{ .name = "remote_transport", .val = caps.remote_transport },
+    };
+    for (rows) |row| {
+        const col: []const u8 = if (row.val) p.success else p.muted;
+        print("    {s}{s}:{s} {s}{}{s}\n", .{ p.dim, row.name, p.reset, col, row.val, p.reset });
+    }
 }
 
 fn runFrontendServe(
@@ -274,7 +300,7 @@ fn runWebServe(allocator: std.mem.Allocator, socket_path: []const u8, no_autosta
 
 fn runSyslinkInspectSnapshot(allocator: std.mem.Allocator, snapshot_path: []const u8) !void {
     if (snapshot_path.len == 0) {
-        print("Error: snapshot path is required\n", .{});
+        cli_ui.printErr("snapshot path is required", .{});
         return error.InvalidArgument;
     }
     const json = try std.fs.cwd().readFileAlloc(allocator, snapshot_path, 16 * 1024 * 1024);
@@ -351,11 +377,11 @@ fn parseChipArg(value: ?[]const u8) !?u8 {
     const raw = value orelse return null;
     if (raw.len == 0) return null;
     const n = std.fmt.parseInt(u8, raw, 10) catch {
-        print("Error: --chip wants a chip number from the title row, not '{s}'\n", .{raw});
+        cli_ui.printErr("--chip wants a chip number from the title row, not '{s}'", .{raw});
         return error.InvalidArgument;
     };
     if (n > 9) {
-        print("Error: --chip {d} is out of range; a family holds chips 0 to 9\n", .{n});
+        cli_ui.printErr("--chip {d} is out of range; a family holds chips 0 to 9", .{n});
         return error.InvalidArgument;
     }
     return n;
@@ -367,11 +393,11 @@ fn parseCountArg(value: ?[]const u8, field: []const u8) !u32 {
     const raw = value orelse return 0;
     if (raw.len == 0) return 0;
     const n = std.fmt.parseInt(u32, raw, 10) catch {
-        print("Error: --{s} wants a positive whole number, not '{s}'\n", .{ field, raw });
+        cli_ui.printErr("--{s} wants a positive whole number, not '{s}'", .{ field, raw });
         return error.InvalidArgument;
     };
     if (n == 0) {
-        print("Error: --{s} must be at least 1\n", .{field});
+        cli_ui.printErr("--{s} must be at least 1", .{field});
         return error.InvalidArgument;
     }
     return n;
@@ -397,6 +423,9 @@ fn profileArg(m: anytype) []const u8 {
 }
 
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
+    if (std.mem.eql(u8, command, "a")) return "attach";
+    if (std.mem.eql(u8, command, "d")) return "detach";
+    if (std.mem.eql(u8, command, "ls")) return "list";
     if (std.mem.eql(u8, command, "instance")) return "profile";
     if (std.mem.eql(u8, command, "ses")) return "session";
     if (std.mem.eql(u8, command, "lay")) return "layout";
@@ -430,7 +459,11 @@ fn ensureArgDescriptions(command: *yazap.Command) void {
 /// just installed" is a question that needs an answer a script can read.
 fn printVersion() !void {
     var out = std.fs.File.stdout().deprecatedWriter();
-    try out.print("hexe {s}\n", .{core.build_options.version});
+    const p = cli_ui.Palette.forStdout();
+    try out.print("{s}{s}hexe{s} {s}{s}{s}\n", .{
+        p.bold, p.accent,                  p.reset,
+        p.bold, core.build_options.version, p.reset,
+    });
 }
 
 pub fn main() !void {
@@ -473,47 +506,90 @@ pub fn main() !void {
     var record_cmd = app.createCommand("record", "Recording lifecycle control");
     record_cmd.setProperty(.help_on_empty_args);
 
+    // Top-level ergonomic session shortcuts
+    var top_attach = app.createCommand("attach", "Attach to a session (alias: a; omit target for interactive picker)");
+    try top_attach.addArg(Arg.positional("name", "Session name, UUID prefix, or '.' for this directory (omit for picker)", null));
+    try top_attach.addArg(Arg.singleValueOption("log", null, "Log level (trace|debug|info|warn|err)"));
+    try top_attach.addArg(Arg.singleValueOption("logfile", 'L', "Write debug logs to file"));
+    try top_attach.addArg(Arg.singleValueOption("ses-socket", null, "Connect to a specific SES daemon socket path"));
+    try top_attach.addArg(Arg.booleanOption("no-autostart-ses", null, "Fail instead of auto-starting the SES daemon"));
+    try addProfileArgs(&top_attach);
+    try top_attach.addArg(Arg.singleValueOption("remote", null, "Connect to remote host[:port] over liblink"));
+    try top_attach.addArg(Arg.singleValueOption("user", 'u', "Remote SSH user (default: $USER)"));
+    try top_attach.addArg(Arg.singleValueOption("identity", 'i', "SSH private key path (default: ~/.ssh/id_ed25519)"));
+
+    var top_detach = app.createCommand("detach", "Detach an attached session (alias: d; defaults to current or picker)");
+    try top_detach.addArg(Arg.positional("target", "Session name or UUID prefix (omit for current/picker)", null));
+    try addProfileArgs(&top_detach);
+
+    var top_new = app.createCommand("new", "Create a new terminal session");
+    try top_new.addArg(Arg.singleValueOption("name", 'n', "Custom session name (default: random name)"));
+    try top_new.addArg(Arg.singleValueOption("log", null, "Log level (trace|debug|info|warn|err)"));
+    try top_new.addArg(Arg.singleValueOption("logfile", 'L', "Write debug logs to file"));
+    try top_new.addArg(Arg.singleValueOption("ses-socket", null, "Connect to a specific SES daemon socket path"));
+    try top_new.addArg(Arg.booleanOption("no-autostart-ses", null, "Fail instead of auto-starting the SES daemon"));
+    try addProfileArgs(&top_new);
+    try top_new.addArg(Arg.booleanOption("test-only", 'T', "Run inside an isolated ephemeral test instance"));
+    try top_new.addArg(Arg.singleValueOption("remote", null, "Connect to remote host[:port] over liblink"));
+    try top_new.addArg(Arg.singleValueOption("user", 'u', "Remote SSH user (default: $USER)"));
+    try top_new.addArg(Arg.singleValueOption("identity", 'i', "SSH private key path (default: ~/.ssh/id_ed25519)"));
+
+    var top_list = app.createCommand("list", "List sessions and panes (alias: ls)");
+    try top_list.addArg(Arg.positional("dir", "Filter to sessions rooted at this directory (e.g. '.')", null));
+    try top_list.addArg(Arg.booleanOption("details", 'd', "Show tab, split, and float tree details"));
+    try addProfileArgs(&top_list);
+    try top_list.addArg(Arg.booleanOption("json", 'j', "Emit machine-readable JSON"));
+
+    var top_kill = app.createCommand("kill", "Kill a session (attached or detached) or a single pane/float");
+    try top_kill.addArg(Arg.positional("id", "Session name, pane name, or UUID prefix", null));
+    try addProfileArgs(&top_kill);
+
     // SES subcommands
     var ses_daemon = app.createCommand("daemon", "Start the session daemon");
-    try ses_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
-    try ses_daemon.addArg(Arg.singleValueOption("log", null, null));
-    try ses_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try ses_daemon.addArg(Arg.booleanOption("foreground", 'f', "Stay in foreground instead of daemonizing"));
+    try ses_daemon.addArg(Arg.singleValueOption("log", null, "Log level (trace|debug|info|warn|err)"));
+    try ses_daemon.addArg(Arg.singleValueOption("logfile", 'L', "Write daemon logs to file"));
     try addProfileArgs(&ses_daemon);
-    try ses_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
+    try ses_daemon.addArg(Arg.booleanOption("test-only", 'T', "Mark daemon as ephemeral test instance"));
 
-    var ses_status_cmd = app.createCommand("status", "Show daemon info");
+    var ses_status_cmd = app.createCommand("status", "Show daemon status and socket path");
     try addProfileArgs(&ses_status_cmd);
 
     var ses_list = app.createCommand("list", "List sessions and panes (optionally filtered to a directory)");
-    try ses_list.addArg(Arg.positional("dir", null, null));
-    try ses_list.addArg(Arg.booleanOption("details", 'd', null));
+    try ses_list.addArg(Arg.positional("dir", "Filter to sessions rooted at this directory (e.g. '.')", null));
+    try ses_list.addArg(Arg.booleanOption("details", 'd', "Show tab, split, and float tree details"));
     try addProfileArgs(&ses_list);
-    try ses_list.addArg(Arg.booleanOption("json", 'j', null));
+    try ses_list.addArg(Arg.booleanOption("json", 'j', "Emit machine-readable JSON"));
+
+    var ses_detach = app.createCommand("detach", "Detach an attached session");
+    try ses_detach.addArg(Arg.positional("target", "Session name or UUID prefix (omit for current/picker)", null));
+    try addProfileArgs(&ses_detach);
 
     var ses_kill = app.createCommand("kill", "Kill a detached session");
-    try ses_kill.addArg(Arg.positional("target", null, null));
+    try ses_kill.addArg(Arg.positional("target", "Session name or UUID prefix", null));
     try addProfileArgs(&ses_kill);
 
     var ses_clear = app.createCommand("clear", "Kill all detached sessions (--orphans: orphaned/sticky panes instead)");
     try addProfileArgs(&ses_clear);
-    try ses_clear.addArg(Arg.booleanOption("force", 'f', null));
-    try ses_clear.addArg(Arg.booleanOption("orphans", null, null));
+    try ses_clear.addArg(Arg.booleanOption("force", 'f', "Skip confirmation prompt (required when non-interactive)"));
+    try ses_clear.addArg(Arg.booleanOption("orphans", null, "Kill orphaned and sticky panes instead of detached sessions"));
 
     var ses_export_cmd = app.createCommand("export", "Export detached session to JSON");
-    try ses_export_cmd.addArg(Arg.positional("session", null, null));
-    try ses_export_cmd.addArg(Arg.singleValueOption("output", 'o', null));
+    try ses_export_cmd.addArg(Arg.positional("session", "Session name or UUID prefix", null));
+    try ses_export_cmd.addArg(Arg.singleValueOption("output", 'o', "Write JSON output to file instead of stdout"));
     try addProfileArgs(&ses_export_cmd);
 
     var ses_stats_cmd = app.createCommand("stats", "Show resource usage statistics");
     try addProfileArgs(&ses_stats_cmd);
 
     var ses_pipe_cmd = app.createCommand("pipe", "Internal SES byte-stream bridge");
-    try ses_pipe_cmd.addArg(Arg.singleValueOption("ses-socket", null, null));
+    try ses_pipe_cmd.addArg(Arg.singleValueOption("ses-socket", null, "Path to SES socket"));
 
     try ses_cmd.addSubcommands(&[_]yazap.Command{
         ses_daemon,
         ses_status_cmd,
         ses_list,
+        ses_detach,
         ses_kill,
         ses_clear,
         ses_export_cmd,
@@ -522,90 +598,92 @@ pub fn main() !void {
     });
 
     var layout_list = app.createCommand("list", "List saved session layouts");
-    try layout_list.addArg(Arg.booleanOption("json", 'j', null));
+    try layout_list.addArg(Arg.booleanOption("json", 'j', "Emit machine-readable JSON"));
 
     var layout_open = app.createCommand("open", "Open a saved session layout");
-    try layout_open.addArg(Arg.positional("target", null, null));
-    try layout_open.addArg(Arg.singleValueOption("log", null, null));
-    try layout_open.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try layout_open.addArg(Arg.positional("target", "Directory, .lua file, or registered layout name (optional :tab)", null));
+    try layout_open.addArg(Arg.singleValueOption("log", null, "Log level (trace|debug|info|warn|err)"));
+    try layout_open.addArg(Arg.singleValueOption("logfile", 'L', "Write debug logs to file"));
     try addProfileArgs(&layout_open);
 
     var layout_save = app.createCommand("save", "Save current session as .hexe.lua");
     try addProfileArgs(&layout_save);
-    try layout_save.addArg(Arg.singleValueOption("scope", null, null));
+    try layout_save.addArg(Arg.singleValueOption("name", 'n', "Layout name (skips interactive prompt)"));
+    try layout_save.addArg(Arg.singleValueOption("scope", null, "Where to save: local, global, or both (default: both)"));
 
     try layout_cmd.addSubcommands(&[_]yazap.Command{ layout_list, layout_open, layout_save });
 
     // POD subcommands
     var pod_daemon = app.createCommand("daemon", "Start a per-pane pod daemon");
-    try pod_daemon.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try pod_daemon.addArg(Arg.singleValueOption("name", 'n', null));
-    try pod_daemon.addArg(Arg.singleValueOption("socket", 's', null));
-    try pod_daemon.addArg(Arg.singleValueOption("shell", 'S', null));
-    try pod_daemon.addArg(Arg.singleValueOption("cwd", 'C', null));
-    try pod_daemon.addArg(Arg.singleValueOption("labels", null, null));
-    try pod_daemon.addArg(Arg.booleanOption("write-meta", null, null));
-    try pod_daemon.addArg(Arg.booleanOption("no-write-meta", null, null));
-    try pod_daemon.addArg(Arg.booleanOption("write-alias", null, null));
-    try pod_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
-    try pod_daemon.addArg(Arg.singleValueOption("log", null, null));
-    try pod_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try pod_daemon.addArg(Arg.singleValueOption("uuid", 'u', "32-char hex pod UUID"));
+    try pod_daemon.addArg(Arg.singleValueOption("name", 'n', "Human-readable pod name"));
+    try pod_daemon.addArg(Arg.singleValueOption("socket", 's', "Unix socket path to listen on"));
+    try pod_daemon.addArg(Arg.singleValueOption("shell", 'S', "Shell executable to spawn"));
+    try pod_daemon.addArg(Arg.singleValueOption("cwd", 'C', "Initial working directory"));
+    try pod_daemon.addArg(Arg.singleValueOption("labels", null, "Comma-separated metadata labels"));
+    try pod_daemon.addArg(Arg.booleanOption("write-meta", null, "Write pod-*.meta discovery file"));
+    try pod_daemon.addArg(Arg.booleanOption("no-write-meta", null, "Do not write pod-*.meta discovery file"));
+    try pod_daemon.addArg(Arg.booleanOption("write-alias", null, "Create pod@<name>.sock alias symlink"));
+    try pod_daemon.addArg(Arg.booleanOption("foreground", 'f', "Stay in foreground instead of daemonizing"));
+    try pod_daemon.addArg(Arg.singleValueOption("log", null, "Log level (trace|debug|info|warn|err)"));
+    try pod_daemon.addArg(Arg.singleValueOption("logfile", 'L', "Write daemon logs to file"));
     try addProfileArgs(&pod_daemon);
-    try pod_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
+    try pod_daemon.addArg(Arg.booleanOption("test-only", 'T', "Mark pod as ephemeral test instance"));
 
     var pod_list = app.createCommand("list", "List discoverable pods (from .meta)");
-    try pod_list.addArg(Arg.singleValueOption("where", null, null));
-    try pod_list.addArg(Arg.booleanOption("probe", null, null));
-    try pod_list.addArg(Arg.booleanOption("alive", null, null));
-    try pod_list.addArg(Arg.booleanOption("json", 'j', null));
+    try pod_list.addArg(Arg.singleValueOption("where", null, "Lua predicate body filtering `pod` rows"));
+    try pod_list.addArg(Arg.booleanOption("probe", null, "Probe each pod socket to verify liveness"));
+    try pod_list.addArg(Arg.booleanOption("alive", null, "Show only pods responding to socket probe"));
+    try pod_list.addArg(Arg.booleanOption("json", 'j', "Emit machine-readable JSON"));
 
     var pod_new = app.createCommand("new", "Create a standalone pod (spawns pod daemon)");
-    try pod_new.addArg(Arg.singleValueOption("name", 'n', null));
-    try pod_new.addArg(Arg.singleValueOption("shell", 'S', null));
-    try pod_new.addArg(Arg.singleValueOption("cwd", 'C', null));
-    try pod_new.addArg(Arg.singleValueOption("labels", null, null));
-    try pod_new.addArg(Arg.booleanOption("alias", null, null));
-    try pod_new.addArg(Arg.singleValueOption("log", null, null));
-    try pod_new.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try pod_new.addArg(Arg.singleValueOption("name", 'n', "Pod name"));
+    try pod_new.addArg(Arg.singleValueOption("shell", 'S', "Shell executable to spawn"));
+    try pod_new.addArg(Arg.singleValueOption("cwd", 'C', "Initial working directory"));
+    try pod_new.addArg(Arg.singleValueOption("labels", null, "Comma-separated metadata labels"));
+    try pod_new.addArg(Arg.booleanOption("alias", null, "Create pod@<name>.sock symlink"));
+    try pod_new.addArg(Arg.singleValueOption("log", null, "Log level (trace|debug|info|warn|err)"));
+    try pod_new.addArg(Arg.singleValueOption("logfile", 'L', "Write daemon logs to file"));
     try addProfileArgs(&pod_new);
-    try pod_new.addArg(Arg.booleanOption("test-only", 'T', null));
+    try pod_new.addArg(Arg.booleanOption("test-only", 'T', "Mark pod as ephemeral test instance"));
+    try pod_new.addArg(Arg.booleanOption("json", 'j', "Emit machine-readable JSON"));
 
     var pod_send = app.createCommand("send", "Send input to a pod (by uuid/name/socket)");
-    try pod_send.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try pod_send.addArg(Arg.singleValueOption("name", 'n', null));
-    try pod_send.addArg(Arg.singleValueOption("socket", 's', null));
-    try pod_send.addArg(Arg.booleanOption("enter", 'e', null));
-    try pod_send.addArg(Arg.singleValueOption("ctrl", 'C', null));
-    try pod_send.addArg(Arg.positional("text", null, null));
+    try pod_send.addArg(Arg.singleValueOption("uuid", 'u', "Target pod 32-char hex UUID"));
+    try pod_send.addArg(Arg.singleValueOption("name", 'n', "Target pod name"));
+    try pod_send.addArg(Arg.singleValueOption("socket", 's', "Target pod socket path"));
+    try pod_send.addArg(Arg.booleanOption("enter", 'e', "Append newline after input"));
+    try pod_send.addArg(Arg.singleValueOption("ctrl", 'C', "Send Ctrl+<letter> control byte"));
+    try pod_send.addArg(Arg.positional("text", "Text bytes to write to the pod", null));
 
-    var pod_attach = app.createCommand("attach", "Attach to a pod (raw tty)");
-    try pod_attach.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try pod_attach.addArg(Arg.singleValueOption("name", 'n', null));
-    try pod_attach.addArg(Arg.singleValueOption("socket", 's', null));
-    try pod_attach.addArg(Arg.singleValueOption("detach", null, null));
-    try pod_attach.addArg(Arg.singleValueOption("record", null, null));
-    try pod_attach.addArg(Arg.booleanOption("capture-input", null, null));
+    var pod_attach = app.createCommand("attach", "Attach to a pod (raw tty; omit target for interactive picker)");
+    try pod_attach.addArg(Arg.singleValueOption("uuid", 'u', "Target pod 32-char hex UUID"));
+    try pod_attach.addArg(Arg.singleValueOption("name", 'n', "Target pod name"));
+    try pod_attach.addArg(Arg.singleValueOption("socket", 's', "Target pod socket path"));
+    try pod_attach.addArg(Arg.singleValueOption("detach", null, "Detach prefix key letter for Ctrl+<key>, d (default: b)"));
+    try pod_attach.addArg(Arg.singleValueOption("record", null, "Record session to asciicast file"));
+    try pod_attach.addArg(Arg.booleanOption("capture-input", null, "Include input events in recording"));
 
     var pod_record = app.createCommand("record", "Attach to a pod and record asciicast");
-    try pod_record.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try pod_record.addArg(Arg.singleValueOption("name", 'n', null));
-    try pod_record.addArg(Arg.singleValueOption("socket", 's', null));
-    try pod_record.addArg(Arg.singleValueOption("out", 'o', null));
-    try pod_record.addArg(Arg.booleanOption("capture-input", null, null));
+    try pod_record.addArg(Arg.singleValueOption("uuid", 'u', "Target pod 32-char hex UUID"));
+    try pod_record.addArg(Arg.singleValueOption("name", 'n', "Target pod name"));
+    try pod_record.addArg(Arg.singleValueOption("socket", 's', "Target pod socket path"));
+    try pod_record.addArg(Arg.singleValueOption("out", 'o', "Output asciicast (.cast) file path"));
+    try pod_record.addArg(Arg.booleanOption("capture-input", null, "Include input events in recording"));
 
     var pod_kill = app.createCommand("kill", "Kill a pod by uuid/name");
-    try pod_kill.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try pod_kill.addArg(Arg.singleValueOption("name", 'n', null));
-    try pod_kill.addArg(Arg.singleValueOption("signal", 's', null));
-    try pod_kill.addArg(Arg.booleanOption("force", 'f', null));
+    try pod_kill.addArg(Arg.singleValueOption("uuid", 'u', "Target pod 32-char hex UUID"));
+    try pod_kill.addArg(Arg.singleValueOption("name", 'n', "Target pod name"));
+    try pod_kill.addArg(Arg.singleValueOption("signal", 's', "Signal name or number (default: TERM)"));
+    try pod_kill.addArg(Arg.booleanOption("force", 'f', "Follow with SIGKILL after 50ms"));
 
     var pod_share = app.createCommand("share", "Show or cut the observers watching a pane");
-    try pod_share.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try pod_share.addArg(Arg.singleValueOption("name", 'n', null));
-    try pod_share.addArg(Arg.singleValueOption("socket", 's', null));
-    try pod_share.addArg(Arg.booleanOption("on", null, null));
-    try pod_share.addArg(Arg.booleanOption("off", null, null));
-    try pod_share.addArg(Arg.booleanOption("json", null, null));
+    try pod_share.addArg(Arg.singleValueOption("uuid", 'u', "Target pod 32-char hex UUID"));
+    try pod_share.addArg(Arg.singleValueOption("name", 'n', "Target pod name"));
+    try pod_share.addArg(Arg.singleValueOption("socket", 's', "Target pod socket path"));
+    try pod_share.addArg(Arg.booleanOption("on", null, "Allow observers on this pod"));
+    try pod_share.addArg(Arg.booleanOption("off", null, "Disconnect and block observers on this pod"));
+    try pod_share.addArg(Arg.booleanOption("json", null, "Emit machine-readable JSON"));
 
     // hexe's own subcommand, not a plugin's: nothing a plugin declares is
     // reachable from here.
@@ -615,176 +693,186 @@ pub fn main() !void {
 
     var plugin_cmd = app.createCommand("plugin", "What is on the runtimepath, and what it would run");
     var plugin_list = app.createCommand("list", "The path, and the plugins on it, in load order");
-    try plugin_list.addArg(Arg.booleanOption("json", null, null));
+    try plugin_list.addArg(Arg.booleanOption("json", null, "Emit machine-readable JSON"));
     try plugin_cmd.addSubcommands(&[_]yazap.Command{plugin_list});
 
     var pod_gc = app.createCommand("gc", "Garbage-collect stale pod metadata");
-    try pod_gc.addArg(Arg.booleanOption("dry-run", 'n', null));
+    try pod_gc.addArg(Arg.booleanOption("dry-run", 'n', "Show stale files without deleting them"));
 
     try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_record, pod_kill, pod_share, pod_gc });
 
     // MUX subcommands
     var mux_new = app.createCommand("new", "Create new terminal session");
-    try mux_new.addArg(Arg.singleValueOption("name", 'n', null));
-    try mux_new.addArg(Arg.singleValueOption("log", null, null));
-    try mux_new.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try mux_new.addArg(Arg.singleValueOption("ses-socket", null, null));
-    try mux_new.addArg(Arg.booleanOption("no-autostart-ses", null, null));
+    try mux_new.addArg(Arg.singleValueOption("name", 'n', "Custom session name (default: random name)"));
+    try mux_new.addArg(Arg.singleValueOption("log", null, "Log level (trace|debug|info|warn|err)"));
+    try mux_new.addArg(Arg.singleValueOption("logfile", 'L', "Write debug logs to file"));
+    try mux_new.addArg(Arg.singleValueOption("ses-socket", null, "Connect to a specific SES daemon socket path"));
+    try mux_new.addArg(Arg.booleanOption("no-autostart-ses", null, "Fail instead of auto-starting the SES daemon"));
     try addProfileArgs(&mux_new);
-    try mux_new.addArg(Arg.booleanOption("test-only", 'T', null));
-    try mux_new.addArg(Arg.singleValueOption("remote", null, null));
-    try mux_new.addArg(Arg.singleValueOption("user", 'u', null));
-    try mux_new.addArg(Arg.singleValueOption("identity", 'i', null));
+    try mux_new.addArg(Arg.booleanOption("test-only", 'T', "Run inside an isolated ephemeral test instance"));
+    try mux_new.addArg(Arg.singleValueOption("remote", null, "Connect to remote host[:port] over liblink"));
+    try mux_new.addArg(Arg.singleValueOption("user", 'u', "Remote SSH user (default: $USER)"));
+    try mux_new.addArg(Arg.singleValueOption("identity", 'i', "SSH private key path (default: ~/.ssh/id_ed25519)"));
 
-    var mux_attach = app.createCommand("attach", "Attach to existing session");
-    try mux_attach.addArg(Arg.positional("name", null, null));
-    try mux_attach.addArg(Arg.singleValueOption("log", null, null));
-    try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try mux_attach.addArg(Arg.singleValueOption("ses-socket", null, null));
-    try mux_attach.addArg(Arg.booleanOption("no-autostart-ses", null, null));
+    var mux_attach = app.createCommand("attach", "Attach to existing session (omit name for interactive picker)");
+    try mux_attach.addArg(Arg.positional("name", "Session name, UUID prefix, or '.' for this directory (omit for picker)", null));
+    try mux_attach.addArg(Arg.singleValueOption("log", null, "Log level (trace|debug|info|warn|err)"));
+    try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', "Write debug logs to file"));
+    try mux_attach.addArg(Arg.singleValueOption("ses-socket", null, "Connect to a specific SES daemon socket path"));
+    try mux_attach.addArg(Arg.booleanOption("no-autostart-ses", null, "Fail instead of auto-starting the SES daemon"));
     try addProfileArgs(&mux_attach);
-    try mux_attach.addArg(Arg.singleValueOption("remote", null, null));
-    try mux_attach.addArg(Arg.singleValueOption("user", 'u', null));
-    try mux_attach.addArg(Arg.singleValueOption("identity", 'i', null));
+    try mux_attach.addArg(Arg.singleValueOption("remote", null, "Connect to remote host[:port] over liblink"));
+    try mux_attach.addArg(Arg.singleValueOption("user", 'u', "Remote SSH user (default: $USER)"));
+    try mux_attach.addArg(Arg.singleValueOption("identity", 'i', "SSH private key path (default: ~/.ssh/id_ed25519)"));
+
+    var mux_detach = app.createCommand("detach", "Detach an attached session (defaults to current or picker)");
+    try mux_detach.addArg(Arg.positional("target", "Session name or UUID prefix (omit for current/picker)", null));
+    try addProfileArgs(&mux_detach);
+
+    var mux_list = app.createCommand("list", "List sessions and panes (alias of session list)");
+    try mux_list.addArg(Arg.positional("dir", "Filter to sessions rooted at this directory (e.g. '.')", null));
+    try mux_list.addArg(Arg.booleanOption("details", 'd', "Show tab, split, and float tree details"));
+    try addProfileArgs(&mux_list);
+    try mux_list.addArg(Arg.booleanOption("json", 'j', "Emit machine-readable JSON"));
 
     var mux_kill = app.createCommand("kill", "Kill a session (attached or detached) or a single pane/float by name or uuid prefix");
-    try mux_kill.addArg(Arg.positional("id", null, null));
+    try mux_kill.addArg(Arg.positional("id", "Session name, pane name, or UUID prefix", null));
     try addProfileArgs(&mux_kill);
 
     var mux_close = app.createCommand("close", "Alias of kill");
-    try mux_close.addArg(Arg.positional("id", null, null));
+    try mux_close.addArg(Arg.positional("id", "Session name, pane name, or UUID prefix", null));
     try addProfileArgs(&mux_close);
 
     var mux_record = app.createCommand("record", "Attach to a session and record it as asciicast");
-    try mux_record.addArg(Arg.positional("session", null, null));
-    try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
-    try mux_record.addArg(Arg.booleanOption("capture-input", null, null));
+    try mux_record.addArg(Arg.positional("session", "Session name or UUID prefix", null));
+    try mux_record.addArg(Arg.singleValueOption("out", 'o', "Output asciicast (.cast) file path"));
+    try mux_record.addArg(Arg.booleanOption("capture-input", null, "Include input events in recording"));
     try addProfileArgs(&mux_record);
 
     var mux_float = app.createCommand("float", "Spawn a transient float pane");
-    try mux_float.addArg(Arg.singleValueOption("command", 'c', null));
-    try mux_float.addArg(Arg.singleValueOption("title", null, null));
-    try mux_float.addArg(Arg.singleValueOption("cwd", null, null));
-    try mux_float.addArg(Arg.singleValueOption("result-file", null, null));
-    try mux_float.addArg(Arg.booleanOption("pass-env", null, null));
-    try mux_float.addArg(Arg.singleValueOption("extra-env", null, null));
-    try mux_float.addArg(Arg.booleanOption("isolated", null, null));
-    try mux_float.addArg(Arg.singleValueOption("isolation", null, null));
-    try mux_float.addArg(Arg.singleValueOption("size", null, null));
-    try mux_float.addArg(Arg.singleValueOption("key", null, null));
+    try mux_float.addArg(Arg.singleValueOption("command", 'c', "Command to execute inside the float"));
+    try mux_float.addArg(Arg.singleValueOption("title", null, "Border title text"));
+    try mux_float.addArg(Arg.singleValueOption("cwd", null, "Working directory for the float"));
+    try mux_float.addArg(Arg.singleValueOption("result-file", null, "Read this file on exit and print its contents to stdout"));
+    try mux_float.addArg(Arg.booleanOption("pass-env", null, "Forward current shell environment into the float"));
+    try mux_float.addArg(Arg.singleValueOption("extra-env", null, "Comma-separated KEY=VALUE overrides"));
+    try mux_float.addArg(Arg.booleanOption("isolated", null, "Run float inside default process isolation"));
+    try mux_float.addArg(Arg.singleValueOption("isolation", null, "Isolation profile (none|minimal|default|balanced|sandbox|full)"));
+    try mux_float.addArg(Arg.singleValueOption("size", null, "Geometry as width,height[,shift_x,shift_y] percentages"));
+    try mux_float.addArg(Arg.singleValueOption("key", null, "Key that dismisses the float (default: Esc)"));
     try mux_float.addArg(Arg.booleanOption("sub", null, "A sub-float of the pane this runs in: shares its key, dies with it"));
     try addProfileArgs(&mux_float);
 
     var mux_notify = app.createCommand("notify", "Send notification");
-    try mux_notify.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try mux_notify.addArg(Arg.singleValueOption("uuid", 'u', "Target pane UUID or unique prefix"));
     try addPaneTargetArgs(&mux_notify);
-    try mux_notify.addArg(Arg.booleanOption("creator", 'c', null));
-    try mux_notify.addArg(Arg.booleanOption("last", 'l', null));
-    try mux_notify.addArg(Arg.booleanOption("broadcast", 'b', null));
-    try mux_notify.addArg(Arg.positional("message", null, null));
+    try mux_notify.addArg(Arg.booleanOption("creator", 'c', "Target the pane that created this one"));
+    try mux_notify.addArg(Arg.booleanOption("last", 'l', "Target the previously focused pane"));
+    try mux_notify.addArg(Arg.booleanOption("broadcast", 'b', "Broadcast to all panes in the session"));
+    try mux_notify.addArg(Arg.positional("message", "Notification text to display", null));
     try addProfileArgs(&mux_notify);
 
     var mux_send = app.createCommand("send", "Send keystrokes to pane");
-    try mux_send.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try mux_send.addArg(Arg.singleValueOption("uuid", 'u', "Target pane UUID or unique prefix"));
     try addPaneTargetArgs(&mux_send);
-    try mux_send.addArg(Arg.booleanOption("creator", 'c', null));
-    try mux_send.addArg(Arg.booleanOption("last", 'l', null));
-    try mux_send.addArg(Arg.booleanOption("broadcast", 'b', null));
-    try mux_send.addArg(Arg.booleanOption("enter", 'e', null));
-    try mux_send.addArg(Arg.singleValueOption("ctrl", 'C', null));
-    try mux_send.addArg(Arg.positional("text", null, null));
+    try mux_send.addArg(Arg.booleanOption("creator", 'c', "Target the pane that created this one"));
+    try mux_send.addArg(Arg.booleanOption("last", 'l', "Target the previously focused pane"));
+    try mux_send.addArg(Arg.booleanOption("broadcast", 'b', "Broadcast to all panes in the session"));
+    try mux_send.addArg(Arg.booleanOption("enter", 'e', "Append Enter/newline after text"));
+    try mux_send.addArg(Arg.singleValueOption("ctrl", 'C', "Send Ctrl+<letter> control byte"));
+    try mux_send.addArg(Arg.positional("text", "Text to type into the target pane", null));
     try addProfileArgs(&mux_send);
 
     var mux_read = app.createCommand("read", "Print a pane's text: last command, -n lines, or -c commands");
-    try mux_read.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try mux_read.addArg(Arg.singleValueOption("uuid", 'u', "Target pane UUID or unique prefix"));
     try addPaneTargetArgs(&mux_read);
     try mux_read.addArg(Arg.singleValueOption("lines", 'n', "The last N rows that have anything on them"));
     try mux_read.addArg(Arg.singleValueOption("commands", 'c', "The output of the last N commands (needs OSC 133)"));
     try addProfileArgs(&mux_read);
 
     var mux_info = app.createCommand("info", "Show information about a pane");
-    try mux_info.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try mux_info.addArg(Arg.singleValueOption("uuid", 'u', "Target pane UUID or unique prefix"));
     try addPaneTargetArgs(&mux_info);
-    try mux_info.addArg(Arg.booleanOption("creator", 'c', null));
-    try mux_info.addArg(Arg.booleanOption("last", 'l', null));
+    try mux_info.addArg(Arg.booleanOption("creator", 'c', "Target the pane that created this one"));
+    try mux_info.addArg(Arg.booleanOption("last", 'l', "Target the previously focused pane"));
     try addProfileArgs(&mux_info);
 
     var mux_layout = app.createCommand("layout", "Save and restore layouts");
     mux_layout.setProperty(.help_on_empty_args);
 
     var mux_layout_save = app.createCommand("save", "Save current layout");
-    try mux_layout_save.addArg(Arg.positional("name", null, null));
+    try mux_layout_save.addArg(Arg.positional("name", "Saved layout name", null));
 
     var mux_layout_load = app.createCommand("load", "Load a saved layout");
-    try mux_layout_load.addArg(Arg.positional("name", null, null));
+    try mux_layout_load.addArg(Arg.positional("name", "Saved layout name", null));
 
     const mux_layout_list = app.createCommand("list", "List saved layouts");
 
     try mux_layout.addSubcommands(&[_]yazap.Command{ mux_layout_save, mux_layout_load, mux_layout_list });
 
     var mux_focus = app.createCommand("focus", "Move focus to adjacent pane");
-    try mux_focus.addArg(Arg.positional("dir", null, null));
+    try mux_focus.addArg(Arg.positional("dir", "Direction: left, right, up, or down", null));
 
-    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_kill, mux_close, mux_record, mux_float, mux_notify, mux_send, mux_read, mux_info, mux_layout, mux_focus });
+    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_detach, mux_list, mux_kill, mux_close, mux_record, mux_float, mux_notify, mux_send, mux_read, mux_info, mux_layout, mux_focus });
 
     var web_inspect = app.createCommand("inspect-snapshot", "Load a session snapshot through the web adapter");
-    try web_inspect.addArg(Arg.positional("snapshot", null, null));
+    try web_inspect.addArg(Arg.positional("snapshot", "Path to snapshot JSON file", null));
     var web_probe = app.createCommand("probe", "Start the web adapter against SES and print frontend state");
-    try web_probe.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
-    try web_probe.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    try web_probe.addArg(Arg.singleValueOption("ses-socket", null, "Path to SES socket"));
+    try web_probe.addArg(Arg.booleanOption("no-autostart-ses", null, "Do not start SES automatically"));
     var web_serve = app.createCommand("serve", "Run the web adapter host-protocol serving loop");
-    try web_serve.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
-    try web_serve.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    try web_serve.addArg(Arg.singleValueOption("ses-socket", null, "Path to SES socket"));
+    try web_serve.addArg(Arg.booleanOption("no-autostart-ses", null, "Do not start SES automatically"));
     try web_cmd.addSubcommands(&[_]yazap.Command{ web_inspect, web_probe, web_serve });
 
     var syslink_inspect = app.createCommand("inspect-snapshot", "Load a session snapshot through the syslink adapter");
-    try syslink_inspect.addArg(Arg.positional("snapshot", null, null));
+    try syslink_inspect.addArg(Arg.positional("snapshot", "Path to snapshot JSON file", null));
     var syslink_probe = app.createCommand("probe", "Start the syslink adapter against SES and print frontend state");
-    try syslink_probe.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
-    try syslink_probe.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    try syslink_probe.addArg(Arg.singleValueOption("ses-socket", null, "Path to SES socket"));
+    try syslink_probe.addArg(Arg.booleanOption("no-autostart-ses", null, "Do not start SES automatically"));
     var syslink_serve = app.createCommand("serve", "Run the syslink adapter host-protocol serving loop");
-    try syslink_serve.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
-    try syslink_serve.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    try syslink_serve.addArg(Arg.singleValueOption("ses-socket", null, "Path to SES socket"));
+    try syslink_serve.addArg(Arg.booleanOption("no-autostart-ses", null, "Do not start SES automatically"));
     try syslink_cmd.addSubcommands(&[_]yazap.Command{ syslink_inspect, syslink_probe, syslink_serve });
 
     // Shell integration: the hooks that report shell state to the mux. The
     // prompt itself is painted by an external program, not by hexe.
     var shp_init = app.createCommand("init", "Print shell integration hooks");
-    try shp_init.addArg(Arg.positional("shell", null, null));
-    try shp_init.addArg(Arg.booleanOption("no-comms", null, null));
+    try shp_init.addArg(Arg.positional("shell", "Shell name: bash, zsh, or fish", null));
+    try shp_init.addArg(Arg.booleanOption("no-comms", null, "Emit prompt hooks without shell-to-mux IPC reporting"));
 
     const shp_exit_intent = app.createCommand("exit-intent", "Ask mux permission before shell exits");
 
     const shp_env_save = app.createCommand("env-save", "Publish this shell's environment to the pane");
 
     var shp_shell_event = app.createCommand("shell-event", "Send shell command metadata to the current mux");
-    try shp_shell_event.addArg(Arg.singleValueOption("cmd", null, null));
-    try shp_shell_event.addArg(Arg.singleValueOption("status", null, null));
-    try shp_shell_event.addArg(Arg.singleValueOption("duration", null, null));
-    try shp_shell_event.addArg(Arg.singleValueOption("cwd", null, null));
-    try shp_shell_event.addArg(Arg.singleValueOption("jobs", null, null));
-    try shp_shell_event.addArg(Arg.singleValueOption("phase", null, null));
-    try shp_shell_event.addArg(Arg.booleanOption("running", null, null));
-    try shp_shell_event.addArg(Arg.singleValueOption("started-at", null, null));
+    try shp_shell_event.addArg(Arg.singleValueOption("cmd", null, "Command text executed by the shell"));
+    try shp_shell_event.addArg(Arg.singleValueOption("status", null, "Exit status code of the last command"));
+    try shp_shell_event.addArg(Arg.singleValueOption("duration", null, "Command duration in milliseconds"));
+    try shp_shell_event.addArg(Arg.singleValueOption("cwd", null, "Current working directory"));
+    try shp_shell_event.addArg(Arg.singleValueOption("jobs", null, "Number of background shell jobs"));
+    try shp_shell_event.addArg(Arg.singleValueOption("phase", null, "Shell hook phase (preexec, precmd, prompt)"));
+    try shp_shell_event.addArg(Arg.booleanOption("running", null, "Mark command as currently running"));
+    try shp_shell_event.addArg(Arg.singleValueOption("started-at", null, "Command start timestamp in milliseconds"));
 
     try shp_cmd.addSubcommands(&[_]yazap.Command{ shp_init, shp_exit_intent, shp_env_save, shp_shell_event });
 
     // POP subcommands
     var pop_notify = app.createCommand("notify", "Show notification");
-    try pop_notify.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try pop_notify.addArg(Arg.singleValueOption("timeout", 't', null));
-    try pop_notify.addArg(Arg.positional("message", null, null));
+    try pop_notify.addArg(Arg.singleValueOption("uuid", 'u', "Target pane UUID (defaults to $HEXE_PANE_UUID)"));
+    try pop_notify.addArg(Arg.singleValueOption("timeout", 't', "Auto-dismiss timeout in milliseconds"));
+    try pop_notify.addArg(Arg.positional("message", "Notification message text", null));
 
     var pop_confirm = app.createCommand("confirm", "Yes/No dialog");
-    try pop_confirm.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try pop_confirm.addArg(Arg.singleValueOption("timeout", 't', null));
-    try pop_confirm.addArg(Arg.positional("message", null, null));
+    try pop_confirm.addArg(Arg.singleValueOption("uuid", 'u', "Target pane UUID (defaults to $HEXE_PANE_UUID)"));
+    try pop_confirm.addArg(Arg.singleValueOption("timeout", 't', "Dialog timeout in milliseconds"));
+    try pop_confirm.addArg(Arg.positional("message", "Confirmation prompt text", null));
 
     var pop_choose = app.createCommand("choose", "Select from options");
-    try pop_choose.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try pop_choose.addArg(Arg.singleValueOption("timeout", 't', null));
-    try pop_choose.addArg(Arg.singleValueOption("items", 'i', null));
-    try pop_choose.addArg(Arg.positional("message", null, null));
+    try pop_choose.addArg(Arg.singleValueOption("uuid", 'u', "Target pane UUID (defaults to $HEXE_PANE_UUID)"));
+    try pop_choose.addArg(Arg.singleValueOption("timeout", 't', "Dialog timeout in milliseconds"));
+    try pop_choose.addArg(Arg.singleValueOption("items", 'i', "Comma-separated list of choices"));
+    try pop_choose.addArg(Arg.positional("message", "Picker title text", null));
 
     try pop_cmd.addSubcommands(&[_]yazap.Command{ pop_notify, pop_confirm, pop_choose });
 
@@ -796,31 +884,31 @@ pub fn main() !void {
     try config_cmd.addSubcommands(&[_]yazap.Command{ config_validate_cmd, config_check_cmd, config_dump_cmd, config_paths_cmd });
 
     var record_start = app.createCommand("start", "Start background recording");
-    try record_start.addArg(Arg.singleValueOption("scope", null, null));
-    try record_start.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try record_start.addArg(Arg.singleValueOption("name", 'n', null));
-    try record_start.addArg(Arg.singleValueOption("socket", 's', null));
-    try record_start.addArg(Arg.singleValueOption("out", 'o', null));
-    try record_start.addArg(Arg.booleanOption("capture-input", null, null));
+    try record_start.addArg(Arg.singleValueOption("scope", null, "Recording scope: pod or mux"));
+    try record_start.addArg(Arg.singleValueOption("uuid", 'u', "Target pod/pane UUID"));
+    try record_start.addArg(Arg.singleValueOption("name", 'n', "Target pod name"));
+    try record_start.addArg(Arg.singleValueOption("socket", 's', "Explicit pod socket path"));
+    try record_start.addArg(Arg.singleValueOption("out", 'o', "Output asciinema .cast file path"));
+    try record_start.addArg(Arg.booleanOption("capture-input", null, "Include keyboard input events in cast"));
 
     var record_stop = app.createCommand("stop", "Stop background recording");
-    try record_stop.addArg(Arg.singleValueOption("scope", null, null));
+    try record_stop.addArg(Arg.singleValueOption("scope", null, "Recording scope: pod or mux"));
 
     var record_status = app.createCommand("status", "Show recording status");
-    try record_status.addArg(Arg.singleValueOption("scope", null, null));
-    try record_status.addArg(Arg.booleanOption("json", 'j', null));
+    try record_status.addArg(Arg.singleValueOption("scope", null, "Recording scope: pod or mux"));
+    try record_status.addArg(Arg.booleanOption("json", 'j', "Output recording status as JSON"));
 
     var record_toggle = app.createCommand("toggle", "Toggle background recording");
-    try record_toggle.addArg(Arg.singleValueOption("scope", null, null));
-    try record_toggle.addArg(Arg.singleValueOption("uuid", 'u', null));
-    try record_toggle.addArg(Arg.singleValueOption("name", 'n', null));
-    try record_toggle.addArg(Arg.singleValueOption("socket", 's', null));
-    try record_toggle.addArg(Arg.singleValueOption("out", 'o', null));
-    try record_toggle.addArg(Arg.booleanOption("capture-input", null, null));
+    try record_toggle.addArg(Arg.singleValueOption("scope", null, "Recording scope: pod or mux"));
+    try record_toggle.addArg(Arg.singleValueOption("uuid", 'u', "Target pod/pane UUID"));
+    try record_toggle.addArg(Arg.singleValueOption("name", 'n', "Target pod name"));
+    try record_toggle.addArg(Arg.singleValueOption("socket", 's', "Explicit pod socket path"));
+    try record_toggle.addArg(Arg.singleValueOption("out", 'o', "Output asciinema .cast file path"));
+    try record_toggle.addArg(Arg.booleanOption("capture-input", null, "Include keyboard input events in cast"));
     try record_cmd.addSubcommands(&[_]yazap.Command{ record_start, record_stop, record_status, record_toggle });
 
     var allow_cmd = app.createCommand("allow", "Trust a project .hexe.lua so its on_start/on_stop hooks may run");
-    try allow_cmd.addArg(Arg.positional("path", null, null));
+    try allow_cmd.addArg(Arg.positional("path", "Path to project directory or .hexe.lua file", null));
 
     // A profile is a wholly separate daemon with its own sessions, sockets and
     // state. It was reachable only through HEXE_INSTANCE or a subcommand flag,
@@ -853,11 +941,11 @@ pub fn main() !void {
     palette_cmd.setProperty(.help_on_empty_args);
 
     var palette_list = app.createCommand("list", "Panes a palette change would reach");
-    try palette_list.addArg(Arg.booleanOption("json", 'j', null));
+    try palette_list.addArg(Arg.booleanOption("json", 'j', "Output reachable panes as JSON"));
     try addProfileArgs(&palette_list);
 
     var palette_set = app.createCommand("set", "Patch entries: <i>=#rrggbb or fg/bg/cursor");
-    try palette_set.addArg(Arg.multiValuesPositional("entries", null, null));
+    try palette_set.addArg(Arg.multiValuesPositional("entries", "Color entries in <i>=#rrggbb or fg/bg/cursor=#rrggbb form", null));
     try palette_set.addArg(Arg.singleValueOption("ns", null, "Namespace, or '*' for all"));
     try palette_set.addArg(Arg.booleanOption("all", 'a', "Every namespace (same as --ns '*')"));
     try palette_set.addArg(Arg.singleValueOption("from", 'f', "Read entries from a colours file"));
@@ -865,21 +953,21 @@ pub fn main() !void {
     try addProfileArgs(&palette_set);
 
     var palette_use = app.createCommand("use", "Select a namespace for what the pane draws next");
-    try palette_use.addArg(Arg.singleValueOption("ns", null, null));
-    try palette_use.addArg(Arg.singleValueOption("pane", 'p', null));
+    try palette_use.addArg(Arg.singleValueOption("ns", null, "Palette namespace to activate"));
+    try palette_use.addArg(Arg.singleValueOption("pane", 'p', "Pane uuid (default: current or every live pane)"));
     try addProfileArgs(&palette_use);
 
     var palette_end = app.createCommand("end", "Pop the selected namespace");
-    try palette_end.addArg(Arg.singleValueOption("pane", 'p', null));
+    try palette_end.addArg(Arg.singleValueOption("pane", 'p', "Pane uuid (default: current or every live pane)"));
     try addProfileArgs(&palette_end);
 
     var palette_drop = app.createCommand("drop", "Release a namespace binding");
-    try palette_drop.addArg(Arg.singleValueOption("ns", null, null));
-    try palette_drop.addArg(Arg.singleValueOption("pane", 'p', null));
+    try palette_drop.addArg(Arg.singleValueOption("ns", null, "Palette namespace to release"));
+    try palette_drop.addArg(Arg.singleValueOption("pane", 'p', "Pane uuid (default: every live pane)"));
     try addProfileArgs(&palette_drop);
 
     var palette_get = app.createCommand("get", "Show the colours a pane actually has set");
-    try palette_get.addArg(Arg.multiValuesPositional("indices", null, null));
+    try palette_get.addArg(Arg.multiValuesPositional("indices", "Palette indices or fg/bg/cursor names to query", null));
     try palette_get.addArg(Arg.singleValueOption("ns", null, "Only this namespace"));
     try palette_get.addArg(Arg.singleValueOption("pane", 'p', "Pane uuid (default: every live pane)"));
     try addProfileArgs(&palette_get);
@@ -887,12 +975,12 @@ pub fn main() !void {
     var palette_reset = app.createCommand("reset", "Forget a namespace's colours (default: all)");
     try palette_reset.addArg(Arg.singleValueOption("ns", null, "Namespace, or '*' for all"));
     try palette_reset.addArg(Arg.booleanOption("all", 'a', "Every namespace (same as --ns '*')"));
-    try palette_reset.addArg(Arg.singleValueOption("pane", 'p', null));
+    try palette_reset.addArg(Arg.singleValueOption("pane", 'p', "Pane uuid (default: every live pane)"));
     try addProfileArgs(&palette_reset);
 
     try palette_cmd.addSubcommands(&[_]yazap.Command{ palette_list, palette_get, palette_set, palette_use, palette_end, palette_drop, palette_reset });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd, api_cmd, plugin_cmd, lua_api_cmd, version_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ top_attach, top_detach, top_new, top_list, top_kill, ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd, allow_cmd, profile_cmd, palette_cmd, api_cmd, plugin_cmd, lua_api_cmd, version_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -933,7 +1021,14 @@ pub fn main() !void {
         }
     }
 
-    const matches = try app.parseFrom(normalized_args.items);
+    if (try help.tryHandleHelp(root, normalized_args.items)) {
+        return;
+    }
+
+    const matches = app.parseFrom(normalized_args.items) catch {
+        cli_ui.printErrHint("Run 'hexe --help' for usage.", .{});
+        std.process.exit(1);
+    };
 
     // Before the profile is resolved: asking the version must not start a
     // daemon, read a config or care which profile it would have used.
@@ -961,7 +1056,7 @@ pub fn main() !void {
         fn check(sub: anytype, flag: []const u8) bool {
             const vals = sub.getMultiValues(flag) orelse return false;
             if (vals.len <= 1) return false;
-            std.debug.print("Error: --{s} given more than once\n", .{flag});
+            cli_ui.printErr("--{s} given more than once", .{flag});
             return true;
         }
     }.check;
@@ -1057,6 +1152,71 @@ pub fn main() !void {
         return;
     }
 
+    if (matches.subcommandMatches("attach")) |m| {
+        const instance = profileArg(m);
+        if (instance.len > 0) setInstanceFromCli(instance);
+        const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
+        try runTerminalAttach(
+            m.getSingleValue("name") orelse "",
+            log_level,
+            m.getSingleValue("logfile") orelse "",
+            m.getSingleValue("ses-socket") orelse "",
+            m.containsArg("no-autostart-ses"),
+            .{
+                .remote = m.getSingleValue("remote") orelse "",
+                .user = m.getSingleValue("user") orelse "",
+                .identity = m.getSingleValue("identity") orelse "",
+            },
+        );
+        return;
+    }
+
+    if (matches.subcommandMatches("detach")) |m| {
+        const instance = profileArg(m);
+        if (instance.len > 0) setInstanceFromCli(instance);
+        try cli_cmds.runDetach(allocator, m.getSingleValue("target") orelse "");
+        return;
+    }
+
+    if (matches.subcommandMatches("new")) |m| {
+        const instance = profileArg(m);
+        if (instance.len > 0) {
+            setInstanceFromCli(instance);
+            if (m.containsArg("test-only")) setTestOnlyEnv();
+        } else if (m.containsArg("test-only")) {
+            setGeneratedTestInstance();
+        }
+        const log_level = parseCliLogLevel(m.getSingleValue("log")) catch std.process.exit(1);
+        try runTerminalNew(
+            m.getSingleValue("name") orelse "",
+            log_level,
+            m.getSingleValue("logfile") orelse "",
+            m.getSingleValue("ses-socket") orelse "",
+            m.containsArg("no-autostart-ses"),
+            .{
+                .remote = m.getSingleValue("remote") orelse "",
+                .user = m.getSingleValue("user") orelse "",
+                .identity = m.getSingleValue("identity") orelse "",
+            },
+            false,
+        );
+        return;
+    }
+
+    if (matches.subcommandMatches("list")) |m| {
+        const instance = profileArg(m);
+        if (instance.len > 0) setInstanceFromCli(instance);
+        try cli_cmds.runList(allocator, m.containsArg("details"), m.containsArg("json"), m.getSingleValue("dir") orelse "");
+        return;
+    }
+
+    if (matches.subcommandMatches("kill")) |m| {
+        const instance = profileArg(m);
+        if (instance.len > 0) setInstanceFromCli(instance);
+        try cli_cmds.runTerminalKill(allocator, m.getSingleValue("id") orelse "");
+        return;
+    }
+
     if (matches.subcommandMatches("session")) |ses_matches| {
         if (ses_matches.subcommandMatches("daemon")) |m| {
             const instance = profileArg(m);
@@ -1064,7 +1224,7 @@ pub fn main() !void {
             if (m.containsArg("test-only")) {
                 setTestOnlyEnv();
                 if (!hasInstanceEnv()) {
-                    print("Error: --test-only requires --instance or HEXE_INSTANCE\n", .{});
+                    cli_ui.printErr("--test-only requires --instance or HEXE_INSTANCE", .{});
                     return;
                 }
             }
@@ -1082,6 +1242,12 @@ pub fn main() !void {
             const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runList(allocator, m.containsArg("details"), m.containsArg("json"), m.getSingleValue("dir") orelse "");
+            return;
+        }
+        if (ses_matches.subcommandMatches("detach")) |m| {
+            const instance = profileArg(m);
+            if (instance.len > 0) setInstanceFromCli(instance);
+            try cli_cmds.runDetach(allocator, m.getSingleValue("target") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("kill")) |m| {
@@ -1141,10 +1307,10 @@ pub fn main() !void {
             if (instance.len > 0) setInstanceFromCli(instance);
             const scope_raw = m.getSingleValue("scope") orelse "both";
             const scope = std.meta.stringToEnum(cli_cmds.LayoutSaveScope, scope_raw) orelse {
-                print("Error: invalid --scope (use local|global|both)\n", .{});
+                cli_ui.printErr("invalid --scope (use local|global|both)", .{});
                 return;
             };
-            try cli_cmds.runSesFreeze(allocator, scope);
+            try cli_cmds.runSesFreeze(allocator, scope, m.getSingleValue("name") orelse "");
             return;
         }
     } else if (matches.subcommandMatches("pod")) |pod_matches| {
@@ -1154,7 +1320,7 @@ pub fn main() !void {
             if (m.containsArg("test-only")) {
                 setTestOnlyEnv();
                 if (!hasInstanceEnv()) {
-                    print("Error: --test-only requires --instance or HEXE_INSTANCE\n", .{});
+                    cli_ui.printErr("--test-only requires --instance or HEXE_INSTANCE", .{});
                     return;
                 }
             }
@@ -1187,7 +1353,7 @@ pub fn main() !void {
             if (m.containsArg("test-only")) {
                 setTestOnlyEnv();
                 if (!hasInstanceEnv()) {
-                    print("Error: --test-only requires --instance or HEXE_INSTANCE\n", .{});
+                    cli_ui.printErr("--test-only requires --instance or HEXE_INSTANCE", .{});
                     return;
                 }
             }
@@ -1201,6 +1367,7 @@ pub fn main() !void {
                 m.containsArg("alias"),
                 log_level,
                 m.getSingleValue("logfile") orelse "",
+                m.containsArg("json"),
             );
             return;
         }
@@ -1231,7 +1398,7 @@ pub fn main() !void {
         if (pod_matches.subcommandMatches("record")) |m| {
             const out = m.getSingleValue("out") orelse "";
             if (out.len == 0) {
-                print("Error: --out is required for pod record\n", .{});
+                cli_ui.printErr("--out is required for pod record", .{});
                 return;
             }
             try cli_cmds.runPodRecord(
@@ -1326,17 +1493,30 @@ pub fn main() !void {
             );
             return;
         }
+        if (mux_matches.subcommandMatches("detach")) |m| {
+            const instance = profileArg(m);
+            if (instance.len > 0) setInstanceFromCli(instance);
+            try cli_cmds.runDetach(allocator, m.getSingleValue("target") orelse "");
+            return;
+        }
+        if (mux_matches.subcommandMatches("list")) |m| {
+            const instance = profileArg(m);
+            if (instance.len > 0) setInstanceFromCli(instance);
+            try cli_cmds.runList(allocator, m.containsArg("details"), m.containsArg("json"), m.getSingleValue("dir") orelse "");
+            return;
+        }
         if (mux_matches.subcommandMatches("record")) |m| {
             const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             const out = m.getSingleValue("out") orelse "";
             if (out.len == 0) {
-                print("Error: --out is required for terminal record\n", .{});
+                cli_ui.printErr("--out is required for terminal record", .{});
                 std.process.exit(1);
             }
             const session = m.getSingleValue("session") orelse "";
             if (session.len == 0) {
-                print("Error: session name required (hexe terminal record <session> --out FILE)\n", .{});
+                cli_ui.printErr("session name required", .{});
+                cli_ui.printErrHint("Usage: hexe terminal record <session> --out FILE", .{});
                 std.process.exit(1);
             }
             try cli_cmds.runMuxRecord(session, out, m.containsArg("capture-input"));
@@ -1574,16 +1754,19 @@ fn runSesStatus(allocator: std.mem.Allocator) !void {
     const socket_path = try ipc.getSesSocketPath(allocator);
     defer allocator.free(socket_path);
 
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = core.cli_ui.Palette.forStdout();
+
     var client = ipc.Client.connect(socket_path) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
-            print("ses daemon is not running\n", .{});
+            try out.print("{s}○{s} ses daemon is not running\n", .{ p.muted, p.reset });
             return;
         }
         return err;
     };
     defer client.close();
 
-    print("ses daemon running at: {s}\n", .{socket_path});
+    try out.print("{s}●{s} ses daemon running at {s}{s}{s}\n", .{ p.success, p.reset, p.dim, socket_path, p.reset });
 }
 
 fn runPodDaemon(
@@ -1601,7 +1784,7 @@ fn runPodDaemon(
     log_file: []const u8,
 ) !void {
     if (uuid.len == 0 or socket_path.len == 0) {
-        print("Error: --uuid and --socket required\n", .{});
+        cli_ui.printErr("--uuid and --socket required", .{});
         std.process.exit(1);
     }
 
@@ -1705,15 +1888,19 @@ fn runAllow(allocator: std.mem.Allocator, arg_path: []const u8) !void {
 
     core.trust.allow(allocator, path) catch |err| {
         switch (err) {
-            error.FileNotFound => print("No .hexe.lua found at {s}\n", .{path}),
-            else => print("Failed to trust {s}: {s}\n", .{ path, @errorName(err) }),
+            error.FileNotFound => cli_ui.printErr("no .hexe.lua found at {s}", .{path}),
+            else => cli_ui.printErr("failed to trust {s}: {s}", .{ path, @errorName(err) }),
         }
         return;
     };
 
     const abs = std.fs.cwd().realpathAlloc(allocator, path) catch null;
     defer if (abs) |a| allocator.free(a);
-    print("Trusted {s} — its on_start/on_stop hooks will now run.\n", .{abs orelse path});
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    try out.print("{s}✓{s} Trusted {s}{s}{s} {s}— its on_start/on_stop hooks will now run.{s}\n", .{
+        p.success, p.reset, p.bold, abs orelse path, p.reset, p.dim, p.reset,
+    });
 }
 
 fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool, remote: RemoteConnectArgs) core.FrontendConnectOptions {
@@ -1749,9 +1936,9 @@ fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []
                 // a script that carried HEXE_PANE_UUID into a different
                 // HEXE_INSTANCE. Say so and fail, rather than exiting 0 with no
                 // session, which reads as success.
-                print("Error: cannot ask whether to start a nested mux (ses daemon unreachable).\n", .{});
-                print("       This shell claims a pane (HEXE_PANE_UUID) whose daemon is not running.\n", .{});
-                print("       Unset HEXE_PANE_UUID to start a session anyway.\n", .{});
+                cli_ui.printErr("cannot ask whether to start a nested mux (ses daemon unreachable)", .{});
+                cli_ui.printErrHint("This shell claims a pane (HEXE_PANE_UUID) whose daemon is not running.", .{});
+                cli_ui.printErrHint("Unset HEXE_PANE_UUID to start a session anyway.", .{});
                 return error.NestedMuxConfirmUnavailable;
             };
             if (!allowed) return;
@@ -1775,8 +1962,15 @@ fn runTerminalAttach(name: []const u8, log_level: ?core.logging.Level, log_file:
             .log_file = if (log_file.len > 0) log_file else null,
             .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses, remote),
         });
+    } else if (std.posix.isatty(std.posix.STDIN_FILENO) and std.posix.isatty(std.posix.STDOUT_FILENO)) {
+        try terminal.run(.{
+            .chooser_mode = .attach_all,
+            .log_level = log_level,
+            .log_file = if (log_file.len > 0) log_file else null,
+            .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses, remote),
+        });
     } else {
-        print("Error: session name required\n", .{});
+        cli_ui.printErr("session name required (or run `hexe attach` interactively on a TTY)", .{});
         std.process.exit(1);
     }
 }
@@ -1785,7 +1979,7 @@ fn runShpInit(shell: []const u8, no_comms: bool) !void {
     if (shell.len > 0) {
         try shell_hooks.printInit(shell, no_comms);
     } else {
-        print("Error: shell name required (bash, zsh, fish)\n", .{});
+        cli_ui.printErr("shell name required (bash, zsh, fish)", .{});
         std.process.exit(1);
     }
 }

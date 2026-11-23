@@ -594,6 +594,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     return state_reattach.reattachSession(self, session_id_prefix);
 }
 
+pub const ReattachOutcome = state_reattach.ReattachOutcome;
+
+pub fn reattachSessionDetailed(self: anytype, session_id_prefix: []const u8) ReattachOutcome {
+    return state_reattach.reattachSessionDetailed(self, session_id_prefix);
+}
+
 pub fn applySessionSnapshot(self: anytype) bool {
     return state_reattach.applySessionSnapshot(self);
 }

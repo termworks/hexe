@@ -19,7 +19,7 @@ fn loadConfig(allocator: std.mem.Allocator) !LoadedConfig {
 
     var config = core.config.Config.load(allocator);
     if (config.status == .@"error") {
-        if (config.status_message) |msg| print("Config error: {s}\n", .{msg});
+        if (config.status_message) |msg| core.cli_ui.printErr("Config error: {s}", .{msg});
         config.deinit();
         return error.ConfigError;
     }
@@ -38,12 +38,15 @@ fn unloadConfig(allocator: std.mem.Allocator, loaded: *LoadedConfig) void {
 /// Validate the Hexe configuration file
 pub fn run() !void {
     const allocator = std.heap.page_allocator;
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = core.cli_ui.Palette.forStdout();
+
     var loaded = loadConfig(allocator) catch |err| {
         if (err == error.FileNotFound) {
             const config_path = try core.lua_runtime.getActiveConfigPath(allocator);
             defer allocator.free(config_path);
-            print("✓ No config file found (using defaults)\n", .{});
-            print("  Expected location: {s}\n", .{config_path});
+            try out.print("{s}✓{s} No config file found (using defaults)\n", .{ p.success, p.reset });
+            try out.print("  {s}Expected location:{s} {s}\n", .{ p.dim, p.reset, config_path });
             return;
         }
         return err;
@@ -54,7 +57,8 @@ pub fn run() !void {
     // Schema check against config_v2: catches wrong types and out-of-range
     // values with the path that caused them, which loading alone cannot.
     if (schemaError(allocator, loaded.path)) |problem| {
-        print("✗ Config invalid: {s}\n", .{loaded.path});
+        const pe = core.cli_ui.Palette.forStderr();
+        print("{s}✗{s} Config invalid: {s}\n", .{ pe.err, pe.reset, loaded.path });
         if (problem.path.len > 0) {
             print("  {s}: {s}\n", .{ problem.path, problem.message });
         } else {
@@ -64,15 +68,12 @@ pub fn run() !void {
     }
 
     // Success!
-    print("✓ Config valid: {s}\n", .{loaded.path});
-    print("\nConfiguration loaded successfully:\n", .{});
-
-    // Show some config highlights
-    print("  - Status bar enabled: {}\n", .{config.tabs.status.enabled});
-    print("  - Keybindings: {} defined\n", .{config.input.binds.len});
-    print("  - Notifications enabled: {}\n", .{config.notifications.mux.duration_ms > 0});
-
-    print("\n✓ All checks passed\n", .{});
+    const sb_on = config.tabs.status.enabled;
+    const notif_on = config.notifications.mux.duration_ms > 0;
+    try out.print("{s}✓{s} Config valid: {s}{s}{s}\n", .{ p.success, p.reset, p.bold, loaded.path, p.reset });
+    try out.print("  {s}Status bar:{s}    {s}{}{s}\n", .{ p.dim, p.reset, if (sb_on) p.success else p.muted, sb_on, p.reset });
+    try out.print("  {s}Keybindings:{s}   {s}{}{s} defined\n", .{ p.dim, p.reset, p.accent, config.input.binds.len, p.reset });
+    try out.print("  {s}Notifications:{s} {s}{}{s}\n", .{ p.dim, p.reset, if (notif_on) p.success else p.muted, notif_on, p.reset });
 }
 
 /// Strict validation alias used by the new Lua config plan.
@@ -82,10 +83,6 @@ pub fn runCheck() !void {
 
 fn jsonBool(value: bool) []const u8 {
     return if (value) "true" else "false";
-}
-
-fn dumpSegmentList(name: []const u8, len: usize, trailing_comma: bool) void {
-    print("      \"{s}\": {{ \"count\": {} }}{s}\n", .{ name, len, if (trailing_comma) "," else "" });
 }
 
 const SchemaProblem = struct {
@@ -147,9 +144,10 @@ pub fn runDump() !void {
     var ses = core.SesConfig.load(allocator);
     defer ses.deinit(allocator);
 
+    var out = std.fs.File.stdout().deprecatedWriter();
     const cfg = loaded.config;
     const lua_summary = summarizeLuaConfig(allocator, loaded.path);
-    print(
+    try out.print(
         "{{\n" ++
             "  \"config_path\": \"{s}\",\n" ++
             "  \"lua\": {{\n" ++
@@ -178,7 +176,7 @@ pub fn runDump() !void {
             lua_summary.theme_chars,
         },
     );
-    print(
+    try out.print(
         "  \"mux\": {{\n" ++
             "    \"confirm\": {{ \"exit\": {s}, \"detach\": {s}, \"disown\": {s}, \"close\": {s} }},\n" ++
             "    \"selection_color\": {},\n" ++
@@ -206,9 +204,9 @@ pub fn runDump() !void {
             jsonBool(cfg.tabs.status.enabled),
         },
     );
-    print("      \"view\": \"{s}\",\n", .{cfg.tabs.status.view});
-    print("      \"refresh_ms\": {}\n", .{cfg.tabs.status.refresh_ms});
-    print(
+    try out.print("      \"view\": \"{s}\",\n", .{cfg.tabs.status.view});
+    try out.print("      \"refresh_ms\": {}\n", .{cfg.tabs.status.refresh_ms});
+    try out.print(
         "    }}\n" ++
             "  }},\n" ++
             "  \"pop\": {{\n" ++
@@ -230,11 +228,13 @@ pub fn runPaths() !void {
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(cwd);
 
-    print("config_dir: {s}\n", .{config_dir});
-    print("config_file: {s}\n", .{config_path});
-    print("lua_module_paths:\n", .{});
-    print("  - {s}/lua/?.lua\n", .{config_dir});
-    print("  - {s}/lua/?/init.lua\n", .{config_dir});
-    print("  - {s}/.hexe/lua/?.lua\n", .{cwd});
-    print("  - {s}/.hexe/lua/?/init.lua\n", .{cwd});
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = core.cli_ui.Palette.forStdout();
+    try out.print("{s}config_dir:{s}  {s}\n", .{ p.dim, p.reset, config_dir });
+    try out.print("{s}config_file:{s} {s}\n", .{ p.dim, p.reset, config_path });
+    try out.print("{s}lua_module_paths:{s}\n", .{ p.dim, p.reset });
+    try out.print("  - {s}/lua/?.lua\n", .{config_dir});
+    try out.print("  - {s}/lua/?/init.lua\n", .{config_dir});
+    try out.print("  - {s}/.hexe/lua/?.lua\n", .{cwd});
+    try out.print("  - {s}/.hexe/lua/?/init.lua\n", .{cwd});
 }

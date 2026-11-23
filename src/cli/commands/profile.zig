@@ -139,24 +139,35 @@ pub fn runProfileList(allocator: std.mem.Allocator) !void {
         if (p.state_dir) |d| allocator.free(d);
     };
 
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p_style = core.cli_ui.Palette.forStdout();
+
     if (list.items.len == 0) {
-        print("No profiles yet.\n", .{});
-        print("Start one with: hexe --profile work\n", .{});
+        try out.print("{s}No profiles yet.{s}\n", .{ p_style.dim, p_style.reset });
+        try out.print("Start one with: {s}hexe --profile work{s}\n", .{ p_style.accent, p_style.reset });
         return;
     }
 
     const current = std.posix.getenv("HEXE_INSTANCE") orelse "default";
-    print("{s:<20} {s:<9} {s:<10} {s}\n", .{ "PROFILE", "DAEMON", "CONFIG", "STATE" });
+    try out.print("{s}{s:<20} {s:<10} {s:<10} {s}{s}\n", .{ p_style.dim, "PROFILE", "DAEMON", "CONFIG", "STATE", p_style.reset });
     for (list.items) |p| {
-        const mark: []const u8 = if (std.mem.eql(u8, p.name, current)) "*" else " ";
-        print("{s}{s:<19} {s:<9} {s:<10} {s}\n", .{
-            mark,
-            p.name,
-            if (p.running) "running" else "stopped",
+        const is_cur = std.mem.eql(u8, p.name, current);
+        const mark: []const u8 = if (is_cur) "*" else " ";
+        const status_col: []const u8 = if (p.running) p_style.success else p_style.muted;
+        const status_str: []const u8 = if (p.running) "running" else "stopped";
+        var state_buf: [256]u8 = undefined;
+        const state_disp: []const u8 = if (p.state_dir) |d| core.cli_ui.compactHome(d, &state_buf) else "-";
+        try out.print("{s}{s}{s}{s}{s:<19}{s} {s}{s:<10}{s} {s:<10} {s}{s}{s}\n", .{
+            p_style.accent, mark, p_style.reset,
+            if (is_cur) p_style.bold else "", p.name, p_style.reset,
+            status_col, status_str, p_style.reset,
             if (hasOwnConfig(allocator, p.name)) "own" else "shared",
-            p.state_dir orelse "-",
+            p_style.dim, state_disp, p_style.reset,
         });
     }
-    print("\n* = this shell's profile. Select one with --profile NAME.\n", .{});
-    print("CONFIG 'own' = profiles/<name>.lua; 'shared' = the common init.lua.\n", .{});
+    if (std.posix.isatty(std.posix.STDOUT_FILENO)) {
+        try out.print("\n{s}* = active profile · select with -P/--profile NAME · CONFIG own = profiles/<name>.lua{s}\n", .{
+            p_style.dim, p_style.reset,
+        });
+    }
 }

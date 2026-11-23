@@ -2,15 +2,21 @@ const std = @import("std");
 const core = @import("core");
 const ipc = core.ipc;
 const pod_meta = core.pod_meta;
+const cli_ui = core.cli_ui;
 
-const print = std.debug.print;
-
-fn deleteGcEntry(dir: std.fs.Dir, dir_path: []const u8, name: []const u8) void {
+fn deleteGcEntry(
+    out: anytype,
+    p: cli_ui.Palette,
+    dir: std.fs.Dir,
+    dir_path: []const u8,
+    name: []const u8,
+) bool {
     dir.deleteFile(name) catch |err| {
-        print("gc: failed to delete {s}/{s}: {s}\n", .{ dir_path, name, @errorName(err) });
-        return;
+        cli_ui.printErr("gc: failed to delete {s}/{s}: {s}", .{ dir_path, name, @errorName(err) });
+        return false;
     };
-    print("gc: deleted {s}/{s}\n", .{ dir_path, name });
+    out.print("  {s}✓{s} {s}deleted{s} {s}/{s}\n", .{ p.success, p.reset, p.dim, p.reset, dir_path, name }) catch {};
+    return true;
 }
 
 pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
@@ -19,6 +25,10 @@ pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
 
     var d = try std.fs.cwd().openDir(dir, .{ .iterate = true });
     defer d.close();
+
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    var count: usize = 0;
 
     var it = d.iterate();
     while (try it.next()) |entry| {
@@ -32,9 +42,10 @@ pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
             const alive = (ipc.Client.connect(sock) catch null) != null;
             if (!alive) {
                 if (dry_run) {
-                    print("gc: would delete {s}/{s}\n", .{ dir, entry.name });
-                } else {
-                    deleteGcEntry(d, dir, entry.name);
+                    try out.print("  {s}○{s} {s}would delete{s} {s}/{s}\n", .{ p.warn, p.reset, p.dim, p.reset, dir, entry.name });
+                    count += 1;
+                } else if (deleteGcEntry(out, p, d, dir, entry.name)) {
+                    count += 1;
                 }
             }
             continue;
@@ -46,9 +57,10 @@ pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
             const target = d.readLink(entry.name, &link_buf) catch "";
             if (target.len == 0) {
                 if (dry_run) {
-                    print("gc: would delete {s}/{s}\n", .{ dir, entry.name });
-                } else {
-                    deleteGcEntry(d, dir, entry.name);
+                    try out.print("  {s}○{s} {s}would delete{s} {s}/{s}\n", .{ p.warn, p.reset, p.dim, p.reset, dir, entry.name });
+                    count += 1;
+                } else if (deleteGcEntry(out, p, d, dir, entry.name)) {
+                    count += 1;
                 }
                 continue;
             }
@@ -58,17 +70,27 @@ pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
             const alive = (ipc.Client.connect(full) catch null) != null;
             if (!alive) {
                 if (dry_run) {
-                    print("gc: would delete {s}\n", .{full});
-                } else {
-                    d.deleteFile(entry.name) catch |err| {
-                        print("gc: failed to delete {s}: {s}\n", .{ full, @errorName(err) });
-                        continue;
-                    };
-                    print("gc: deleted {s}\n", .{full});
+                    try out.print("  {s}○{s} {s}would delete{s} {s}\n", .{ p.warn, p.reset, p.dim, p.reset, full });
+                    count += 1;
+                } else if (deleteGcEntry(out, p, d, dir, entry.name)) {
+                    count += 1;
                 }
             }
             continue;
         }
+    }
+
+    const file_word: []const u8 = if (count == 1) "file" else "files";
+    if (count == 0) {
+        try out.print("{s}✓{s} No stale pod files found\n", .{ p.success, p.reset });
+    } else if (dry_run) {
+        try out.print("{s}○{s} Would remove {s}{d}{s} stale pod {s} {s}(dry run){s}\n", .{
+            p.warn, p.reset, p.bold, count, p.reset, file_word, p.dim, p.reset,
+        });
+    } else {
+        try out.print("{s}✓{s} Removed {s}{d}{s} stale pod {s}\n", .{
+            p.success, p.reset, p.bold, count, p.reset, file_word,
+        });
     }
 
     _ = pod_meta;

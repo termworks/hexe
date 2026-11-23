@@ -16,27 +16,51 @@ pub fn parseEvent(parser: *vaxis.Parser, bytes: []const u8, allocator: std.mem.A
 
 pub fn handlePopupEvent(popups: *pop.PopupManager, event: vaxis.Event) bool {
     const key = popupKeyFromVaxisEvent(event) orelse return false;
-    const result = popups.handleInput(key);
+    const result = popups.handleKey(key);
     return result == .dismissed;
 }
 
-fn popupKeyFromVaxisEvent(event: vaxis.Event) ?u8 {
+pub fn popupKeyFromVaxisEvent(event: vaxis.Event) ?pop.PopupKey {
     const key = switch (event) {
         .key_press => |k| k,
         else => return null,
     };
 
+    if (key.mods.ctrl) {
+        const cp = key.base_layout_codepoint orelse key.codepoint;
+        if (cp == 'c' or cp == 'C' or cp == 0x03) return .ctrl_c;
+        if (cp == 'u' or cp == 'U' or cp == 0x15) return .ctrl_u;
+        if (cp == 'j' or cp == 'J' or cp == 'n' or cp == 'N') return .down;
+        if (cp == 'k' or cp == 'K' or cp == 'p' or cp == 'P') return .up;
+    }
+
     return switch (key.codepoint) {
-        vaxis.Key.up => 'k',
-        vaxis.Key.down => 'j',
-        vaxis.Key.left => 'h',
-        vaxis.Key.right => 'l',
-        vaxis.Key.enter => '\r',
-        vaxis.Key.escape => 27,
+        vaxis.Key.up => .up,
+        vaxis.Key.down => .down,
+        vaxis.Key.left => .left,
+        vaxis.Key.right => .right,
+        vaxis.Key.page_up => .page_up,
+        vaxis.Key.page_down => .page_down,
+        vaxis.Key.home => .home,
+        vaxis.Key.end => .end,
+        vaxis.Key.enter => .enter,
+        vaxis.Key.tab => if (key.mods.shift) .shift_tab else .tab,
+        vaxis.Key.backspace => .backspace,
+        vaxis.Key.escape => .escape,
         else => blk: {
-            const cp = key.base_layout_codepoint orelse key.codepoint;
+            if (key.codepoint == 0x03) break :blk .ctrl_c;
+            if (key.codepoint == 0x15) break :blk .ctrl_u;
+            if (key.codepoint == 0x7f or key.codepoint == 0x08) break :blk .backspace;
+            if (key.codepoint == '\r' or key.codepoint == '\n') break :blk .enter;
+            if (key.codepoint == '\t') break :blk if (key.mods.shift) .shift_tab else .tab;
+            if (key.text) |txt| {
+                if (txt.len == 1 and txt[0] >= 0x20 and txt[0] <= 0x7e) {
+                    break :blk .{ .char = txt[0] };
+                }
+            }
+            const cp = key.shifted_codepoint orelse key.base_layout_codepoint orelse key.codepoint;
             if (cp > 0xFF) break :blk null;
-            break :blk @intCast(cp);
+            break :blk .{ .char = @intCast(cp) };
         },
     };
 }

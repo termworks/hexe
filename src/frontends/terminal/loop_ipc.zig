@@ -240,6 +240,11 @@ fn dispatchCtlFrame(ctx: CtlDispatchContext, ctl_event: frontend_core.CtlFrameEv
         .session_stolen => {
             handleSessionStolen(state, fd, ctl_event.payload_len, buffer);
         },
+        .session_detached => {
+            skipPayload(fd, ctl_event.payload_len, buffer);
+            state.recordExitSummary(.detached);
+            state.runtime.requestExplicitDetachStop();
+        },
         .ignorable_response => {
             skipPayload(fd, ctl_event.payload_len, buffer);
         },

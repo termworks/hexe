@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.10] - 2026-11-23
+
+### <!-- 0 -->⛰️  Features
+
+- Lock float border title to parent and render highlighted chip pills
+- Overhaul CLI UI, grouped colored help, and interactive attach/detach
+
 ## [0.5.9] - 2026-11-20
 
 ### <!-- 1 -->🐛 Bug Fixes

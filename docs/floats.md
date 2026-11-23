@@ -178,13 +178,14 @@ A float can own floats. `--sub` opens one as a member of the caller's family:
 hexe terminal float --sub --command "git log --oneline -40"
 ```
 
-A family is **one rectangle, one toggle key, one member on screen at a time**. The parent is chip
-`0`, children count up from `1`:
+A family is **one rectangle, one toggle key, one title, one member on screen at a time**. The border
+always keeps the parent's title; chip `0` is the initial float, children count up from `1`, and the
+selected chip is highlighted in the float's active color:
 
 ```
-   ╭───claude──[0]─<1>─<2>─<3>──────────────────╮
-   │   whichever member is current              │
-   ╰────────────────────────────────────────────╯
+   ╔══════ claude ══ 0 | 1 | 2 ══╗
+   ║   whichever member is shown ║
+   ╚═════════════════════════════╝
 ```
 
 | | |

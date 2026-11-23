@@ -8,9 +8,8 @@
 
 const std = @import("std");
 const core = @import("core");
+const cli_ui = core.cli_ui;
 const shared = @import("shared.zig");
-
-const print = std.debug.print;
 
 pub fn runPodShare(
     allocator: std.mem.Allocator,
@@ -22,19 +21,19 @@ pub fn runPodShare(
     json: bool,
 ) !void {
     if (on and off) {
-        print("Error: --on and --off are mutually exclusive\n", .{});
+        cli_ui.printErr("--on and --off are mutually exclusive", .{});
         return error.ConflictingOptions;
     }
 
     const path = shared.resolvePodSocketTarget(allocator, uuid, name, socket_path) catch |err| {
-        print("Error: could not resolve pod target: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("could not resolve pod target: {s}", .{@errorName(err)});
         return err;
     };
     defer allocator.free(path);
 
     const cmd: core.wire.PodShareCmd = if (off) .block else if (on) .allow else .query;
     const status = core.pod_share.requestPath(path, cmd) catch |err| {
-        print("Error: pod share request failed: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("pod share request failed: {s}", .{@errorName(err)});
         return err;
     };
 
@@ -50,11 +49,24 @@ pub fn runPodShare(
         return;
     }
 
+    const p = cli_ui.Palette.forStdout();
     if (status.blocked) {
-        try out.writeAll("blocked — no one can watch this pane\n");
+        if (p.enabled) {
+            try out.print("{s}✗ blocked{s} {s}— no one can watch this pane{s}\n", .{ p.err, p.reset, p.dim, p.reset });
+        } else {
+            try out.writeAll("blocked — no one can watch this pane\n");
+        }
     } else if (status.observers == 0) {
-        try out.writeAll("not shared — no one is watching\n");
+        if (p.enabled) {
+            try out.print("{s}○ not shared{s} {s}— no one is watching{s}\n", .{ p.muted, p.reset, p.dim, p.reset });
+        } else {
+            try out.writeAll("not shared — no one is watching\n");
+        }
     } else {
-        try out.print("shared — {d} watching\n", .{status.observers});
+        if (p.enabled) {
+            try out.print("{s}● shared{s} — {s}{d}{s} watching\n", .{ p.success, p.reset, p.bold, status.observers, p.reset });
+        } else {
+            try out.print("shared — {d} watching\n", .{status.observers});
+        }
     }
 }

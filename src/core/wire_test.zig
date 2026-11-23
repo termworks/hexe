@@ -347,3 +347,40 @@ test "wire round-trip: SessionEntry carries the attached flag" {
     try testing.expectEqualSlices(u8, std.mem.asBytes(&sent), std.mem.asBytes(&got));
     try testing.expectEqual(@as(u8, 1), got.attached);
 }
+
+test "wire round-trip: DetachSession and DetachSessionResult" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    const target = "work";
+    const req: wire.DetachSession = .{ .id_len = @intCast(target.len) };
+    try wire.writeControlWithTrail(pair.a, .detach_session, std.mem.asBytes(&req), target);
+
+    const hdr = try wire.readControlHeader(pair.b);
+    try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.detach_session)), hdr.msg_type);
+    const got_req = try wire.readStruct(wire.DetachSession, pair.b);
+    try testing.expectEqual(req.id_len, got_req.id_len);
+    var tbuf: [16]u8 = undefined;
+    try wire.readExact(pair.b, tbuf[0..target.len]);
+    try testing.expectEqualStrings(target, tbuf[0..target.len]);
+
+    const res: wire.DetachSessionResult = .{
+        .success = 1,
+        .session_id = [_]u8{'a'} ** 32,
+        .pane_count = 4,
+        .name_len = @intCast(target.len),
+        .error_len = 0,
+    };
+    try wire.writeControlWithTrail(pair.b, .detach_session, std.mem.asBytes(&res), target);
+
+    const rhdr = try wire.readControlHeader(pair.a);
+    try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.detach_session)), rhdr.msg_type);
+    const got_res = try wire.readStruct(wire.DetachSessionResult, pair.a);
+    try testing.expectEqual(@as(u8, 1), got_res.success);
+    try testing.expectEqual(@as(u16, 4), got_res.pane_count);
+    try testing.expectEqual(@as(u16, target.len), got_res.name_len);
+    var nbuf: [16]u8 = undefined;
+    try wire.readExact(pair.a, nbuf[0..got_res.name_len]);
+    try testing.expectEqualStrings(target, nbuf[0..got_res.name_len]);
+}

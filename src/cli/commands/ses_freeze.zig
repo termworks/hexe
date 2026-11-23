@@ -3,8 +3,7 @@ const core = @import("core");
 const ipc = core.ipc;
 const session_config = core.session_config;
 const com = @import("com.zig");
-
-const print = std.debug.print;
+const cli_ui = core.cli_ui;
 
 pub const LayoutSaveScope = enum {
     local,
@@ -13,17 +12,17 @@ pub const LayoutSaveScope = enum {
 };
 
 /// Save the current terminal layout to .hexe.lua in CWD and register in sessions.json.
-pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void {
+pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope, name_override: []const u8) !void {
     const wire = core.wire;
     const posix = std.posix;
 
     // Get current pane UUID from environment
     const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: not inside a hexe terminal session (HEXE_PANE_UUID not set)\n", .{});
+        cli_ui.printErr("not inside a hexe terminal session (HEXE_PANE_UUID not set)", .{});
         std.process.exit(1);
     };
     if (uuid_str.len < 32) {
-        print("Error: invalid HEXE_PANE_UUID\n", .{});
+        cli_ui.printErr("invalid HEXE_PANE_UUID", .{});
         std.process.exit(1);
     }
     var uuid_arr: [32]u8 = undefined;
@@ -36,43 +35,43 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
     var pu: wire.PaneUuid = .{ .uuid = undefined };
     pu.uuid = uuid_arr;
     wire.writeControl(fd, .get_layout, std.mem.asBytes(&pu)) catch {
-        print("Error: failed to send request\n", .{});
+        cli_ui.printErr("failed to send request", .{});
         std.process.exit(1);
     };
 
     // Read response
     const hdr = wire.readControlHeader(fd) catch {
-        print("Error: failed to read response\n", .{});
+        cli_ui.printErr("failed to read response", .{});
         std.process.exit(1);
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type == .@"error") {
-        print("Error: server returned error\n", .{});
+        cli_ui.printErr("server returned error", .{});
         std.process.exit(1);
     }
     if (msg_type != .get_layout or hdr.payload_len == 0) {
-        print("Error: unexpected response\n", .{});
+        cli_ui.printErr("unexpected response", .{});
         std.process.exit(1);
     }
     if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
-        print("Error: layout response too large\n", .{});
+        cli_ui.printErr("layout response too large", .{});
         std.process.exit(1);
     }
 
     // Read raw layout export JSON.
     const layout_export = allocator.alloc(u8, hdr.payload_len) catch {
-        print("Error: allocation failed\n", .{});
+        cli_ui.printErr("allocation failed", .{});
         std.process.exit(1);
     };
     defer allocator.free(layout_export);
     wire.readExact(fd, layout_export) catch {
-        print("Error: failed to read layout export\n", .{});
+        cli_ui.printErr("failed to read layout export", .{});
         std.process.exit(1);
     };
 
     // Parse the layout export JSON.
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, layout_export, .{}) catch {
-        print("Error: failed to parse layout export\n", .{});
+        cli_ui.printErr("failed to parse layout export", .{});
         std.process.exit(1);
     };
     defer parsed.deinit();
@@ -80,7 +79,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
     const root_obj = switch (parsed.value) {
         .object => |o| o,
         else => {
-            print("Error: invalid layout export format\n", .{});
+            cli_ui.printErr("invalid layout export format", .{});
             std.process.exit(1);
         },
     };
@@ -94,7 +93,11 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         for (used_names) |n| allocator.free(n);
         if (used_names.len > 0) allocator.free(used_names);
     }
-    const layout_name = try promptLayoutName(allocator, used_names);
+    const default_name = std.fs.path.basename(cwd);
+    const layout_name = if (name_override.len > 0)
+        try validateLayoutName(allocator, name_override, used_names)
+    else
+        try promptLayoutName(allocator, used_names, default_name);
     defer allocator.free(layout_name);
 
     const write_local = scope == .local or scope == .both;
@@ -102,26 +105,26 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
     const tmp_path = ".hexe.lua.tmp";
     const file = if (write_local)
         (std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch {
-            print("Error: cannot create {s}\n", .{tmp_path});
+            cli_ui.printErr("cannot create {s}", .{tmp_path});
             std.process.exit(1);
         })
     else
         (std.fs.cwd().createFile("/dev/null", .{ .truncate = true }) catch {
-            print("Error: cannot open /dev/null\n", .{});
+            cli_ui.printErr("cannot open /dev/null", .{});
             std.process.exit(1);
         });
     defer file.close();
 
     file.writeAll("local hexe = require(\"hexe\")\n\n") catch |err| {
-        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     writeLuaString(file, "hexe.layout(\"", layout_name, "\", {\n") catch |err| {
-        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     writeLuaString(file, "  root = \"", cwd, "\",\n") catch |err| {
-        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
 
@@ -187,7 +190,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         }
 
         writeLuaString(file, "    hexe.tab(\"", tab_name, "\", {\n") catch |err| {
-            print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+            cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
             std.process.exit(1);
         };
         var wrote_root = false;
@@ -226,7 +229,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
                             if (cwd_map.get(pid)) |pane_cwd| {
                                 if (!std.mem.eql(u8, pane_cwd, cwd)) {
                                     writeLuaString(file, "      root = hexe.pane({ cwd = \"", pane_cwd, "\" }),\n") catch |err| {
-                                        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+                                        cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
                                         std.process.exit(1);
                                     };
                                     wrote_root = true;
@@ -303,17 +306,50 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
     try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
 }
 
-fn promptLayoutName(allocator: std.mem.Allocator, used_names: []const []const u8) ![]u8 {
+fn validateLayoutName(allocator: std.mem.Allocator, raw: []const u8, used_names: []const []const u8) ![]u8 {
+    for (raw) |ch| {
+        if (ch == '/' or ch == '\\') {
+            cli_ui.printErr("layout name cannot contain '/' or '\\'", .{});
+            std.process.exit(1);
+        }
+    }
+    for (used_names) |used| {
+        if (std.ascii.eqlIgnoreCase(used, raw)) {
+            cli_ui.printErr("layout name '{s}' is already in use", .{raw});
+            std.process.exit(1);
+        }
+    }
+    return allocator.dupe(u8, raw);
+}
+
+fn promptLayoutName(allocator: std.mem.Allocator, used_names: []const []const u8, default_name: []const u8) ![]u8 {
     const stdout = std.fs.File.stdout();
     const stdin_fd = std.posix.STDIN_FILENO;
 
+    var default_available = default_name.len > 0;
+    if (default_available) {
+        for (used_names) |used| {
+            if (std.ascii.eqlIgnoreCase(used, default_name)) {
+                default_available = false;
+                break;
+            }
+        }
+    }
+
     var buf: [256]u8 = undefined;
     while (true) {
-        try stdout.writeAll("Layout name: ");
+        if (default_available) {
+            var pbuf: [256]u8 = undefined;
+            const prompt = std.fmt.bufPrint(&pbuf, "Layout name [{s}]: ", .{default_name}) catch "Layout name: ";
+            try stdout.writeAll(prompt);
+        } else {
+            try stdout.writeAll("Layout name: ");
+        }
         const n = std.posix.read(stdin_fd, buf[0..]) catch return error.EndOfStream;
         if (n == 0) return error.EndOfStream;
 
-        const raw = std.mem.trim(u8, buf[0..n], " \t\r\n");
+        const trimmed = std.mem.trim(u8, buf[0..n], " \t\r\n");
+        const raw = if (trimmed.len == 0 and default_available) default_name else trimmed;
         if (raw.len == 0) {
             try stdout.writeAll("Name is required\n");
             continue;
@@ -423,7 +459,7 @@ fn collectUsedLayoutNames(allocator: std.mem.Allocator) ![][]u8 {
 fn finalizeSave(allocator: std.mem.Allocator, scope: LayoutSaveScope, output_path: []const u8, tmp_path: []const u8, layout_name: []const u8, cwd: []const u8) !void {
     if (scope == .local or scope == .both) {
         std.fs.cwd().rename(tmp_path, output_path) catch {
-            print("Error: cannot write {s}\n", .{output_path});
+            cli_ui.printErr("cannot write {s}", .{output_path});
             return;
         };
     }
@@ -432,10 +468,14 @@ fn finalizeSave(allocator: std.mem.Allocator, scope: LayoutSaveScope, output_pat
         try session_config.upsertLayoutRegistryEntry(allocator, layout_name, cwd);
     }
 
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    var cwd_buf: [512]u8 = undefined;
+    const cwd_disp = cli_ui.compactHome(cwd, &cwd_buf);
     switch (scope) {
-        .local => print("Saved local layout: {s}\n", .{output_path}),
-        .global => print("Saved global layout entry: {s} -> {s}\n", .{ layout_name, cwd }),
-        .both => print("Saved local+global layout: {s} ({s})\n", .{ output_path, layout_name }),
+        .local => try out.print("{s}✓{s} Saved local layout: {s}{s}{s}\n", .{ p.success, p.reset, p.bold, output_path, p.reset }),
+        .global => try out.print("{s}✓{s} Saved global layout: {s}{s}{s} {s}→ {s}{s}\n", .{ p.success, p.reset, p.bold, layout_name, p.reset, p.dim, cwd_disp, p.reset }),
+        .both => try out.print("{s}✓{s} Saved layout {s}{s}{s} {s}({s}){s}\n", .{ p.success, p.reset, p.bold, layout_name, p.reset, p.dim, output_path, p.reset }),
     }
 }
 

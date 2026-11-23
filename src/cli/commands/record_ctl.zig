@@ -1,7 +1,6 @@
 const std = @import("std");
 const core = @import("core");
-
-const print = std.debug.print;
+const cli_ui = core.cli_ui;
 
 const Scope = enum { pod, mux };
 
@@ -21,7 +20,7 @@ const RecordState = struct {
 fn deleteStateFile(path: []const u8, comptime context: []const u8) void {
     std.fs.cwd().deleteFile(path) catch |err| {
         if (err != error.FileNotFound) {
-            print("Warning: {s}: failed to delete state file '{s}': {s}\n", .{ context, path, @errorName(err) });
+            cli_ui.printWarn("{s}: failed to delete state file '{s}': {s}", .{ context, path, @errorName(err) });
         }
     };
 }
@@ -37,7 +36,7 @@ pub fn runRecordStart(
     capture_input: bool,
 ) !void {
     const scope = parseScope(scope_raw) orelse {
-        print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
+        cli_ui.printErr("unsupported scope '{s}' (supported: pod|mux)", .{scope_raw});
         std.process.exit(1);
     };
 
@@ -47,7 +46,7 @@ pub fn runRecordStart(
     if (try loadState(allocator, state_path)) |st| {
         defer freeState(allocator, st);
         if (isPidAlive(st.pid)) {
-            print("already recording (pid={d})\n", .{st.pid});
+            cli_ui.printErr("already recording (pid={d})", .{st.pid});
             std.process.exit(1);
         }
         deleteStateFile(state_path, "start");
@@ -68,7 +67,7 @@ pub fn runRecordStart(
     if (scope == .pod and target_uuid.len == 0 and name.len == 0 and socket.len == 0 and (target.len == 0 or std.mem.eql(u8, target, "active"))) {
         owned_target_uuid = try resolveActivePodUuid(allocator);
         if (owned_target_uuid == null) {
-            print("Error: no active pod target found (use --uuid/--name/--socket)\n", .{});
+            cli_ui.printErr("no active pod target found (use --uuid/--name/--socket)", .{});
             std.process.exit(1);
         }
         target_uuid = owned_target_uuid.?;
@@ -92,7 +91,7 @@ pub fn runRecordStart(
         // child exits immediately with "session name required" while
         // `record start` still reported success.
         if (name.len == 0) {
-            print("Error: --scope mux needs --name <session>\n", .{});
+            cli_ui.printErr("--scope mux needs --name <session>", .{});
             std.process.exit(1);
         }
         try argv.append(allocator, "terminal");
@@ -116,7 +115,7 @@ pub fn runRecordStart(
     // stop of "not recording".
     std.Thread.sleep(200 * std.time.ns_per_ms);
     if (!isPidAlive(pid)) {
-        print("Error: recorder exited immediately (check --out path and that the target exists)\n", .{});
+        cli_ui.printErr("recorder exited immediately (check --out path and that the target exists)", .{});
         std.process.exit(1);
     }
     const state = RecordState{
@@ -131,19 +130,28 @@ pub fn runRecordStart(
         .start_tick = pidStartTime(allocator, pid) orelse 0,
     };
     try saveState(allocator, state_path, state);
-    print("recording started pid={d} out={s}\n", .{ pid, out_final });
+
+    var stdout = std.fs.File.stdout().deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    if (p.enabled) {
+        try stdout.print("{s}●{s} Recording started {s}pid={d}{s} {s}out={s}{s}\n", .{
+            p.err, p.reset, p.dim, pid, p.reset, p.accent, out_final, p.reset,
+        });
+    } else {
+        try stdout.print("recording started pid={d} out={s}\n", .{ pid, out_final });
+    }
 }
 
 pub fn runRecordStop(allocator: std.mem.Allocator, scope_raw: []const u8) !void {
     const scope = parseScope(scope_raw) orelse {
-        print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
+        cli_ui.printErr("unsupported scope '{s}' (supported: pod|mux)", .{scope_raw});
         std.process.exit(1);
     };
     const state_path = try getStatePath(allocator, scope);
     defer allocator.free(state_path);
 
     const st = (try loadState(allocator, state_path)) orelse {
-        print("not recording\n", .{});
+        cli_ui.printErr("not recording", .{});
         std.process.exit(1);
     };
     defer freeState(allocator, st);
@@ -155,18 +163,37 @@ pub fn runRecordStop(allocator: std.mem.Allocator, scope_raw: []const u8) !void 
         const now_tick = pidStartTime(allocator, st.pid);
         const same_process = st.start_tick == 0 or now_tick == null or now_tick.? == st.start_tick;
         if (!same_process) {
-            print("Warning: recorder pid={d} was recycled; not signalling\n", .{st.pid});
+            cli_ui.printWarn("recorder pid={d} was recycled; not signalling", .{st.pid});
         } else if (std.c.kill(st.pid, std.c.SIG.TERM) != 0) {
-            print("Warning: failed to signal recorder pid={d}\n", .{st.pid});
+            cli_ui.printWarn("failed to signal recorder pid={d}", .{st.pid});
         }
     }
     deleteStateFile(state_path, "stop");
-    print("recording stopped\n", .{});
+
+    var stdout = std.fs.File.stdout().deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    if (p.enabled) {
+        try stdout.print("{s}■{s} Recording stopped", .{ p.success, p.reset });
+        if (st.out.len > 0) {
+            try stdout.print(" {s}({s}){s}", .{ p.dim, st.out, p.reset });
+        }
+        try stdout.writeByte('\n');
+    } else {
+        try stdout.writeAll("recording stopped\n");
+    }
 }
 
 pub fn runRecordStatus(allocator: std.mem.Allocator, scope_raw: []const u8, json: bool) !void {
+    var stdout = std.fs.File.stdout().deprecatedWriter();
+    const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
+    const p = cli_ui.Palette.forStdout();
+
     const scope = parseScope(scope_raw) orelse {
-        print("0\n", .{});
+        if (is_tty and !json) {
+            try stdout.print("{s}○{s} Not recording\n", .{ p.muted, p.reset });
+        } else {
+            try stdout.writeAll("0\n");
+        }
         return;
     };
     const state_path = try getStatePath(allocator, scope);
@@ -175,9 +202,11 @@ pub fn runRecordStatus(allocator: std.mem.Allocator, scope_raw: []const u8, json
     const st_opt = try loadState(allocator, state_path);
     if (st_opt == null) {
         if (json) {
-            print("{{\"active\":false}}\n", .{});
+            try stdout.writeAll("{\"active\":false}\n");
+        } else if (is_tty) {
+            try stdout.print("{s}○{s} Not recording {s}({s}){s}\n", .{ p.muted, p.reset, p.dim, @tagName(scope), p.reset });
         } else {
-            print("0\n", .{});
+            try stdout.writeAll("0\n");
         }
         return;
     }
@@ -188,17 +217,27 @@ pub fn runRecordStatus(allocator: std.mem.Allocator, scope_raw: []const u8, json
     if (!active) {
         deleteStateFile(state_path, "status");
         if (json) {
-            print("{{\"active\":false}}\n", .{});
+            try stdout.writeAll("{\"active\":false}\n");
+        } else if (is_tty) {
+            try stdout.print("{s}○{s} Not recording {s}({s}){s}\n", .{ p.muted, p.reset, p.dim, @tagName(scope), p.reset });
         } else {
-            print("0\n", .{});
+            try stdout.writeAll("0\n");
         }
         return;
     }
 
     if (json) {
-        print("{{\"active\":true,\"pid\":{d},\"scope\":\"{s}\",\"out\":\"{s}\",\"started_ms\":{d}}}\n", .{ st.pid, @tagName(st.scope), st.out, st.started_ms });
+        try stdout.print("{{\"active\":true,\"pid\":{d},\"scope\":\"{s}\",\"out\":\"{s}\",\"started_ms\":{d}}}\n", .{ st.pid, @tagName(st.scope), st.out, st.started_ms });
+    } else if (is_tty) {
+        try stdout.print("{s}●{s} {s}Recording active{s} {s}({s}){s}  {s}pid={d}{s}  {s}{s}{s}\n", .{
+            p.err,  p.reset,
+            p.bold, p.reset,
+            p.dim,  @tagName(st.scope), p.reset,
+            p.dim,  st.pid,             p.reset,
+            p.accent, st.out,           p.reset,
+        });
     } else {
-        print("1\n", .{});
+        try stdout.writeAll("1\n");
     }
 }
 
@@ -213,7 +252,7 @@ pub fn runRecordToggle(
     capture_input: bool,
 ) !void {
     const scope = parseScope(scope_raw) orelse {
-        print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
+        cli_ui.printErr("unsupported scope '{s}' (supported: pod|mux)", .{scope_raw});
         std.process.exit(1);
     };
     const state_path = try getStatePath(allocator, scope);
@@ -260,7 +299,7 @@ fn resolveActivePodUuid(allocator: std.mem.Allocator) !?[]u8 {
     defer allocator.free(out);
 
     _ = child.wait() catch |err| {
-        print("Warning: failed to wait for active-pod resolver: {s}\n", .{@errorName(err)});
+        cli_ui.printWarn("failed to wait for active-pod resolver: {s}", .{@errorName(err)});
     };
 
     return extractUuidFromText(allocator, out);
