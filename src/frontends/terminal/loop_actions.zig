@@ -281,15 +281,13 @@ fn getCurrentFocusedPane(state: *State) ?*Pane {
 
 /// Perform the actual detach action.
 pub fn performDetach(state: *State) void {
-    const session_uuid = state.runtime.sessionUuid();
     state.runtime.detachCurrentSession() catch {
-        std.debug.print("\nDetach failed - panes orphaned\n", .{});
+        state.recordExitSummary(.detach_failed);
         state.running = false;
         return;
     };
+    state.recordExitSummary(.detached);
     state.runtime.requestExplicitDetachStop();
-    // Print session_id (our UUID) so user can reattach.
-    std.debug.print("\nSession detached: {s}\nReattach with: hexe terminal attach {s}\n", .{ session_uuid, session_uuid[0..8] });
 }
 
 /// Perform the actual disown action - orphan pane in ses and spawn new shell in same place.

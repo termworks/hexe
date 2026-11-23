@@ -24,6 +24,7 @@ pub const Align = style.Align;
 pub const Bounds = style.Bounds;
 pub const Position = style.Position;
 pub const InputResult = style.InputResult;
+pub const PopupKey = style.PopupKey;
 
 pub const Notification = notification.Notification;
 pub const NotificationManager = notification.NotificationManager;
@@ -35,6 +36,7 @@ pub const Selection = confirm.Selection;
 
 pub const Picker = picker.Picker;
 pub const PickerOptions = picker.PickerOptions;
+pub const PickerAction = picker.PickerAction;
 
 /// Blocking popup scope
 pub const Scope = enum {
@@ -52,6 +54,13 @@ pub const Popup = union(enum) {
         return switch (self) {
             .confirm => |c| c.handleInput(key),
             .picker => |p| p.handleInput(key),
+        };
+    }
+
+    pub fn handleKey(self: Popup, key: PopupKey) InputResult {
+        return switch (self) {
+            .confirm => |c| c.handleKey(key),
+            .picker => |p| p.handleKey(key),
         };
     }
 
@@ -97,7 +106,9 @@ pub const PopupManager = struct {
     active: ?Popup,
     // Store last result for retrieval after popup is dismissed
     last_confirm_result: ?bool,
+    last_confirm_cancelled: bool,
     last_picker_result: ?usize,
+    last_picker_action: ?PickerAction,
     last_picker_cancelled: bool,
 
     pub fn init(allocator: std.mem.Allocator) PopupManager {
@@ -106,7 +117,9 @@ pub const PopupManager = struct {
             .notifications = NotificationManager.init(allocator),
             .active = null,
             .last_confirm_result = null,
+            .last_confirm_cancelled = false,
             .last_picker_result = null,
+            .last_picker_action = null,
             .last_picker_cancelled = false,
         };
     }
@@ -117,7 +130,9 @@ pub const PopupManager = struct {
             .notifications = NotificationManager.initWithConfig(allocator, cfg),
             .active = null,
             .last_confirm_result = null,
+            .last_confirm_cancelled = false,
             .last_picker_result = null,
+            .last_picker_action = null,
             .last_picker_cancelled = false,
         };
     }
@@ -216,14 +231,18 @@ pub const PopupManager = struct {
                     .confirm => |c| {
                         c.forceTimeout();
                         self.last_confirm_result = c.getResult();
+                        self.last_confirm_cancelled = true;
                         self.last_picker_result = null;
+                        self.last_picker_action = null;
                         self.last_picker_cancelled = false;
                     },
                     .picker => |p| {
                         p.forceTimeout();
                         self.last_picker_result = null;
+                        self.last_picker_action = null;
                         self.last_picker_cancelled = true;
                         self.last_confirm_result = null;
+                        self.last_confirm_cancelled = false;
                     },
                 }
                 // Clean up the popup
@@ -236,32 +255,40 @@ pub const PopupManager = struct {
         return needs_refresh;
     }
 
-    /// Handle keyboard input
-    /// Returns null if no popup handled it, otherwise the result
-    pub fn handleInput(self: *PopupManager, key: u8) ?InputResult {
+    /// Handle structured keyboard input.
+    /// Returns null if no popup handled it, otherwise the result.
+    pub fn handleKey(self: *PopupManager, key: PopupKey) ?InputResult {
         if (self.active) |popup| {
-            const result = popup.handleInput(key);
+            const result = popup.handleKey(key);
             if (result == .dismissed) {
-                // Store result before cleanup
                 switch (popup) {
                     .confirm => |c| {
                         self.last_confirm_result = c.getResult();
+                        self.last_confirm_cancelled = c.wasCancelled();
                         self.last_picker_result = null;
+                        self.last_picker_action = null;
                         self.last_picker_cancelled = false;
                     },
                     .picker => |p| {
                         self.last_picker_result = p.getResult();
+                        self.last_picker_action = p.getAction();
                         self.last_picker_cancelled = p.wasCancelled();
                         self.last_confirm_result = null;
+                        self.last_confirm_cancelled = false;
                     },
                 }
-                // Popup is done, clean up
                 popup.deinit(self.allocator);
                 self.active = null;
             }
             return result;
         }
         return null;
+    }
+
+    /// Handle legacy single-byte keyboard input.
+    /// Returns null if no popup handled it, otherwise the result.
+    pub fn handleInput(self: *PopupManager, key: u8) ?InputResult {
+        return self.handleKey(PopupKey.fromByte(key));
     }
 
     /// Check if there's an active blocking popup
@@ -298,10 +325,18 @@ pub const PopupManager = struct {
         return self.last_confirm_result;
     }
 
+    pub fn wasConfirmCancelled(self: *PopupManager) bool {
+        return self.last_confirm_cancelled;
+    }
+
     /// Get result from the last picker dialog (if any)
     /// Returns the stored result from the last dismissed picker popup
     pub fn getPickerResult(self: *PopupManager) ?usize {
         return self.last_picker_result;
+    }
+
+    pub fn getPickerAction(self: *PopupManager) ?PickerAction {
+        return self.last_picker_action;
     }
 
     /// Check if last picker was cancelled
@@ -312,7 +347,9 @@ pub const PopupManager = struct {
     /// Clear stored results
     pub fn clearResults(self: *PopupManager) void {
         self.last_confirm_result = null;
+        self.last_confirm_cancelled = false;
         self.last_picker_result = null;
+        self.last_picker_action = null;
         self.last_picker_cancelled = false;
     }
 
@@ -329,3 +366,8 @@ pub const PopupManager = struct {
         self.notifications.clear();
     }
 };
+
+test {
+    _ = confirm;
+    _ = picker;
+}

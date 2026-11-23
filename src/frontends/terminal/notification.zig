@@ -103,13 +103,14 @@ fn renderTextWithVaxis(renderer: *Renderer, start_x: u16, y: u16, text: []const 
 
     const screen_w = renderer.screenWidth();
     if (start_x >= screen_w) return;
+    const owned_text = renderer.frame_arena.allocator().dupe(u8, text) catch text;
     const row = renderer.vx.window().child(.{
         .x_off = @intCast(start_x),
         .y_off = @intCast(y),
         .width = screen_w - start_x,
         .height = 1,
     });
-    const seg = vaxis.Segment{ .text = text, .style = toVaxisStyle(style) };
+    const seg = vaxis.Segment{ .text = owned_text, .style = toVaxisStyle(style) };
     _ = row.print(&.{seg}, .{ .row_offset = 0, .col_offset = 0, .wrap = .none, .commit = true });
 }
 

@@ -14,9 +14,15 @@ const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
 const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
 const State = @import("state.zig").State;
+const state_types = @import("state_types.zig");
 const terminal_host = @import("host.zig");
 const startup_chooser = @import("startup_chooser.zig");
+const picker_standalone = @import("picker_standalone.zig");
 const statusbar = @import("statusbar.zig");
+
+pub const ChooserMode = state_types.ChooserMode;
+pub const runStandalonePicker = picker_standalone.runPicker;
+pub const runStandaloneConfirm = picker_standalone.runConfirm;
 
 var debug_enabled: bool = false;
 
@@ -78,53 +84,26 @@ fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameCha
     }
 }
 
-const ResolvedAttachTarget = struct {
-    target: []const u8,
-    owned: ?[]u8 = null,
+const ResolvedAttachTarget = union(enum) {
+    exact: struct {
+        target: []const u8,
+        owned: ?[]u8 = null,
+    },
+    pick_cwd,
 
     pub fn deinit(self: *ResolvedAttachTarget, allocator: std.mem.Allocator) void {
-        if (self.owned) |owned| allocator.free(owned);
+        switch (self.*) {
+            .exact => |ex| {
+                if (ex.owned) |owned| allocator.free(owned);
+            },
+            .pick_cwd => {},
+        }
         self.* = undefined;
     }
 };
 
-/// Print to the controlling terminal directly. The frontend redirects
-/// stderr to /dev/null (or the logfile) at startup so the TUI stays clean —
-/// which made every attach-resolution message, INCLUDING the ambiguity
-/// picker prompt, invisible: the process then blocked reading stdin behind a
-/// prompt nobody could see ("attach just hangs"). Interactive output goes to
-/// /dev/tty, which survives the redirect.
-fn ttyPrint(comptime fmt: []const u8, args: anytype) void {
-    var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    if (std.fs.openFileAbsolute("/dev/tty", .{ .mode = .write_only })) |tty| {
-        defer tty.close();
-        tty.writeAll(msg) catch {};
-        return;
-    } else |_| {}
-    // No controlling terminal (setsid'd): stdin is the terminal for any
-    // interactive session — writing to a tty through its stdin fd is valid.
-    if (std.posix.isatty(std.posix.STDIN_FILENO)) {
-        var off: usize = 0;
-        while (off < msg.len) {
-            off += std.posix.write(std.posix.STDIN_FILENO, msg[off..]) catch return;
-        }
-    }
-}
-
-fn readAttachSelection(max: usize) ?usize {
-    var in_buf: [64]u8 = undefined;
-    var stdin = std.fs.File.stdin().reader(&in_buf);
-    const line = stdin.interface.takeDelimiterExclusive('\n') catch return null;
-    const trimmed = std.mem.trim(u8, line, " \t\r\n");
-    if (trimmed.len == 0) return null;
-    const choice = std.fmt.parseInt(usize, trimmed, 10) catch return null;
-    if (choice == 0 or choice > max) return null;
-    return choice - 1;
-}
-
 fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntime, original: []const u8) !ResolvedAttachTarget {
-    if (!std.mem.eql(u8, original, ".")) return .{ .target = original };
+    if (!std.mem.eql(u8, original, ".")) return .{ .exact = .{ .target = original } };
 
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
     defer allocator.free(cwd);
@@ -147,18 +126,9 @@ fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntim
     var match_count: usize = 0;
     for (sessions[0..count], 0..) |session, idx| {
         if (std.mem.eql(u8, &session.session_id, &own_uuid)) continue;
-        // A ZERO-pane session is never a meaningful attach target: attached
-        // ones are frontends still booting (they register before creating a
-        // pane — e.g. a concurrent `attach .` racer), and detached ones are
-        // leftovers of aborted attaches. Matching them forced the ambiguity
-        // picker on phantom candidates.
         if (session.pane_count == 0) continue;
         const base_root = session.base_root[0..session.base_root_len];
         if (base_root.len == 0 or !std.mem.eql(u8, base_root, cwd)) continue;
-        // Dedup by session id: during park/steal transitions one session can
-        // briefly appear both as a stale attached client and as its detached
-        // record. Two entries for one session must not trigger the picker
-        // (which would look like a hang). Prefer the detached record.
         var duplicate = false;
         for (matches[0..match_count]) |existing_idx| {
             if (std.mem.eql(u8, &sessions[existing_idx].session_id, &session.session_id)) {
@@ -175,34 +145,34 @@ fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntim
     }
 
     if (match_count == 0) {
-        ttyPrint("No session rooted at: {s}\n", .{cwd});
         return error.SessionNotFound;
     }
 
     if (match_count == 1) {
         const session = sessions[matches[0]];
         const target = try allocator.dupe(u8, session.session_id[0..8]);
-        return .{ .target = target, .owned = target };
+        return .{ .exact = .{ .target = target, .owned = target } };
     }
 
-    ttyPrint("Sessions rooted at {s}:\n", .{cwd});
-    for (matches[0..match_count], 0..) |session_idx, display_idx| {
+    // Multiple sessions match cwd: on a TTY, open the unified vaxis session
+    // picker; on a non-TTY (scripts), print candidates and fail cleanly.
+    if (std.posix.isatty(std.posix.STDIN_FILENO) and std.posix.isatty(std.posix.STDOUT_FILENO)) {
+        return .pick_cwd;
+    }
+
+    var buf: [4096]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    const w = stream.writer();
+    w.print("Multiple sessions rooted at {s}:\n", .{cwd}) catch {};
+    for (matches[0..match_count]) |session_idx| {
         const session = sessions[session_idx];
         const name = session.session_name[0..session.session_name_len];
         const state_tag: []const u8 = if (session.attached) " (attached)" else "";
-        ttyPrint("  {d}) [{s}] {s} ({d} panes){s}\n", .{ display_idx + 1, session.session_id[0..8], name, session.pane_count, state_tag });
+        w.print("  [{s}] {s} ({d} panes){s}\n", .{ session.session_id[0..8], name, session.pane_count, state_tag }) catch {};
     }
-    // Never block waiting for a selection that cannot come: on a non-tty
-    // stdin (scripts, pipelines) the old blocking read looked like a hang.
-    if (!std.posix.isatty(std.posix.STDIN_FILENO)) {
-        ttyPrint("Multiple sessions match; attach by UUID prefix instead.\n", .{});
-        return error.InvalidSelection;
-    }
-    ttyPrint("Select session [1-{d}]: ", .{match_count});
-    const selected = readAttachSelection(match_count) orelse return error.InvalidSelection;
-    const session = sessions[matches[selected]];
-    const target = try allocator.dupe(u8, session.session_id[0..8]);
-    return .{ .target = target, .owned = target };
+    w.print("Attach by UUID prefix instead (e.g. `hexe attach <id>`).\n", .{}) catch {};
+    writeStartupMessage(stream.getWritten());
+    return error.InvalidSelection;
 }
 
 /// Arguments for terminal frontend commands.
@@ -219,6 +189,9 @@ pub const TerminalArgs = struct {
     /// session already rooted at this cwd, then whether to load .hexe.lua,
     /// before falling back to a plain new session. See startup_chooser.zig.
     startup_chooser: bool = false,
+    /// Explicit tab-less chooser mode (e.g., interactive `hexe attach`).
+    chooser_mode: state_types.ChooserMode = .none,
+    chooser_filter: ?[]const u8 = null,
     connect_options: FrontendConnectOptions = .{},
 };
 
@@ -298,8 +271,8 @@ pub fn run(terminal_args: TerminalArgs) !void {
     // Handle --attach: attach to detached session by name or UUID prefix.
     if (terminal_args.attach) |uuid_arg| {
         if (uuid_arg.len < 3 and !std.mem.eql(u8, uuid_arg, ".")) {
-            std.debug.print("Session name/UUID too short (need at least 3 chars)\n", .{});
-            return;
+            std.debug.print("Error: session name/UUID too short (need at least 3 chars)\n", .{});
+            std.process.exit(1);
         }
         // Will be handled after state init.
     }
@@ -368,6 +341,12 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Get terminal size.
     const size = terminal.getTermSize();
+
+    // Deferred LIFO exit code: runs AFTER state.deinit() and startup_error
+    // output so failed non-interactive attaches exit cleanly with rc != 0 and
+    // no stack trace.
+    var exit_code: u8 = 0;
+    defer if (exit_code != 0) std.process.exit(exit_code);
 
     // A startup failure has to be readable AFTER the screen is handed back.
     // State.init claims the terminal (raw mode, alternate screen), so anything
@@ -486,41 +465,109 @@ pub fn run(terminal_args: TerminalArgs) !void {
     if (terminal_args.attach) |uuid_prefix| {
         var attach_attempt: usize = 0;
         attach_retry: while (true) : (attach_attempt += 1) {
-            if (attach_attempt > 0) std.Thread.sleep(600 * std.time.ns_per_ms);
+            if (attach_attempt > 0) std.Thread.sleep(250 * std.time.ns_per_ms);
             const last_try = attach_attempt + 1 >= 4;
             var resolved_attach = resolveDotAttachTarget(allocator, state.runtime, uuid_prefix) catch |err| {
                 debugLog("attach: failed to resolve target {s}: {s} (attempt {d})", .{ uuid_prefix, @errorName(err), attach_attempt + 1 });
                 if (err == error.SessionNotFound and !last_try) continue :attach_retry;
-                if (err == error.InvalidSelection) {
-                    ttyPrint("Invalid selection\n", .{});
+                if (err == error.SessionNotFound) {
+                    const cwd = std.fs.cwd().realpathAlloc(allocator, ".") catch null;
+                    defer if (cwd) |d| allocator.free(d);
+                    var msg_buf: [512]u8 = undefined;
+                    const p = core.cli_ui.Palette.forFd(real_stderr orelse posix.STDERR_FILENO);
+                    const msg = std.fmt.bufPrint(
+                        &msg_buf,
+                        "{s}✗{s} No session rooted at {s}{s}{s}\n  {s}List all:{s}  {s}hexe ls{s}\n  {s}Start one:{s} {s}hexe new{s}\n",
+                        .{ p.err, p.reset, p.bold, cwd orelse ".", p.reset, p.dim, p.reset, p.accent, p.reset, p.dim, p.reset, p.accent, p.reset },
+                    ) catch "No session rooted here\n";
+                    writeStartupMessage(msg);
                 }
+                exit_code = 1;
                 return;
             };
             defer resolved_attach.deinit(allocator);
 
-            debugLog("attach: trying to reattach with prefix={s}", .{resolved_attach.target});
-            if (state.reattachSession(resolved_attach.target)) {
-                debugLog("attach: reattachSession succeeded", .{});
-                state.notifications.show("Session reattached");
-                restored_existing_target = true;
-                // Reattach may change state.uuid — update env for subsequent panes.
-                const reattached_uuid = state.runtime.sessionUuid();
-                @memcpy(session_id_z[0..32], &reattached_uuid);
-                _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
-            } else if (state.attachOrphanedPane(resolved_attach.target)) {
-                debugLog("attach: attachOrphanedPane succeeded", .{});
-                state.notifications.show("Attached to orphaned pane");
-                restored_existing_target = true;
-            } else {
-                debugLog("attach: both reattach methods failed (attempt {d})", .{attach_attempt + 1});
-                if (!last_try) continue :attach_retry;
-                // Session/pane not found - EXIT with error, don't create new session
-                ttyPrint("Session or pane '{s}' not found\n", .{resolved_attach.target});
-                ttyPrint("Use 'hexe terminal list' to see available sessions\n", .{});
-                return; // Exit without entering main loop
+            switch (resolved_attach) {
+                .pick_cwd => {
+                    startup_chooser.beginAttach(&state, .attach_cwd, null);
+                    break :attach_retry;
+                },
+                .exact => |ex| {
+                    debugLog("attach: trying to reattach with prefix={s}", .{ex.target});
+                    switch (state.reattachSessionDetailed(ex.target)) {
+                        .ok => {
+                            debugLog("attach: reattachSession succeeded", .{});
+                            state.notifications.show("Session reattached");
+                            restored_existing_target = true;
+                            const reattached_uuid = state.runtime.sessionUuid();
+                            @memcpy(session_id_z[0..32], &reattached_uuid);
+                            _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
+                            break :attach_retry;
+                        },
+                        .ambiguous => {
+                            if (posix.isatty(posix.STDIN_FILENO) and posix.isatty(posix.STDOUT_FILENO)) {
+                                startup_chooser.beginAttach(&state, .attach_filter, ex.target);
+                                break :attach_retry;
+                            }
+                            const raw_err = state.runtime.lastReattachError();
+                            var msg_buf: [640]u8 = undefined;
+                            const msg = std.fmt.bufPrint(&msg_buf, "Error: {s}\n", .{
+                                if (raw_err.len > 0) raw_err else "ambiguous session target",
+                            }) catch "Error: ambiguous session target\n";
+                            writeStartupMessage(msg);
+                            exit_code = 1;
+                            return;
+                        },
+                        .prefix_too_short => {
+                            const raw_err = state.runtime.lastReattachError();
+                            var msg_buf: [256]u8 = undefined;
+                            const msg = std.fmt.bufPrint(&msg_buf, "Error: {s}\n", .{
+                                if (raw_err.len > 0) raw_err else "session prefix too short (need at least 4 chars)",
+                            }) catch "Error: session prefix too short\n";
+                            writeStartupMessage(msg);
+                            exit_code = 1;
+                            return;
+                        },
+                        .not_found, .failed => {
+                            if (state.attachOrphanedPane(ex.target)) {
+                                debugLog("attach: attachOrphanedPane succeeded", .{});
+                                state.notifications.show("Attached to orphaned pane");
+                                restored_existing_target = true;
+                                break :attach_retry;
+                            }
+                            debugLog("attach: both reattach methods failed (attempt {d})", .{attach_attempt + 1});
+                            if (!last_try) continue :attach_retry;
+                            const p = core.cli_ui.Palette.forFd(real_stderr orelse posix.STDERR_FILENO);
+                            var msg_buf: [512]u8 = undefined;
+                            const msg = std.fmt.bufPrint(
+                                &msg_buf,
+                                "{s}✗{s} Session or pane '{s}{s}{s}' not found\n  {s}List sessions:{s}  {s}hexe ls{s}\n  {s}Pick session:{s}   {s}hexe attach{s}\n",
+                                .{ p.err, p.reset, p.bold, ex.target, p.reset, p.dim, p.reset, p.accent, p.reset, p.dim, p.reset, p.accent, p.reset },
+                            ) catch "Session or pane not found\n";
+                            writeStartupMessage(msg);
+                            exit_code = 1;
+                            return;
+                        },
+                    }
+                },
             }
-            break :attach_retry;
         }
+    } else if (terminal_args.chooser_mode != .none and terminal_args.chooser_mode != .startup) {
+        var probe_cands: [startup_chooser.MAX_CANDIDATES]startup_chooser.Candidate = undefined;
+        const only_cwd = terminal_args.chooser_mode == .attach_cwd;
+        const cand_count = startup_chooser.collectSessions(allocator, state.runtime, only_cwd, &probe_cands);
+        if (cand_count == 0) {
+            const p = core.cli_ui.Palette.forFd(real_stderr orelse posix.STDERR_FILENO);
+            var msg_buf: [320]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &msg_buf,
+                "{s}○{s} No active sessions to attach to\n  {s}Start one:{s}  {s}hexe new{s}\n",
+                .{ p.warn, p.reset, p.dim, p.reset, p.accent, p.reset },
+            ) catch "No active sessions to attach to\n";
+            writeStartupMessage(msg);
+            return;
+        }
+        startup_chooser.beginAttach(&state, terminal_args.chooser_mode, terminal_args.chooser_filter);
     } else if (terminal_args.session_config_path) |config_path| {
         // Launch from session config (.hexe.lua)
         debugLog("applying session config from: {s}", .{config_path});
@@ -629,6 +676,31 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Continue with main loop.
     try terminal_host.run(&state);
+
+    // Terminal screen and raw mode are now restored; emit any post-exit banner
+    // (detach, session stolen, unexpected disconnect) directly to real stderr.
+    printExitSummary(allocator, &state.exit_summary);
+}
+
+fn printExitSummary(allocator: std.mem.Allocator, summary: *const state_types.ExitSummary) void {
+    if (summary.kind == .none) return;
+    const out_fd = real_stderr orelse posix.STDERR_FILENO;
+    const color = core.cli_ui.useColor(out_fd);
+    const profile = posix.getenv("HEXE_INSTANCE");
+    const uuid8 = summary.session_uuid[0..8];
+    const name = summary.sessionName();
+
+    const banner: ?[]u8 = switch (summary.kind) {
+        .none => null,
+        .detached => core.cli_ui.formatDetachBanner(allocator, color, name, uuid8, summary.pane_count, profile) catch null,
+        .stolen => core.cli_ui.formatStolenBanner(allocator, color, name, uuid8, profile) catch null,
+        .disconnected => core.cli_ui.formatDisconnectBanner(allocator, color, name, uuid8, profile) catch null,
+        .detach_failed => core.cli_ui.formatDetachFailedBanner(allocator, color) catch null,
+    };
+    if (banner) |msg| {
+        defer allocator.free(msg);
+        writeStartupMessage(msg);
+    }
 }
 
 /// Export HEXE_SESSION for child panes. Reattach can change the session

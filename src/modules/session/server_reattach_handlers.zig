@@ -257,7 +257,89 @@ pub fn handleBinaryReattach(self: *Server, fd: posix.fd_t, payload_len: u32, buf
         }
 
         if (attached_name_count == 0) {
-            self.sendBinaryError(fd, "session_not_found");
+            // Phase 4: Case-insensitive name prefix match across detached and
+            // attached sessions (excluding the requesting client itself).
+            var prefix_matches: [16]struct {
+                session_id: [16]u8,
+                name: []const u8,
+                attached: bool,
+            } = undefined;
+            var prefix_match_count: usize = 0;
+
+            var p_iter = self.ses_state.store.detached_sessions.iterator();
+            while (p_iter.next()) |entry| {
+                const detached = entry.value_ptr;
+                const sname = detached.session_snapshot.session_name;
+                if (std.ascii.startsWithIgnoreCase(sname, id_prefix)) {
+                    if (prefix_match_count < prefix_matches.len) {
+                        prefix_matches[prefix_match_count] = .{
+                            .session_id = entry.key_ptr.*,
+                            .name = sname,
+                            .attached = false,
+                        };
+                        prefix_match_count += 1;
+                    }
+                }
+            }
+
+            const requester_id = self.findClientForCtlFd(fd);
+            for (self.ses_state.store.clients.items) |client| {
+                if (requester_id != null and client.id == requester_id.?) continue;
+                const sid = client.session_id orelse continue;
+                const sname = client.session_name orelse continue;
+                if (std.ascii.startsWithIgnoreCase(sname, id_prefix)) {
+                    if (prefix_match_count < prefix_matches.len) {
+                        prefix_matches[prefix_match_count] = .{
+                            .session_id = sid,
+                            .name = sname,
+                            .attached = true,
+                        };
+                        prefix_match_count += 1;
+                    }
+                }
+            }
+
+            if (prefix_match_count == 0) {
+                self.sendBinaryError(fd, "session_not_found");
+                return;
+            }
+
+            if (prefix_match_count == 1) {
+                const match = prefix_matches[0];
+                if (match.attached) {
+                    if (self.ses_state.isSessionLocked(match.session_id)) {
+                        self.sendBinaryError(fd, "session_locked: another client is attaching this session");
+                        return;
+                    }
+                    if (!forceDetachWithPurge(self, match.session_id)) {
+                        core.logging.warn("ses", "reattach failed to force-detach attached session by prefix session={s}", .{id_prefix});
+                        self.sendBinaryError(fd, "reattach_failed");
+                        return;
+                    }
+                }
+                const client_id = requester_id orelse {
+                    self.sendBinaryError(fd, "no_client");
+                    return;
+                };
+                completeReattach(self, fd, match.session_id, client_id);
+                return;
+            }
+
+            var pref_err_buf: [512]u8 = undefined;
+            var pref_stream = std.io.fixedBufferStream(&pref_err_buf);
+            const pref_writer = pref_stream.writer();
+            pref_writer.print("ambiguous: multiple sessions match '{s}':\n", .{id_prefix}) catch {
+                self.sendBinaryError(fd, "ambiguous_session_name");
+                return;
+            };
+            for (prefix_matches[0..prefix_match_count]) |match| {
+                const hex_id = std.fmt.bytesToHex(&match.session_id, .lower);
+                pref_writer.print("  {s} ({s})\n", .{ hex_id[0..8], match.name }) catch {
+                    self.sendBinaryError(fd, "ambiguous_session_name");
+                    return;
+                };
+            }
+            self.sendBinaryError(fd, pref_stream.getWritten());
             return;
         }
 

@@ -7,6 +7,8 @@ const AsciicastWriter = core.recording.asciicast.AsciicastWriter;
 const xev = @import("xev").Dynamic;
 const tty = @import("tty.zig");
 const shared = @import("shared.zig");
+const pod_list = @import("pod_list.zig");
+const terminal = @import("terminal");
 
 const print = std.debug.print;
 
@@ -51,6 +53,7 @@ const AttachContext = struct {
     capture_input: bool,
     detach_code: u8,
     saw_prefix: bool = false,
+    detached_by_user: bool = false,
     running: bool = true,
     password_mode: bool = false,
     net_buf: [4096]u8 = undefined,
@@ -85,7 +88,7 @@ fn stdinCallback(
         if (c.saw_prefix) {
             c.saw_prefix = false;
             if (c.in_buf[0] == 'd' or c.in_buf[0] == 'D') {
-                _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch 0;
+                c.detached_by_user = true;
                 c.running = false;
                 return .disarm;
             }
@@ -194,12 +197,30 @@ pub fn runPodAttach(
     record_path: []const u8,
     capture_input: bool,
 ) !void {
-    const target_socket = try resolveTargetSocket(allocator, uuid, name, socket_path);
+    var picked_uuid_buf: [32]u8 = undefined;
+    var picked_name_owned: ?[]u8 = null;
+    defer if (picked_name_owned) |n| allocator.free(n);
+
+    var eff_uuid = uuid;
+    var eff_name = name;
+
+    if (uuid.len == 0 and name.len == 0 and socket_path.len == 0) {
+        if (std.posix.isatty(std.posix.STDIN_FILENO) and std.posix.isatty(std.posix.STDOUT_FILENO)) {
+            if (try pickPodInteractively(allocator, &picked_uuid_buf, &picked_name_owned)) {
+                eff_uuid = picked_uuid_buf[0..];
+                if (picked_name_owned) |pn| eff_name = pn;
+            } else {
+                return;
+            }
+        }
+    }
+
+    const target_socket = try resolveTargetSocket(allocator, eff_uuid, eff_name, socket_path);
     defer allocator.free(target_socket);
 
     var client = ipc.Client.connect(target_socket) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
-            print("pod is not running\n", .{});
+            core.cli_ui.printErr("pod is not running", .{});
             std.process.exit(1);
         }
         return err;
@@ -208,22 +229,29 @@ pub fn runPodAttach(
 
     // Observer, NOT the authoritative VT client — see sendAuxFrame above.
     wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_OBSERVER) catch |err| {
-        print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
+        core.cli_ui.printErr("failed to handshake with pod: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
 
     var conn = client.toConnection();
 
+    // Detach sequence (tmux-ish): prefix Ctrl+<key> (default b), then 'd'.
+    const det = if (detach_key.len == 1) detach_key[0] else 'b';
+    const det_code: u8 = if (det >= 'a' and det <= 'z') det - 'a' + 1 else if (det >= 'A' and det <= 'Z') det - 'A' + 1 else 0x02;
+
     // Enter raw mode on stdin so we can proxy bytes.
     const orig_termios = tty.enableRawMode(std.posix.STDIN_FILENO) catch null;
-    defer if (orig_termios) |t| tty.disableRawMode(std.posix.STDIN_FILENO, t) catch |err| {
-        core.logging.logError("pod_attach", "failed to restore terminal mode", err);
+    var raw_restored = false;
+    defer if (!raw_restored) {
+        if (orig_termios) |t| tty.disableRawMode(std.posix.STDIN_FILENO, t) catch |err| {
+            core.logging.logError("pod_attach", "failed to restore terminal mode", err);
+        };
     };
 
     // Initial resize.
     const term_size = tty.getTermSize();
     sendResize(target_socket, term_size) catch |err| {
-        print("Warning: failed to send initial resize: {s}\n", .{@errorName(err)});
+        core.cli_ui.printWarn("failed to send initial resize: {s}", .{@errorName(err)});
     };
 
     var recorder: ?AsciicastWriter = null;
@@ -265,10 +293,6 @@ pub fn runPodAttach(
         _ = c.signal(c.SIGWINCH, winchHandler);
     }
 
-    // Detach sequence (tmux-ish): prefix Ctrl+<key> (default b), then 'd'.
-    const det = if (detach_key.len == 1) detach_key[0] else 'b';
-    const det_code: u8 = if (det >= 'a' and det <= 'z') det - 'a' + 1 else if (det >= 'A' and det <= 'Z') det - 'A' + 1 else 0x02;
-
     var frame_reader = try pod_protocol.Reader.init(allocator, pod_protocol.MAX_FRAME_LEN);
     defer frame_reader.deinit(allocator);
 
@@ -303,6 +327,126 @@ pub fn runPodAttach(
     while (attach_ctx.running) {
         try loop.run(.once);
     }
+
+    // Restore cooked mode before printing the detach summary.
+    if (orig_termios) |t| {
+        tty.disableRawMode(std.posix.STDIN_FILENO, t) catch {};
+        raw_restored = true;
+    }
+
+    if (attach_ctx.detached_by_user) {
+        var label_buf: [160]u8 = undefined;
+        var hint_buf: [256]u8 = undefined;
+        const label = if (eff_name.len > 0 and eff_uuid.len >= 8)
+            std.fmt.bufPrint(&label_buf, "{s} [{s}]", .{ eff_name, eff_uuid[0..8] }) catch eff_name
+        else if (eff_name.len > 0)
+            eff_name
+        else if (eff_uuid.len >= 8)
+            eff_uuid[0..8]
+        else
+            target_socket;
+
+        const hint = if (eff_uuid.len == 32)
+            std.fmt.bufPrint(&hint_buf, "hexe pod attach --uuid {s}", .{eff_uuid}) catch "hexe pod attach"
+        else if (eff_name.len > 0)
+            std.fmt.bufPrint(&hint_buf, "hexe pod attach --name {s}", .{eff_name}) catch "hexe pod attach"
+        else
+            std.fmt.bufPrint(&hint_buf, "hexe pod attach --socket {s}", .{target_socket}) catch "hexe pod attach";
+
+        const color = core.cli_ui.useColor(std.posix.STDERR_FILENO);
+        if (core.cli_ui.formatPodDetachBanner(allocator, color, label, hint)) |banner| {
+            defer allocator.free(banner);
+            _ = std.posix.write(std.posix.STDERR_FILENO, banner) catch 0;
+        } else |_| {}
+    }
+}
+
+fn pickPodInteractively(
+    allocator: std.mem.Allocator,
+    out_uuid: *[32]u8,
+    out_name: *?[]u8,
+) !bool {
+    const dir = try ipc.getSocketDir(allocator);
+    defer allocator.free(dir);
+
+    var records = std.ArrayList(pod_list.PodRecord).empty;
+    defer {
+        for (records.items) |r| pod_list.freeRecord(allocator, r);
+        records.deinit(allocator);
+    }
+
+    pod_list.scanMetaFiles(allocator, dir, &records) catch {};
+
+    // Filter to live pods only.
+    var live = std.ArrayList(pod_list.PodRecord).empty;
+    defer live.deinit(allocator);
+    for (records.items) |rec| {
+        const sock = ipc.getPodSocketPath(allocator, &rec.uuid) catch continue;
+        defer allocator.free(sock);
+        if (ipc.Client.connect(sock)) |conn_val| {
+            var c = conn_val;
+            c.close();
+            try live.append(allocator, rec);
+        } else |_| {}
+    }
+
+    if (live.items.len == 0) {
+        const p = core.cli_ui.Palette.forStderr();
+        print("{s}○{s} No running pods found\n  {s}Create one:{s}  {s}hexe pod new{s}\n", .{
+            p.warn, p.reset, p.dim, p.reset, p.accent, p.reset,
+        });
+        return false;
+    }
+
+    var labels = try allocator.alloc([]const u8, live.items.len);
+    var labels_built: usize = 0;
+    defer {
+        for (labels[0..labels_built]) |l| allocator.free(l);
+        allocator.free(labels);
+    }
+
+    var badges = try allocator.alloc([]const u8, live.items.len);
+    var badges_built: usize = 0;
+    defer {
+        for (badges[0..badges_built]) |b| allocator.free(b);
+        allocator.free(badges);
+    }
+
+    var details = try allocator.alloc([]const u8, live.items.len);
+    var details_built: usize = 0;
+    defer {
+        for (details[0..details_built]) |d| allocator.free(d);
+        allocator.free(details);
+    }
+
+    for (live.items, 0..) |rec, i| {
+        labels[i] = try std.fmt.allocPrint(allocator, "{s:<14} [{s}]", .{ rec.name, rec.uuid[0..8] });
+        labels_built = i + 1;
+        badges[i] = try std.fmt.allocPrint(allocator, "pid {d}", .{rec.child_pid});
+        badges_built = i + 1;
+        var home_buf: [256]u8 = undefined;
+        const cwd_disp = core.cli_ui.compactHome(rec.cwd, &home_buf);
+        details[i] = try std.fmt.allocPrint(allocator, "cwd: {s}{s}{s}", .{
+            cwd_disp,
+            if (rec.shell.len > 0) " · " else "",
+            rec.shell,
+        });
+        details_built = i + 1;
+    }
+
+    const chosen = try terminal.runStandalonePicker(allocator, labels, .{
+        .title = "Attach to pod",
+        .badges = badges,
+        .details = details,
+        .hint = "↑↓/jk move · / filter · Enter attach · Ctrl+B d detaches · Esc cancel",
+        .filterable = true,
+    });
+    const idx = chosen orelse return false;
+    out_uuid.* = live.items[idx].uuid;
+    if (live.items[idx].name.len > 0 and !std.mem.eql(u8, live.items[idx].name, "-")) {
+        out_name.* = try allocator.dupe(u8, live.items[idx].name);
+    }
+    return true;
 }
 
 const WinchPipe = struct {
@@ -356,12 +500,12 @@ fn podFrameCallback(ctx: *anyopaque, frame: pod_protocol.Frame) void {
 fn resolveTargetSocket(allocator: std.mem.Allocator, uuid: []const u8, name: []const u8, socket_path: []const u8) ![]const u8 {
     return shared.resolvePodSocketTarget(allocator, uuid, name, socket_path) catch |err| {
         switch (err) {
-            error.InvalidUuid => print("Error: --uuid must be 32 hex chars\n", .{}),
-            error.MissingTarget => print("Error: must provide --socket, --uuid, or --name\n", .{}),
+            error.InvalidUuid => core.cli_ui.printErr("--uuid must be 32 hex chars", .{}),
+            error.MissingTarget => core.cli_ui.printErr("must provide --socket, --uuid, or --name", .{}),
             // Pane names are unique per session, so one name can belong to
             // two panes in two sessions. Picking either could type into, or
             // signal, the wrong one.
-            error.AmbiguousPodName => print("Error: several pods are called that; use --uuid\n", .{}),
+            error.AmbiguousPodName => core.cli_ui.printErr("several pods are called that; use --uuid", .{}),
             else => {},
         }
         return err;

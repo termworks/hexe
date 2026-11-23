@@ -8,8 +8,9 @@ const std = @import("std");
 const core = @import("core");
 const com = @import("com.zig");
 const shared = @import("shared.zig");
+const terminal = @import("terminal");
 
-const print = std.debug.print;
+const cli_ui = core.cli_ui;
 const ipc = core.ipc;
 const connectSesCliChannel = com.connectSesCliChannel;
 const parseUuid32Hex = com.parseUuid32Hex;
@@ -19,17 +20,18 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     const posix = std.posix;
 
     if (name.len == 0) {
-        print("Error: layout name required\n", .{});
+        cli_ui.printErr("layout name required", .{});
+        cli_ui.printErrHint("Usage: hexe terminal layout save <name>", .{});
         std.process.exit(1);
     }
 
     // Get current pane UUID.
     const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: not inside a hexe terminal session (HEXE_PANE_UUID not set)\n", .{});
+        cli_ui.printErr("not inside a hexe terminal session (HEXE_PANE_UUID not set)", .{});
         std.process.exit(1);
     };
     const uuid_arr = parseUuid32Hex(uuid_str) orelse {
-        print("Error: invalid HEXE_PANE_UUID\n", .{});
+        cli_ui.printErr("invalid HEXE_PANE_UUID", .{});
         std.process.exit(1);
     };
 
@@ -40,29 +42,29 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     var pu: wire.PaneUuid = .{ .uuid = undefined };
     pu.uuid = uuid_arr;
     wire.writeControl(fd, .get_layout, std.mem.asBytes(&pu)) catch {
-        print("Error: failed to send request\n", .{});
+        cli_ui.printErr("failed to send request", .{});
         std.process.exit(1);
     };
 
     // Read response.
     const hdr = wire.readControlHeader(fd) catch {
-        print("Error: failed to read response\n", .{});
+        cli_ui.printErr("failed to read response", .{});
         std.process.exit(1);
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type == .@"error") {
         if (hdr.payload_len > 0) {
             if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
-                print("Error response too large\n", .{});
+                cli_ui.printErr("error response too large", .{});
                 std.process.exit(1);
             }
             const err_buf = allocator.alloc(u8, hdr.payload_len) catch {
-                print("Error: server returned error\n", .{});
+                cli_ui.printErr("server returned error", .{});
                 std.process.exit(1);
             };
             defer allocator.free(err_buf);
             wire.readExact(fd, err_buf) catch |err| {
-                print("Error: failed to read server error response: {s}\n", .{@errorName(err)});
+                cli_ui.printErr("failed to read server error response: {s}", .{@errorName(err)});
                 std.process.exit(1);
             };
             // Parse error struct to skip msg_len prefix.
@@ -70,38 +72,38 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
                 const err_hdr = std.mem.bytesToValue(wire.Error, err_buf[0..@sizeOf(wire.Error)]);
                 const msg_start = @sizeOf(wire.Error);
                 const msg_end = msg_start + @min(@as(usize, err_hdr.msg_len), err_buf.len - msg_start);
-                print("Error: {s}\n", .{err_buf[msg_start..msg_end]});
+                cli_ui.printErr("{s}", .{err_buf[msg_start..msg_end]});
             } else {
-                print("Error: server returned error\n", .{});
+                cli_ui.printErr("server returned error", .{});
             }
         } else {
-            print("Error: server returned error\n", .{});
+            cli_ui.printErr("server returned error", .{});
         }
         std.process.exit(1);
     }
     if (msg_type != .get_layout or hdr.payload_len == 0) {
-        print("Error: unexpected response\n", .{});
+        cli_ui.printErr("unexpected response", .{});
         std.process.exit(1);
     }
     if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
-        print("Error: layout response too large\n", .{});
+        cli_ui.printErr("layout response too large", .{});
         std.process.exit(1);
     }
 
     // Read raw layout export JSON.
     const layout_export = allocator.alloc(u8, hdr.payload_len) catch {
-        print("Error: allocation failed\n", .{});
+        cli_ui.printErr("allocation failed", .{});
         std.process.exit(1);
     };
     defer allocator.free(layout_export);
     wire.readExact(fd, layout_export) catch {
-        print("Error: failed to read layout export\n", .{});
+        cli_ui.printErr("failed to read layout export", .{});
         std.process.exit(1);
     };
 
     // Parse the layout export, find the active tab, and extract tree + splits for CWD lookup.
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, layout_export, .{}) catch {
-        print("Error: failed to parse layout export\n", .{});
+        cli_ui.printErr("failed to parse layout export", .{});
         std.process.exit(1);
     };
     defer parsed.deinit();
@@ -109,14 +111,14 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     const root_obj = switch (parsed.value) {
         .object => |o| o,
         else => {
-            print("Error: invalid layout export format\n", .{});
+            cli_ui.printErr("invalid layout export format", .{});
             std.process.exit(1);
         },
     };
 
     // Find active tab.
     const active_tab_val = root_obj.get("active_tab") orelse {
-        print("Error: no active_tab in layout export\n", .{});
+        cli_ui.printErr("no active_tab in layout export", .{});
         std.process.exit(1);
     };
     const active_tab_idx: usize = switch (active_tab_val) {
@@ -125,32 +127,32 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     };
 
     const tabs_val = root_obj.get("tabs") orelse {
-        print("Error: no tabs in layout export\n", .{});
+        cli_ui.printErr("no tabs in layout export", .{});
         std.process.exit(1);
     };
     const tabs_arr = switch (tabs_val) {
         .array => |a| a,
         else => {
-            print("Error: tabs is not array\n", .{});
+            cli_ui.printErr("tabs is not array", .{});
             std.process.exit(1);
         },
     };
 
     if (active_tab_idx >= tabs_arr.items.len) {
-        print("Error: active tab index out of range\n", .{});
+        cli_ui.printErr("active tab index out of range", .{});
         std.process.exit(1);
     }
 
     const tab = switch (tabs_arr.items[active_tab_idx]) {
         .object => |o| o,
         else => {
-            print("Error: tab is not object\n", .{});
+            cli_ui.printErr("tab is not object", .{});
             std.process.exit(1);
         },
     };
 
     const tree_val = tab.get("tree") orelse {
-        print("Error: no tree in tab\n", .{});
+        cli_ui.printErr("no tree in tab", .{});
         std.process.exit(1);
     };
 
@@ -174,7 +176,7 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
                                 switch (pwd_val) {
                                     .string => |s| {
                                         cwd_map.put(id, s) catch |err| {
-                                            print("Error: failed to build layout cwd map: {s}\n", .{@errorName(err)});
+                                            cli_ui.printErr("failed to build layout cwd map: {s}", .{@errorName(err)});
                                             std.process.exit(1);
                                         };
                                     },
@@ -196,48 +198,54 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     const writer = out_buf.writer(allocator);
 
     writer.writeAll("{\n  \"version\": 1,\n  \"tree\": ") catch {
-        print("Error: failed to build layout\n", .{});
+        cli_ui.printErr("failed to build layout", .{});
         std.process.exit(1);
     };
     writeLayoutTemplate(writer, tree_val, &cwd_map, 2) catch {
-        print("Error: failed to build layout\n", .{});
+        cli_ui.printErr("failed to build layout", .{});
         std.process.exit(1);
     };
     writer.writeAll("\n}\n") catch {
-        print("Error: failed to build layout\n", .{});
+        cli_ui.printErr("failed to build layout", .{});
         std.process.exit(1);
     };
 
     // Write to file.
     const layout_dir = ipc.getLayoutDir(allocator) catch {
-        print("Error: cannot determine layout directory\n", .{});
+        cli_ui.printErr("cannot determine layout directory", .{});
         std.process.exit(1);
     };
     defer allocator.free(layout_dir);
 
     // Create directory if needed.
     std.fs.cwd().makePath(layout_dir) catch {
-        print("Error: cannot create layout directory: {s}\n", .{layout_dir});
+        cli_ui.printErr("cannot create layout directory: {s}", .{layout_dir});
         std.process.exit(1);
     };
 
     const file_path = std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ layout_dir, name }) catch {
-        print("Error: allocation failed\n", .{});
+        cli_ui.printErr("allocation failed", .{});
         std.process.exit(1);
     };
     defer allocator.free(file_path);
 
     const file = std.fs.cwd().createFile(file_path, .{ .mode = 0o600 }) catch {
-        print("Error: cannot create file: {s}\n", .{file_path});
+        cli_ui.printErr("cannot create file: {s}", .{file_path});
         std.process.exit(1);
     };
     defer file.close();
     file.writeAll(out_buf.items) catch {
-        print("Error: failed to write file\n", .{});
+        cli_ui.printErr("failed to write file", .{});
         std.process.exit(1);
     };
 
-    print("Layout saved: {s}\n", .{file_path});
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    var path_buf: [512]u8 = undefined;
+    const disp_path = cli_ui.compactHome(file_path, &path_buf);
+    try out.print("{s}✓{s} Layout saved: {s}{s}{s} {s}({s}){s}\n", .{
+        p.success, p.reset, p.bold, name, p.reset, p.dim, disp_path, p.reset,
+    });
 }
 
 fn writeLayoutTemplate(writer: anytype, value: std.json.Value, cwd_map: *std.AutoHashMap(i64, []const u8), indent: usize) !void {
@@ -361,53 +369,67 @@ fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeAll("\"");
 }
 
-pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
+pub fn runLayoutLoad(allocator: std.mem.Allocator, name_arg: []const u8) !void {
     const wire = core.wire;
     const posix = std.posix;
 
-    if (name.len == 0) {
-        print("Error: layout name required\n", .{});
-        std.process.exit(1);
-    }
-
-    // Get current pane UUID.
-    const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: not inside a hexe terminal session (HEXE_PANE_UUID not set)\n", .{});
-        std.process.exit(1);
-    };
-    const uuid_arr = parseUuid32Hex(uuid_str) orelse {
-        print("Error: invalid HEXE_PANE_UUID\n", .{});
-        std.process.exit(1);
-    };
-
-    // Read layout file.
     const layout_dir = ipc.getLayoutDir(allocator) catch {
-        print("Error: cannot determine layout directory\n", .{});
+        cli_ui.printErr("cannot determine layout directory", .{});
         std.process.exit(1);
     };
     defer allocator.free(layout_dir);
 
+    var owned_name: ?[]u8 = null;
+    defer if (owned_name) |n| allocator.free(n);
+    var name: []const u8 = name_arg;
+
+    if (name.len == 0) {
+        if (posix.isatty(posix.STDIN_FILENO) and posix.isatty(posix.STDOUT_FILENO)) {
+            owned_name = try pickLayoutName(allocator, layout_dir);
+            if (owned_name) |picked| {
+                name = picked;
+            } else {
+                return;
+            }
+        } else {
+            cli_ui.printErr("layout name required", .{});
+            cli_ui.printErrHint("List saved layouts with: hexe terminal layout list", .{});
+            std.process.exit(1);
+        }
+    }
+
+    // Get current pane UUID.
+    const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
+        cli_ui.printErr("not inside a hexe terminal session (HEXE_PANE_UUID not set)", .{});
+        std.process.exit(1);
+    };
+    const uuid_arr = parseUuid32Hex(uuid_str) orelse {
+        cli_ui.printErr("invalid HEXE_PANE_UUID", .{});
+        std.process.exit(1);
+    };
+
     const file_path = std.fmt.allocPrint(allocator, "{s}/{s}.json", .{ layout_dir, name }) catch {
-        print("Error: allocation failed\n", .{});
+        cli_ui.printErr("allocation failed", .{});
         std.process.exit(1);
     };
     defer allocator.free(file_path);
 
     const file = std.fs.cwd().openFile(file_path, .{}) catch {
-        print("Error: layout not found: {s}\n", .{file_path});
+        cli_ui.printErr("layout not found: {s}", .{file_path});
+        cli_ui.printErrHint("List saved layouts with: hexe terminal layout list", .{});
         std.process.exit(1);
     };
     defer file.close();
 
     const file_contents = file.readToEndAlloc(allocator, 1024 * 1024) catch {
-        print("Error: failed to read layout file\n", .{});
+        cli_ui.printErr("failed to read layout file", .{});
         std.process.exit(1);
     };
     defer allocator.free(file_contents);
 
     // Parse and validate.
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, file_contents, .{}) catch {
-        print("Error: invalid layout JSON\n", .{});
+        cli_ui.printErr("invalid layout JSON", .{});
         std.process.exit(1);
     };
     defer parsed.deinit();
@@ -415,13 +437,13 @@ pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
     const root_obj = switch (parsed.value) {
         .object => |o| o,
         else => {
-            print("Error: layout file is not a JSON object\n", .{});
+            cli_ui.printErr("layout file is not a JSON object", .{});
             std.process.exit(1);
         },
     };
 
     const tree_val = root_obj.get("tree") orelse {
-        print("Error: no 'tree' in layout file\n", .{});
+        cli_ui.printErr("no 'tree' in layout file", .{});
         std.process.exit(1);
     };
 
@@ -429,7 +451,7 @@ pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
     var tree_buf: std.ArrayList(u8) = .empty;
     defer tree_buf.deinit(allocator);
     serializeJsonValue(tree_val, tree_buf.writer(allocator)) catch {
-        print("Error: failed to serialize tree\n", .{});
+        cli_ui.printErr("failed to serialize tree", .{});
         std.process.exit(1);
     };
 
@@ -444,40 +466,114 @@ pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
     al.uuid = uuid_arr;
 
     wire.writeControlWithTrail(fd, .apply_layout, std.mem.asBytes(&al), tree_buf.items) catch {
-        print("Error: failed to send layout\n", .{});
+        cli_ui.printErr("failed to send layout", .{});
         std.process.exit(1);
     };
 
     if (!shared.readOkOrError(allocator, fd)) std.process.exit(1);
-    print("Layout applied: {s}\n", .{name});
+
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    try out.print("{s}✓{s} Layout applied: {s}{s}{s}\n", .{ p.success, p.reset, p.bold, name, p.reset });
 }
 
-pub fn runLayoutList(allocator: std.mem.Allocator) !void {
-    const layout_dir = ipc.getLayoutDir(allocator) catch {
-        print("Error: cannot determine layout directory\n", .{});
-        std.process.exit(1);
-    };
-    defer allocator.free(layout_dir);
+fn pickLayoutName(allocator: std.mem.Allocator, layout_dir: []const u8) !?[]u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
 
     var dir = std.fs.cwd().openDir(layout_dir, .{ .iterate = true }) catch {
-        // Directory doesn't exist = no layouts.
-        print("No saved layouts\n", .{});
-        return;
+        const p = cli_ui.Palette.forStderr();
+        std.debug.print("{s}○{s} No saved layouts found\n", .{ p.warn, p.reset });
+        return null;
     };
     defer dir.close();
 
-    var count: usize = 0;
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
         if (entry.kind != .file) continue;
         if (std.mem.endsWith(u8, entry.name, ".json")) {
             const base = entry.name[0 .. entry.name.len - 5];
-            print("{s}\n", .{base});
-            count += 1;
+            try names.append(allocator, try allocator.dupe(u8, base));
         }
     }
 
-    if (count == 0) {
-        print("No saved layouts\n", .{});
+    if (names.items.len == 0) {
+        const p = cli_ui.Palette.forStderr();
+        std.debug.print("{s}○{s} No saved layouts found\n", .{ p.warn, p.reset });
+        return null;
+    }
+
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    const chosen = try terminal.runStandalonePicker(allocator, names.items, .{
+        .title = "Load layout",
+        .hint = "↑↓/jk move · / filter · Enter apply · Esc cancel",
+        .filterable = true,
+    });
+    const idx = chosen orelse return null;
+    return try allocator.dupe(u8, names.items[idx]);
+}
+
+pub fn runLayoutList(allocator: std.mem.Allocator) !void {
+    const layout_dir = ipc.getLayoutDir(allocator) catch {
+        cli_ui.printErr("cannot determine layout directory", .{});
+        std.process.exit(1);
+    };
+    defer allocator.free(layout_dir);
+
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
+
+    var dir = std.fs.cwd().openDir(layout_dir, .{ .iterate = true }) catch {
+        try out.print("{s}No saved layouts{s}\n", .{ p.dim, p.reset });
+        return;
+    };
+    defer dir.close();
+
+    var names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (std.mem.endsWith(u8, entry.name, ".json")) {
+            const base = entry.name[0 .. entry.name.len - 5];
+            try names.append(allocator, try allocator.dupe(u8, base));
+        }
+    }
+
+    if (names.items.len == 0) {
+        try out.print("{s}No saved layouts{s}\n", .{ p.dim, p.reset });
+        return;
+    }
+
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    if (is_tty) {
+        var dir_buf: [512]u8 = undefined;
+        const dir_disp = cli_ui.compactHome(layout_dir, &dir_buf);
+        try out.print("{s}Saved layouts{s} {s}({s}){s}\n", .{ p.bold, p.reset, p.dim, dir_disp, p.reset });
+        for (names.items) |n| {
+            try out.print("  {s}•{s} {s}{s}{s}\n", .{ p.accent, p.reset, p.bold, n, p.reset });
+        }
+    } else {
+        for (names.items) |n| {
+            try out.print("{s}\n", .{n});
+        }
     }
 }

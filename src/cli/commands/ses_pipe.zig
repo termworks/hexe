@@ -20,7 +20,7 @@ pub fn run(allocator: std.mem.Allocator, socket_path: []const u8) !void {
     };
 
     var client = core.ipc.Client.connect(resolved_socket) catch {
-        std.debug.print("Error: Could not connect to ses daemon socket: {s}\n", .{resolved_socket});
+        core.cli_ui.printErr("could not connect to ses daemon socket: {s}", .{resolved_socket});
         return error.SesNotRunning;
     };
     defer client.close();

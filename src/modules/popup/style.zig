@@ -123,3 +123,39 @@ pub const InputResult = enum {
     dismissed, // Popup done, remove it
     pass_through, // Input not handled, let caller process
 };
+
+/// Structured popup key event.
+///
+/// Keeping arrows and control keys distinct from printable ASCII letters lets
+/// filterable pickers navigate with arrows while typing `j`/`k`/`h`/`l` into
+/// the search query.
+pub const PopupKey = union(enum) {
+    up,
+    down,
+    left,
+    right,
+    page_up,
+    page_down,
+    home,
+    end,
+    enter,
+    tab,
+    shift_tab,
+    backspace,
+    escape,
+    ctrl_c,
+    ctrl_u,
+    char: u8,
+
+    pub fn fromByte(key: u8) PopupKey {
+        return switch (key) {
+            '\r', '\n' => .enter,
+            '\t' => .tab,
+            0x08, 0x7f => .backspace,
+            27 => .escape,
+            0x03 => .ctrl_c,
+            0x15 => .ctrl_u,
+            else => .{ .char = key },
+        };
+    }
+};

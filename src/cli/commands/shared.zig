@@ -314,28 +314,28 @@ const wire = core.wire;
 /// reading this cannot tell "applied" from "pane not attached".
 /// Returns true on `.ok`; prints the reason and returns false otherwise.
 pub fn readOkOrError(allocator: std.mem.Allocator, fd: std.posix.fd_t) bool {
-    const print = std.debug.print;
+    const cli_ui = core.cli_ui;
     const hdr = wire.readControlHeader(fd) catch |err| {
-        print("Error: no reply from ses daemon: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("no reply from ses daemon: {s}", .{@errorName(err)});
         return false;
     };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type == .ok) return true;
     if (msg_type != .@"error") {
-        print("Error: unexpected reply from ses daemon\n", .{});
+        cli_ui.printErr("unexpected reply from ses daemon", .{});
         return false;
     }
     if (hdr.payload_len == 0 or hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
-        print("Error: ses daemon reported failure\n", .{});
+        cli_ui.printErr("ses daemon reported failure", .{});
         return false;
     }
     const buf = allocator.alloc(u8, hdr.payload_len) catch {
-        print("Error: ses daemon reported failure\n", .{});
+        cli_ui.printErr("ses daemon reported failure", .{});
         return false;
     };
     defer allocator.free(buf);
     wire.readExact(fd, buf) catch {
-        print("Error: ses daemon reported failure\n", .{});
+        cli_ui.printErr("ses daemon reported failure", .{});
         return false;
     };
     if (buf.len > @sizeOf(wire.Error)) {
@@ -343,10 +343,10 @@ pub fn readOkOrError(allocator: std.mem.Allocator, fd: std.posix.fd_t) bool {
         const start = @sizeOf(wire.Error);
         const end = @min(buf.len, start + e.msg_len);
         if (end > start) {
-            print("Error: {s}\n", .{buf[start..end]});
+            cli_ui.printErr("{s}", .{buf[start..end]});
             return false;
         }
     }
-    print("Error: ses daemon reported failure\n", .{});
+    cli_ui.printErr("ses daemon reported failure", .{});
     return false;
 }

@@ -104,6 +104,7 @@ pub const SesState = struct {
     pub const detachSession = api.detachSession;
     pub const reattachSession = api.reattachSession;
     pub const forceDetachAttachedSession = api.forceDetachAttachedSession;
+    pub const forceDetachAttachedSessionWithNotify = api.forceDetachAttachedSessionWithNotify;
     pub const removeDetachedSession = api.removeDetachedSession;
     pub const removePaneFromDetachedSessions = api.removePaneFromDetachedSessions;
     pub const isPaneParked = api.isPaneParked;

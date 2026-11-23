@@ -1,8 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const ipc = core.ipc;
-
-const print = std.debug.print;
+const cli_ui = core.cli_ui;
 
 pub fn runPodNew(
     allocator: std.mem.Allocator,
@@ -13,6 +12,7 @@ pub fn runPodNew(
     alias: bool,
     log_level: ?core.logging.Level,
     log_file: []const u8,
+    json_output: bool,
 ) !void {
     const uuid = ipc.generateUuid();
     const uuid_str = uuid[0..];
@@ -139,7 +139,26 @@ pub fn runPodNew(
     };
 
     const stdout = std.fs.File.stdout();
-    var buf: [4096]u8 = undefined;
-    const json_str = try std.fmt.bufPrint(&buf, "{{\"type\":\"{s}\",\"uuid\":\"{s}\",\"socket\":\"{s}\",\"pod_pid\":{d},\"child_pid\":{d}}}\n", .{ response.type, response.uuid, response.socket, response.pod_pid, response.child_pid });
-    try stdout.writeAll(json_str);
+    const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
+    if (!is_tty or json_output) {
+        var buf: [4096]u8 = undefined;
+        const json_str = try std.fmt.bufPrint(&buf, "{{\"type\":\"{s}\",\"uuid\":\"{s}\",\"socket\":\"{s}\",\"pod_pid\":{d},\"child_pid\":{d}}}\n", .{ response.type, response.uuid, response.socket, response.pod_pid, response.child_pid });
+        try stdout.writeAll(json_str);
+        return;
+    }
+
+    var out = stdout.deprecatedWriter();
+    const p = cli_ui.Palette.forStdout();
+    const disp_name: []const u8 = if (name.len > 0) name else uuid_str[0..8];
+    try out.print("{s}✓{s} Created pod {s}{s}{s} {s}[{s}]{s}\n", .{
+        p.success, p.reset, p.bold, disp_name, p.reset, p.muted, uuid_str[0..8], p.reset,
+    });
+    try out.print("  {s}UUID:{s}    {s}{s}{s}\n", .{ p.dim, p.reset, p.muted, response.uuid, p.reset });
+    try out.print("  {s}PID:{s}     pod={d}  shell={d}\n", .{ p.dim, p.reset, response.pod_pid, response.child_pid });
+    try out.print("  {s}Socket:{s}  {s}{s}{s}\n", .{ p.dim, p.reset, p.dim, response.socket, p.reset });
+    if (name.len > 0) {
+        try out.print("  {s}Attach:{s}  {s}hexe pod attach --name {s}{s}\n", .{ p.dim, p.reset, p.accent, name, p.reset });
+    } else {
+        try out.print("  {s}Attach:{s}  {s}hexe pod attach --uuid {s}{s}\n", .{ p.dim, p.reset, p.accent, response.uuid, p.reset });
+    }
 }

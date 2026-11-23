@@ -796,8 +796,22 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
     return true;
 }
 
+pub const ReattachOutcome = enum {
+    ok,
+    not_found,
+    ambiguous,
+    prefix_too_short,
+    failed,
+};
+
 /// Reattach to a detached session, restoring full state.
 pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
+    return reattachSessionDetailed(self, session_id_prefix) == .ok;
+}
+
+/// Reattach to a detached session and distinguish non-retryable server errors
+/// (ambiguity, short prefix) from not-found and transient failures.
+pub fn reattachSessionDetailed(self: anytype, session_id_prefix: []const u8) ReattachOutcome {
     terminal_main.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
 
     // Reattach rebuilds panes (freeing their screens); tear down any active
@@ -813,7 +827,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     if (!self.runtime.isConnected()) {
         terminal_main.debugLog("reattachSession: runtime not connected, aborting", .{});
-        return false;
+        return .failed;
     }
 
     // Try to reattach session (server supports prefix matching). A
@@ -831,13 +845,15 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 std.Thread.sleep(400 * std.time.ns_per_ms);
                 continue;
             }
+            if (e == error.SessionAmbiguous) return .ambiguous;
+            if (e == error.PrefixTooShort) return .prefix_too_short;
             terminal_main.debugLog("reattachSession: runtime.reattachSessionProjection failed: {s}", .{@errorName(e)});
-            return false;
+            return .failed;
         };
     };
     if (result == null) {
         terminal_main.debugLog("reattachSession: runtime.reattachSessionProjection returned null (session not found)", .{});
-        return false;
+        return .not_found;
     }
 
     var reattach_result = result.?;
@@ -845,7 +861,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     terminal_main.debugLog("reattachSession: got parsed result with {d} panes", .{reattach_result.pane_uuids.len});
     const snapshot = self.runtime.attachedSnapshot() orelse {
         core.logging.warn("terminal", "reattachSession failed: daemon returned no attached snapshot", .{});
-        return false;
+        return .failed;
     };
 
     // Check timeout after JSON parsing
@@ -854,7 +870,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         if (elapsed > 30000) {
             terminal_main.debugLog("reattachSession: timeout after JSON parse ({d}ms > 30s), aborting", .{elapsed});
             self.notifications.showFor("Reattach timeout: JSON parsing took too long", 5000);
-            return false;
+            return .failed;
         } else if (elapsed > 10000) {
             const msg = std.fmt.allocPrint(
                 self.allocator,
@@ -871,7 +887,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     const wanted_active_tab = snapshot.active_tab;
     if (!self.runtime.setSessionIdentity(snapshot.uuid, restored_name)) {
         terminal_main.debugLog("reattachSession: failed to set restored session identity before adoption", .{});
-        return false;
+        return .failed;
     }
 
     clearStateForRestore(self);
@@ -932,7 +948,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             terminal_main.debugLog("reattachSession: timeout after pane adoption ({d}ms > 30s), aborting", .{elapsed});
             self.notifications.showFor("Reattach timeout: pane adoption took too long", 5000);
             orphanAdoptedPaneMap(self, &uuid_pane_map, "reattachSession adoption timeout");
-            return false;
+            return .failed;
         } else if (elapsed > 10000) {
             const msg = std.fmt.allocPrint(
                 self.allocator,
@@ -1053,7 +1069,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.createTab() catch {
             terminal_main.debugLog("reattachSession: FAILED to create recovery tab", .{});
             orphanAdoptedPaneMap(self, &uuid_pane_map, "reattachSession recovery tab creation");
-            return false;
+            return .failed;
         };
         self.notifications.showFor("Warning: All tabs were empty, created new tab", 5000);
     }
@@ -1126,7 +1142,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     if (self.view.tab_views.items.len == 0) {
         terminal_main.debugLog("reattachSession: no tabs restored, returning false", .{});
         orphanAdoptedPaneMap(self, &uuid_pane_map, "reattachSession no restored tabs");
-        return false;
+        return .failed;
     }
 
     // Re-register with restored UUID/name before requesting backlog replay.
@@ -1166,8 +1182,8 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
 
-    terminal_main.debugLog("reattachSession: returning true, tabs={d} floats={d}", .{ self.view.tab_views.items.len, self.view.float_views.items.len });
-    return true;
+    terminal_main.debugLog("reattachSession: returning ok, tabs={d} floats={d}", .{ self.view.tab_views.items.len, self.view.float_views.items.len });
+    return .ok;
 }
 
 pub fn applySessionSnapshot(self: anytype) bool {

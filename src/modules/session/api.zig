@@ -133,6 +133,10 @@ pub fn forceDetachAttachedSession(self: anytype, session_id: [16]u8) bool {
     return detach_lifecycle.forceDetachAttachedSession(self, session_id);
 }
 
+pub fn forceDetachAttachedSessionWithNotify(self: anytype, session_id: [16]u8, notify_msg: core.wire.MsgType) bool {
+    return detach_lifecycle.forceDetachAttachedSessionWithNotify(self, session_id, notify_msg);
+}
+
 pub fn removeDetachedSession(self: anytype, session_id: [16]u8) void {
     detached_sessions.removeDetachedSession(&self.store, session_id);
 }

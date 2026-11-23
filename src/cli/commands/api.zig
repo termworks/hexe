@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const cli_ui = core.cli_ui;
 
 const print = std.debug.print;
 
@@ -101,7 +102,7 @@ fn soleSession(allocator: std.mem.Allocator) ![]u8 {
             found = try allocator.dupe(u8, name);
         } else {
             extra += 1;
-            print("Error: several sessions are listening; pass --session\n", .{});
+            cli_ui.printErr("several sessions are listening; pass --session", .{});
         }
     }
     if (extra > 0) {
@@ -166,12 +167,13 @@ pub fn resolveEndpoint(allocator: std.mem.Allocator, session_opt: ?[]const u8) !
                 allocator.free(candidate);
             }
 
-            print("Error: no listening session answers to '{s}'\n", .{want});
+            cli_ui.printErr("no listening session answers to '{s}'", .{want});
             if (keys.len == 0) {
-                print("       Nothing is listening; is hexe attached?\n", .{});
+                cli_ui.printErrHint("Nothing is listening; is hexe attached?", .{});
             } else {
-                print("       Listening:", .{});
-                for (keys) |key| print(" {s}", .{key});
+                const p = cli_ui.Palette.forStderr();
+                print("  {s}Listening:{s}", .{ p.dim, p.reset });
+                for (keys) |key| print(" {s}{s}{s}", .{ p.accent, key, p.reset });
                 print("\n", .{});
             }
             return error.NoSession;
@@ -180,9 +182,9 @@ pub fn resolveEndpoint(allocator: std.mem.Allocator, session_opt: ?[]const u8) !
 
     const sole = soleSession(allocator) catch |err| {
         switch (err) {
-            error.NoControlSocket => print("Error: no running session is listening; is hexe attached?\n", .{}),
+            error.NoControlSocket => cli_ui.printErr("no running session is listening; is hexe attached?", .{}),
             error.AmbiguousSession => {},
-            else => print("Error: {s}\n", .{@errorName(err)}),
+            else => cli_ui.printErr("{s}", .{@errorName(err)}),
         }
         return error.NoSession;
     };
@@ -198,7 +200,7 @@ pub fn run(
     session_opt: ?[]const u8,
 ) !void {
     if (call.len == 0) {
-        print("Error: a call name is required\n", .{});
+        cli_ui.printErr("a call name is required", .{});
         return error.InvalidArgument;
     }
 
@@ -215,7 +217,7 @@ pub fn run(
     const check = struct {
         fn go(alloc: std.mem.Allocator, text: []const u8) !void {
             var parsed = std.json.parseFromSlice(std.json.Value, alloc, text, .{}) catch {
-                print("Error: argument is not valid JSON: {s}\n", .{text});
+                cli_ui.printErr("argument is not valid JSON: {s}", .{text});
                 return error.InvalidArgument;
             };
             parsed.deinit();
@@ -266,7 +268,7 @@ pub fn run(
         // Deliberately does not name the cause: `false` covers both "no pane
         // matched that selector" and "the session refused it", and asserting
         // one of them would be wrong half the time.
-        print("Error: `{s}` did not take effect (no pane matched, or it was refused)\n", .{call});
+        cli_ui.printErr("`{s}` did not take effect (no pane matched, or it was refused)", .{call});
         return error.CallDidNothing;
     }
 }
@@ -284,7 +286,7 @@ fn request(
     quiet: bool,
 ) ![]u8 {
     const stream = std.net.connectUnixSocket(path) catch |err| {
-        if (!quiet) print("Error: cannot reach session '{s}': {s}\n", .{ label, @errorName(err) });
+        if (!quiet) cli_ui.printErr("cannot reach session '{s}': {s}", .{ label, @errorName(err) });
         return error.NotConnected;
     };
     defer stream.close();
@@ -299,14 +301,14 @@ fn request(
     while (got < 4) {
         const n = try stream.read(len_buf[got..]);
         if (n == 0) {
-            if (!quiet) print("Error: session closed the connection without replying\n", .{});
+            if (!quiet) cli_ui.printErr("session closed the connection without replying", .{});
             return error.UnexpectedEof;
         }
         got += n;
     }
     const len = std.mem.readInt(u32, &len_buf, .big);
     if (len > MAX_REPLY) {
-        if (!quiet) print("Error: reply is implausibly large ({d} bytes)\n", .{len});
+        if (!quiet) cli_ui.printErr("reply is implausibly large ({d} bytes)", .{len});
         return error.StreamTooLong;
     }
 
@@ -316,7 +318,7 @@ fn request(
     while (got < len) {
         const n = try stream.read(reply[got..]);
         if (n == 0) {
-            if (!quiet) print("Error: reply was truncated\n", .{});
+            if (!quiet) cli_ui.printErr("reply was truncated", .{});
             return error.UnexpectedEof;
         }
         got += n;
@@ -379,7 +381,7 @@ pub fn resolveFamilyChip(
     defer allocator.free(reply);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, reply, .{}) catch {
-        print("Error: the session's answer to `floats` was not JSON\n", .{});
+        cli_ui.printErr("the session's answer to `floats` was not JSON", .{});
         return error.CallFailed;
     };
     defer parsed.deinit();

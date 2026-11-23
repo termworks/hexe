@@ -362,14 +362,27 @@ pub const State = struct {
     /// focused pane — so the loop's per-frame helpers are no-ops instead of
     /// indexing an empty tab list.
     empty_layout: Layout,
-    /// Bare `hexe` startup chooser is on screen and no tab exists yet. While
-    /// set, the loop must NOT create its fallback tab and the renderer must
-    /// draw the MUX popup only — the answer decides what the session becomes.
+    /// Bare `hexe` / interactive `hexe attach` chooser is on screen and no tab
+    /// exists yet. While set, the loop must NOT create its fallback tab and the
+    /// renderer must draw the MUX popup only — the answer decides what the
+    /// session becomes.
     startup_choice_pending: bool,
-    /// Session-id prefixes of the same-cwd attach candidates offered by the
-    /// startup chooser, in the order their labels were listed.
-    startup_attach_ids: [16][8]u8,
+    startup_chooser_mode: state_types.ChooserMode,
+    startup_show_all: bool,
+    startup_initial_filter: [64]u8,
+    startup_initial_filter_len: usize,
+    startup_kill_target: [8]u8,
+    startup_kill_name: [64]u8,
+    startup_kill_name_len: usize,
+    /// Session-id prefixes of the attach candidates offered by the chooser,
+    /// in the order their labels were listed.
+    startup_attach_ids: [64][8]u8,
+    startup_attach_names: [64][64]u8,
+    startup_attach_name_lens: [64]usize,
     startup_attach_count: usize,
+    /// Recorded before teardown so `main.zig` can print a styled banner to
+    /// `real_stderr` after restoring the terminal screen.
+    exit_summary: state_types.ExitSummary,
     exit_from_shell_death: bool,
     pending_exit_intent: bool,
     /// Request id of the exit_intent the confirmation popup is answering, echoed
@@ -591,8 +604,18 @@ pub const State = struct {
             .pending_action = null,
             .empty_layout = Layout.init(allocator, 0, 0),
             .startup_choice_pending = false,
-            .startup_attach_ids = .{.{0} ** 8} ** 16,
+            .startup_chooser_mode = .none,
+            .startup_show_all = false,
+            .startup_initial_filter = .{0} ** 64,
+            .startup_initial_filter_len = 0,
+            .startup_kill_target = .{0} ** 8,
+            .startup_kill_name = .{0} ** 64,
+            .startup_kill_name_len = 0,
+            .startup_attach_ids = .{.{0} ** 8} ** 64,
+            .startup_attach_names = .{.{0} ** 64} ** 64,
+            .startup_attach_name_lens = .{0} ** 64,
             .startup_attach_count = 0,
+            .exit_summary = .{},
             .exit_from_shell_death = false,
             .pending_exit_intent = false,
             .pending_exit_intent_request_id = 0,
@@ -1099,6 +1122,59 @@ pub const State = struct {
         if (!self.syncSessionFloatChecked(pane, self.activeFloatingIndex() != null)) {
             self.notifications.show("Rename failed: session sync rejected update");
         }
+    }
+
+    pub fn totalPaneCount(self: *const State) usize {
+        var count: usize = self.view.float_views.items.len;
+        for (self.view.tab_views.items) |*tab| {
+            count += tab.layout.splits.count();
+        }
+        return count;
+    }
+
+    pub fn recordExitSummary(self: *State, kind: state_types.ExitSummary.Kind) void {
+        // Keep a more specific earlier summary (e.g., explicit detach recorded
+        // before the stop request is drained).
+        if (self.exit_summary.kind != .none and kind == .disconnected) return;
+        const uuid = self.runtime.sessionUuid();
+        const name = self.runtime.sessionName();
+        const nlen = @min(name.len, self.exit_summary.session_name_buf.len);
+        self.exit_summary.kind = kind;
+        self.exit_summary.session_uuid = uuid;
+        @memcpy(self.exit_summary.session_name_buf[0..nlen], name[0..nlen]);
+        self.exit_summary.session_name_len = nlen;
+        self.exit_summary.pane_count = self.totalPaneCount();
+    }
+
+    pub fn showConfirmWithOptions(self: *State, pending_action: PendingAction, message: []const u8, opts: pop.ConfirmOptions) bool {
+        self.pending_action = pending_action;
+        self.popups.showConfirmOwned(message, opts) catch |err| {
+            core.logging.logError("terminal", "failed to show confirmation popup", err);
+            self.pending_action = null;
+            self.notifications.show("Confirmation failed");
+            self.needs_render = true;
+            return false;
+        };
+        self.needs_render = true;
+        return true;
+    }
+
+    pub fn showPickerWithOptions(
+        self: *State,
+        pending_action: PendingAction,
+        labels: []const []const u8,
+        opts: pop.PickerOptions,
+    ) bool {
+        self.popups.showPickerOwned(labels, opts) catch |err| {
+            core.logging.logError("terminal", "failed to show picker popup", err);
+            self.pending_action = null;
+            self.notifications.show("Picker failed");
+            self.needs_render = true;
+            return false;
+        };
+        self.pending_action = pending_action;
+        self.needs_render = true;
+        return true;
     }
 
     pub fn showConfirmOrNotify(self: *State, pending_action: PendingAction, message: []const u8) bool {
@@ -1768,6 +1844,10 @@ pub const State = struct {
 
     pub fn reattachSession(self: *State, session_id_prefix: []const u8) bool {
         return state_tabs.reattachSession(self, session_id_prefix);
+    }
+
+    pub fn reattachSessionDetailed(self: *State, session_id_prefix: []const u8) state_tabs.ReattachOutcome {
+        return state_tabs.reattachSessionDetailed(self, session_id_prefix);
     }
 
     pub fn applySessionSnapshot(self: *State) bool {

@@ -754,7 +754,26 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pane_output_tests.step);
     test_step.dependOn(&run_pane_search_tests.step);
     test_step.dependOn(&run_reattach_reconcile_tests.step);
+    const pop_tests = b.addTest(.{
+        .root_module = pop_module,
+    });
+    const run_pop_tests = b.addRunArtifact(pop_tests);
+
+    if (yazap_mod) |yazap| {
+        const help_test_module = b.createModule(.{
+            .root_source_file = b.path("src/cli/help.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        help_test_module.addImport("core", core_module);
+        help_test_module.addImport("yazap", yazap);
+        const help_tests = b.addTest(.{ .root_module = help_test_module });
+        const run_help_tests = b.addRunArtifact(help_tests);
+        test_step.dependOn(&run_help_tests.step);
+    }
+
     test_step.dependOn(&run_frontend_core_tests.step);
+    test_step.dependOn(&run_pop_tests.step);
     test_step.dependOn(&run_web_host_tests.step);
     test_step.dependOn(&run_syslink_host_tests.step);
 }

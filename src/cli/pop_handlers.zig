@@ -2,6 +2,7 @@ const std = @import("std");
 const commands_mod = @import("cli_commands");
 const core = @import("core");
 const cli_cmds = commands_mod.com;
+const cli_ui = core.cli_ui;
 
 const print = std.debug.print;
 
@@ -20,23 +21,23 @@ pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i32
     const posix = std.posix;
 
     if (message.len == 0) {
-        print("Error: message is required\n", .{});
+        cli_ui.printErr("message is required", .{});
         std.process.exit(1);
     }
 
     var target_uuid: [32]u8 = undefined;
     if (uuid.len > 0) {
         target_uuid = parseUuid32Hex(uuid) orelse {
-            print("Error: --uuid must be 32 hex chars\n", .{});
+            cli_ui.printErr("--uuid must be 32 hex chars", .{});
             std.process.exit(1);
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
+            cli_ui.printErr("--uuid required (or run inside hexe terminal)", .{});
             std.process.exit(1);
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
-            print("Error: invalid HEXE_PANE_UUID\n", .{});
+            cli_ui.printErr("invalid HEXE_PANE_UUID", .{});
             std.process.exit(1);
         };
     }
@@ -51,7 +52,7 @@ pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i32
         .msg_len = @intCast(message.len),
     };
     wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch |err| {
-        print("Error: failed to send popup notify: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("failed to send popup notify: {s}", .{@errorName(err)});
     };
 }
 
@@ -65,23 +66,23 @@ pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i3
         // `hexe popup confirm "$msg" && rm -rf ...` with an unset $msg
         // therefore got a silent confirmation. Every other failure in this
         // function already exits 1.
-        print("Error: message is required\n", .{});
+        cli_ui.printErr("message is required", .{});
         std.process.exit(1);
     }
 
     var target_uuid: [32]u8 = undefined;
     if (uuid.len > 0) {
         target_uuid = parseUuid32Hex(uuid) orelse {
-            print("Error: --uuid must be 32 hex chars\n", .{});
+            cli_ui.printErr("--uuid must be 32 hex chars", .{});
             std.process.exit(1);
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
+            cli_ui.printErr("--uuid required (or run inside hexe terminal)", .{});
             std.process.exit(1);
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
-            print("Error: invalid HEXE_PANE_UUID\n", .{});
+            cli_ui.printErr("invalid HEXE_PANE_UUID", .{});
             std.process.exit(1);
         };
     }
@@ -130,23 +131,23 @@ pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i32
     const posix = std.posix;
 
     if (items.len == 0) {
-        print("Error: --items is required\n", .{});
+        cli_ui.printErr("--items is required", .{});
         std.process.exit(1);
     }
 
     var target_uuid: [32]u8 = undefined;
     if (uuid.len > 0) {
         target_uuid = parseUuid32Hex(uuid) orelse {
-            print("Error: --uuid must be 32 hex chars\n", .{});
+            cli_ui.printErr("--uuid must be 32 hex chars", .{});
             std.process.exit(1);
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
+            cli_ui.printErr("--uuid required (or run inside hexe terminal)", .{});
             std.process.exit(1);
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
-            print("Error: invalid HEXE_PANE_UUID\n", .{});
+            cli_ui.printErr("invalid HEXE_PANE_UUID", .{});
             std.process.exit(1);
         };
     }
@@ -170,7 +171,7 @@ pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i32
     }
 
     if (item_count == 0) {
-        print("Error: no valid items provided\n", .{});
+        cli_ui.printErr("no valid items provided", .{});
         std.process.exit(1);
     }
 

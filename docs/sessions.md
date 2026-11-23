@@ -6,11 +6,12 @@ Close the window, kill the frontend, lose the ssh connection: the session is a s
 the machine, and it keeps running.
 
 ```sh
-hexe terminal new                 # a new session, named after a pokemon
-hexe terminal new --name work     # or named by you
-hexe terminal attach work         # by name
-hexe terminal attach a3f2         # or by uuid prefix
-hexe ses list                     # what is running, attached or not
+hexe new                          # a new session, named after a pokemon
+hexe new --name work              # or named by you
+hexe attach                       # interactive picker (all sessions, cwd matches first)
+hexe attach work                  # by name (or `hexe attach a3f2` by uuid prefix)
+hexe detach                       # cleanly detach from inside a pane or from outside
+hexe ls                           # what is running, attached or not
 ```
 
 <!-- demo:begin -->
@@ -79,9 +80,14 @@ Three behaviours follow from that, and none of them were written down before:
 
 - **Names are made unique automatically.** Ask for a name that is taken and you get a suffixed one
   rather than a collision.
-- **An ambiguous prefix lists the candidates** instead of picking one for you.
-- **Attaching to a session that is already attached steals it.** The other frontend is detached;
-  the session is single, and the newcomer wins.
+- **An ambiguous prefix** opens the interactive picker pre-filtered to your query on a TTY, or
+  exits non-zero listing the matching candidates when non-interactive.
+- **Attaching to a session that is already attached steals it.** The other frontend is detached
+  and prints a post-exit notice telling you how to reattach; the session is single, and the
+  newcomer wins.
+- **Clean detach prints a summary banner** after restoring the terminal, showing the session name,
+  short UUID, pane count, and the exact `hexe attach <name>` command to resume (including `-P` when
+  using a named profile).
 
 A frontend that simply vanishes — the terminal closed, the ssh link dropped — is noticed and the
 session auto-detaches rather than being held open by a client that is gone.

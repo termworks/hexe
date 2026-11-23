@@ -13,8 +13,7 @@ const palette = core.palette;
 const pod_protocol = core.pod_protocol;
 const pod_list = @import("pod_list.zig");
 const shared = @import("shared.zig");
-
-const print = std.debug.print;
+const cli_ui = core.cli_ui;
 
 pub const Error = error{
     NoPanes,
@@ -37,7 +36,7 @@ pub fn runPaletteList(allocator: std.mem.Allocator, json_output: bool) !void {
     try collectPods(allocator, &records);
 
     if (records.items.len == 0) {
-        print("Error: no live panes to address\n", .{});
+        cli_ui.printErr("no live panes to address", .{});
         return Error.NoPanes;
     }
 
@@ -58,10 +57,46 @@ pub fn runPaletteList(allocator: std.mem.Allocator, json_output: bool) !void {
         return;
     }
 
-    // A listing is data, so it goes to stdout — `print` here is std.debug.print,
-    // which is stderr, and a caller piping this would get nothing.
+    // A listing is data, so it goes to stdout. When piped, keep the exact
+    // `pane uuid=<uuid> name=<name> <slot>=<count>...` format for shell hooks;
+    // on an interactive TTY, render an aligned colored table.
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
+    const is_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
+    const p = cli_ui.Palette.forStdout();
+
+    if (is_tty) {
+        var w = out.writer(allocator);
+        try w.print("{s}{s:<10}  {s:<16}  {s}{s}\n", .{ p.dim, "UUID", "NAME", "NAMESPACES", p.reset });
+        for (records.items) |r| {
+            const disp_name: []const u8 = if (r.name.len > 0) r.name else "-";
+            try w.print("{s}{s:<10}{s}  {s}{s:<16}{s}  ", .{
+                p.muted, r.uuid[0..8], p.reset,
+                p.bold,  disp_name,    p.reset,
+            });
+            var any_ns = false;
+            if (fetchPalette(allocator, r.uuid)) |blob| {
+                defer allocator.free(blob);
+                var reader = palette.BlobReader.init(blob);
+                while (reader.next()) |ns| {
+                    var extras: usize = 0;
+                    if (ns.fg != null) extras += 1;
+                    if (ns.bg != null) extras += 1;
+                    if (ns.cursor != null) extras += 1;
+                    if (any_ns) try w.writeByte(' ');
+                    try w.print("{s}ns:{d}{s}={s}{d}{s}", .{
+                        p.accent, ns.slot, p.reset, p.success, ns.count() + extras, p.reset,
+                    });
+                    any_ns = true;
+                }
+            }
+            if (!any_ns) try w.print("{s}-{s}", .{ p.muted, p.reset });
+            try w.writeByte('\n');
+        }
+        try std.fs.File.stdout().writeAll(out.items);
+        return;
+    }
+
     for (records.items) |r| {
         try out.writer(allocator).print("pane uuid={s} name={s}", .{ r.uuid[0..], r.name });
         // Which namespaces this pane actually carries colours for, and how
@@ -103,30 +138,58 @@ pub fn runPaletteGet(
 
     if (pane.len > 0) {
         if (!shared.isUuid32Hex(pane)) {
-            print("Error: --pane must be a 32-character pane uuid\n", .{});
+            cli_ui.printErr("--pane must be a 32-character pane uuid", .{});
             return Error.BadArgument;
         }
     } else {
         try collectPods(allocator, &records);
         if (records.items.len == 0) {
-            print("Error: no live panes to address\n", .{});
+            cli_ui.printErr("no live panes to address", .{});
             return Error.NoPanes;
         }
     }
 
     var out = std.ArrayList(u8).empty;
     defer out.deinit(allocator);
+    const p = cli_ui.Palette.forStdout();
 
     if (pane.len > 0) {
         var uuid: [32]u8 = undefined;
         @memcpy(&uuid, pane[0..32]);
-        try appendPanePalette(allocator, &out, uuid, ns_filter, indices);
+        try appendPanePalette(allocator, &out, uuid, ns_filter, indices, p);
     } else {
         for (records.items) |r| {
-            try appendPanePalette(allocator, &out, r.uuid, ns_filter, indices);
+            try appendPanePalette(allocator, &out, r.uuid, ns_filter, indices, p);
         }
     }
     try std.fs.File.stdout().writeAll(out.items);
+}
+
+fn writePaletteColorLine(
+    w: anytype,
+    p: cli_ui.Palette,
+    uuid8: []const u8,
+    slot: u8,
+    key: []const u8,
+    r: u8,
+    g: u8,
+    b: u8,
+) !void {
+    if (p.enabled) {
+        var swatch_buf: [48]u8 = undefined;
+        const swatch = cli_ui.formatRgbSwatch(&swatch_buf, r, g, b);
+        try w.print("{s}{s}{s} {s}{d}{s} {s}{s:<6}{s} {s} #{x:0>2}{x:0>2}{x:0>2}\n", .{
+            p.muted,  uuid8, p.reset,
+            p.accent, slot,  p.reset,
+            p.bold,   key,   p.reset,
+            swatch,   r,     g,
+            b,
+        });
+    } else {
+        try w.print("{s} {d} {s}=#{x:0>2}{x:0>2}{x:0>2}\n", .{
+            uuid8, slot, key, r, g, b,
+        });
+    }
 }
 
 /// One pane's parked palette, filtered to `ns_filter` and `indices` if given.
@@ -136,6 +199,7 @@ fn appendPanePalette(
     uuid: [32]u8,
     ns_filter: []const u8,
     indices: []const []const u8,
+    p: cli_ui.Palette,
 ) !void {
     const blob = fetchPalette(allocator, uuid) orelse return;
     defer allocator.free(blob);
@@ -147,22 +211,21 @@ fn appendPanePalette(
             if (want != namespace.slot) continue;
         }
 
-        var w = out.writer(allocator);
+        const w = out.writer(allocator);
         var i: usize = 0;
         while (i < namespace.count()) : (i += 1) {
             const entry = namespace.at(i);
             if (!wantsIndex(indices, entry.index)) continue;
-            try w.print("{s} {d} {d}=#{x:0>2}{x:0>2}{x:0>2}\n", .{
-                uuid[0..8],  namespace.slot, entry.index,
-                entry.rgb.r, entry.rgb.g,    entry.rgb.b,
-            });
+            var key_buf: [8]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "{d}", .{entry.index}) catch continue;
+            try writePaletteColorLine(w, p, uuid[0..8], namespace.slot, key, entry.rgb.r, entry.rgb.g, entry.rgb.b);
         }
         // Defaults only when no explicit index filter was given: `get 3` asks
         // about index 3, not about the namespace's background.
         if (indices.len == 0) {
-            if (namespace.fg) |c| try w.print("{s} {d} fg=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.slot, c.r, c.g, c.b });
-            if (namespace.bg) |c| try w.print("{s} {d} bg=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.slot, c.r, c.g, c.b });
-            if (namespace.cursor) |c| try w.print("{s} {d} cursor=#{x:0>2}{x:0>2}{x:0>2}\n", .{ uuid[0..8], namespace.slot, c.r, c.g, c.b });
+            if (namespace.fg) |c| try writePaletteColorLine(w, p, uuid[0..8], namespace.slot, "fg", c.r, c.g, c.b);
+            if (namespace.bg) |c| try writePaletteColorLine(w, p, uuid[0..8], namespace.slot, "bg", c.r, c.g, c.b);
+            if (namespace.cursor) |c| try writePaletteColorLine(w, p, uuid[0..8], namespace.slot, "cursor", c.r, c.g, c.b);
         }
     }
 }
@@ -290,17 +353,17 @@ pub fn runPaletteSet(
     if (from.len > 0) try readEntriesFile(allocator, from, &entries);
 
     if (entries.items.len == 0) {
-        print("Error: nothing to set (give <i>=#rrggbb pairs or --from FILE)\n", .{});
+        cli_ui.printErr("nothing to set (give <i>=#rrggbb pairs or --from FILE)", .{});
         return Error.NoEntries;
     }
 
     if (!validNsArg(ns)) {
-        print("Error: invalid namespace {s}: expected * or a slot number 0..{d}\n", .{ ns, palette.MAX_NS - 1 });
+        cli_ui.printErr("invalid namespace {s}: expected * or a slot number 0..{d}", .{ ns, palette.MAX_NS - 1 });
         return Error.BadArgument;
     }
     for (entries.items) |e| {
         if (validEntry(e)) continue;
-        print("Error: invalid entry {s}: expected <0-255|fg|bg|cursor>=#rrggbb\n", .{e});
+        cli_ui.printErr("invalid entry {s}: expected <0-255|fg|bg|cursor>=#rrggbb", .{e});
         return Error.BadArgument;
     }
 
@@ -334,7 +397,7 @@ pub fn runPaletteVerb(
     pane: []const u8,
 ) !void {
     if (!std.mem.eql(u8, verb, "end") and !validNsArg(ns)) {
-        print("Error: invalid namespace {s}: expected * or a slot number 0..{d}\n", .{ ns, palette.MAX_NS - 1 });
+        cli_ui.printErr("invalid namespace {s}: expected * or a slot number 0..{d}", .{ ns, palette.MAX_NS - 1 });
         return Error.BadArgument;
     }
 
@@ -344,7 +407,7 @@ pub fn runPaletteVerb(
         try seq.writer(allocator).print("\x1b]{d};end\x1b\\", .{effectiveOsc()});
     } else {
         if (ns.len == 0) {
-            print("Error: {s} requires --ns NAME\n", .{verb});
+            cli_ui.printErr("{s} requires --ns NAME", .{verb});
             return Error.BadArgument;
         }
         try seq.writer(allocator).print("\x1b]{d};{s};{s}\x1b\\", .{ effectiveOsc(), verb, ns });
@@ -361,7 +424,7 @@ fn readEntriesFile(
     out: *std.ArrayList([]const u8),
 ) !void {
     const data = std.fs.cwd().readFileAlloc(allocator, path, 1 << 20) catch |err| {
-        print("Error: cannot read {s}: {s}\n", .{ path, @errorName(err) });
+        cli_ui.printErr("cannot read {s}: {s}", .{ path, @errorName(err) });
         return err;
     };
     defer allocator.free(data);
@@ -400,13 +463,13 @@ fn inject(allocator: std.mem.Allocator, pane: []const u8, seq: []const u8) !void
         // Validated before it becomes a path. `getPodSocketPath` interpolates
         // the string, so an unchecked `--pane` reaches the filesystem.
         if (!shared.isUuid32Hex(pane)) {
-            print("Error: --pane must be a 32-character pane uuid\n", .{});
+            cli_ui.printErr("--pane must be a 32-character pane uuid", .{});
             return Error.BadArgument;
         }
         const socket = try ipc.getPodSocketPath(allocator, pane);
         defer allocator.free(socket);
         injectTo(socket, seq) catch |err| {
-            print("Error: pane {s} did not accept the palette: {s}\n", .{ pane, @errorName(err) });
+            cli_ui.printErr("pane {s} did not accept the palette: {s}", .{ pane, @errorName(err) });
             return err;
         };
         return;
@@ -419,7 +482,7 @@ fn inject(allocator: std.mem.Allocator, pane: []const u8, seq: []const u8) !void
     }
     try collectPods(allocator, &records);
     if (records.items.len == 0) {
-        print("Error: no live panes to address\n", .{});
+        cli_ui.printErr("no live panes to address", .{});
         return Error.NoPanes;
     }
 
@@ -431,7 +494,7 @@ fn inject(allocator: std.mem.Allocator, pane: []const u8, seq: []const u8) !void
         delivered += 1;
     }
     if (delivered == 0) {
-        print("Error: no pane accepted the palette update\n", .{});
+        cli_ui.printErr("no pane accepted the palette update", .{});
         return Error.NoPanes;
     }
 }

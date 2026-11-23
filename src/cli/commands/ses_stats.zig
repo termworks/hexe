@@ -1,8 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const wire = core.wire;
-
-const print = std.debug.print;
+const cli_ui = core.cli_ui;
 
 /// Show SES daemon resource statistics
 pub fn run(allocator: std.mem.Allocator) !void {
@@ -11,8 +10,8 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer allocator.free(ses_path);
 
     var client = core.ipc.Client.connect(ses_path) catch {
-        print("Error: Could not connect to ses daemon\n", .{});
-        print("Make sure the daemon is running with: hexe ses daemon\n", .{});
+        cli_ui.printErr("could not connect to ses daemon", .{});
+        cli_ui.printErrHint("Start a session with: hexe new  (or: hexe ses daemon)", .{});
         return error.SesNotRunning;
     };
     const fd = client.fd;
@@ -27,11 +26,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const hdr = try wire.readControlHeader(fd);
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .status) {
-        print("Error: Failed to retrieve status\n", .{});
+        cli_ui.printErr("failed to retrieve status", .{});
         return error.StatusFailed;
     }
     if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
-        print("Error: status response too large\n", .{});
+        cli_ui.printErr("status response too large", .{});
         return error.ResponseTooLarge;
     }
 
@@ -44,7 +43,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     // non-zero with nothing printed.
     client.close();
     var list_client = core.ipc.Client.connect(ses_path) catch {
-        print("Error: Could not reconnect to ses daemon\n", .{});
+        cli_ui.printErr("could not reconnect to ses daemon", .{});
         return error.SesNotRunning;
     };
     defer list_client.close();
@@ -56,11 +55,11 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const sessions_msg_type: wire.MsgType = @enumFromInt(sessions_hdr.msg_type);
 
     if (sessions_msg_type != .sessions_list) {
-        print("Error: Unexpected response\n", .{});
+        cli_ui.printErr("unexpected response", .{});
         return error.UnexpectedResponse;
     }
     if (sessions_hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
-        print("Error: sessions list response too large\n", .{});
+        cli_ui.printErr("sessions list response too large", .{});
         return error.ResponseTooLarge;
     }
 
@@ -69,7 +68,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     try wire.readExact(list_fd, payload);
 
     if (payload.len < @sizeOf(wire.SessionsList)) {
-        print("Error: malformed sessions list response\n", .{});
+        cli_ui.printErr("malformed sessions list response", .{});
         return error.MalformedResponse;
     }
 
@@ -83,7 +82,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     var i: u16 = 0;
     while (i < list_hdr.session_count) : (i += 1) {
         if (off + @sizeOf(wire.SessionEntry) > payload.len) {
-            print("Error: malformed sessions list entry\n", .{});
+            cli_ui.printErr("malformed sessions list entry", .{});
             return error.MalformedResponse;
         }
 
@@ -93,13 +92,13 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
         const name_end = off + entry.name_len;
         if (name_end > payload.len) {
-            print("Error: malformed session name\n", .{});
+            cli_ui.printErr("malformed session name", .{});
             return error.MalformedResponse;
         }
         off = name_end;
         const base_root_end = off + entry.base_root_len;
         if (base_root_end > payload.len) {
-            print("Error: malformed session base root\n", .{});
+            cli_ui.printErr("malformed session base root", .{});
             return error.MalformedResponse;
         }
         off = base_root_end;
@@ -108,28 +107,23 @@ pub fn run(allocator: std.mem.Allocator) !void {
         total_panes += entry.pane_count;
     }
 
-    // Display resource statistics
-    print("\n━━━ SES Daemon Resource Statistics ━━━\n\n", .{});
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = core.cli_ui.Palette.forStdout();
 
-    print("📊 Sessions\n", .{});
-    print("  Detached sessions:  {d}\n", .{session_count});
-    print("  Total panes:        {d}\n\n", .{total_panes});
+    try out.print("{s}SES Daemon Statistics{s}\n\n", .{ p.bold, p.reset });
 
-    // Load resource limits from env
+    try out.print("{s}Sessions{s}\n", .{ p.accent, p.reset });
+    try out.print("  {s}Total sessions:{s}     {d}\n", .{ p.dim, p.reset, session_count });
+    try out.print("  {s}Total panes:{s}        {d}\n\n", .{ p.dim, p.reset, total_panes });
+
     const limits = core.resource_limits.ResourceLimits.fromEnv();
 
-    print("⚙️  Resource Limits\n", .{});
-    print("  Max connections:    {d}\n", .{limits.max_connections});
-    print("  Max sessions:       {d}\n", .{limits.max_sessions});
-    print("  Max panes/session:  {d}\n", .{limits.max_panes_per_session});
-    print("  Max memory/session: {d} MB\n", .{limits.max_memory_per_session_mb});
-    print("  Max conn/minute:    {d}\n\n", .{limits.max_connections_per_minute});
+    try out.print("{s}Resource Limits{s}\n", .{ p.accent, p.reset });
+    try out.print("  {s}Max connections:{s}    {d}\n", .{ p.dim, p.reset, limits.max_connections });
+    try out.print("  {s}Max sessions:{s}       {d}\n", .{ p.dim, p.reset, limits.max_sessions });
+    try out.print("  {s}Max panes/session:{s}  {d}\n", .{ p.dim, p.reset, limits.max_panes_per_session });
+    try out.print("  {s}Max memory/session:{s} {d} MB\n", .{ p.dim, p.reset, limits.max_memory_per_session_mb });
+    try out.print("  {s}Max conn/minute:{s}    {d}\n\n", .{ p.dim, p.reset, limits.max_connections_per_minute });
 
-    print("💡 Configuration\n", .{});
-    print("  Set limits via environment variables:\n", .{});
-    print("    HEXE_MAX_CONNECTIONS\n", .{});
-    print("    HEXE_MAX_SESSIONS\n", .{});
-    print("    HEXE_MAX_PANES_PER_SESSION\n", .{});
-    print("    HEXE_MAX_MEMORY_PER_SESSION_MB\n", .{});
-    print("    HEXE_MAX_CONNECTIONS_PER_MINUTE\n\n", .{});
+    try out.print("{s}Environment overrides:{s} HEXE_MAX_CONNECTIONS, HEXE_MAX_SESSIONS, HEXE_MAX_PANES_PER_SESSION, HEXE_MAX_MEMORY_PER_SESSION_MB, HEXE_MAX_CONNECTIONS_PER_MINUTE\n", .{ p.dim, p.reset });
 }

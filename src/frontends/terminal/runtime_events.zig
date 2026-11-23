@@ -61,6 +61,12 @@ pub fn applyDeferredSessionStolen(state: *State) void {
 
 pub fn applyRuntimeStopRequest(state: *State, hooks: HostHooks) bool {
     const reason = state.runtime.takeStopReason() orelse return false;
+    switch (reason) {
+        .session_stolen => state.recordExitSummary(.stolen),
+        .explicit_detach => state.recordExitSummary(.detached),
+        .frontend_disconnect => state.recordExitSummary(.disconnected),
+        .none => {},
+    }
     if (frontend_core.stopRequestFromRuntime(reason)) |request| {
         hooks.handleStopRequest(state, request);
     }

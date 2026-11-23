@@ -215,6 +215,7 @@ pub const MsgType = enum(u16) {
     get_pane_palette = 0x0144, // MUX → SES: fetch them back when attaching
     set_name_pool = 0x0145, // MUX → SES: the vocabulary panes are named from
     resolve_pane_target = 0x0146, // CLI → SES: (session?, pane name | uuid prefix) → one pane uuid
+    detach_session = 0x0147, // CLI → SES: detach an attached session by name/uuid prefix (or sole/env session)
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -774,6 +775,22 @@ pub const FloatResult = extern struct {
 /// Followed by: id bytes (id_len).
 pub const KillSession = extern struct {
     id_len: u16 align(1),
+};
+
+/// DetachSession: CLI → SES request to detach an attached session.
+/// Followed by: id bytes (id_len). Empty id detaches the only attached session if unambiguous.
+pub const DetachSession = extern struct {
+    id_len: u16 align(1),
+};
+
+/// DetachSessionResult: response to detach_session.
+/// Followed by: session name bytes (name_len), then error message bytes (error_len).
+pub const DetachSessionResult = extern struct {
+    success: u8 align(1),
+    session_id: [32]u8 align(1) = .{0} ** 32,
+    pane_count: u16 align(1) = 0,
+    name_len: u16 align(1) = 0,
+    error_len: u16 align(1) = 0,
 };
 
 /// KillSessionResult: response to kill_session.

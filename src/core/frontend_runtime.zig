@@ -518,6 +518,10 @@ pub const FrontendRuntime = struct {
         return try self.client.listSessions(out_buf);
     }
 
+    pub fn lastReattachError(self: *const FrontendRuntime) []const u8 {
+        return self.client.lastReattachError();
+    }
+
     pub fn reconcileResolvedName(self: *FrontendRuntime) !?frontend_attach.SessionNameChange {
         return frontend_attach.reconcileResolvedName(self.allocator, &self.client, &self.projection);
     }

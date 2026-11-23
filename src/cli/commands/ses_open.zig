@@ -1,10 +1,9 @@
 const std = @import("std");
 const core = @import("core");
 const session_config = core.session_config;
+const cli_ui = core.cli_ui;
 
-const print = std.debug.print;
-
-/// Run `hexe ses open <target>` — launch a session from a .hexe.lua config.
+/// Run `hexe layout open <target>` — launch a session from a .hexe.lua config.
 pub fn runSesOpen(
     allocator: std.mem.Allocator,
     target: []const u8,
@@ -15,18 +14,18 @@ pub fn runSesOpen(
     _ = instance;
 
     if (target.len == 0) {
-        print("Error: target required (directory path, .lua file, or session name)\n", .{});
-        print("Usage: hexe ses open <path-or-name>[:<tab>]\n", .{});
+        cli_ui.printErr("target required (directory path, .lua file, or session name)", .{});
+        cli_ui.printErrHint("Usage: hexe layout open <path-or-name>[:<tab>]", .{});
         std.process.exit(1);
     }
 
     // Resolve the config path
     const resolved = session_config.resolveConfigPath(allocator, target) catch |err| {
-        print("Error resolving config path: {s}\n", .{@errorName(err)});
+        cli_ui.printErr("resolving config path failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     } orelse {
-        print("Error: config not found for '{s}'\n", .{target});
-        print("Looked for .hexe.lua in directory/path or registered layout name in sessions.json\n", .{});
+        cli_ui.printErr("config not found for '{s}'", .{target});
+        cli_ui.printErrHint("Looked for .hexe.lua in directory/path or registered layout name in sessions.json", .{});
         std.process.exit(1);
     };
     defer allocator.free(resolved.path);
@@ -35,9 +34,9 @@ pub fn runSesOpen(
     // Parse the config
     var config = session_config.parseSessionLua(allocator, resolved.path) catch |err| {
         if (err == error.FileNotFound) {
-            print("Error: config file not found: {s}\n", .{resolved.path});
+            cli_ui.printErr("config file not found: {s}", .{resolved.path});
         } else {
-            print("Error: failed to parse config: {s}\n", .{@errorName(err)});
+            cli_ui.printErr("failed to parse config: {s}", .{@errorName(err)});
         }
         std.process.exit(1);
     };
@@ -68,7 +67,7 @@ pub fn runSesOpen(
     // Change to root directory before launching the terminal frontend
     if (root_path) |rp| {
         std.posix.chdir(rp) catch |err| {
-            print("Error: cannot chdir to root '{s}': {s}\n", .{ rp, @errorName(err) });
+            cli_ui.printErr("cannot chdir to root '{s}': {s}", .{ rp, @errorName(err) });
             std.process.exit(1);
         };
     }

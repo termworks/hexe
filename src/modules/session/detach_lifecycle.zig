@@ -396,6 +396,10 @@ pub fn cancelPendingReattach(self: anytype, session_id: [16]u8, client_id: usize
 }
 
 pub fn forceDetachAttachedSession(self: anytype, session_id: [16]u8) bool {
+    return forceDetachAttachedSessionWithNotify(self, session_id, .session_stolen);
+}
+
+pub fn forceDetachAttachedSessionWithNotify(self: anytype, session_id: [16]u8, notify_msg: wire.MsgType) bool {
     var owner_index: ?usize = null;
 
     for (self.store.clients.items, 0..) |client, i| {
@@ -418,8 +422,8 @@ pub fn forceDetachAttachedSession(self: anytype, session_id: [16]u8) bool {
     }
 
     if (owner.mux_ctl_fd) |mfd| {
-        wire.writeControlTimeout(mfd, .session_stolen, &.{}, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
-            core.logging.logError("ses", "failed to notify owner session was stolen", err);
+        wire.writeControlTimeout(mfd, notify_msg, &.{}, server.HANDLER_IO_TIMEOUT_MS) catch |err| {
+            core.logging.logError("ses", "failed to notify owner of detach/steal", err);
         };
     }
 

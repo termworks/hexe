@@ -24,10 +24,49 @@ pub const PendingAction = enum {
     layout_load_choose, // Choosing detach/replace for local layout load
     /// Bare `hexe` startup, level 1: exactly one session rooted at this cwd.
     startup_attach_confirm,
-    /// Bare `hexe` startup, level 1: several sessions rooted at this cwd.
+    /// Bare `hexe` startup, level 1: several sessions rooted at this cwd (or all).
     startup_attach_choose,
     /// Bare `hexe` startup, level 2: a local .hexe.lua exists.
     startup_layout_confirm,
+    /// Interactive `hexe attach` picker (no args, `attach .`, or ambiguous prefix).
+    attach_choose,
+    /// Confirmation before killing a session from the startup or attach picker.
+    chooser_kill_confirm,
+};
+
+/// Post-teardown summary printed to the user's normal terminal screen once
+/// raw mode and the alternate screen have been restored.
+pub const ExitSummary = struct {
+    pub const Kind = enum {
+        none,
+        detached,
+        stolen,
+        disconnected,
+        detach_failed,
+    };
+
+    kind: Kind = .none,
+    session_uuid: [32]u8 = .{0} ** 32,
+    session_name_buf: [64]u8 = undefined,
+    session_name_len: usize = 0,
+    pane_count: usize = 0,
+
+    pub fn sessionName(self: *const ExitSummary) []const u8 {
+        return self.session_name_buf[0..self.session_name_len];
+    }
+};
+
+/// Mode of the tab-less vaxis session chooser.
+pub const ChooserMode = enum {
+    none,
+    /// Bare `hexe`: same-dir sessions -> `.hexe.lua` -> plain new session.
+    startup,
+    /// `hexe attach` (no args): list all sessions; Esc/q exits without creating a new session.
+    attach_all,
+    /// `hexe attach .`: list sessions rooted at cwd; Esc/q exits cleanly.
+    attach_cwd,
+    /// `hexe attach <prefix>` when ambiguous: pre-filtered picker; Esc/q exits cleanly.
+    attach_filter,
 };
 
 /// A terminal tab view contains only terminal widgets for one projected tab.
