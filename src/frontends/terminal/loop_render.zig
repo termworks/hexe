@@ -249,10 +249,35 @@ fn collectFloatRects(state: *State, out: *[MAX_TRACKED_FLOATS]vt_bridge.Rect) []
 /// extras simply do not occlude, which is the pre-existing behaviour.
 const MAX_TRACKED_FLOATS = 32;
 
-fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []const u8 {
+const FloatBorderHeader = struct {
+    title: []const u8,
+    family: borders.FloatFamilyChips = .{},
+};
+
+fn composeFloatBorderHeader(state: *State, pane: *const Pane) FloatBorderHeader {
+    var family: borders.FloatFamilyChips = .{};
+    var title_pane: *const Pane = pane;
+
+    if (state.familyRootOf(pane)) |root| {
+        var members_buf: [16]State.FamilyMember = undefined;
+        const members = state.familyMembers(root, &members_buf);
+        for (members) |m| {
+            // The family's title always belongs to its initial/root float
+            // (chip 0), so stepping through sub-floats never rewrites it.
+            if (std.mem.eql(u8, &m.uuid, &root)) {
+                title_pane = m.pane;
+            }
+            if (family.len < family.indices.len) {
+                family.indices[family.len] = m.index;
+                family.len += 1;
+            }
+        }
+        family.active_index = if (state.paneFloatState(pane)) |fs| fs.family_index else 0;
+    }
+
     const title = blk: {
-        if (state.paneFloatTitle(pane)) |t| break :blk t;
-        const float_key = state.paneFloatKey(pane);
+        if (state.paneFloatTitle(title_pane)) |t| break :blk t;
+        const float_key = state.paneFloatKey(title_pane);
         if (float_key != 0) {
             if (state.getLayoutFloatByKey(float_key)) |fd| {
                 if (fd.title) |t| break :blk t;
@@ -260,28 +285,9 @@ fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []co
         }
         break :blk "";
     };
-    const pokemon = state.paneName(pane.uuid) orelse "";
+    const pokemon = state.paneName(title_pane.uuid) orelse "";
     const base = if (title.len > 0) title else pokemon;
-
-    // The family's chips after the title: the member on screen in brackets,
-    // its siblings in angles. A float with no siblings draws none.
-    const root = state.familyRootOf(pane) orelse return base;
-    var members_buf: [16]State.FamilyMember = undefined;
-    const members = state.familyMembers(root, &members_buf);
-    if (members.len < 2) return base;
-    const own: u8 = if (state.paneFloatState(pane)) |fs| fs.family_index else 0;
-
-    var stream = std.io.fixedBufferStream(out);
-    const w = stream.writer();
-    w.writeAll(base) catch return base;
-    for (members) |m| {
-        if (m.index == own) {
-            w.print(" [{d}]", .{m.index}) catch break;
-        } else {
-            w.print(" <{d}>", .{m.index}) catch break;
-        }
-    }
-    return stream.getWritten();
+    return .{ .title = base, .family = family };
 }
 
 /// Push a namespace's cursor colour to the host terminal, or take it back.
@@ -438,11 +444,10 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (parent != state.activeTabIndex()) continue;
         }
 
-        var float_label_compose: [256]u8 = undefined;
-        const float_label_raw = composeFloatBorderLabel(state, pane, &float_label_compose);
+        const header = composeFloatBorderHeader(state, pane);
         var float_label_buf: [128]u8 = undefined;
-        const float_label = sanitizeLabelUtf8(float_label_raw, &float_label_buf);
-        borders.drawFloatingBorder(renderer, state.paneBorderX(pane), state.paneBorderY(pane), state.paneBorderW(pane), state.paneBorderH(pane), false, float_label, state.paneBorderColor(pane), state.paneFloatStyle(pane), state);
+        const float_label = sanitizeLabelUtf8(header.title, &float_label_buf);
+        borders.drawFloatingBorder(renderer, state.paneBorderX(pane), state.paneBorderY(pane), state.paneBorderW(pane), state.paneBorderH(pane), false, float_label, header.family, state.paneBorderColor(pane), state.paneFloatStyle(pane), state);
         if (state.float_rename_uuid) |uuid| {
             if (std.mem.eql(u8, &uuid, &pane.uuid)) {
                 float_title.drawTitleEditor(state, renderer, pane, state.float_rename_buf.items);
@@ -491,11 +496,10 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         if (state.paneVisibleOnTab(pane, state.activeTabIndex()) and can_render and
             state.isCurrentFamilyMember(pane))
         {
-            var active_float_label_compose: [256]u8 = undefined;
-            const active_float_label_raw = composeFloatBorderLabel(state, pane, &active_float_label_compose);
+            const active_header = composeFloatBorderHeader(state, pane);
             var active_float_label_buf: [128]u8 = undefined;
-            const active_float_label = sanitizeLabelUtf8(active_float_label_raw, &active_float_label_buf);
-            borders.drawFloatingBorder(renderer, state.paneBorderX(pane), state.paneBorderY(pane), state.paneBorderW(pane), state.paneBorderH(pane), true, active_float_label, state.paneBorderColor(pane), state.paneFloatStyle(pane), state);
+            const active_float_label = sanitizeLabelUtf8(active_header.title, &active_float_label_buf);
+            borders.drawFloatingBorder(renderer, state.paneBorderX(pane), state.paneBorderY(pane), state.paneBorderW(pane), state.paneBorderH(pane), true, active_float_label, active_header.family, state.paneBorderColor(pane), state.paneFloatStyle(pane), state);
             if (state.float_rename_uuid) |uuid| {
                 if (std.mem.eql(u8, &uuid, &pane.uuid)) {
                     float_title.drawTitleEditor(state, renderer, pane, state.float_rename_buf.items);

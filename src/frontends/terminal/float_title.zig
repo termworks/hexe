@@ -43,7 +43,22 @@ pub const TitleRect = struct {
 };
 
 pub fn getTitleRect(state: *const State, pane: *const Pane) ?TitleRect {
-    const title = state.paneFloatTitle(pane) orelse return null;
+    var family: borders.FloatFamilyChips = .{};
+    var title_pane: *const Pane = pane;
+    if (state.familyRootOf(pane)) |root| {
+        var members_buf: [16]State.FamilyMember = undefined;
+        const members = state.familyMembers(root, &members_buf);
+        for (members) |m| {
+            if (std.mem.eql(u8, &m.uuid, &root)) title_pane = m.pane;
+            if (family.len < family.indices.len) {
+                family.indices[family.len] = m.index;
+                family.len += 1;
+            }
+        }
+        family.active_index = if (state.paneFloatState(pane)) |fs| fs.family_index else 0;
+    }
+
+    const title = state.paneFloatTitle(title_pane) orelse return null;
     if (title.len == 0) return null;
 
     const style = state.paneFloatStyle(pane) orelse return null;
@@ -66,9 +81,22 @@ pub fn getTitleRect(state: *const State, pane: *const Pane) ?TitleRect {
         const active_uuid = state.runtime.activeFloatUuid() orelse break :blk false;
         break :blk std.mem.eql(u8, &active_uuid, &pane.uuid);
     };
-    const runs = statusbar.titleRuns(state, title, inner_w, true, is_active);
+    var horiz_buf: [4]u8 = undefined;
+    const horiz_n = std.unicode.utf8Encode(style.horizontal, &horiz_buf) catch 0;
+    const runs = statusbar.titleRunsWithFamily(state, title, inner_w, true, is_active, family, horiz_buf[0..horiz_n]);
     const painted: usize = statusbar.runsWidth(runs);
-    const measured: usize = if (painted > 0) painted else text_width.displayWidth(title);
+    const fallback_w: usize = blk: {
+        var w_acc: usize = text_width.displayWidth(title) + 2;
+        if (family.len >= 2) {
+            w_acc += 2;
+            for (family.slice(), 0..) |idx, i| {
+                if (i > 0) w_acc += 1;
+                w_acc += if (idx >= 10) 4 else 3;
+            }
+        }
+        break :blk w_acc;
+    };
+    const measured: usize = if (painted > 0) painted else fallback_w;
     const total_len: u16 = @intCast(@min(@as(usize, inner_w), measured));
     if (total_len == 0) return null;
 

@@ -14,6 +14,18 @@ pub const TitlePlacement = struct {
     y: u16,
 };
 
+/// Ordered chip indices for a float family (parent = 0, children = 1..9) and
+/// which chip is currently displayed. `len < 2` means a lone float (no chips).
+pub const FloatFamilyChips = struct {
+    indices: [16]u8 = undefined,
+    len: usize = 0,
+    active_index: u8 = 0,
+
+    pub fn slice(self: *const FloatFamilyChips) []const u8 {
+        return self.indices[0..self.len];
+    }
+};
+
 pub fn floatTitleInnerWidth(w: u16) u16 {
     return w -| 4;
 }
@@ -29,10 +41,14 @@ pub fn floatTitlePlacement(x: u16, y: u16, w: u16, h: u16, pos: core.FloatStyleP
     };
 }
 
+fn contrastFgForBg(bg_palette: u8) u8 {
+    return if (bg_palette == 0 or (bg_palette >= 232 and bg_palette <= 241)) 250 else 0;
+}
+
 fn applyFloatTitleStyleDefaults(style: core.style.Style, border_palette: u8) core.style.Style {
     var out = style;
     if (out.bg == .none) out.bg = .{ .palette = border_palette };
-    if (out.fg == .none) out.fg = .{ .palette = 0 };
+    if (out.fg == .none) out.fg = .{ .palette = contrastFgForBg(border_palette) };
     return out;
 }
 
@@ -313,6 +329,7 @@ pub fn drawFloatingBorder(
     h: u16,
     active: bool,
     name: []const u8,
+    family: FloatFamilyChips,
     border_color: core.BorderColor,
     style: ?*const core.FloatStyle,
     state: *const State,
@@ -378,7 +395,10 @@ pub fn drawFloatingBorder(
         const inner_w = floatTitleInnerWidth(w);
         if (inner_w == 0) return;
 
-        const runs = statusbar.titleRuns(state, name, inner_w, true, active);
+        var horiz_buf: [4]u8 = undefined;
+        const horiz_bytes = encodeCodepointUtf8(horizontal, &horiz_buf);
+
+        const runs = statusbar.titleRunsWithFamily(state, name, inner_w, true, active, family, horiz_bytes);
         const runs_len = @min(statusbar.runsWidth(runs), inner_w);
         if (runs_len > 0) {
             const place = floatTitlePlacement(x, y, w, h, pos, runs_len);
@@ -386,14 +406,67 @@ pub fn drawFloatingBorder(
             return;
         }
 
-        // Nothing from the painter yet: draw the raw name so a float is never
-        // left nameless while the first frame is in flight.
-        if (name.len == 0) return;
-        const fallback_len = @min(inner_w, statusbar.measureText(name));
-        if (fallback_len == 0) return;
-        const place = floatTitlePlacement(x, y, w, h, pos, fallback_len);
-        const clipped = text_width.clipTextToWidth(name, inner_w);
-        const fallback_style = applyFloatTitleStyleDefaults(.{}, color);
-        _ = statusbar.drawStyledText(renderer, place.x, place.y, clipped, fallback_style);
+        // Nothing from the painter yet: draw the raw title (and family chip
+        // pills when the float has sub-floats) so a float is never nameless.
+        if (name.len == 0 and family.len < 2) return;
+        const has_chips = family.len >= 2;
+        const title_w: u16 = if (name.len > 0) statusbar.measureText(name) + 2 else 0;
+        var chips_w: u16 = 0;
+        if (has_chips) {
+            // `══` bridge (2 cells) + ` <d> ` (3 cells each) + `|` separators (1 cell each)
+            if (title_w > 0) chips_w += 2;
+            for (family.slice(), 0..) |idx, i| {
+                if (i > 0) chips_w += 1;
+                chips_w += if (idx >= 10) 4 else 3;
+            }
+        }
+        const total_w = @min(inner_w, title_w +| chips_w);
+        if (total_w == 0) return;
+
+        const place = floatTitlePlacement(x, y, w, h, pos, total_w);
+        const limit_x = place.x +| inner_w;
+        var cx = place.x;
+
+        const title_style = applyFloatTitleStyleDefaults(.{}, color);
+        if (name.len > 0 and cx < limit_x) {
+            var padded_buf: [160]u8 = undefined;
+            const padded = std.fmt.bufPrint(&padded_buf, " {s} ", .{name}) catch name;
+            const clipped = text_width.clipTextToWidth(padded, limit_x -| cx);
+            cx = statusbar.drawStyledText(renderer, cx, place.y, clipped, title_style);
+        }
+
+        if (has_chips and cx < limit_x) {
+            const border_style = core.style.Style{ .fg = .{ .palette = color }, .bg = .none };
+            const chip_selected_style = core.style.Style{
+                .fg = .{ .palette = contrastFgForBg(color) },
+                .bg = .{ .palette = color },
+                .bold = true,
+            };
+            const chip_inactive_style = core.style.Style{
+                .fg = .{ .palette = 250 },
+                .bg = .{ .palette = 237 },
+            };
+
+            if (title_w > 0) {
+                var bridge_i: usize = 0;
+                while (bridge_i < 2 and cx < limit_x) : (bridge_i += 1) {
+                    putChar(renderer, cx, place.y, horizontal, .{ .palette = color }, null, false);
+                    cx += 1;
+                }
+            }
+
+            for (family.slice(), 0..) |idx, i| {
+                if (cx >= limit_x) break;
+                if (i > 0) {
+                    cx = statusbar.drawStyledText(renderer, cx, place.y, "|", border_style);
+                    if (cx >= limit_x) break;
+                }
+                var chip_buf: [8]u8 = undefined;
+                const chip_text = std.fmt.bufPrint(&chip_buf, " {d} ", .{idx}) catch continue;
+                const clipped = text_width.clipTextToWidth(chip_text, limit_x -| cx);
+                const chip_st = if (idx == family.active_index) chip_selected_style else chip_inactive_style;
+                cx = statusbar.drawStyledText(renderer, cx, place.y, clipped, chip_st);
+            }
+        }
     }
 }
