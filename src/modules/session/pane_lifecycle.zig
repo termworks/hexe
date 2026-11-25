@@ -169,6 +169,18 @@ pub fn stealAttachedPane(self: anytype, uuid: [32]u8, new_client_id: usize) bool
     if (old_client_id == new_client_id) return true;
 
     if (self.getClient(old_client_id)) |old_client| {
+        // Close any sub-floats attached to the stolen parent on old_client so
+        // they aren't stranded with a dangling parent_float.
+        var children: [MAX_SUB_FLOATS][32]u8 = undefined;
+        const child_count = collectSubFloats(self, uuid, &children);
+        for (children[0..child_count]) |child| {
+            if (old_client.mux_ctl_fd) |ctl_fd| {
+                notifyPaneExitedBestEffort(ctl_fd, child);
+            }
+            killPane(self, child) catch |err| {
+                core.logging.logError("ses", "stealAttachedPane: failed to close sub-float", err);
+            };
+        }
         if (old_client.mux_ctl_fd) |ctl_fd| {
             notifyPaneExitedBestEffort(ctl_fd, uuid);
         }
@@ -405,6 +417,16 @@ pub fn suspendPane(self: anytype, uuid: [32]u8) !void {
 
     if (pane.attached_to) |client_id| {
         if (self.getClient(client_id)) |client| {
+            // If suspending a parent float, cascade-kill its sub-floats while
+            // the parent is still linked to its snapshot so children cannot be
+            // stranded with a dangling parent_float.
+            var children: [MAX_SUB_FLOATS][32]u8 = undefined;
+            const child_count = collectSubFloats(self, uuid, &children);
+            for (children[0..child_count]) |child| {
+                killPane(self, child) catch |err| {
+                    core.logging.logError("ses", "suspendPane: failed to close sub-float", err);
+                };
+            }
             removePaneFromClientList(client, uuid);
             prunePaneFromClientSnapshot(self.allocator, client, uuid);
         }
@@ -464,7 +486,9 @@ fn collectSubFloats(self: anytype, uuid: [32]u8, out: *[MAX_SUB_FLOATS][32]u8) u
 /// A fixed buffer rather than an allocation: this runs while a pane is being
 /// destroyed, and a kill that can fail on allocation is a kill that can leave
 /// the family half-dead. Nine is the chips a title row addresses.
-const MAX_SUB_FLOATS: usize = 9;
+/// Match the frontend's 16-member family cap so sub-floats never outlive their
+/// parent in SES.
+const MAX_SUB_FLOATS: usize = 16;
 
 pub fn killPane(self: anytype, uuid: [32]u8) !void {
     const hex_uuid: [32]u8 = std.fmt.bytesToHex(uuid[0..16], .lower);

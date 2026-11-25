@@ -41,11 +41,11 @@ pub const PaneState = enum {
                 else => false,
             },
             .sticky => switch (to) {
-                .attached, .orphaned => true,
+                .attached, .detached, .orphaned => true,
                 else => false,
             },
             .orphaned => switch (to) {
-                .attached, .sticky => true,
+                .attached, .detached, .sticky => true,
                 else => false,
             },
         };

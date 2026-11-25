@@ -176,6 +176,7 @@ pub fn shutdownClient(self: anytype, client_id: usize, preserve_sticky: bool) vo
                             pane.attached_to = null;
                             // Preserved sticky panes are free, not parked.
                             pane.session_id = null;
+                            pane.orphaned_at = std.time.timestamp();
                             continue;
                         }
                     }

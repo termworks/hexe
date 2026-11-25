@@ -448,7 +448,7 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
             if (panes_arr.items.len > MAX_PANES_PER_SESSION) continue;
 
             const state_owned = try ses_state.allocator.dupe(u8, session_state);
-            errdefer ses_state.allocator.free(state_owned);
+            defer ses_state.allocator.free(state_owned);
             const snapshot = state.SessionSnapshot.fromJson(ses_state.allocator, state_owned) catch blk: {
                 const hex_sid: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
                 break :blk try state.SessionSnapshot.initMinimal(ses_state.allocator, hex_sid, name);

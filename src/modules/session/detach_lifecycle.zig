@@ -91,12 +91,30 @@ fn pruneDetachedSessionPanes(self: anytype, session_id: [16]u8) void {
 
     for (stale_panes.items) |pane_uuid| {
         ses.debugLog("pruneDetachedSessionPanes: dropping stale pane uuid={s}", .{pane_uuid[0..8]});
+        var orphan_children: std.ArrayList([32]u8) = .empty;
+        defer orphan_children.deinit(self.allocator);
+        if (self.store.detached_sessions.getPtr(session_id)) |det| {
+            for (det.session_snapshot.floats.items) |f| {
+                const pf = f.parent_float orelse continue;
+                if (std.mem.eql(u8, &pf, &pane_uuid)) {
+                    orphan_children.append(self.allocator, f.pane_uuid) catch {};
+                }
+            }
+        }
         if (self.store.panes.contains(pane_uuid)) {
             self.killPane(pane_uuid) catch |err| {
                 core.logging.logError("ses", "killPane failed in pruneDetachedSessionPanes", err);
             };
         } else {
             prunePaneFromDetachedSnapshot(self.allocator, &self.store, session_id, pane_uuid);
+        }
+        for (orphan_children.items) |child_uuid| {
+            if (self.store.panes.contains(child_uuid)) {
+                self.killPane(child_uuid) catch |err| {
+                    core.logging.logError("ses", "killPane failed for sub-float in pruneDetachedSessionPanes", err);
+                };
+            }
+            prunePaneFromDetachedSnapshot(self.allocator, &self.store, session_id, child_uuid);
         }
     }
 
@@ -124,10 +142,26 @@ fn pruneDetachedSessionPanes(self: anytype, session_id: [16]u8) void {
 
     for (stale_floats.items) |pane_uuid| {
         ses.debugLog("pruneDetachedSessionPanes: dropping stale float uuid={s}", .{pane_uuid[0..8]});
+        var orphan_children: std.ArrayList([32]u8) = .empty;
+        defer orphan_children.deinit(self.allocator);
+        for (detached_after.session_snapshot.floats.items) |f| {
+            const pf = f.parent_float orelse continue;
+            if (std.mem.eql(u8, &pf, &pane_uuid)) {
+                orphan_children.append(self.allocator, f.pane_uuid) catch {};
+            }
+        }
         if (self.store.panes.contains(pane_uuid)) {
             self.killPane(pane_uuid) catch |err| {
                 core.logging.logError("ses", "killPane failed pruning detached float", err);
             };
+        }
+        for (orphan_children.items) |child_uuid| {
+            if (self.store.panes.contains(child_uuid)) {
+                self.killPane(child_uuid) catch |err| {
+                    core.logging.logError("ses", "killPane failed pruning detached sub-float", err);
+                };
+            }
+            prunePaneFromDetachedSnapshot(self.allocator, &self.store, session_id, child_uuid);
         }
         snapshot_mod.removePaneFromSessionSnapshot(self.allocator, &detached_after.session_snapshot, pane_uuid);
     }

@@ -353,6 +353,57 @@ pub fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, b
                 self.replyOrCloseWithTrail(fd, .pane_created, std.mem.asBytes(&existing_resp), existing.pod_socket_path);
                 return;
             }
+
+            // Guard against concurrent duplicate spawns for the same (pwd, key)
+            // while an earlier async spawn is still awaiting its pod handshake.
+            var in_flight_fd: ?posix.fd_t = null;
+            for (self.pending_spawns.items) |ps| {
+                const f_pwd = ps.flight.sticky_pwd orelse continue;
+                const f_key = ps.flight.sticky_key orelse continue;
+                if (f_key == key and std.mem.eql(u8, f_pwd, pwd)) {
+                    in_flight_fd = ps.flight.spawn.stdout_file.handle;
+                    break;
+                }
+            }
+            if (in_flight_fd) |spawn_fd| {
+                wire.waitReadableTimeout(spawn_fd, 150) catch {};
+                self.processPendingSpawns();
+                if (self.ses_state.findStickyPaneWithAffinity(pwd, key, preferred_session)) |existing| {
+                    if (existing.state == .detached or self.ses_state.isPaneParked(existing)) {
+                        self.ses_state.removePaneFromDetachedSessions(existing.uuid);
+                    }
+                    if (existing.attached_to) |owner_id| {
+                        if (owner_id != client_id) {
+                            _ = self.ses_state.stealAttachedPane(existing.uuid, client_id);
+                            _ = self.ses_state.attachPane(existing.uuid, client_id) catch |err| {
+                                core.logging.logError("ses", "create_pane failed to attach in-flight sticky pane", err);
+                                self.sendBinaryError(fd, "attach_existing_failed");
+                                return;
+                            };
+                        }
+                    } else {
+                        _ = self.ses_state.attachPane(existing.uuid, client_id) catch |err| {
+                            core.logging.logError("ses", "create_pane failed to attach in-flight sticky pane", err);
+                            self.sendBinaryError(fd, "attach_existing_failed");
+                            return;
+                        };
+                    }
+                    if (self.ses_state.getPane(existing.uuid)) |p| p.requestBacklogReplay();
+                    replayPaneBacklogNow(self, existing.uuid);
+                    self.ses_state.markDirty();
+                    var existing_resp = wire.PaneCreated{
+                        .uuid = existing.uuid,
+                        .pid = existing.child_pid,
+                        .pane_id = existing.pane_id,
+                        .socket_path_len = @intCast(existing.pod_socket_path.len),
+                    };
+                    self.replyOrCloseWithTrail(fd, .pane_created, std.mem.asBytes(&existing_resp), existing.pod_socket_path);
+                    return;
+                }
+                // Still spawning after the grace window — refuse to fork a duplicate pod.
+                self.sendBinaryError(fd, "sticky_spawn_in_flight");
+                return;
+            }
         }
     }
 
@@ -455,7 +506,12 @@ pub fn handleBinaryFindSticky(self: *Server, fd: posix.fd_t, payload_len: u32, b
     else
         null;
 
-    if (self.ses_state.findStickyPaneWithAffinity(pwd, fs.key, preferred_session)) |pane| {
+    const found_pane = if (fs.claim_free != 0)
+        self.ses_state.findStickyPaneForClaimFree(pwd, fs.key, preferred_session, client_id)
+    else
+        self.ses_state.findStickyPaneWithAffinity(pwd, fs.key, preferred_session);
+
+    if (found_pane) |pane| {
         var already_attached_to_client = false;
         if (pane.attached_to) |owner_id| {
             already_attached_to_client = owner_id == client_id;

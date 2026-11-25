@@ -96,6 +96,15 @@ pub fn finishCreatePane(self: anytype, flight: *InFlightPane, child_pid: std.pos
         if (flight.sticky_pwd) |pwd| self.allocator.free(pwd);
     };
 
+    const sticky_session_name: ?[]const u8 = if (flight.sticky_pwd != null and flight.sticky_key != null) blk: {
+        const client = self.getClient(flight.client_id) orelse break :blk null;
+        const sname = client.session_name orelse break :blk null;
+        break :blk self.allocator.dupe(u8, sname) catch null;
+    } else null;
+    errdefer if (!pane_inserted) {
+        if (sticky_session_name) |ssn| self.allocator.free(ssn);
+    };
+
     const pane = store_mod.Pane{
         .uuid = flight.uuid,
         .name = flight.name,
@@ -105,6 +114,7 @@ pub fn finishCreatePane(self: anytype, flight: *InFlightPane, child_pid: std.pos
         .state = .attached,
         .sticky_pwd = flight.sticky_pwd,
         .sticky_key = flight.sticky_key,
+        .sticky_session_name = sticky_session_name,
         .attached_to = flight.client_id,
         .session_id = null,
         .created_at = std.time.timestamp(),
@@ -189,6 +199,14 @@ pub fn createPane(
     errdefer if (!pane_inserted) {
         if (owned_pwd) |pwd| self.allocator.free(pwd);
     };
+    const sticky_session_name: ?[]const u8 = if (owned_pwd != null and sticky_key != null) blk: {
+        const client = self.getClient(client_id) orelse break :blk null;
+        const sname = client.session_name orelse break :blk null;
+        break :blk self.allocator.dupe(u8, sname) catch null;
+    } else null;
+    errdefer if (!pane_inserted) {
+        if (sticky_session_name) |ssn| self.allocator.free(ssn);
+    };
 
     const now = std.time.timestamp();
     const pane_id = self.allocPaneId();
@@ -202,6 +220,7 @@ pub fn createPane(
         .state = .attached,
         .sticky_pwd = owned_pwd,
         .sticky_key = sticky_key,
+        .sticky_session_name = sticky_session_name,
         .attached_to = client_id,
         .session_id = null,
         .created_at = now,

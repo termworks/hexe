@@ -1528,7 +1528,7 @@ pub const Server = struct {
     /// Drive forked-but-unannounced pods. Runs on the periodic tick, so a slow
     /// pod costs latency for its own pane instead of freezing every session
     /// (PLAN.md 1.1).
-    fn processPendingSpawns(self: *Server) void {
+    pub fn processPendingSpawns(self: *Server) void {
         if (self.pending_spawns.items.len == 0) return;
         const now = std.time.milliTimestamp();
 
@@ -3077,12 +3077,16 @@ pub const Server = struct {
             }
         }
         if (exited_uuid) |uuid| {
+            const owner_cid: ?usize = if (self.ses_state.store.panes.getPtr(uuid)) |pane| pane.attached_to else null;
             // Treat POD VT disconnect as terminal for the pane. This keeps SES
             // authoritative for snapshot pruning instead of relying on the
             // frontend to repair canonical state after receiving pane_exited.
             self.ses_state.killPane(uuid) catch |e| {
                 core.logging.logError("ses", "killPane failed after POD VT disconnect", e);
             };
+            if (owner_cid) |cid| {
+                self.pushClientSessionSnapshot(cid);
+            }
         }
     }
 
@@ -3774,6 +3778,7 @@ pub const Server = struct {
             // channel-agnostic.
             .list_sessions => {
                 server_listing_handlers.handleBinaryListSessions(self, fd, &buf);
+                self.finishCliRequest(fd);
             },
             // Named MsgTypes that never arrive on the CLI-tool request channel
             // (handshake 0x04): MUX→SES binary CTL messages, responses, and POD
@@ -3918,7 +3923,7 @@ pub const Server = struct {
             return;
         };
         defer self.allocator.free(session_json);
-        self.replyOrClose(mux_fd, .session_state, session_json);
+        self.notifyOrClose(mux_fd, .session_state, session_json);
     }
 
     pub fn findClientForPaneUuid(self: *Server, uuid: [32]u8) ?*state.Client {
