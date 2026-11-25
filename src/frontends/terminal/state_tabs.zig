@@ -13,6 +13,8 @@ const Pane = @import("pane.zig").Pane;
 const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 const state_reattach = @import("state_reattach.zig");
 const tab_switch = @import("tab_switch.zig");
+const float_util = @import("float_util.zig");
+const float_completion = @import("float_completion.zig");
 const lua_events = @import("lua_events.zig");
 
 fn killTabPanes(self: anytype, tab: *TabView) void {
@@ -150,19 +152,29 @@ pub fn createTab(self: anytype) !void {
 
 /// Close the current tab.
 pub fn closeCurrentTab(self: anytype) bool {
+    return closeTabAt(self, self.activeTabIndex());
+}
+
+/// Close tab at `closing_tab` (active or background), preserving active-tab focus
+/// when closing a background tab.
+pub fn closeTabAt(self: anytype, requested_tab: usize) bool {
     if (self.runtime.applyPendingSessionSnapshot()) {
         _ = self.applySessionSnapshot();
     }
     if (self.view.tab_views.items.len <= 1) return false;
-    const closing_tab = self.activeTabIndex();
+    if (requested_tab >= self.view.tab_views.items.len) return false;
+    const closing_tab = requested_tab;
+    const was_active_tab = closing_tab == self.activeTabIndex();
     const closing_uuid = self.runtime.tabUuid(closing_tab) orelse {
-        core.logging.warn("terminal", "closeCurrentTab skipped: active tab has no session UUID", .{});
+        core.logging.warn("terminal", "closeTabAt skipped: tab {d} has no session UUID", .{closing_tab});
         return false;
     };
-    const next_active_tab: ?usize = if (self.view.tab_views.items.len > 1)
-        if (closing_tab >= self.view.tab_views.items.len - 1) self.view.tab_views.items.len - 2 else closing_tab
+    const next_active_tab: ?usize = if (was_active_tab)
+        (if (closing_tab >= self.view.tab_views.items.len - 1) self.view.tab_views.items.len - 2 else closing_tab)
+    else if (self.activeTabIndex() > closing_tab)
+        self.activeTabIndex() - 1
     else
-        null;
+        self.activeTabIndex();
 
     if (attachedSnapshotOwnsTab(self, closing_uuid)) {
         if (!self.syncSessionTabRemovedChecked(closing_uuid, next_active_tab)) {
@@ -191,6 +203,7 @@ pub fn closeCurrentTab(self: anytype) bool {
                 self.runtime.killPane(fp_uuid) catch |e| {
                     core.logging.logError("terminal", "killPane failed in closeTab", e);
                 };
+                float_completion.handleBlockingFloatCompletion(self, fp);
                 self.clearTransientPaneState(fp);
                 self.clearFloatUi(fp_uuid);
                 fp.deinit();
@@ -222,21 +235,40 @@ pub fn closeCurrentTab(self: anytype) bool {
     tab.deinit();
     self.runtime.removeTabMeta(closing_tab);
     self.runtime.removeTabFocusMemory(closing_tab);
-    self.applyFrontendTabRemoved(closing_tab, next_active_tab);
-    if (self.activeTabIndex() >= self.view.tab_views.items.len) {
-        self.setActiveTabIndex(self.view.tab_views.items.len - 1);
-    } else {
-        self.setActiveTabIndex(self.activeTabIndex());
-    }
-    if (self.activeFloatingIndex()) |afi| {
-        if (afi < self.view.float_views.items.len) {
-            self.syncPaneFocus(self.view.float_views.items[afi], null);
-        } else if (self.currentLayout().getFocusedPane()) |pane| {
-            self.setActiveFloatingIndex(null);
-            self.syncPaneFocus(pane, null);
+    if (self.pending_pop_response and self.pending_pop_scope == .tab) {
+        if (self.pending_pop_tab == closing_tab) {
+            self.pending_pop_response = false;
+        } else if (self.pending_pop_tab > closing_tab) {
+            self.pending_pop_tab -= 1;
         }
-    } else if (self.currentLayout().getFocusedPane()) |pane| {
-        self.syncPaneFocus(pane, null);
+    }
+    self.applyFrontendTabRemoved(closing_tab, next_active_tab);
+    const resolved_active = next_active_tab orelse if (self.activeTabIndex() >= self.view.tab_views.items.len)
+        self.view.tab_views.items.len - 1
+    else
+        self.activeTabIndex();
+    self.setActiveTabIndex(@min(resolved_active, self.view.tab_views.items.len - 1));
+    if (was_active_tab) {
+        var kept_active_float = false;
+        if (self.activeFloatingIndex()) |afi| {
+            if (afi < self.view.float_views.items.len) {
+                const fp = self.view.float_views.items[afi];
+                if (float_util.isFloatRenderableOnTab(self, fp, self.activeTabIndex())) {
+                    self.syncPaneFocus(fp, null);
+                    _ = self.syncFamilyFloats(fp, true);
+                    kept_active_float = true;
+                }
+            }
+        }
+        if (!kept_active_float) {
+            self.setActiveFloatingIndex(null);
+            tab_switch.restoreTabFocus(self, null);
+            if (self.activeFloatingIndex()) |restored| {
+                if (restored < self.view.float_views.items.len) {
+                    _ = self.syncFamilyFloats(self.view.float_views.items[restored], true);
+                }
+            }
+        }
     }
     self.renderer.invalidate();
     self.force_full_render = true;
@@ -334,6 +366,14 @@ fn collectStickyAdoptionCwds(self: anytype, cwd_set: *std.StringHashMap(void)) v
 /// authoritatively from SES. Returns null only when SES has no sticky identity
 /// for the pane (e.g. a plain adhoc float).
 pub fn ensureStickyFloatDir(self: anytype, pane: *Pane) ?[]const u8 {
+    // A sub-float belongs to its parent family's directory identity, never its own.
+    if (self.familyRootOf(pane)) |root| {
+        if (!std.mem.eql(u8, &root, &pane.uuid)) {
+            if (self.findPaneByUuid(root)) |root_pane| {
+                return ensureStickyFloatDir(self, root_pane);
+            }
+        }
+    }
     if (self.panePwdDir(pane)) |dir| return dir;
 
     if (self.runtime.getPaneInfoSnapshot(pane.uuid)) |info| {
@@ -376,10 +416,17 @@ pub fn adoptStickyPanes(self: anytype) void {
     // are backed by the same SES sticky lookup metadata (pwd + key), even when
     // the config attr is `per_cwd` rather than explicit `sticky`.
     var cwd_it = cwd_set.keyIterator();
+    var git_buf: [std.fs.max_path_bytes]u8 = undefined;
     while (cwd_it.next()) |cwd_ptr| {
-        const cwd = cwd_ptr.*;
+        const raw_cwd = cwd_ptr.*;
         for (self.active_layout_floats) |*float_def| {
             if (!float_def.attributes.sticky and !float_def.attributes.keyedByDir()) continue;
+            // `per_git` floats are keyed in SES by git repo root (falling back
+            // to raw cwd outside a repo), matching setNamedFloat.
+            const cwd = if (float_def.attributes.per_git)
+                core.config.gitRootOf(raw_cwd, &git_buf) orelse raw_cwd
+            else
+                raw_cwd;
             if (hasLocalCwdFloat(self, float_def.key, cwd)) continue;
 
             // Try to claim a FREE sticky pane in ses matching this directory +
@@ -461,17 +508,16 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
         self.runtime.requestPaneCwd(uuid);
     }
 
-    pane.focused = true;
+    pane.focused = false;
 
-    // For global floats (special or pwd), set per-tab visibility.
+    // Background-adopted sticky/per-CWD floats wait hidden until toggled on
+    // their matching directory/tab; marking them visible on activeTabIndex()
+    // would dump floats from other tabs' directories onto the current tab.
     const parent_tab: ?usize = if (!float_def.attributes.global and !float_def.attributes.keyedByDir())
         self.activeTabIndex()
     else
         null;
-    const tab_visible: u64 = if (parent_tab == null and self.activeTabIndex() < 64)
-        (@as(u64, 1) << @intCast(self.activeTabIndex()))
-    else
-        0;
+    const tab_visible: u64 = 0;
 
     if (!self.setPaneFloatUi(uuid, .{
         .border_x = frame.outer_x,
@@ -503,7 +549,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     self.setLocalFloatState(
         pane.uuid,
         parent_tab,
-        true,
+        false,
         tab_visible,
         float_def.attributes.sticky,
         float_def.attributes.keyedByDir(),

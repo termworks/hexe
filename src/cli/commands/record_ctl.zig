@@ -348,7 +348,7 @@ fn pidStartTime(allocator: std.mem.Allocator, pid: i32) ?u64 {
     // final ')'.
     const close = std.mem.lastIndexOfScalar(u8, data, ')') orelse return null;
     var it = std.mem.tokenizeScalar(u8, data[close + 1 ..], ' ');
-    var idx: usize = 2; // the token after ')' is field 3 (state)
+    var idx: usize = 3; // the token after ')' is field 3 (state); field 22 is starttime
     while (it.next()) |tok| : (idx += 1) {
         if (idx == 22) return std.fmt.parseInt(u64, std.mem.trim(u8, tok, " \n"), 10) catch null;
     }

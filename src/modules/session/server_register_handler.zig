@@ -127,6 +127,12 @@ pub fn handleBinaryRegister(self: *Server, fd: posix.fd_t, payload_len: u32, buf
             };
             if (client.session_name) |old| client.allocator.free(old);
             client.session_name = owned_name;
+            if (client.session_snapshot) |*snapshot| {
+                if (snapshot.allocator.dupe(u8, rn)) |snap_name| {
+                    snapshot.allocator.free(snapshot.session_name);
+                    snapshot.session_name = snap_name;
+                } else |_| {}
+            }
         } else {
             if (client.session_name) |old| client.allocator.free(old);
             client.session_name = null;

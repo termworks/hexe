@@ -190,6 +190,10 @@ pub fn findStickyPaneWithAffinity(self: anytype, pwd: []const u8, key: u8, prefe
     return sticky_panes.findStickyPaneWithAffinity(&self.store, pwd, key, preferred_session_name);
 }
 
+pub fn findStickyPaneForClaimFree(self: anytype, pwd: []const u8, key: u8, preferred_session_name: ?[]const u8, requester_client_id: usize) ?*store_mod.Pane {
+    return sticky_panes.findStickyPaneForClaimFree(&self.store, pwd, key, preferred_session_name, requester_client_id);
+}
+
 pub fn stealAttachedPane(self: anytype, uuid: [32]u8, new_client_id: usize) bool {
     return pane_lifecycle.stealAttachedPane(self, uuid, new_client_id);
 }

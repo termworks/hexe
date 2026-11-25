@@ -419,6 +419,62 @@ api("act", json.dumps("float.family_next"))
 back = shown_chip()
 check(back == before, f"and next undoes it ({after} -> {back}, wanted {before})")
 
+# -------------------------------------------------------------------- phase 3d
+print("\nphase 3d: switching tabs while on a sub-float preserves its focus and chip")
+if shown_chip() == 0:
+    api("act", json.dumps("float.family_next"))
+chip_before_tab = shown_chip()
+check(chip_before_tab not in (None, 0), f"starting on a child chip (got {chip_before_tab})")
+api("act", json.dumps("tab.new"))
+time.sleep(0.8)
+api("act", json.dumps("tab.prev"))
+time.sleep(0.8)
+chip_after_tab = shown_chip()
+check(chip_after_tab == chip_before_tab,
+      f"returning to the tab keeps the same sub-float visible ({chip_after_tab}, wanted {chip_before_tab})")
+active_rec = next((f for f in floats() if f.get("focused") is True), None)
+check(active_rec is not None and active_rec.get("family_index") == chip_before_tab,
+      f"and focused on that sub-float (got {active_rec.get('family_index') if active_rec else None})")
+api("act", json.dumps("float.family_prev"))
+stepped = shown_chip()
+check(stepped is not None and stepped != chip_before_tab,
+      f"and stepping after tab return still moves ({chip_before_tab} -> {stepped})")
+api("act", json.dumps("float.family_next"))
+_ = shown_chip()
+# Clean up the extra tab so later phases match the original single-tab setup.
+api("act", json.dumps("tab.next"))
+time.sleep(0.5)
+api("act", json.dumps("tab.close"))
+time.sleep(0.5)
+
+# -------------------------------------------------------------------- phase 3e
+print("\nphase 3e: hiding a global family with sub-floats clears focus cleanly and never traps stepping")
+chip_before_hide = shown_chip()
+check(chip_before_hide not in (None, 0), f"starting on a sub-float before hide (got {chip_before_hide})")
+os.write(m, b"\x1b2")
+time.sleep(0.8)
+check(visible_members(PARENT) == [], f"alt+2 hides the family (got {visible_members(PARENT)})")
+focused_while_hidden = [f["uuid"][:8] for f in floats() if f.get("focused") is True]
+check(focused_while_hidden == [],
+      f"no hidden float remains focused after SES snapshot sync (got {focused_while_hidden})")
+# Stepping while hidden must decline rather than resurrecting the hidden float.
+api("act", json.dumps("float.family_next"))
+time.sleep(0.4)
+check(visible_members(PARENT) == [],
+      f"family_next while hidden does not resurrect the float (got {visible_members(PARENT)})")
+os.write(m, b"\x1b2")
+time.sleep(0.8)
+check(shown_chip() == chip_before_hide,
+      f"alt+2 brings back the same sub-float ({shown_chip()}, wanted {chip_before_hide})")
+api("act", json.dumps("float.family_prev"))
+prev_after_reveal = shown_chip()
+check(prev_after_reveal is not None and prev_after_reveal != chip_before_hide,
+      f"stepping back after reveal works ({chip_before_hide} -> {prev_after_reveal})")
+api("act", json.dumps("float.family_next"))
+back_after_reveal = shown_chip()
+check(back_after_reveal == chip_before_hide,
+      f"and stepping forward returns ({prev_after_reveal} -> {back_after_reveal})")
+
 # --------------------------------------------------------------------- phase 4
 print("\nphase 4: --sub from outside a float is refused, not silently top-level")
 before = len(floats())

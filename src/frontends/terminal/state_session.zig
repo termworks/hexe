@@ -96,6 +96,10 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
 pub fn applyLayoutDef(self: anytype, layout: *const LayoutDef) !void {
     terminal_main.debugLog("applyLayoutDef: '{s}' tabs={d} floats={d}", .{ layout.name, layout.tabs.len, layout.floats.len });
 
+    if (layout.floats.len > 0) {
+        self.setActiveLayoutFloats(layout.floats);
+    }
+
     // Hook parity with applySessionConfig: the canonical hexe.setup path used
     // to silently drop on_start, so the same .hexe.lua ran its hooks or not
     // depending on which parser won. Same trust-ledger gate (PLAN 1.9).
@@ -138,23 +142,44 @@ pub fn applyLayoutDef(self: anytype, layout: *const LayoutDef) !void {
     self.force_full_render = true;
 }
 
-/// Replace current runtime tabs/floats with a session config.
-pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]const u8) !void {
-    // Remove floating panes.
+fn clearCurrentSessionBeforeReplace(self: anytype) void {
+    if (self.isSearchActive()) self.exitSearchMode();
+    if (self.isCopyModeActive()) self.exitCopyMode();
+    self.mouse_drag = .none;
+    self.mouse_selection.clear();
+
+    // Remove floating panes (killing pods and clearing local + SES float state).
     for (self.view.float_views.items) |pane| {
+        const uuid = pane.uuid;
+        if (self.runtime.isConnected()) {
+            self.runtime.killPane(uuid) catch {};
+        }
         self.clearTransientPaneState(pane);
-        self.clearFloatUi(pane.uuid);
+        self.clearLocalFloatState(uuid);
+        self.clearFloatUi(uuid);
         pane.deinit();
         self.allocator.destroy(pane);
     }
     self.view.float_views.clearRetainingCapacity();
+    self.family_shown.clearRetainingCapacity();
     self.setActiveFloatingIndex(null);
     self.runtime.setFocusedPaneUuid(null);
 
-    // Remove all tabs.
-    for (self.view.tab_views.items) |*tab| {
+    // Remove all tabs (killing split pods and removing tabs in SES).
+    var ti: usize = self.view.tab_views.items.len;
+    while (ti > 0) {
+        ti -= 1;
+        if (self.runtime.isConnected()) {
+            if (self.runtime.tabUuid(ti)) |tab_uuid| {
+                _ = self.syncSessionTabRemovedChecked(tab_uuid, null);
+            }
+        }
+        var tab = &self.view.tab_views.items[ti];
         var split_it = tab.layout.splits.valueIterator();
         while (split_it.next()) |pane_ptr| {
+            if (self.runtime.isConnected()) {
+                self.runtime.killPane(pane_ptr.*.uuid) catch {};
+            }
             self.clearTransientPaneState(pane_ptr.*);
         }
         tab.deinit();
@@ -164,37 +189,17 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
     self.runtime.clearTabFocusMemory();
     self.setActiveTabIndex(0);
     self.runtime.setFocusedPaneUuid(null);
+}
 
+/// Replace current runtime tabs/floats with a session config.
+pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]const u8) !void {
+    clearCurrentSessionBeforeReplace(self);
     try applySessionConfig(self, config, tab_filter);
 }
 
 /// Replace current runtime tabs/floats with a canonical layout definition.
 pub fn replaceWithLayoutDef(self: anytype, layout: *const LayoutDef) !void {
-    // Remove floating panes.
-    for (self.view.float_views.items) |pane| {
-        self.clearTransientPaneState(pane);
-        self.clearFloatUi(pane.uuid);
-        pane.deinit();
-        self.allocator.destroy(pane);
-    }
-    self.view.float_views.clearRetainingCapacity();
-    self.setActiveFloatingIndex(null);
-    self.runtime.setFocusedPaneUuid(null);
-
-    // Remove all tabs.
-    for (self.view.tab_views.items) |*tab| {
-        var split_it = tab.layout.splits.valueIterator();
-        while (split_it.next()) |pane_ptr| {
-            self.clearTransientPaneState(pane_ptr.*);
-        }
-        tab.deinit();
-    }
-    self.view.tab_views.clearRetainingCapacity();
-    self.runtime.clearTabMeta();
-    self.runtime.clearTabFocusMemory();
-    self.setActiveTabIndex(0);
-    self.runtime.setFocusedPaneUuid(null);
-
+    clearCurrentSessionBeforeReplace(self);
     try applyLayoutDef(self, layout);
 }
 

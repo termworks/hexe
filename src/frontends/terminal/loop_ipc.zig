@@ -782,6 +782,7 @@ fn handleFocusMove(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
         .up => .up,
         .down => .down,
     };
+    state.clearZoom();
     _ = focus_move.perform(state, dir);
     state.needs_render = true;
 }
@@ -1030,12 +1031,28 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         }
     }
 
-    // Unfocus current pane.
+    const zero_parent: [32]u8 = .{0} ** 32;
+    const is_sub = !std.mem.eql(u8, &fr.parent_pane, &zero_parent);
+    const old_active_float = state.runtime.activeFloatUuid();
+    const parent_visible_here: bool = blk: {
+        if (!is_sub) break :blk true;
+        const parent_pane = state.findPaneByUuid(fr.parent_pane) orelse break :blk false;
+        const tab = state.activeTabIndex();
+        if (!state.paneVisibleOnTab(parent_pane, tab)) break :blk false;
+        if (state.paneParentTab(parent_pane)) |pt| {
+            if (pt != tab) break :blk false;
+        }
+        break :blk true;
+    };
+
+    // Unfocus current pane (only if the new float will actually take focus here).
     const old_uuid = state.getCurrentFocusedUuid();
-    if (state.activeFloatingIndex()) |idx| {
-        if (idx < state.view.float_views.items.len) state.syncPaneUnfocus(state.view.float_views.items[idx]);
-    } else if (state.currentLayout().getFocusedPane()) |tiled| {
-        state.syncPaneUnfocus(tiled);
+    if (!is_sub or parent_visible_here) {
+        if (state.activeFloatingIndex()) |idx| {
+            if (idx < state.view.float_views.items.len) state.syncPaneUnfocus(state.view.float_views.items[idx]);
+        } else if (state.currentLayout().getFocusedPane()) |tiled| {
+            state.syncPaneUnfocus(tiled);
+        }
     }
 
     const env_items: ?[]const []const u8 = if (env_list.items.len > 0) env_list.items else null;
@@ -1075,6 +1092,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         .shift_y = fr.shift_y,
         .exit_key = if (exit_key_slice.len > 0) exit_key_slice else null,
     };
+
     const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
@@ -1087,25 +1105,42 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
     // creation rather than during, so the adhoc path stays one thing and a
     // parent that turns out not to be a float leaves an ordinary float behind
     // instead of failing the request.
-    const zero_parent: [32]u8 = .{0} ** 32;
-    if (!std.mem.eql(u8, &fr.parent_pane, &zero_parent)) {
+    var stole_focus = true;
+    if (is_sub) {
         if (!state.adoptIntoFloatFamily(new_uuid, fr.parent_pane)) {
             terminal_main.debugLogUuid(
                 &fr.parent_pane,
                 "float --sub: parent is not a float; left the new float top-level",
                 .{},
             );
-        } else {
+        } else if (parent_visible_here) {
             // A family shows one member at a time, and the one just asked for
             // is the one to show -- which also pushes the family to SES, so a
             // reattach finds the child under its parent rather than as a
             // second top-level float.
             // Local-only for the siblings: this is inside the request handler.
             _ = state.showFamilyMember(new_uuid, false);
+        } else {
+            // Parent is hidden or lives on another tab: join the family
+            // quietly without popping it onto the active tab or stealing focus.
+            stole_focus = false;
+            if (state.findPaneByUuid(new_uuid)) |new_pane| {
+                new_pane.focused = false;
+                _ = state.syncSessionFloatChecked(new_pane, false);
+            }
+            state.setActiveFloatingUuid(old_active_float);
+            if (old_active_float) |af_uuid| {
+                if (state.findPaneByUuid(af_uuid)) |af_pane| {
+                    _ = state.syncSessionFloatChecked(af_pane, true);
+                    state.syncPaneFocus(af_pane, null);
+                }
+            } else if (state.currentLayout().getFocusedPane()) |tiled| {
+                state.syncPaneFocus(tiled, null);
+            }
         }
     }
 
-    if (state.view.float_views.items.len > 0) {
+    if (stole_focus and state.view.float_views.items.len > 0) {
         state.syncPaneFocus(state.view.float_views.items[state.view.float_views.items.len - 1], old_uuid);
         // Only swallow input that is already in flight with the float request
         // (the trigger key's leftover bytes). See State.drop_input_until_ms.
@@ -1266,15 +1301,17 @@ fn applyPaneNameVisuals(state: *State, uuid: [32]u8, name: []const u8) void {
         }
     }
 
-    var split_iter = state.currentLayout().splits.valueIterator();
-    while (split_iter.next()) |pane| {
-        if (std.mem.eql(u8, pane.*.uuid[0..], uuid[0..]) and pane.*.pokemon_initialized and
-            !pane.*.pokemon_state.manually_toggled and !pane.*.pokemon_state.show_sprite)
-        {
-            const id = pane.*.pokemon_state.sprite_name orelse name;
-            pane.*.pokemon_state.loadSprite(id, rollShiny(state)) catch |err| {
-                core.logging.logError("terminal", "failed to load split sprite after pane-name update", err);
-            };
+    for (state.view.tab_views.items) |*tab| {
+        var split_iter = tab.layout.splits.valueIterator();
+        while (split_iter.next()) |pane| {
+            if (std.mem.eql(u8, pane.*.uuid[0..], uuid[0..]) and pane.*.pokemon_initialized and
+                !pane.*.pokemon_state.manually_toggled and !pane.*.pokemon_state.show_sprite)
+            {
+                const id = pane.*.pokemon_state.sprite_name orelse name;
+                pane.*.pokemon_state.loadSprite(id, rollShiny(state)) catch |err| {
+                    core.logging.logError("terminal", "failed to load split sprite after pane-name update", err);
+                };
+            }
         }
     }
     state.needs_render = true;
@@ -1287,12 +1324,14 @@ fn recordPaneSprite(state: *State, uuid: [32]u8, name: []const u8) void {
             core.logging.logError("terminal", "failed to record float sprite id", err);
         };
     }
-    var it = state.currentLayout().splits.valueIterator();
-    while (it.next()) |pane| {
-        if (!std.mem.eql(u8, pane.*.uuid[0..], uuid[0..])) continue;
-        pane.*.pokemon_state.recordSprite(name) catch |err| {
-            core.logging.logError("terminal", "failed to record split sprite id", err);
-        };
+    for (state.view.tab_views.items) |*tab| {
+        var it = tab.layout.splits.valueIterator();
+        while (it.next()) |pane| {
+            if (!std.mem.eql(u8, pane.*.uuid[0..], uuid[0..])) continue;
+            pane.*.pokemon_state.recordSprite(name) catch |err| {
+                core.logging.logError("terminal", "failed to record split sprite id", err);
+            };
+        }
     }
 }
 

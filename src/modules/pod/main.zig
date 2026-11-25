@@ -1332,7 +1332,12 @@ const Pod = struct {
             const now_ms: i64 = std.time.milliTimestamp();
             if (now_ms - timer_ctx.last_meta_ms >= 1000) {
                 timer_ctx.last_meta_ms = now_ms;
-                const live_cwd = timer_ctx.pod.lastOsc7Cwd();
+                var proc_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+                const live_cwd: ?[]const u8 = timer_ctx.pod.lastOsc7Cwd() orelse blk: {
+                    var link_path_buf: [64]u8 = undefined;
+                    const link_path = std.fmt.bufPrint(&link_path_buf, "/proc/{d}/cwd", .{timer_ctx.pod.pty.child_pid}) catch break :blk null;
+                    break :blk std.fs.readLinkAbsolute(link_path, &proc_cwd_buf) catch null;
+                };
                 // Only the cwd is live in the sidecar; skip the disk write
                 // when it hasn't changed since the last successful write.
                 // Still rewrite every 5 minutes regardless: sidecars can live
@@ -1592,7 +1597,7 @@ const Pod = struct {
         // a wrong first line beats losing the history behind it.
         vt.feed(bytes) catch {};
 
-        const mode: wire.PodReadMode = @enumFromInt(req.mode);
+        const mode = std.meta.intToEnum(wire.PodReadMode, req.mode) catch return error.InvalidMode;
         const count: usize = req.count;
         const owned = switch (mode) {
             .lines => try core.prompt_marks.lastLinesAlloc(self.allocator, &vt, count),
@@ -1915,6 +1920,12 @@ const Pod = struct {
     /// Register a one-shot request connection, trying to complete it inline so
     /// a peer that already wrote its request pays no extra latency.
     fn beginPodRequest(self: *Pod, conn: core.IpcConnection, kind: PendingRequestKind) void {
+        if (self.pending_requests.items.len >= MAX_PENDING_HANDSHAKES) {
+            debugLog("reject pod request fd={d}: pending request limit ({d}) reached", .{ conn.fd, MAX_PENDING_HANDSHAKES });
+            var tmp = conn;
+            tmp.close();
+            return;
+        }
         var pending = PendingPodRequest{
             .fd = conn.fd,
             .kind = kind,

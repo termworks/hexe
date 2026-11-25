@@ -121,20 +121,26 @@ fn parseLuaCodepoint(lua: *Lua, default: u21, context: []const u8) u21 {
     };
 }
 
+fn safeFloatToU8(val: f64) u8 {
+    if (!std.math.isFinite(val) or val <= 0) return 0;
+    if (val >= 255) return 255;
+    return @intFromFloat(val);
+}
+
 pub fn applyFloatVisualOptions(comptime allow_attributes: bool, lua: *Lua, idx: i32, allocator: std.mem.Allocator, target: anytype) void {
     _ = lua.getField(idx, "size");
     if (lua.typeOf(-1) == .table) {
         _ = lua.getField(-1, "width");
         if (lua.typeOf(-1) == .number) {
             const w = luaNumberOrRaise(lua, -1, "float style: failed to parse width");
-            target.width_percent = @intFromFloat(w);
+            target.width_percent = safeFloatToU8(w);
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "height");
         if (lua.typeOf(-1) == .number) {
             const h = luaNumberOrRaise(lua, -1, "float style: failed to parse height");
-            target.height_percent = @intFromFloat(h);
+            target.height_percent = safeFloatToU8(h);
         }
         lua.pop(1);
     }
@@ -145,14 +151,14 @@ pub fn applyFloatVisualOptions(comptime allow_attributes: bool, lua: *Lua, idx: 
         _ = lua.getField(-1, "x");
         if (lua.typeOf(-1) == .number) {
             const x = luaNumberOrRaise(lua, -1, "float style: failed to parse padding.x");
-            target.padding_x = @intFromFloat(x);
+            target.padding_x = safeFloatToU8(x);
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "y");
         if (lua.typeOf(-1) == .number) {
             const y = luaNumberOrRaise(lua, -1, "float style: failed to parse padding.y");
-            target.padding_y = @intFromFloat(y);
+            target.padding_y = safeFloatToU8(y);
         }
         lua.pop(1);
     }
@@ -164,14 +170,14 @@ pub fn applyFloatVisualOptions(comptime allow_attributes: bool, lua: *Lua, idx: 
         _ = lua.getField(-1, "active");
         if (lua.typeOf(-1) == .number) {
             const a = luaNumberOrRaise(lua, -1, "float style: failed to parse color.active");
-            color.active = @intFromFloat(a);
+            color.active = safeFloatToU8(a);
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "passive");
         if (lua.typeOf(-1) == .number) {
             const p = luaNumberOrRaise(lua, -1, "float style: failed to parse color.passive");
-            color.passive = @intFromFloat(p);
+            color.passive = safeFloatToU8(p);
         }
         lua.pop(1);
 

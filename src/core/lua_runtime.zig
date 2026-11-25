@@ -333,6 +333,8 @@ pub const LuaRuntime = struct {
     /// What the last project file actually asked for, for a caller that wants
     /// to report it.
     declared_needs: Needs = .{},
+    has_loaded_config: bool = false,
+    is_project_overlay: bool = false,
 
     const Self = @This();
 
@@ -471,7 +473,29 @@ pub const LuaRuntime = struct {
     /// Maximum project config size we will read into memory to hash + execute.
     const MAX_PROJECT_CONFIG_BYTES: usize = 8 * 1024 * 1024;
 
+    fn resetModuleForOverlay(self: *Self) void {
+        if (self.lua.getGlobal("hexe") catch return != .table) {
+            self.lua.pop(1);
+            return;
+        }
+        if (self.lua.getField(-1, "__reset_for_overlay") != .function) {
+            self.lua.pop(2);
+            return;
+        }
+        self.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+            self.lua.pop(1);
+        };
+        self.lua.pop(1);
+    }
+
     pub fn loadProjectConfig(self: *Self, path: []const u8) !void {
+        const is_overlay = self.has_loaded_config;
+        if (is_overlay) {
+            self.resetModuleForOverlay();
+        }
+        const prev_overlay = self.is_project_overlay;
+        self.is_project_overlay = is_overlay;
+        defer self.is_project_overlay = prev_overlay;
         // Read ONCE, then hash and execute those same bytes. Hashing via the
         // path (trust.isTrusted) and separately letting Lua re-open it is a
         // TOCTOU window: anyone able to write the working tree could present
@@ -534,9 +558,13 @@ pub const LuaRuntime = struct {
         // Before the config is finished, not after: `applyReturnedConfig` calls
         // `__finish`, which snapshots the registration tables. A plugin binding
         // a key after that point registers into a table nobody reads again.
-        self.loadPlugins();
+        if (!self.plugins_loaded) {
+            self.loadPlugins();
+            self.plugins_loaded = true;
+        }
 
         try self.applyReturnedConfig();
+        self.has_loaded_config = true;
     }
 
     /// Run every plugin on the runtimepath.
@@ -625,8 +653,12 @@ pub const LuaRuntime = struct {
             return error.LuaError;
         };
 
-        self.loadPlugins();
+        if (!self.plugins_loaded) {
+            self.loadPlugins();
+            self.plugins_loaded = true;
+        }
         try self.applyReturnedConfig();
+        self.has_loaded_config = true;
     }
 
     fn applyReturnedConfig(self: *Self) !void {
@@ -1100,6 +1132,7 @@ pub const LuaRuntime = struct {
             defer self.pop();
 
             const len = self.lua.rawLen(-1);
+            var insert_at: usize = 0;
             var i: i32 = 1;
             while (i <= len) : (i += 1) {
                 _ = self.lua.rawGetIndex(-1, i);
@@ -1107,11 +1140,20 @@ pub const LuaRuntime = struct {
                     self.lua.pop(1);
                     return err;
                 };
-                ses_builder.layouts.append(ses_builder.allocator, layout) catch |err| {
-                    self.lua.pop(1);
-                    layout.deinit(ses_builder.allocator);
-                    return err;
-                };
+                if (self.is_project_overlay) {
+                    ses_builder.layouts.insert(ses_builder.allocator, insert_at, layout) catch |err| {
+                        self.lua.pop(1);
+                        layout.deinit(ses_builder.allocator);
+                        return err;
+                    };
+                    insert_at += 1;
+                } else {
+                    ses_builder.layouts.append(ses_builder.allocator, layout) catch |err| {
+                        self.lua.pop(1);
+                        layout.deinit(ses_builder.allocator);
+                        return err;
+                    };
+                }
                 self.lua.pop(1);
             }
         }
@@ -1692,6 +1734,7 @@ fn injectSetupHelpers(lua: *Lua) void {
         // settings in the same namespace as the API, so without this
         // `hexe.mxu = {...}` is accepted in silence and simply never read.
         "local __known={}; for k in pairs(hexe) do __known[k]=true end; " ++
+        "hexe.__reset_for_overlay=function() hexe.mux=__ns(); hexe.ses=__ns(); hexe.pop=__ns(); hexe.status=__ns(); hexe.palette=__ns(); hexe.names=__ns(); hexe.decor=__ns(); hexe.keys={}; hexe.plugins={}; hexe.theme=nil; hexe.shp=nil end; " ++
         "hexe.__finish=function() for k in pairs(hexe) do if type(k)=='string' and k:sub(1,1)~='_' and not __known[k] then error('config error: hexe.'..k..' is not a hexe setting', 2) end end; local cfg={}; for _,k in ipairs({'theme','keys','mux','status','pop','ses','palette','names','decor','plugins'}) do local v=rawget(hexe,k); if type(v)=='table' then cfg[k]=__solid(v) end end; " ++
         "hexe.validate(cfg); __theme_styles=(type(cfg.theme)=='table' and type(cfg.theme.styles)=='table') and cfg.theme.styles or {}; rawset(cfg,'__hexe_type','config'); return cfg end; " ++
         "end";

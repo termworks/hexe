@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.11] - 2026-11-25
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Close control-socket ACL bypasses, fix config overlay, and harden CLI commands
+- Fix crash-recovery state transitions, sub-float cascades, and snapshot sync
+- Prevent search/drag/reload UAFs and harden input, zoom, and pod loops
+- Isolate per-cwd floats across tabs and fix sub-float family lifecycle
+
 ## [0.5.10] - 2026-11-23
 
 ### <!-- 0 -->⛰️  Features

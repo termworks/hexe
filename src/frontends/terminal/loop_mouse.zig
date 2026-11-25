@@ -169,6 +169,11 @@ fn shouldForwardToPane(pane: *const Pane, ev: MouseEvent, override_active: bool)
 
 fn focusTarget(state: *State, target: FocusTarget) void {
     const old_uuid = state.getCurrentFocusedUuid();
+    const changed = if (old_uuid) |ou| !std.mem.eql(u8, &ou, &target.pane.uuid) else true;
+    if (changed) {
+        if (state.isSearchActive()) state.exitSearchMode();
+        if (state.isCopyModeActive()) state.exitCopyMode();
+    }
     if (target.kind == .float) {
         state.setActiveFloatingIndex(target.float_index);
         state.syncPaneFocus(target.pane, old_uuid);
@@ -209,6 +214,9 @@ fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
     var it = state.currentLayout().splits.valueIterator();
     while (it.next()) |pane_ptr| {
         const p = pane_ptr.*;
+        if (state.zoomed_pane_uuid) |zu| {
+            if (!std.mem.eql(u8, &p.uuid, &zu)) continue;
+        }
         if (x >= p.x and x < p.x + p.width and y >= p.y and y < p.y + p.height) {
             return .{ .kind = .split, .pane = p, .float_index = null };
         }
@@ -379,8 +387,8 @@ fn updateFloatMove(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const St
     else
         0;
 
-    state.setPaneFloatGeometryUi(
-        pane.uuid,
+    state.setPaneFloatGeometry(
+        pane,
         state.paneFloatWidthPct(pane),
         state.paneFloatHeightPct(pane),
         pos_x_pct,
@@ -455,8 +463,8 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     else
         0;
 
-    state.setPaneFloatGeometryUi(
-        pane.uuid,
+    state.setPaneFloatGeometry(
+        pane,
         width_pct,
         height_pct,
         pos_x_pct,
@@ -651,7 +659,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             if (ev.is_release) {
                 state.mouse_drag = .none;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
-                    if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane)) {
+                    if (!state.syncFamilyFloats(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane)) {
                         if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
                             terminal_main.debugLogUuid(
                                 &pane.uuid,
@@ -678,7 +686,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.overlays.hideResizeInfo();
                 state.needs_render = true;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
-                    if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane)) {
+                    if (!state.syncFamilyFloats(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane)) {
                         if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
                             terminal_main.debugLogUuid(
                                 &pane.uuid,

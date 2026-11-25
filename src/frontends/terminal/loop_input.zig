@@ -237,6 +237,18 @@ fn forwardPasteToFocusedPane(state: *State, txt: []const u8) void {
 
     if (resolveFocusedPaneForInput(state)) |pane| {
         if (pane.popups.isBlocked()) return;
+        if (state.sync_input and !state.paneIsFloating(pane)) {
+            var it = state.currentLayout().splitIterator();
+            while (it.next()) |p| {
+                if (p.*.popups.isBlocked()) continue;
+                if (p.*.isScrolled()) {
+                    p.*.scrollToBottom();
+                    state.needs_render = true;
+                }
+                sendEncodedPasteToPane(state, p.*, txt);
+            }
+            return;
+        }
         if (pane.isScrolled()) {
             pane.scrollToBottom();
             state.needs_render = true;
@@ -302,6 +314,18 @@ fn finishBracketedPaste(state: *State) void {
     const uuid = state.bracketed_paste_target_uuid orelse return;
     const pane = state.findPaneByUuid(uuid) orelse return;
     if (pane.popups.isBlocked()) return;
+    if (state.sync_input and !state.paneIsFloating(pane)) {
+        var it = state.currentLayout().splitIterator();
+        while (it.next()) |p| {
+            if (p.*.popups.isBlocked()) continue;
+            if (p.*.isScrolled()) {
+                p.*.scrollToBottom();
+                state.needs_render = true;
+            }
+            sendEncodedPasteToPane(state, p.*, state.bracketed_paste_buf.items);
+        }
+        return;
+    }
     if (pane.isScrolled()) {
         pane.scrollToBottom();
         state.needs_render = true;
@@ -362,7 +386,7 @@ fn resolveFocusedPaneForInput(state: *State) ?*Pane {
             parent == state.activeTabIndex()
         else
             true;
-        if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) return fpane;
+        if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact and state.isCurrentFamilyMember(fpane)) return fpane;
     }
     return state.currentLayout().getFocusedPane();
 }
@@ -1616,13 +1640,25 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     const first_parsed = parseEventHead(state, inp);
 
     // A message overlay -- a link, a QR, whatever a plugin put up -- is
-    // dismissed by the next keypress, which is then swallowed. Anything else
-    // would mean the key that closed it also did something, and the user
-    // pressed it to close the box.
+    // dismissed by the next keypress, which is then swallowed. Ignore mouse
+    // motion, key releases, and winsize events so hover never dismisses it.
     if (state.overlays.hasMessage()) {
-        _ = state.overlays.dismissMessages();
-        state.needs_render = true;
-        return;
+        if (first_parsed) |fp| {
+            if (fp.event) |ev| {
+                switch (ev) {
+                    .key_press => {
+                        _ = state.overlays.dismissMessages();
+                        state.needs_render = true;
+                        return;
+                    },
+                    .paste => {
+                        freeParsedEventPayload(state, ev);
+                        return;
+                    },
+                    else => {},
+                }
+            }
+        }
     }
 
     // ==========================================================================
@@ -1814,7 +1850,7 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
                 if (idx < state.view.float_views.items.len) {
                     const fp = state.view.float_views.items[idx];
                     const can_interact = if (state.paneParentTab(fp)) |parent| parent == state.activeTabIndex() else true;
-                    if (state.paneVisibleOnTab(fp, state.activeTabIndex()) and can_interact) {
+                    if (state.paneVisibleOnTab(fp, state.activeTabIndex()) and can_interact and state.isCurrentFamilyMember(fp)) {
                         const n = parseForwardedPaneCsiReplyLen(inp, i);
                         if (n > 0) {
                             fp.write(inp[i .. i + n]) catch |err| {

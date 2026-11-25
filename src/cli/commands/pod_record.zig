@@ -69,7 +69,7 @@ pub fn runPodRecord(
     var buf: [4096]u8 = undefined;
     while (true) {
         const n = std.posix.read(conn.fd, &buf) catch |err| switch (err) {
-            error.WouldBlock => 0,
+            error.WouldBlock => continue,
             else => return err,
         };
         if (n == 0) break;
@@ -95,6 +95,11 @@ fn podFrameCallback(ctx_ptr: *anyopaque, frame: pod_protocol.Frame) void {
         },
         .password_mode => {
             if (frame.payload.len >= 1) ctx.password_mode = frame.payload[0] != 0;
+        },
+        .refused => {
+            const msg = if (frame.payload.len > 0) frame.payload else "pod refused observer connection";
+            core.cli_ui.printErr("{s}", .{msg});
+            ctx.failed = error.ConnectionRefused;
         },
         else => {},
     }

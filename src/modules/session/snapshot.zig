@@ -69,7 +69,17 @@ pub fn normalizeAfterPaneRemoval(snapshot: *session_model.SessionSnapshot) void 
     }
 
     if (snapshot.active_float_uuid) |active_float_uuid| {
-        if (!snapshot.panes.contains(active_float_uuid)) {
+        const visible_here = blk: {
+            if (!snapshot.panes.contains(active_float_uuid)) break :blk false;
+            for (snapshot.floats.items) |f| {
+                if (!std.mem.eql(u8, &f.pane_uuid, &active_float_uuid)) continue;
+                if (f.parent_tab) |pt| break :blk pt == snapshot.active_tab and f.visible;
+                if (snapshot.active_tab >= 64) break :blk false;
+                break :blk (f.tab_visible & (@as(u64, 1) << @intCast(snapshot.active_tab))) != 0;
+            }
+            break :blk false;
+        };
+        if (!visible_here) {
             snapshot.active_float_uuid = null;
         }
     }
@@ -113,15 +123,22 @@ pub fn removePaneFromSessionSnapshot(
 
     switch (pane_state.kind) {
         .float => {
-            var float_idx: ?usize = null;
-            for (snapshot.floats.items, 0..) |float_state, idx| {
-                if (std.mem.eql(u8, &float_state.pane_uuid, &pane_uuid)) {
-                    float_idx = idx;
-                    break;
+            var fi: usize = snapshot.floats.items.len;
+            while (fi > 0) {
+                fi -= 1;
+                const f = snapshot.floats.items[fi];
+                const is_target = std.mem.eql(u8, &f.pane_uuid, &pane_uuid);
+                const is_child = if (f.parent_float) |pf| std.mem.eql(u8, &pf, &pane_uuid) else false;
+                if (!is_target and !is_child) continue;
+                const drop_uuid = f.pane_uuid;
+                _ = snapshot.floats.orderedRemove(fi);
+                _ = snapshot.panes.remove(drop_uuid);
+                if (snapshot.active_float_uuid) |af| {
+                    if (std.mem.eql(u8, &af, &drop_uuid)) snapshot.active_float_uuid = null;
                 }
-            }
-            if (float_idx) |idx| {
-                _ = snapshot.floats.orderedRemove(idx);
+                if (snapshot.focused_pane_uuid) |fp| {
+                    if (std.mem.eql(u8, &fp, &drop_uuid)) snapshot.focused_pane_uuid = null;
+                }
             }
             _ = snapshot.panes.remove(pane_uuid);
         },
@@ -171,7 +188,9 @@ pub fn removePaneFromSessionSnapshot(
                         },
                         .float => {
                             if (parent == tab_idx) {
-                                entry.value_ptr.parent_tab = null;
+                                remove_split_uuids.append(allocator, entry.key_ptr.*) catch |err| {
+                                    core.logging.logError("ses", "failed to collect tab-bound float for tab removal", err);
+                                };
                             } else if (parent > tab_idx) {
                                 entry.value_ptr.parent_tab = parent - 1;
                             }
@@ -182,10 +201,13 @@ pub fn removePaneFromSessionSnapshot(
                     _ = snapshot.panes.remove(split_uuid);
                 }
 
-                for (snapshot.floats.items) |*float_state| {
+                var fi: usize = 0;
+                while (fi < snapshot.floats.items.len) {
+                    const float_state = &snapshot.floats.items[fi];
                     if (float_state.parent_tab) |parent| {
                         if (parent == tab_idx) {
-                            float_state.parent_tab = null;
+                            _ = snapshot.floats.orderedRemove(fi);
+                            continue;
                         } else if (parent > tab_idx) {
                             float_state.parent_tab = parent - 1;
                         }
@@ -198,6 +220,7 @@ pub fn removePaneFromSessionSnapshot(
                     // and it round-trips through JSON, so the corruption
                     // survived detach/reattach and daemon restarts.
                     float_state.tab_visible = shiftTabVisibleForRemove(float_state.tab_visible, tab_idx);
+                    fi += 1;
                 }
 
                 // active_tab is an INDEX too, and every index above the removed

@@ -48,11 +48,39 @@ pub fn removePaneFromDetachedSessions(
         }
         const idx = found_idx orelse continue;
 
+        // Collect any sub-floats of `pane_uuid` parked in this detached session
+        // so claiming a sticky parent doesn't strand dangling children.
+        var orphan_children: std.ArrayList([32]u8) = .empty;
+        defer orphan_children.deinit(allocator);
+        for (entry.value_ptr.session_snapshot.floats.items) |f| {
+            const pf = f.parent_float orelse continue;
+            if (std.mem.eql(u8, &pf, &pane_uuid)) {
+                orphan_children.append(allocator, f.pane_uuid) catch {};
+            }
+        }
+
         entry.value_ptr.pane_uuids = snapshot_mod.removeUuidFromOwnedSlice(
             entry.value_ptr.allocator,
             entry.value_ptr.pane_uuids,
             idx,
         );
+        for (orphan_children.items) |child_uuid| {
+            var ci: usize = 0;
+            while (ci < entry.value_ptr.pane_uuids.len) : (ci += 1) {
+                if (std.mem.eql(u8, &entry.value_ptr.pane_uuids[ci], &child_uuid)) {
+                    entry.value_ptr.pane_uuids = snapshot_mod.removeUuidFromOwnedSlice(
+                        entry.value_ptr.allocator,
+                        entry.value_ptr.pane_uuids,
+                        ci,
+                    );
+                    break;
+                }
+            }
+            if (store.panes.getPtr(child_uuid)) |child_pane| {
+                child_pane.session_id = null;
+                _ = child_pane.transitionState(.orphaned, "parent sticky float claimed from detached session");
+            }
+        }
         snapshot_mod.removePaneFromSessionSnapshot(allocator, &entry.value_ptr.session_snapshot, pane_uuid);
 
         if (entry.value_ptr.pane_uuids.len == 0) {

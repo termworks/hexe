@@ -227,6 +227,7 @@ const ROOT_FIELDS = [_]Field{
 const STATUS_FIELDS = [_]Field{
     .{ .name = "enabled", .kind = .boolean },
     .{ .name = "view", .kind = .string },
+    .{ .name = "exec", .kind = .string },
     .{ .name = "socket", .kind = .string },
     .{ .name = "command", .kind = .string },
     .{ .name = "refresh_ms", .kind = .number },

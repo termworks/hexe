@@ -120,46 +120,51 @@ const adhoc_title_style = core.FloatStyle{
 /// `init`, so a reload kept the OLD float definitions forever: editing a float
 /// in the config and reloading appeared to do nothing, and the previous
 /// allocation leaked.
+pub fn mergeLayoutFloatsWithDefaults(
+    allocator: std.mem.Allocator,
+    cfg: *const core.Config,
+    floats: []const core.LayoutFloatDef,
+) []const core.LayoutFloatDef {
+    if (floats.len == 0) return &[_]core.LayoutFloatDef{};
+    const floats_with_defaults = allocator.alloc(core.LayoutFloatDef, floats.len) catch {
+        return &[_]core.LayoutFloatDef{};
+    };
+    for (floats, 0..) |float_def, i| {
+        var merged = float_def;
+        if (!float_def.has_custom_attributes) {
+            merged.attributes = cfg.float_default_attributes;
+        } else {
+            const ov = float_def.attribute_overrides;
+            const d = cfg.float_default_attributes;
+            const f = float_def.attributes;
+            // Respect explicit `false` overrides when `attribute_overrides` is
+            // populated; fall back to OR-merge for hand-constructed structs.
+            const has_ov = @as(u9, @bitCast(ov)) != 0;
+            merged.attributes.exclusive = if (has_ov) (if (ov.exclusive) f.exclusive else d.exclusive) else (d.exclusive or f.exclusive);
+            merged.attributes.sticky = if (has_ov) (if (ov.sticky) f.sticky else d.sticky) else (d.sticky or f.sticky);
+            merged.attributes.global = if (has_ov) (if (ov.global) f.global else d.global) else (d.global or f.global);
+            merged.attributes.destroy = if (has_ov) (if (ov.destroy) f.destroy else d.destroy) else (d.destroy or f.destroy);
+            merged.attributes.isolated = if (has_ov) (if (ov.isolated) f.isolated else d.isolated) else (d.isolated or f.isolated);
+            merged.attributes.per_cwd = if (has_ov) (if (ov.per_cwd) f.per_cwd else d.per_cwd) else (d.per_cwd or f.per_cwd);
+            merged.attributes.per_git = if (has_ov) (if (ov.per_git) f.per_git else d.per_git) else (d.per_git or f.per_git);
+            merged.attributes.inherit_env = if (has_ov) (if (ov.inherit_env) f.inherit_env else d.inherit_env) else (d.inherit_env or f.inherit_env);
+            merged.attributes.navigatable = if (has_ov) (if (ov.navigatable) f.navigatable else d.navigatable) else (d.navigatable or f.navigatable);
+        }
+        floats_with_defaults[i] = merged;
+    }
+    return floats_with_defaults;
+}
+
 pub fn resolveLayoutFloats(
     allocator: std.mem.Allocator,
     cfg: *const core.Config,
     ses_cfg: *const core.SesConfig,
 ) []const core.LayoutFloatDef {
-    var layout_floats: []const core.LayoutFloatDef = &[_]core.LayoutFloatDef{};
     for (ses_cfg.layouts) |*layout| {
         if (!layout.enabled) continue;
-        const floats_with_defaults = allocator.alloc(core.LayoutFloatDef, layout.floats.len) catch {
-            return layout.floats;
-        };
-        for (layout.floats, 0..) |float_def, i| {
-            var merged = float_def;
-            if (!float_def.has_custom_attributes) {
-                merged.attributes = cfg.float_default_attributes;
-            } else {
-                // OR-merge: a default of true stays true unless the float
-                // overrides it. (Known limitation: a float cannot set false
-                // when the default is true.)
-                merged.attributes.exclusive = cfg.float_default_attributes.exclusive or float_def.attributes.exclusive;
-                merged.attributes.sticky = cfg.float_default_attributes.sticky or float_def.attributes.sticky;
-                merged.attributes.global = cfg.float_default_attributes.global or float_def.attributes.global;
-                merged.attributes.destroy = cfg.float_default_attributes.destroy or float_def.attributes.destroy;
-                merged.attributes.isolated = cfg.float_default_attributes.isolated or float_def.attributes.isolated;
-                merged.attributes.per_cwd = cfg.float_default_attributes.per_cwd or float_def.attributes.per_cwd;
-                merged.attributes.per_git = cfg.float_default_attributes.per_git or float_def.attributes.per_git;
-                merged.attributes.inherit_env = cfg.float_default_attributes.inherit_env or float_def.attributes.inherit_env;
-                // Every attribute a float can declare has to be listed here: the merge
-                // starts from the defaults, so one left out is silently replaced by the
-                // default and the float's own value never reaches it. `navigatable` was
-                // missing, which is why it looked parsed, stored and reported while doing
-                // nothing at all.
-                merged.attributes.navigatable = cfg.float_default_attributes.navigatable or float_def.attributes.navigatable;
-            }
-            floats_with_defaults[i] = merged;
-        }
-        layout_floats = floats_with_defaults;
-        break;
+        return mergeLayoutFloatsWithDefaults(allocator, cfg, layout.floats);
     }
-    return layout_floats;
+    return &[_]core.LayoutFloatDef{};
 }
 
 pub const CopyMode = struct {
@@ -302,6 +307,9 @@ pub const State = struct {
     runtime: *FrontendRuntime,
     frontend_view: ?frontend_core.SessionView,
     active_layout_floats: []const core.LayoutFloatDef,
+    /// Deep-owned backing slice for floats loaded from an explicit `--config` /
+    /// `applyLayoutDef` call whose `LayoutDef` was freed after startup.
+    owned_layout_floats: ?[]core.LayoutFloatDef = null,
     view: TerminalViewState,
     float_ui: std.AutoHashMap([32]u8, FloatUiState),
 
@@ -427,6 +435,11 @@ pub const State = struct {
     api_server: ?@import("api_server.zig").ApiServer = null,
     /// Whether the configured plugins have been started for this session.
     plugins_started: bool = false,
+    /// True while a Lua callback or control-socket API handler is on the stack;
+    /// `config.reload` defers via `pending_config_reload` instead of closing
+    /// the executing LuaRuntime mid-call.
+    in_lua_call: bool = false,
+    pending_config_reload: bool = false,
     /// What the caller currently being served may do. Full authority except
     /// while a scoped socket's request is in flight; the loop is single
     /// threaded, so this is a stack discipline rather than shared state.
@@ -683,10 +696,16 @@ pub const State = struct {
     }
 
     pub fn beginFloatRename(self: *State, pane: *Pane) void {
-        const title = self.paneFloatTitle(pane) orelse return;
+        // The border always displays the family root's title, so rename the
+        // root rather than an individual sub-float chip.
+        const target: *Pane = if (self.familyRootOf(pane)) |root|
+            self.findPaneByUuid(root) orelse pane
+        else
+            pane;
+        const title = self.paneFloatTitle(target) orelse return;
         if (title.len == 0) return;
 
-        self.float_rename_uuid = pane.uuid;
+        self.float_rename_uuid = target.uuid;
         self.float_rename_buf.clearRetainingCapacity();
 
         const cap: usize = 64;
@@ -834,6 +853,7 @@ pub const State = struct {
             tab.layout.decor_right = right;
             tab.layout.recalculateLayout();
         }
+        self.revalidateZoom();
     }
 
     /// A tab view with the side panels already reserved.
@@ -936,6 +956,7 @@ pub const State = struct {
 
     /// Enter scrollback-search over the focused pane.
     pub fn enterSearchMode(self: *State) void {
+        if (self.activeFloatingIndex() != null) return;
         if (self.currentLayout().getFocusedPane() == null) return;
         self.search_mode.enter();
         self.notifications.showFor("Search: type · Enter search · n/N next/prev · Esc exit", 2500);
@@ -1064,6 +1085,11 @@ pub const State = struct {
         }
         removeQueuedPaneReplyTargets(&self.csi_reply_targets, &self.csi_reply_target_enqueued_ms, pane_uuid);
 
+        // Pane destruction invalidates any tracked search pins/screen pointer,
+        // copy mode cursor, or raw `*LayoutNode.Split` divider drag pointer.
+        if (self.isSearchActive()) self.exitSearchMode();
+        if (self.isCopyModeActive()) self.exitCopyMode();
+
         switch (self.mouse_drag) {
             .float_move => |drag| {
                 if (std.mem.eql(u8, &drag.uuid, &pane_uuid)) {
@@ -1075,7 +1101,10 @@ pub const State = struct {
                     self.mouse_drag = .none;
                 }
             },
-            else => {},
+            .split_resize => {
+                self.mouse_drag = .none;
+            },
+            .none => {},
         }
 
         if (self.float_rename_uuid) |uuid| {
@@ -1119,7 +1148,22 @@ pub const State = struct {
         self.clearFloatRename();
         self.renderer.invalidate();
         self.force_full_render = true;
-        if (!self.syncSessionFloatChecked(pane, self.activeFloatingIndex() != null)) {
+        const sync_pane: *Pane = blk: {
+            if (self.activeFloatingIndex()) |afi| {
+                if (afi < self.view.float_views.items.len) {
+                    const active_fp = self.view.float_views.items[afi];
+                    if (self.familyRootOf(active_fp)) |ar| {
+                        if (std.mem.eql(u8, &ar, &pane.uuid)) break :blk active_fp;
+                    }
+                }
+            }
+            break :blk pane;
+        };
+        const is_active = if (self.activeFloatingIndex()) |afi|
+            afi < self.view.float_views.items.len and self.view.float_views.items[afi] == sync_pane
+        else
+            false;
+        if (!self.syncFamilyFloats(sync_pane, is_active)) {
             self.notifications.show("Rename failed: session sync rejected update");
         }
     }
@@ -1298,7 +1342,7 @@ pub const State = struct {
     /// Calling your own session from inside its event loop cannot be answered:
     /// the frontend is busy running the caller. It looks like a hang and ends
     /// in a socket timeout, which says nothing about the cause.
-    fn publishSelfSocket(self: *State) void {
+    pub fn publishSelfSocket(self: *State) void {
         const srv = if (self.api_server) |*s| s else return;
         const rt = self.config._lua_runtime orelse return;
         _ = rt.lua.getGlobal("hexe") catch return;
@@ -1393,6 +1437,41 @@ pub const State = struct {
         }
     }
 
+    pub fn clearOwnedLayoutFloats(self: *State) void {
+        if (self.owned_layout_floats) |owned| {
+            for (owned) |*f| f.deinit(self.allocator);
+            self.allocator.free(owned);
+            self.owned_layout_floats = null;
+        }
+    }
+
+    /// Replace `active_layout_floats` with deep-cloned copies of `floats`
+    /// merged against `self.config.float_default_attributes`. Used when a
+    /// session starts from `--config <file>` or switches via `applyLayoutDef`.
+    pub fn setActiveLayoutFloats(self: *State, floats: []const core.LayoutFloatDef) void {
+        if (floats.len == 0) return;
+        const cloned = self.allocator.alloc(core.LayoutFloatDef, floats.len) catch return;
+        var built: usize = 0;
+        for (floats) |*f| {
+            cloned[built] = f.clone(self.allocator) catch {
+                for (cloned[0..built]) |*c| c.deinit(self.allocator);
+                self.allocator.free(cloned);
+                return;
+            };
+            built += 1;
+        }
+        const merged = mergeLayoutFloatsWithDefaults(self.allocator, &self.config, cloned);
+        if (merged.len == 0) {
+            for (cloned) |*f| f.deinit(self.allocator);
+            self.allocator.free(cloned);
+            return;
+        }
+        if (self.active_layout_floats.len > 0) self.allocator.free(self.active_layout_floats);
+        self.clearOwnedLayoutFloats();
+        self.owned_layout_floats = cloned;
+        self.active_layout_floats = merged;
+    }
+
     pub fn deinit(self: *State) void {
         for (self.stream_plugins.items) |*p| {
             if (p.cast) |*c| c.deinit();
@@ -1427,6 +1506,8 @@ pub const State = struct {
             self.family_shown.deinit();
         }
         self.config.deinit();
+        if (self.active_layout_floats.len > 0) self.allocator.free(self.active_layout_floats);
+        self.clearOwnedLayoutFloats();
         // After view/empty_layout: setPanePopConfig hands layouts a pointer
         // into this struct, so it has to outlive them.
         self.pop_config.deinit();
@@ -1740,8 +1821,14 @@ pub const State = struct {
         }
 
         if (self.runtime.focusedPaneUuid()) |focused_uuid| {
+            const tab = self.activeTabIndex();
             for (self.view.float_views.items, 0..) |pane, idx| {
                 if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
+                    // Never resurrect a hidden, other-tab, or non-current-chip
+                    // float from a stale focused_pane_uuid.
+                    if (!self.paneVisibleOnTab(pane, tab) or !self.isCurrentFamilyMember(pane)) {
+                        break;
+                    }
                     self.runtime.setActiveFloatUuid(focused_uuid);
                     return idx;
                 }
@@ -1754,10 +1841,23 @@ pub const State = struct {
         return null;
     }
 
+    fn clearFocusedFloatUuid(self: *State) void {
+        const focused_uuid = self.runtime.focusedPaneUuid() orelse return;
+        for (self.view.float_views.items) |pane| {
+            if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
+                self.runtime.setFocusedPaneUuid(null);
+                return;
+            }
+        }
+    }
+
     pub fn setActiveFloatingIndex(self: *State, idx: ?usize) void {
         if (idx) |value| {
             if (value < self.view.float_views.items.len) {
                 const uuid = self.view.float_views.items[value].uuid;
+                if (self.runtime.floatState(uuid)) |fs| {
+                    self.setFamilyShown(core.session_model.familyRoot(fs), fs.family_index);
+                }
                 self.runtime.setActiveFloatUuid(uuid);
                 if (self.frontend_view) |*view| {
                     _ = frontend_core.applyViewActionWithContext(view, .float_select, .{
@@ -1770,6 +1870,7 @@ pub const State = struct {
             }
         }
         self.runtime.setActiveFloatUuid(null);
+        self.clearFocusedFloatUuid();
         if (self.frontend_view) |*view| {
             _ = frontend_core.applyViewActionWithContext(view, .float_select, .{
                 .clear_active_float = true,
@@ -1780,6 +1881,13 @@ pub const State = struct {
     }
 
     pub fn setActiveFloatingUuid(self: *State, uuid: ?[32]u8) void {
+        if (uuid) |value| {
+            if (self.runtime.floatState(value)) |fs| {
+                self.setFamilyShown(core.session_model.familyRoot(fs), fs.family_index);
+            }
+        } else {
+            self.clearFocusedFloatUuid();
+        }
         self.runtime.setActiveFloatUuid(uuid);
         if (self.frontend_view) |*view| {
             _ = frontend_core.applyViewActionWithContext(view, .float_select, if (uuid) |value| .{
@@ -2151,12 +2259,13 @@ pub const State = struct {
         active: bool,
         comptime context: []const u8,
     ) bool {
+        const outer_state = self.outerFloatState(pane);
         self.runtime.sessionSyncFloat(
             pane_uuid,
             self.activeTabIndex(),
             self.paneParentTab(pane),
-            if (self.paneFloatState(pane)) |float_state| float_state.visible else true,
-            if (self.paneFloatState(pane)) |float_state| float_state.tab_visible else 0,
+            if (outer_state) |float_state| float_state.visible else true,
+            if (outer_state) |float_state| float_state.tab_visible else 0,
             self.paneSticky(pane),
             self.paneIsPwd(pane),
             self.paneFloatKey(pane),
@@ -2167,9 +2276,8 @@ pub const State = struct {
             self.paneFloatPadX(pane),
             self.paneFloatPadY(pane),
             active,
-            // Read from the float's own record, like visible/tab_visible above:
-            // the family is state the frontend owns, and a sync that dropped it
-            // would turn a sub-float back into a top-level one on the daemon.
+            // Read from the float's own record: the family link and chip index
+            // belong to this member, while visibility/geometry belong to the root.
             if (self.paneFloatState(pane)) |float_state| float_state.parent_float else null,
             if (self.paneFloatState(pane)) |float_state| float_state.family_index else 0,
         ) catch |err| {
@@ -2334,9 +2442,51 @@ pub const State = struct {
             self.rollbackNewReplacementPane(new_pane_uuid, rollback, rollback_context);
             return false;
         };
+        // Rekey local layout/UI/zoom maps from old_pane_uuid -> new_pane_uuid
+        // so splits, zoom, and float UI stay consistent immediately (not only
+        // after an async SES snapshot rebuild).
+        for (self.view.tab_views.items) |*tab| {
+            if (tab.layout.splits.fetchRemove(old_pane_uuid)) |kv| {
+                tab.layout.splits.put(new_pane_uuid, kv.value) catch {};
+            }
+            if (tab.layout.root) |root| {
+                rekeyLayoutNodeUuid(root, old_pane_uuid, new_pane_uuid);
+            }
+            if (tab.layout.focused_pane_uuid) |fu| {
+                if (std.mem.eql(u8, &fu, &old_pane_uuid)) {
+                    tab.layout.focused_pane_uuid = new_pane_uuid;
+                }
+            }
+        }
+        if (self.zoomed_pane_uuid) |zu| {
+            if (std.mem.eql(u8, &zu, &old_pane_uuid)) {
+                self.zoomed_pane_uuid = new_pane_uuid;
+            }
+        }
+        if (self.float_ui.fetchRemove(old_pane_uuid)) |kv| {
+            self.float_ui.put(new_pane_uuid, kv.value) catch {
+                var tmp = kv.value;
+                tmp.deinit(self.allocator);
+            };
+        }
+        if (self.family_shown.fetchRemove(old_pane_uuid)) |kv| {
+            self.family_shown.put(new_pane_uuid, kv.value) catch {};
+        }
         self.applyFrontendPaneReplaced(old_pane_uuid, new_pane_uuid);
 
         return true;
+    }
+
+    fn rekeyLayoutNodeUuid(node: *layout_mod.LayoutNode, old_uuid: [32]u8, new_uuid: [32]u8) void {
+        switch (node.*) {
+            .pane => |*u| {
+                if (std.mem.eql(u8, u, &old_uuid)) u.* = new_uuid;
+            },
+            .split => |sp| {
+                rekeyLayoutNodeUuid(sp.first, old_uuid, new_uuid);
+                rekeyLayoutNodeUuid(sp.second, old_uuid, new_uuid);
+            },
+        }
     }
 
     pub fn respawnFocusedPaneAfterShellDeath(self: *State) bool {
@@ -2360,12 +2510,47 @@ pub const State = struct {
                 core.logging.logError("terminal", "respawn dead pane: kill old pane failed", err);
             };
             self.clearTransientPaneState(pane);
-            while (self.view.tab_views.items.len > 0) {
-                const tab_opt = self.view.tab_views.pop();
-                if (tab_opt) |tab_const| {
-                    var tab = tab_const;
-                    tab.deinit();
+            // Clean up all tab-bound floats so they aren't left with stale parent_tab
+            // indices once existing tabs are torn down.
+            var fi: usize = self.view.float_views.items.len;
+            while (fi > 0) {
+                fi -= 1;
+                const fp = self.view.float_views.items[fi];
+                if (self.paneParentTab(fp) == null) continue;
+                const fp_uuid = fp.uuid;
+                if (self.runtime.isConnected()) {
+                    self.runtime.killPane(fp_uuid) catch {};
                 }
+                @import("float_completion.zig").handleBlockingFloatCompletion(self, fp);
+                self.clearTransientPaneState(fp);
+                self.clearFloatUi(fp_uuid);
+                self.clearLocalFloatState(fp_uuid);
+                if (self.runtime.activeFloatUuid()) |active_uuid| {
+                    if (std.mem.eql(u8, &active_uuid, &fp_uuid)) {
+                        self.setActiveFloatingUuid(null);
+                    }
+                }
+                _ = self.view.float_views.orderedRemove(fi);
+                fp.deinit();
+                self.allocator.destroy(fp);
+            }
+            var ti: usize = self.view.tab_views.items.len;
+            while (ti > 0) {
+                ti -= 1;
+                if (self.runtime.isConnected()) {
+                    if (self.runtime.tabUuid(ti)) |tab_uuid| {
+                        _ = self.syncSessionTabRemovedChecked(tab_uuid, null);
+                    }
+                }
+                var tab = self.view.tab_views.pop().?;
+                var split_it = tab.layout.splits.valueIterator();
+                while (split_it.next()) |pane_ptr| {
+                    if (self.runtime.isConnected() and !std.mem.eql(u8, &pane_ptr.*.uuid, &old_uuid)) {
+                        self.runtime.killPane(pane_ptr.*.uuid) catch {};
+                    }
+                    self.clearTransientPaneState(pane_ptr.*);
+                }
+                tab.deinit();
             }
             self.runtime.clearTabMeta();
             self.runtime.clearTabFocusMemory();
@@ -2624,10 +2809,20 @@ pub const State = struct {
     /// Whether `pane` is the member of its family currently inside the frame.
     ///
     /// True for a float with no family: it is the only member it has.
+    /// If the recorded `family_shown` chip was closed, falls back to the
+    /// lowest surviving chip so a family can never become permanently invisible.
     pub fn isCurrentFamilyMember(self: *const State, pane: *const Pane) bool {
         const own = self.runtime.floatState(pane.uuid) orelse return true;
         const root = core.session_model.familyRoot(own);
-        return own.family_index == (self.family_shown.get(root) orelse 0);
+        const want = self.family_shown.get(root) orelse 0;
+        if (own.family_index == want) return true;
+        var buf: [16]FamilyMember = undefined;
+        const members = self.familyMembers(root, &buf);
+        if (members.len == 0) return true;
+        for (members) |m| {
+            if (m.index == want) return false;
+        }
+        return std.mem.eql(u8, &members[0].uuid, &pane.uuid);
     }
 
     /// Push every member of `pane`'s family to the session.
@@ -2643,11 +2838,13 @@ pub const State = struct {
         const root = self.familyRootOf(pane) orelse return self.syncSessionFloatChecked(pane, active);
         var buf: [16]FamilyMember = undefined;
         const members = self.familyMembers(root, &buf);
-        var own = true;
+        // Sync the active member first so SES moves `active_float_uuid` to it
+        // before siblings sync with `active = false` (avoiding any intermediate
+        // pushed snapshot with `active_float_uuid = null`).
+        const own = self.syncSessionFloatChecked(pane, active);
         for (members) |m| {
-            const is_pane = std.mem.eql(u8, &m.uuid, &pane.uuid);
-            const ok = self.syncSessionFloatChecked(m.pane, if (is_pane) active else false);
-            if (is_pane) own = ok;
+            if (std.mem.eql(u8, &m.uuid, &pane.uuid)) continue;
+            _ = self.syncSessionFloatChecked(m.pane, false);
         }
         return own;
     }
@@ -2695,7 +2892,10 @@ pub const State = struct {
     }
 
     pub fn paneParentTab(self: *const State, pane: *const Pane) ?usize {
-        if (self.paneFloatState(pane)) |float_state| return float_state.parent_tab;
+        if (self.outerFloatState(pane)) |float_state| return float_state.parent_tab;
+        for (self.view.tab_views.items, 0..) |*tab, idx| {
+            if (tab.layout.splits.contains(pane.uuid)) return idx;
+        }
         return null;
     }
 
@@ -2703,8 +2903,8 @@ pub const State = struct {
         // A family is one float: on screen or not as a whole, whichever member
         // is inside the frame. Every member answers from the root's record.
         if (self.outerFloatState(pane)) |float_state| {
-            if (float_state.parent_tab != null) {
-                return float_state.visible;
+            if (float_state.parent_tab) |parent| {
+                return parent == tab and float_state.visible;
             }
             if (tab >= 64) return false;
             return (float_state.tab_visible & (@as(u64, 1) << @intCast(tab))) != 0;
@@ -2712,18 +2912,23 @@ pub const State = struct {
         return true;
     }
 
+    pub fn paneNavigatable(self: *const State, pane: *const Pane) bool {
+        if (self.outerUi(pane)) |ui| return ui.navigatable;
+        return false;
+    }
+
     pub fn paneFloatKey(self: *const State, pane: *const Pane) u8 {
-        if (self.paneFloatState(pane)) |float_state| return float_state.float_key;
+        if (self.outerFloatState(pane)) |float_state| return float_state.float_key;
         return 0;
     }
 
     pub fn paneSticky(self: *const State, pane: *const Pane) bool {
-        if (self.paneFloatState(pane)) |float_state| return float_state.sticky;
+        if (self.outerFloatState(pane)) |float_state| return float_state.sticky;
         return false;
     }
 
     pub fn paneIsPwd(self: *const State, pane: *const Pane) bool {
-        if (self.paneFloatState(pane)) |float_state| return float_state.is_pwd;
+        if (self.outerFloatState(pane)) |float_state| return float_state.is_pwd;
         return false;
     }
 
@@ -2853,11 +3058,14 @@ pub const State = struct {
     }
 
     pub fn swapPaneFloatUi(self: *State, a_uuid: [32]u8, b_uuid: [32]u8) void {
-        const a = self.float_ui.getPtr(a_uuid) orelse {
+        const a_root = if (self.runtime.floatState(a_uuid)) |fs| core.session_model.familyRoot(fs) else a_uuid;
+        const b_root = if (self.runtime.floatState(b_uuid)) |fs| core.session_model.familyRoot(fs) else b_uuid;
+        if (std.mem.eql(u8, &a_root, &b_root)) return;
+        const a = self.float_ui.getPtr(a_root) orelse {
             core.logging.warn("terminal", "swapPaneFloatUi skipped: first pane has no float UI state", .{});
             return;
         };
-        const b = self.float_ui.getPtr(b_uuid) orelse {
+        const b = self.float_ui.getPtr(b_root) orelse {
             core.logging.warn("terminal", "swapPaneFloatUi skipped: second pane has no float UI state", .{});
             return;
         };
@@ -3030,6 +3238,10 @@ pub const State = struct {
     }
 
     pub fn panePwdDir(self: *const State, pane: *const Pane) ?[]const u8 {
+        // A sub-float shares its family root's per-CWD/per-git directory identity.
+        if (self.outerUi(pane)) |ui| {
+            if (ui.pwd_dir) |dir| return dir;
+        }
         if (self.floatUiConst(pane)) |ui| return ui.pwd_dir;
         return null;
     }
@@ -3224,6 +3436,15 @@ pub const State = struct {
         const members = self.familyMembers(root, &buf);
         if (members.len == 0) return false;
 
+        const old_uuid = self.getCurrentFocusedUuid();
+        if (self.activeFloatingIndex()) |afi| {
+            if (afi < self.view.float_views.items.len and self.view.float_views.items[afi] != target) {
+                self.syncPaneUnfocus(self.view.float_views.items[afi]);
+            }
+        } else if (self.currentLayout().getFocusedPane()) |tiled| {
+            self.syncPaneUnfocus(tiled);
+        }
+
         // Which member is inside the frame, and nothing else: the family's
         // visibility is the float's and a step must not disturb it. The float
         // is put on screen if it was not, because asking for a member is
@@ -3246,7 +3467,8 @@ pub const State = struct {
                 break;
             }
         }
-        self.syncPaneFocus(target, null);
+        self.rememberFloatingFocus(target);
+        self.syncPaneFocus(target, old_uuid);
         self.needs_render = true;
         self.force_full_render = true;
         return true;
@@ -3298,25 +3520,35 @@ pub const State = struct {
             return false;
         };
         const root = core.session_model.familyRoot(parent_state);
+        const root_state = self.runtime.floatState(root) orelse parent_state;
 
         var buf: [64]core.session_model.SessionFloat = undefined;
         const floats = self.collectFloatStates(&buf);
 
         child_state.parent_float = root;
         child_state.family_index = core.session_model.nextFamilyIndex(floats, root);
-        child_state.float_key = parent_state.float_key;
-        child_state.parent_tab = parent_state.parent_tab;
-        child_state.tab_visible = parent_state.tab_visible;
+        child_state.float_key = root_state.float_key;
+        child_state.parent_tab = root_state.parent_tab;
+        child_state.visible = root_state.visible;
+        child_state.tab_visible = root_state.tab_visible;
+        child_state.sticky = root_state.sticky;
+        child_state.is_pwd = root_state.is_pwd;
         // The rectangle is mirrored into the child's record for the daemon and
         // for a reattach; the frontend reads the family's, never this copy.
-        child_state.width_pct = parent_state.width_pct;
-        child_state.height_pct = parent_state.height_pct;
-        child_state.pos_x_pct = parent_state.pos_x_pct;
-        child_state.pos_y_pct = parent_state.pos_y_pct;
-        child_state.pad_x = parent_state.pad_x;
-        child_state.pad_y = parent_state.pad_y;
+        child_state.width_pct = root_state.width_pct;
+        child_state.height_pct = root_state.height_pct;
+        child_state.pos_x_pct = root_state.pos_x_pct;
+        child_state.pos_y_pct = root_state.pos_y_pct;
+        child_state.pad_x = root_state.pad_x;
+        child_state.pad_y = root_state.pad_y;
 
-        self.runtime.syncFloatState(child_state, true);
+        if (self.findPaneByUuid(root)) |root_pane| {
+            if (self.panePwdDir(root_pane)) |dir| {
+                _ = self.setPanePwdDir(child, dir);
+            }
+        }
+
+        self.runtime.syncFloatState(child_state, false);
         self.setFamilyShown(root, child_state.family_index);
         self.resizeFloatingPanes();
         return true;
@@ -3349,15 +3581,27 @@ pub const State = struct {
         pad_x: u8,
         pad_y: u8,
     ) void {
-        self.runtime.setFloatGeometry(
-            pane.uuid,
-            width_pct,
-            height_pct,
-            pos_x_pct,
-            pos_y_pct,
-            pad_x,
-            pad_y,
-        );
+        // Geometry belongs to the whole family: update the root UI and every
+        // member's projection record so sub-floats stay aligned with chip 0.
+        const root = self.familyRootOf(pane) orelse pane.uuid;
+        self.setPaneFloatGeometryUi(root, width_pct, height_pct, pos_x_pct, pos_y_pct, pad_x, pad_y);
+        var buf: [16]FamilyMember = undefined;
+        const members = self.familyMembers(root, &buf);
+        if (members.len > 0) {
+            for (members) |m| {
+                self.runtime.setFloatGeometry(m.uuid, width_pct, height_pct, pos_x_pct, pos_y_pct, pad_x, pad_y);
+            }
+        } else {
+            self.runtime.setFloatGeometry(
+                pane.uuid,
+                width_pct,
+                height_pct,
+                pos_x_pct,
+                pos_y_pct,
+                pad_x,
+                pad_y,
+            );
+        }
     }
 
     pub fn reindexFloatParentTabsAfterRemovedTab(self: *State, removed_idx: usize) void {

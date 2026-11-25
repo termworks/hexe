@@ -143,7 +143,7 @@ fn connCallback(
     };
 
     const n = std.posix.read(c.conn.fd, &c.net_buf) catch |err| switch (err) {
-        error.WouldBlock => 0,
+        error.WouldBlock => return .rearm,
         else => {
             core.logging.logError("pod_attach", "pod connection read failed", err);
             c.running = false;
@@ -492,6 +492,11 @@ fn podFrameCallback(ctx: *anyopaque, frame: pod_protocol.Frame) void {
         .backlog_end => {},
         .password_mode => {
             if (frame.payload.len >= 1) attach.password_mode = frame.payload[0] != 0;
+        },
+        .refused => {
+            const msg = if (frame.payload.len > 0) frame.payload else "pod refused observer connection";
+            core.cli_ui.printErr("{s}", .{msg});
+            attach.running = false;
         },
         else => {},
     }

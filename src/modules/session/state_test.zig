@@ -75,10 +75,12 @@ test "PaneState: all valid transitions succeed" {
         // From sticky
         .{ state.PaneState.sticky, state.PaneState.sticky },
         .{ state.PaneState.sticky, state.PaneState.attached },
+        .{ state.PaneState.sticky, state.PaneState.detached },
         .{ state.PaneState.sticky, state.PaneState.orphaned },
         // From orphaned
         .{ state.PaneState.orphaned, state.PaneState.orphaned },
         .{ state.PaneState.orphaned, state.PaneState.attached },
+        .{ state.PaneState.orphaned, state.PaneState.detached },
         .{ state.PaneState.orphaned, state.PaneState.sticky },
     };
 
@@ -93,10 +95,6 @@ test "PaneState: all invalid transitions fail" {
     const invalid_transitions = .{
         // From detached
         .{ state.PaneState.detached, state.PaneState.sticky },
-        // From sticky
-        .{ state.PaneState.sticky, state.PaneState.detached },
-        // From orphaned
-        .{ state.PaneState.orphaned, state.PaneState.detached },
     };
 
     inline for (invalid_transitions) |t| {

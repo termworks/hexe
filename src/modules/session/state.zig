@@ -117,6 +117,7 @@ pub const SesState = struct {
     pub const abortCreatePane = api.abortCreatePane;
     pub const findStickyPane = api.findStickyPane;
     pub const findStickyPaneWithAffinity = api.findStickyPaneWithAffinity;
+    pub const findStickyPaneForClaimFree = api.findStickyPaneForClaimFree;
     pub const stealAttachedPane = api.stealAttachedPane;
     pub const attachPane = api.attachPane;
     pub const processBacklogReplays = api.processBacklogReplays;

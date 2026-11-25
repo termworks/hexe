@@ -69,8 +69,49 @@ fn floatDestroysOnHide(state: *State, pane: *const Pane) bool {
     return def.attributes.destroy;
 }
 
+/// Remove any local sub-floats whose `parent_float` is `root_uuid` and drop
+/// `root_uuid` from `family_shown`. Used when the parent float is closed or
+/// destroyed so killed children cannot linger as local zombies or steal focus.
+pub fn cleanupLocalSubFloats(state: *State, root_uuid: [32]u8) void {
+    _ = state.family_shown.remove(root_uuid);
+    var fi: usize = state.view.float_views.items.len;
+    while (fi > 0) {
+        fi -= 1;
+        const child = state.view.float_views.items[fi];
+        const fs = state.paneFloatState(child) orelse continue;
+        const pf = fs.parent_float orelse continue;
+        if (!std.mem.eql(u8, &pf, &root_uuid)) continue;
+
+        const child_uuid = child.uuid;
+        _ = state.view.float_views.orderedRemove(fi);
+        float_completion.handleBlockingFloatCompletion(state, child);
+        state.clearLocalFloatState(child_uuid);
+        state.clearTransientPaneState(child);
+        state.clearFloatUi(child_uuid);
+        child.deinit();
+        state.allocator.destroy(child);
+        if (state.runtime.activeFloatUuid()) |active_uuid| {
+            if (std.mem.eql(u8, &active_uuid, &child_uuid)) {
+                state.setActiveFloatingUuid(null);
+            }
+        }
+        state.applyFrontendPaneRemoved(child_uuid, null);
+    }
+}
+
 /// Destroy a float pane, answering a blocking CLI caller if one is waiting.
 pub fn destroyFloatPane(state: *State, pane: *Pane) void {
+    const closing_uuid = pane.uuid;
+    const was_active = if (state.activeFloatingIndex()) |af|
+        af < state.view.float_views.items.len and state.view.float_views.items[af] == pane
+    else
+        false;
+    const family_root: ?[32]u8 = blk: {
+        const root = state.familyRootOf(pane) orelse break :blk null;
+        if (std.mem.eql(u8, &root, &closing_uuid)) break :blk null;
+        break :blk root;
+    };
+
     // Send completion with exit code 130 (like Ctrl+C cancellation).
     if (state.pending_float_requests.fetchRemove(pane.uuid)) |entry| {
         if (entry.value.result_path) |path| {
@@ -81,19 +122,19 @@ pub fn destroyFloatPane(state: *State, pane: *Pane) void {
             };
             state.allocator.free(path);
         }
-        // Send cancellation result to CLI.
-        const ctl_fd = state.runtime.getCtlFd() orelse {
+        // Send cancellation result to CLI if CTL channel is available.
+        if (state.runtime.getCtlFd()) |ctl_fd| {
+            const result = wire.FloatResult{
+                .uuid = pane.uuid,
+                .exit_code = 130, // Cancelled (like SIGINT)
+                .output_len = 0,
+            };
+            wire.writeControlWithRequestId(ctl_fd, .float_result, entry.value.ses_request_id, std.mem.asBytes(&result)) catch |err| {
+                core.logging.logError("terminal", "failed to send cancelled float result", err);
+            };
+        } else {
             core.logging.warn("terminal", "destroyFloatPane: cannot send cancellation result because SES CTL channel is unavailable", .{});
-            return;
-        };
-        const result = wire.FloatResult{
-            .uuid = pane.uuid,
-            .exit_code = 130, // Cancelled (like SIGINT)
-            .output_len = 0,
-        };
-        wire.writeControlWithRequestId(ctl_fd, .float_result, entry.value.ses_request_id, std.mem.asBytes(&result)) catch |err| {
-            core.logging.logError("terminal", "failed to send cancelled float result", err);
-        };
+        }
     }
 
     // Find and remove the float from state.view.float_views.
@@ -106,7 +147,6 @@ pub fn destroyFloatPane(state: *State, pane: *Pane) void {
                     return;
                 };
             }
-            const closing_uuid = pane.uuid;
             _ = state.view.float_views.orderedRemove(i);
             state.clearLocalFloatState(pane.uuid);
             state.clearTransientPaneState(pane);
@@ -121,7 +161,45 @@ pub fn destroyFloatPane(state: *State, pane: *Pane) void {
                     state.setActiveFloatingUuid(null);
                 }
             }
-            state.applyFrontendPaneRemoved(closing_uuid, null);
+            if (family_root == null) {
+                cleanupLocalSubFloats(state, closing_uuid);
+            }
+            var next_focus_uuid: ?[32]u8 = null;
+            if (was_active) {
+                var focused_survivor = false;
+                if (family_root) |root| {
+                    var members_buf: [16]State.FamilyMember = undefined;
+                    const members = state.familyMembers(root, &members_buf);
+                    if (members.len > 0 and state.showFamilyMember(members[0].uuid, true)) {
+                        next_focus_uuid = members[0].uuid;
+                        focused_survivor = true;
+                    }
+                }
+                if (!focused_survivor) {
+                    state.setActiveFloatingIndex(null);
+                    if (state.currentLayout().getFocusedPane()) |tiled| {
+                        next_focus_uuid = tiled.uuid;
+                        state.syncPaneFocus(tiled, null);
+                    }
+                }
+            } else if (family_root) |root| {
+                var members_buf: [16]State.FamilyMember = undefined;
+                const members = state.familyMembers(root, &members_buf);
+                if (members.len > 0) {
+                    const shown = state.family_shown.get(root) orelse 0;
+                    var still_present = false;
+                    for (members) |m| {
+                        if (m.index == shown) {
+                            still_present = true;
+                            break;
+                        }
+                    }
+                    if (!still_present) {
+                        state.family_shown.put(root, members[0].index) catch {};
+                    }
+                }
+            }
+            state.applyFrontendPaneRemoved(closing_uuid, next_focus_uuid);
             // Ensure proper re-render with cursor restoration.
             state.needs_render = true;
             state.force_full_render = true;
@@ -393,6 +471,11 @@ pub fn performClose(state: *State) void {
         const old_uuid = state.getCurrentFocusedUuid();
         const pane = state.view.float_views.items[idx];
         const closing_uuid = pane.uuid;
+        const family_root: ?[32]u8 = blk: {
+            const root = state.familyRootOf(pane) orelse break :blk null;
+            if (std.mem.eql(u8, &root, &closing_uuid)) break :blk null;
+            break :blk root;
+        };
         terminal_main.debugLogUuid(&pane.uuid, "performClose: float pane_id={?d} vt_fd={?d}", .{
             pane.getPaneId(),
             state.runtime.currentVtFd(),
@@ -423,18 +506,48 @@ pub fn performClose(state: *State) void {
         state.clearFloatUi(pane.uuid);
         pane.deinit();
         state.allocator.destroy(pane);
-        // Focus another float or fall back to tiled pane.
+        if (family_root == null) {
+            // Parent close cascades in SES: drop child views locally right now
+            // so the focus-fallback loop below cannot focus a just-killed child.
+            cleanupLocalSubFloats(state, closing_uuid);
+        }
+        // Back to the family (lowest surviving chip) when closing a sub-float;
+        // otherwise focus a float that is actually visible on this tab, or fall
+        // back to the tiled pane. Never blindly focus float_views[0], which may
+        // be hidden or belong to another tab/directory.
         var next_focus_uuid: ?[32]u8 = null;
-        if (state.view.float_views.items.len > 0) {
-            state.setActiveFloatingIndex(0);
-            const next_pane = state.view.float_views.items[0];
-            next_focus_uuid = next_pane.uuid;
-            state.syncPaneFocus(next_pane, old_uuid);
-        } else {
-            state.setActiveFloatingIndex(null);
-            if (state.currentLayout().getFocusedPane()) |tiled| {
-                next_focus_uuid = tiled.uuid;
-                state.syncPaneFocus(tiled, old_uuid);
+        var focused_survivor = false;
+        if (family_root) |root| {
+            var members_buf: [16]State.FamilyMember = undefined;
+            const members = state.familyMembers(root, &members_buf);
+            if (members.len > 0 and state.showFamilyMember(members[0].uuid, true)) {
+                next_focus_uuid = members[0].uuid;
+                focused_survivor = true;
+            }
+        }
+        if (!focused_survivor) {
+            const tab = state.activeTabIndex();
+            var visible_float_idx: ?usize = null;
+            for (state.view.float_views.items, 0..) |candidate, ci| {
+                if (!state.paneVisibleOnTab(candidate, tab)) continue;
+                if (!state.isCurrentFamilyMember(candidate)) continue;
+                if (state.paneParentTab(candidate)) |pt| {
+                    if (pt != tab) continue;
+                }
+                visible_float_idx = ci;
+                break;
+            }
+            if (visible_float_idx) |vfi| {
+                state.setActiveFloatingIndex(vfi);
+                const next_pane = state.view.float_views.items[vfi];
+                next_focus_uuid = next_pane.uuid;
+                state.syncPaneFocus(next_pane, old_uuid);
+            } else {
+                state.setActiveFloatingIndex(null);
+                if (state.currentLayout().getFocusedPane()) |tiled| {
+                    next_focus_uuid = tiled.uuid;
+                    state.syncPaneFocus(tiled, old_uuid);
+                }
             }
         }
         state.applyFrontendPaneRemoved(closing_uuid, next_focus_uuid);
@@ -594,11 +707,19 @@ fn applyFloatExclusivity(state: *State, float_def: *const core.LayoutFloatDef) v
     var roots: std.ArrayList([32]u8) = .empty;
     defer roots.deinit(state.allocator);
 
+    const active_tab = state.activeTabIndex();
     for (state.view.float_views.items) |other| {
-        if (state.paneFloatKey(other) == float_def.key) continue;
+        // Exclusivity is per-tab: never hide or destroy floats on other tabs,
+        // or already-hidden `destroy`/`capture_output` floats.
+        if (!state.paneVisibleOnTab(other, active_tab)) continue;
+        if (state.paneParentTab(other)) |pt| {
+            if (pt != active_tab) continue;
+        }
         const root = state.familyRootOf(other) orelse other.uuid;
         if (keep) |kept| {
             if (std.mem.eql(u8, &root, &kept)) continue;
+        } else if (state.paneFloatKey(other) == float_def.key) {
+            continue;
         }
         var seen = false;
         for (roots.items) |already| {
@@ -624,6 +745,56 @@ fn applyFloatExclusivity(state: *State, float_def: *const core.LayoutFloatDef) v
         for (state.view.float_views.items) |candidate| {
             const candidate_root = state.familyRootOf(candidate) orelse candidate.uuid;
             if (std.mem.eql(u8, &candidate_root, &root)) {
+                hideOrDestroyFloat(state, candidate, state.activeTabIndex());
+                break;
+            }
+        }
+    }
+}
+
+/// Hide every other per-CWD/per-git instance of `float_def.key` on the active
+/// tab so at most one directory's instance of a keyed-by-dir float can ever be
+/// visible on a tab (even when `exclusive = false`, or when revealing an
+/// already-existing float after `cd`/reattach).
+fn hideOtherPerDirInstances(state: *State, float_def: *const core.LayoutFloatDef) void {
+    if (!float_def.attributes.keyedByDir()) return;
+    const keep_root: ?[32]u8 = blk: {
+        const uuid = state.runtime.activeFloatUuid() orelse break :blk null;
+        const active_p = state.findPaneByUuid(uuid) orelse break :blk null;
+        break :blk state.familyRootOf(active_p) orelse active_p.uuid;
+    };
+    var to_hide: std.ArrayList([32]u8) = .empty;
+    defer to_hide.deinit(state.allocator);
+
+    for (state.view.float_views.items) |pane| {
+        if (state.paneFloatKey(pane) != float_def.key) continue;
+        if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
+        const root = state.familyRootOf(pane) orelse pane.uuid;
+        if (keep_root) |kr| {
+            if (std.mem.eql(u8, &root, &kr)) continue;
+        }
+        var seen = false;
+        for (to_hide.items) |already| {
+            if (std.mem.eql(u8, &already, &root)) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        to_hide.append(state.allocator, root) catch |err| {
+            terminal_main.debugLogUuid(&pane.uuid, "hideOtherPerDirInstances: failed to queue per-cwd float hide: {s}", .{@errorName(err)});
+            state.notifications.show("Per-directory float cleanup incomplete");
+        };
+    }
+
+    for (to_hide.items) |target_root| {
+        if (state.findPaneByUuid(target_root)) |candidate| {
+            hideOrDestroyFloat(state, candidate, state.activeTabIndex());
+            continue;
+        }
+        for (state.view.float_views.items) |candidate| {
+            const candidate_root = state.familyRootOf(candidate) orelse candidate.uuid;
+            if (std.mem.eql(u8, &candidate_root, &target_root)) {
                 hideOrDestroyFloat(state, candidate, state.activeTabIndex());
                 break;
             }
@@ -659,11 +830,13 @@ fn revealExistingFloatLocally(state: *State, pane: *Pane, existing_idx: usize, f
         // to reveal through session sync because SES will reject it.
         state.setPaneVisibleOnTab(pane, state.activeTabIndex(), false);
         state.setActiveFloatingIndex(null);
+        state.runtime.setFocusedPaneUuid(old_uuid);
         return false;
     }
 
     catchUpVtBeforeFloatReveal(state);
     applyFloatExclusivity(state, float_def);
+    hideOtherPerDirInstances(state, float_def);
     state.renderer.invalidate();
     state.force_full_render = true;
     state.needs_render = true;
@@ -736,9 +909,17 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
     // the cwd of the currently focused split pane.
 
     // Find existing float by key (and directory if per_cwd).
+    // Evaluate each family once through its root so a sub-float from another
+    // directory can never bypass per-CWD matching or steal a toggle.
     var existing_idx: usize = 0;
     while (existing_idx < state.view.float_views.items.len) {
         var pane = state.view.float_views.items[existing_idx];
+        if (state.familyRootOf(pane)) |root| {
+            if (!std.mem.eql(u8, &root, &pane.uuid) and state.findPaneByUuid(root) != null) {
+                existing_idx += 1;
+                continue;
+            }
+        }
         if (state.paneFloatKey(pane) == float_def.key) {
             // Only tab-bound floats use parent_tab filtering.
             // per_cwd/global floats are shared across tabs.
@@ -800,6 +981,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
                 if (createNamedFloat(state, float_def, current_dir, old_uuid)) |_| {
                     catchUpVtBeforeFloatReveal(state);
                     applyFloatExclusivity(state, float_def);
+                    hideOtherPerDirInstances(state, float_def);
                 } else |err| {
                     terminal_main.debugLogUuid(
                         &pane.uuid,
@@ -871,6 +1053,10 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
             if (state.paneVisibleOnTab(pane, state.activeTabIndex()) and
                 float_def.attributes.destroy and !float_def.attributes.keyedByDir())
             {
+                const destroy_target: *Pane = if (state.familyRootOf(pane)) |root|
+                    state.findPaneByUuid(root) orelse pane
+                else
+                    pane;
                 if (state.activeFloatingIndex()) |afi| {
                     if (afi == existing_idx) {
                         state.syncPaneUnfocus(pane);
@@ -880,7 +1066,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
                         }
                     }
                 }
-                destroyFloatPane(state, pane);
+                destroyFloatPane(state, destroy_target);
                 state.needs_render = true;
                 return;
             }
@@ -899,6 +1085,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
                 state.syncPaneFocus(pane, old_uuid);
                 // If alone mode, hide all other floats on this tab.
                 applyFloatExclusivity(state, float_def);
+                hideOtherPerDirInstances(state, float_def);
                 catchUpVtBeforeFloatReveal(state);
             } else {
                 // Float was hidden. If it had focus, return focus to tiled pane.
@@ -924,6 +1111,7 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
                         if (createNamedFloat(state, float_def, current_dir, old_uuid)) |_| {
                             catchUpVtBeforeFloatReveal(state);
                             applyFloatExclusivity(state, float_def);
+                            hideOtherPerDirInstances(state, float_def);
                         } else |err| {
                             terminal_main.debugLogUuid(
                                 &pane.uuid,
@@ -977,30 +1165,8 @@ pub fn setNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, want:
     // If alone mode, hide all other floats on this tab.
     applyFloatExclusivity(state, float_def);
 
-    // For pwd floats, hide other instances of same float (different dirs) on this tab.
-    if (float_def.attributes.keyedByDir()) {
-        const new_idx = state.view.float_views.items.len - 1;
-        var to_hide: std.ArrayList([32]u8) = .empty;
-        defer to_hide.deinit(state.allocator);
-
-        for (state.view.float_views.items, 0..) |pane, i| {
-            if (i != new_idx and state.paneFloatKey(pane) == float_def.key) {
-                to_hide.append(state.allocator, pane.uuid) catch |err| {
-                    terminal_main.debugLogUuid(&pane.uuid, "toggleNamedFloat: failed to queue per-cwd float hide: {s}", .{@errorName(err)});
-                    state.notifications.show("Per-directory float cleanup incomplete");
-                };
-            }
-        }
-
-        for (to_hide.items) |target_uuid| {
-            for (state.view.float_views.items) |candidate| {
-                if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
-                    hideOrDestroyFloat(state, candidate, state.activeTabIndex());
-                    break;
-                }
-            }
-        }
-    }
+    // For pwd floats, hide other instances (by family root) of the same float key on this tab.
+    hideOtherPerDirInstances(state, float_def);
 }
 
 pub const FloatSize = struct {
@@ -1371,6 +1537,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
             true,
         );
 
+        state.setPaneVisibleOnTab(existing, state.activeTabIndex(), true);
         for (state.view.float_views.items, 0..) |candidate, idx| {
             if (candidate == existing or std.mem.eql(u8, &candidate.uuid, &result.uuid)) {
                 state.setActiveFloatingIndex(idx);
@@ -1379,7 +1546,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         }
         state.syncPaneFocus(existing, old_uuid);
         state.syncPaneAux(existing, parent_uuid);
-        if (!state.syncSessionFloatChecked(existing, true)) {
+        if (!state.syncFamilyFloats(existing, true)) {
             terminal_main.debugLogUuid(&result.uuid, "createNamedFloat reused sticky/per-CWD pane but session sync was rejected", .{});
         }
         state.renderer.invalidate();

@@ -4,6 +4,7 @@ const core = @import("core");
 const ses = @import("main.zig");
 const store_mod = @import("store.zig");
 const persist = @import("persist.zig");
+const detached_sessions = @import("detached_sessions.zig");
 
 pub fn isPidAlive(pid: posix.pid_t) bool {
     if (pid <= 0) return false;
@@ -61,6 +62,33 @@ pub fn findStickyPaneWithAffinity(
     key: u8,
     preferred_session_name: ?[]const u8,
 ) ?*store_mod.Pane {
+    return findStickyPaneWithAffinityFiltered(store, pwd, key, preferred_session_name, null);
+}
+
+pub fn findStickyPaneForClaimFree(
+    store: *store_mod.SessionStore,
+    pwd: []const u8,
+    key: u8,
+    preferred_session_name: ?[]const u8,
+    requester_client_id: usize,
+) ?*store_mod.Pane {
+    return findStickyPaneWithAffinityFiltered(store, pwd, key, preferred_session_name, requester_client_id);
+}
+
+fn hasLiveClient(store: *const store_mod.SessionStore, client_id: usize) bool {
+    for (store.clients.items) |client| {
+        if (client.id == client_id) return true;
+    }
+    return false;
+}
+
+fn findStickyPaneWithAffinityFiltered(
+    store: *store_mod.SessionStore,
+    pwd: []const u8,
+    key: u8,
+    preferred_session_name: ?[]const u8,
+    claim_free_client_id: ?usize,
+) ?*store_mod.Pane {
     var fallback_pane: ?*store_mod.Pane = null;
 
     var iter = store.panes.valueIterator();
@@ -81,6 +109,15 @@ pub fn findStickyPaneWithAffinity(
             // accepts on its socket can be re-adopted; anything else must fall
             // through to a fresh spawn instead of a float that never opens.
             if (!persist.podSocketAlive(pane.pod_socket_path)) continue;
+            if (claim_free_client_id) |requester_id| {
+                const already_owned = if (pane.attached_to) |owner_id| owner_id == requester_id else false;
+                if (!already_owned) {
+                    if (pane.attached_to) |owner_id| {
+                        if (hasLiveClient(store, owner_id)) continue;
+                    }
+                    if (detached_sessions.isPaneParked(store, pane)) continue;
+                }
+            }
             if (pane.sticky_pwd) |spwd| {
                 if (pane.sticky_key) |skey| {
                     if (skey == key and std.mem.eql(u8, spwd, pwd)) {

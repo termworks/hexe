@@ -7,6 +7,7 @@ const log = std.log.scoped(.terminal_focus);
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
+const tab_switch = @import("tab_switch.zig");
 
 /// Enter pane select mode - displays numbered labels on all panes.
 /// If swap is true, selecting a pane will swap it with the focused pane.
@@ -35,6 +36,7 @@ pub fn enterPaneSelectMode(state: *State, swap: bool) void {
 
     for (state.view.float_views.items) |pane| {
         if (!state.paneVisibleOnTab(pane, state.activeTabIndex())) continue;
+        if (!state.isCurrentFamilyMember(pane)) continue;
         if (state.paneParentTab(pane)) |parent| {
             if (parent != state.activeTabIndex()) continue;
         }
@@ -63,6 +65,10 @@ pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
             if (state.paneParentTab(pane)) |parent| {
                 if (parent != state.activeTabIndex()) continue;
             }
+            if (!state.isCurrentFamilyMember(pane)) {
+                _ = state.showFamilyMember(pane.uuid, true);
+                return;
+            }
 
             state.unfocusAllPanes();
             state.setActiveFloatingIndex(i);
@@ -78,6 +84,7 @@ pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
     while (it.next()) |entry| {
         const pane = entry.value_ptr.*;
         if (std.mem.eql(u8, &pane.uuid, &uuid)) {
+            state.clearZoom();
             state.unfocusAllPanes();
             state.setActiveFloatingIndex(null);
             layout.focused_pane_uuid = entry.key_ptr.*;
@@ -171,24 +178,7 @@ pub fn switchToNextTab(state: *State) void {
         break :blk state.activeTabIndex() + 1;
     };
 
-    const old_uuid = state.getCurrentFocusedUuid();
-
-    if (state.activeFloatingIndex()) |idx| {
-        if (idx < state.view.float_views.items.len) {
-            const fp = state.view.float_views.items[idx];
-            state.syncPaneUnfocus(fp);
-            state.setActiveFloatingIndex(null);
-            state.cursor_needs_restore = true;
-        }
-    } else if (state.currentLayout().getFocusedPane()) |old_pane| {
-        state.syncPaneUnfocus(old_pane);
-    }
-
-    state.setActiveTabIndex(target_tab);
-    restoreFocusInTab(state, old_uuid);
-    state.renderer.invalidate();
-    state.force_full_render = true;
-    state.needs_render = true;
+    tab_switch.switchToTab(state, target_tab);
 }
 
 /// Switch to the previous tab, handling focus transitions.
@@ -207,24 +197,7 @@ pub fn switchToPrevTab(state: *State) void {
         break :blk state.activeTabIndex() - 1;
     };
 
-    const old_uuid = state.getCurrentFocusedUuid();
-
-    if (state.activeFloatingIndex()) |idx| {
-        if (idx < state.view.float_views.items.len) {
-            const fp = state.view.float_views.items[idx];
-            state.syncPaneUnfocus(fp);
-            state.setActiveFloatingIndex(null);
-            state.cursor_needs_restore = true;
-        }
-    } else if (state.currentLayout().getFocusedPane()) |old_pane| {
-        state.syncPaneUnfocus(old_pane);
-    }
-
-    state.setActiveTabIndex(target_tab);
-    restoreFocusInTab(state, old_uuid);
-    state.renderer.invalidate();
-    state.force_full_render = true;
-    state.needs_render = true;
+    tab_switch.switchToTab(state, target_tab);
 }
 
 fn getCurrentFocusedPane(state: *State) ?*Pane {
@@ -256,63 +229,34 @@ fn swapPanePositions(state: *State, pane_a: *Pane, pane_b: *Pane) void {
 }
 
 fn swapFloatPositions(state: *State, a: *Pane, b: *Pane) void {
-    const ax = a.x;
-    const ay = a.y;
-    const aw = a.width;
-    const ah = a.height;
-    a.x = b.x;
-    a.y = b.y;
-    a.width = b.width;
-    a.height = b.height;
-    b.x = ax;
-    b.y = ay;
-    b.width = aw;
-    b.height = ah;
-
     state.swapPaneFloatUi(a.uuid, b.uuid);
-
-    a.vt.resize(a.width, a.height) catch |err| {
-        core.logging.logError("terminal", "swap pane VT resize failed", err);
-    };
-    b.vt.resize(b.width, b.height) catch |err| {
-        core.logging.logError("terminal", "swap pane VT resize failed", err);
-    };
-
+    // Sync swapped geometry into both families' projection records and resize
+    // every member of both families (not just `a` and `b`).
+    for ([_]*Pane{ a, b }) |p| {
+        state.setPaneFloatGeometry(
+            p,
+            state.paneFloatWidthPct(p),
+            state.paneFloatHeightPct(p),
+            state.paneFloatPosXPct(p),
+            state.paneFloatPosYPct(p),
+            state.paneFloatPadX(p),
+            state.paneFloatPadY(p),
+        );
+    }
+    state.resizeFloatingPanes();
     a.syncBackendSize();
     b.syncBackendSize();
 
-    // Push both rects to SES, the way float_nudge does. Without this the swap
-    // was frontend-only and a detach/reattach restored the pre-swap positions.
+    // Push both families' rects to SES, the way float_nudge does. Without this
+    // the swap was frontend-only and a detach/reattach restored the pre-swap positions.
     const active_pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
         if (idx < state.view.float_views.items.len) state.view.float_views.items[idx] else null
     else
         null;
     for ([_]*Pane{ a, b }) |p| {
         const is_active = active_pane == p;
-        if (!state.syncSessionFloatChecked(p, is_active)) {
+        if (!state.syncFamilyFloats(p, is_active)) {
             core.logging.warn("terminal", "float swap: session sync rejected update", .{});
         }
-    }
-}
-
-fn restoreFocusInTab(state: *State, old_uuid: ?[32]u8) void {
-    const active_tab = state.activeTabIndex();
-    if (state.runtime.lastFocusKind(active_tab) == .float) {
-        if (state.runtime.lastFloatingUuid(active_tab)) |uuid| {
-            for (state.view.float_views.items, 0..) |pane, fi| {
-                if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                if (!state.paneVisibleOnTab(pane, active_tab)) continue;
-                if (state.paneParentTab(pane)) |parent| {
-                    if (parent != active_tab) continue;
-                }
-                state.setActiveFloatingIndex(fi);
-                state.syncPaneFocus(pane, old_uuid);
-                return;
-            }
-        }
-    }
-
-    if (state.currentLayout().getFocusedPane()) |new_pane| {
-        state.syncPaneFocus(new_pane, old_uuid);
     }
 }

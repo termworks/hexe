@@ -45,6 +45,11 @@ pub fn updateSelectionAndStatus(state: *State, now_ms: i64) void {
 }
 
 pub fn updateOverlaysPopupsAndKeyTimers(state: *State, now_ms: i64) void {
+    if (state.pending_config_reload and !state.in_lua_call) {
+        state.pending_config_reload = false;
+        @import("keybinds_actions.zig").performConfigReload(state);
+    }
+
     // Update MUX realm notifications.
     if (state.notifications.update()) {
         state.needs_render = true;
@@ -65,40 +70,31 @@ pub fn updateOverlaysPopupsAndKeyTimers(state: *State, now_ms: i64) void {
         }
     }
 
-    // TAB realm (current tab only) — skipped while the session has no tab,
-    // which is the startup chooser's normal state.
-    if (state.view.tab_views.items.len > 0) {
-        const tab = &state.view.tab_views.items[state.activeTabIndex()];
-
-        // Update TAB realm notifications.
+    // Update TAB and PANE realm notifications & popup timeouts across ALL tabs
+    // so timed popups on background tabs still expire and answer waiting CLIs.
+    for (state.view.tab_views.items, 0..) |*tab, tab_idx| {
         if (tab.notifications.update()) {
             state.needs_render = true;
         }
-
-        // Update TAB realm popups (check for timeout).
         if (tab.popups.update()) {
             state.needs_render = true;
-            // Check if a popup timed out and we need to send response.
-            if (state.pending_pop_response and state.pending_pop_scope == .tab and !tab.popups.isBlocked()) {
+            if (state.pending_pop_response and state.pending_pop_scope == .tab and state.pending_pop_tab == tab_idx and !tab.popups.isBlocked()) {
                 loop_ipc.sendPopResponse(state);
             }
         }
-    }
 
-    // Update PANE realm notifications (splits).
-    var notif_pane_it = state.currentLayout().splitIterator();
-    while (notif_pane_it.next()) |pane| {
-        if (pane.*.updateNotifications()) {
-            state.needs_render = true;
-        }
-        // Update PANE realm popups (check for timeout).
-        if (pane.*.updatePopups()) {
-            state.needs_render = true;
-            // Check if a popup timed out and we need to send response.
-            if (state.pending_pop_response and state.pending_pop_scope == .pane) {
-                if (state.pending_pop_pane) |pending_pane| {
-                    if (pending_pane == pane.* and !pane.*.popups.isBlocked()) {
-                        loop_ipc.sendPopResponse(state);
+        var notif_pane_it = tab.layout.splitIterator();
+        while (notif_pane_it.next()) |pane| {
+            if (pane.*.updateNotifications()) {
+                state.needs_render = true;
+            }
+            if (pane.*.updatePopups()) {
+                state.needs_render = true;
+                if (state.pending_pop_response and state.pending_pop_scope == .pane) {
+                    if (state.pending_pop_pane) |pending_pane| {
+                        if (pending_pane == pane.* and !pane.*.popups.isBlocked()) {
+                            loop_ipc.sendPopResponse(state);
+                        }
                     }
                 }
             }

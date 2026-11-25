@@ -291,7 +291,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope, name_o
                             try file.writeAll(" },");
                         }
 
-                        try file.writeAll(" }");
+                        try file.writeAll(" })");
                         if (fi + 1 < floats_arr.items.len) try file.writeAll(",");
                         try file.writeAll("\n");
                     }

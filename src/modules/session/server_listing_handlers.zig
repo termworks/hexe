@@ -202,14 +202,16 @@ pub fn handleBinaryExited(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
         return;
     };
 
+    var owner_client_id: ?usize = null;
     if (self.ses_state.store.panes.getPtr(ex.uuid)) |pane| {
         pane.last_status = ex.status;
+        owner_client_id = pane.attached_to;
         // Notify owning mux immediately so it can tear down dead pane UI.
         if (pane.attached_to) |client_id| {
             if (self.ses_state.getClient(client_id)) |client| {
                 if (client.mux_ctl_fd) |ctl_fd| {
                     var msg = wire.PaneUuid{ .uuid = ex.uuid };
-                    self.replyOrClose(ctl_fd, .pane_exited, std.mem.asBytes(&msg));
+                    self.notifyOrClose(ctl_fd, .pane_exited, std.mem.asBytes(&msg));
                 }
             }
         }
@@ -220,5 +222,8 @@ pub fn handleBinaryExited(self: *Server, fd: posix.fd_t, payload_len: u32, buf: 
     self.ses_state.killPane(ex.uuid) catch |e| {
         core.logging.logError("ses", "killPane failed after pane exit", e);
     };
+    if (owner_client_id) |cid| {
+        self.pushClientSessionSnapshot(cid);
+    }
     self.ses_state.markDirty();
 }

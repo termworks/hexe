@@ -16,6 +16,7 @@ const Pane = @import("pane.zig").Pane;
 const BindAction = core.Config.BindAction;
 const lua_api = @import("lua_api.zig");
 const float_geometry = @import("float_geometry.zig");
+const float_util = @import("float_util.zig");
 
 /// Run a keybinding whose action is a Lua function.
 ///
@@ -59,8 +60,12 @@ fn layoutDirectionFromCore(direction: frontend_core.Direction) layout_mod.Layout
 
 fn focusedPane(state: *State) ?*Pane {
     if (state.activeFloatingIndex()) |index| {
-        if (index < state.view.float_views.items.len) return state.view.float_views.items[index];
-        return null;
+        if (index < state.view.float_views.items.len) {
+            const fp = state.view.float_views.items[index];
+            if (float_util.isFloatRenderableOnTab(state, fp, state.activeTabIndex())) {
+                return fp;
+            }
+        }
     }
     return state.currentLayout().getFocusedPane();
 }
@@ -133,7 +138,6 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
-            state.dropZoom();
             const parent_pane = state.currentLayout().getFocusedPane() orelse {
                 core.logging.warn("terminal", "split_h skipped: no focused pane", .{});
                 return true;
@@ -157,6 +161,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 break :blk null;
             };
             if (new_pane) |pane| {
+                state.dropZoom();
                 if (state.syncSessionSplitPaneChecked(parent_uuid, pane.uuid, .horizontal, pane.uuid)) {
                     state.syncPaneAux(pane, parent_uuid);
                 } else {
@@ -172,7 +177,6 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
-            state.dropZoom();
             const parent_pane = state.currentLayout().getFocusedPane() orelse {
                 core.logging.warn("terminal", "split_v skipped: no focused pane", .{});
                 return true;
@@ -196,6 +200,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 break :blk null;
             };
             if (new_pane) |pane| {
+                state.dropZoom();
                 if (state.syncSessionSplitPaneChecked(parent_uuid, pane.uuid, .vertical, pane.uuid)) {
                     state.syncPaneAux(pane, parent_uuid);
                 } else {
@@ -209,6 +214,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         .split_resize => |dir| {
             // Only applies to split panes (floats should ignore).
             if (state.activeFloatingIndex() != null) return true;
+            state.clearZoom();
             const shared_sync = state.applyFrontendSplitResize(dir, 1);
             if (state.currentLayout().resizeFocused(layoutDirectionFromCore(dir), 1)) |sync| {
                 state.needs_render = true;
@@ -234,7 +240,12 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
-            state.setActiveFloatingIndex(null);
+            if (state.activeFloatingIndex()) |idx| {
+                if (idx < state.view.float_views.items.len) {
+                    state.syncPaneUnfocus(state.view.float_views.items[idx]);
+                }
+                state.setActiveFloatingIndex(null);
+            }
             state.createTab() catch |e| {
                 core.logging.logError("terminal", "createTab failed", e);
             };
@@ -250,7 +261,6 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .pane_close => {
-            state.dropZoom();
             // Close float or split pane, but never the tab.
             if (state.activeFloatingIndex() != null) {
                 // Close the focused float.
@@ -274,6 +284,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                             state.needs_render = true;
                             return true;
                         };
+                        state.dropZoom();
                         state.clearTransientPaneState(closing_pane);
                         _ = layout.closePaneLocal(closing_uuid);
                         if (layout.getFocusedPane()) |new_pane| {
@@ -339,15 +350,13 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 return false;
             }
             const pane = state.view.float_views.items[fi];
-            if (state.paneParentTab(pane)) |parent| {
-                if (parent != state.activeTabIndex()) {
-                    core.logging.warn("terminal", "float_nudge skipped: active float belongs to another tab", .{});
-                    return false;
-                }
+            if (!float_util.isFloatRenderableOnTab(state, pane, state.activeTabIndex())) {
+                core.logging.warn("terminal", "float_nudge skipped: active float is not renderable on this tab", .{});
+                return false;
             }
 
             nudgeFloat(state, pane, layoutDirectionFromCore(dir), 1);
-            if (!state.syncSessionFloatChecked(pane, true)) {
+            if (!state.syncFamilyFloats(pane, true)) {
                 if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
                     core.logging.warn("terminal", "float_nudge: shared sticky/per-CWD float sync rejected; kept local nudge", .{});
                 } else {
@@ -407,7 +416,13 @@ fn applyPaletteConfig(state: *State) void {
     for (state.view.float_views.items) |p| p.vt.ns_table.applyDefaults();
 }
 
-fn performConfigReload(state: *State) void {
+pub fn performConfigReload(state: *State) void {
+    // Never destroy the LuaRuntime while a Lua callback or control-socket API
+    // request is executing on its stack — defer to the main loop tick.
+    if (state.in_lua_call) {
+        state.pending_config_reload = true;
+        return;
+    }
     var new_config = core.Config.load(state.allocator);
     if (new_config.status == .@"error") {
         state.notifications.showFor("Config reload failed — kept current config", 1800);
@@ -427,10 +442,22 @@ fn performConfigReload(state: *State) void {
 
     var old = state.config;
     state.config = new_config;
+    // Re-resolve every live float's `float_style` pointer against the new
+    // config BEFORE freeing `old` (whose `float_match_rules` backed the old
+    // pointers — leaving them dangling would UAF on the next render).
+    for (state.view.float_views.items) |fp| {
+        const key = state.paneFloatKey(fp);
+        const visuals = state.resolveFloatVisuals(if (key != 0) .named else .adhoc, state.paneFloatTitle(fp));
+        if (state.floatUi(fp)) |ui| {
+            ui.float_style = visuals.float_style;
+            ui.border_color = visuals.border_color;
+        }
+    }
     state.applyDecorInsets();
     old.deinit();
 
     if (state.active_layout_floats.len > 0) state.allocator.free(state.active_layout_floats);
+    state.clearOwnedLayoutFloats();
     state.active_layout_floats = new_floats;
     var old_ses = state.ses_config;
     state.ses_config = new_ses;
@@ -440,7 +467,9 @@ fn performConfigReload(state: *State) void {
     // every callback registered by the reloaded config is dead after a reload —
     // conditions silently stop matching and actions silently do nothing.
     if (state.config._lua_runtime) |rt| lua_api.install(rt);
+    state.publishSelfSocket();
     applyPaletteConfig(state);
+    state.resizeFloatingPanes();
     state.renderer.invalidate();
     state.force_full_render = true;
     state.needs_render = true;
@@ -664,15 +693,6 @@ fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step
     // Pick the nearest percentage that actually lands on the requested cell.
     const pos_x_pct: u8 = float_geometry.pctForCell(@intCast(outer_x), max_x, dx);
     const pos_y_pct: u8 = float_geometry.pctForCell(@intCast(outer_y), max_y, dy);
-    state.setPaneFloatGeometryUi(
-        pane.uuid,
-        state.paneFloatWidthPct(pane),
-        state.paneFloatHeightPct(pane),
-        pos_x_pct,
-        pos_y_pct,
-        state.paneFloatPadX(pane),
-        state.paneFloatPadY(pane),
-    );
     state.setPaneFloatGeometry(
         pane,
         state.paneFloatWidthPct(pane),

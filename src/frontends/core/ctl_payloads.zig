@@ -118,11 +118,21 @@ pub const PopChoosePayload = struct {
     }
 };
 
+const CTL_PAYLOAD_TIMEOUT_MS: i32 = 1500;
+
+fn readExactBounded(fd: posix.fd_t, buf: []u8) !void {
+    return wire.readExactTimeout(fd, buf, CTL_PAYLOAD_TIMEOUT_MS);
+}
+
+fn readStructBounded(comptime T: type, fd: posix.fd_t) !T {
+    return wire.readStructTimeout(T, fd, CTL_PAYLOAD_TIMEOUT_MS);
+}
+
 fn skipPayload(fd: posix.fd_t, len: usize, scratch: []u8) !void {
     var remaining = len;
     while (remaining > 0) {
         const chunk = @min(remaining, scratch.len);
-        try wire.readExact(fd, scratch[0..chunk]);
+        try readExactBounded(fd, scratch[0..chunk]);
         remaining -= chunk;
     }
 }
@@ -142,7 +152,7 @@ pub fn readPaneCwdPayload(
         return null;
     }
 
-    const resp = try wire.readStruct(wire.PaneCwd, fd);
+    const resp = try readStructBounded(wire.PaneCwd, fd);
     const remaining = payload_len - @sizeOf(wire.PaneCwd);
     if (resp.cwd_len == 0) {
         if (remaining > 0) try skipPayload(fd, remaining, scratch);
@@ -155,7 +165,7 @@ pub fn readPaneCwdPayload(
 
     const cwd = try allocator.alloc(u8, resp.cwd_len);
     errdefer allocator.free(cwd);
-    try wire.readExact(fd, cwd);
+    try readExactBounded(fd, cwd);
     return .{ .uuid = resp.uuid, .cwd = cwd };
 }
 
@@ -175,7 +185,7 @@ pub fn readPaneInfoPayload(
         return null;
     }
 
-    const resp = try wire.readStruct(wire.PaneInfoResp, fd);
+    const resp = try readStructBounded(wire.PaneInfoResp, fd);
     const remaining_payload = payload_len - @sizeOf(wire.PaneInfoResp);
     const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
         @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
@@ -199,7 +209,7 @@ pub fn readPaneInfoPayload(
     if (resp.name_len > 0) {
         if (resp.name_len <= wire.MAX_PAYLOAD_LEN) {
             payload.name = try allocator.alloc(u8, resp.name_len);
-            try wire.readExact(fd, payload.name.?);
+            try readExactBounded(fd, payload.name.?);
         } else {
             try skipPayload(fd, resp.name_len, scratch);
         }
@@ -208,7 +218,7 @@ pub fn readPaneInfoPayload(
     if (resp.fg_len > 0) {
         if (resp.fg_len <= wire.MAX_PAYLOAD_LEN) {
             payload.fg_name = try allocator.alloc(u8, resp.fg_len);
-            try wire.readExact(fd, payload.fg_name.?);
+            try readExactBounded(fd, payload.fg_name.?);
         } else {
             try skipPayload(fd, resp.fg_len, scratch);
         }
@@ -226,7 +236,7 @@ pub fn readPaneUuidPayload(fd: posix.fd_t, payload_len: u32, scratch: []u8) !?Pa
         return null;
     }
 
-    const payload = try wire.readStruct(wire.PaneUuid, fd);
+    const payload = try readStructBounded(wire.PaneUuid, fd);
     const remaining = payload_len - @sizeOf(wire.PaneUuid);
     if (remaining > 0) try skipPayload(fd, remaining, scratch);
     return .{ .uuid = payload.uuid };
@@ -247,7 +257,7 @@ pub fn readShellEventPayload(
         return null;
     }
 
-    const ev = try wire.readStruct(wire.ForwardedShellEvent, fd);
+    const ev = try readStructBounded(wire.ForwardedShellEvent, fd);
     const remaining = payload_len - @sizeOf(wire.ForwardedShellEvent);
     const trail_len: usize = @as(usize, ev.cmd_len) + @as(usize, ev.cwd_len);
     if (trail_len != remaining) {
@@ -268,11 +278,11 @@ pub fn readShellEventPayload(
 
     if (ev.cmd_len > 0) {
         payload.cmd = try allocator.alloc(u8, ev.cmd_len);
-        try wire.readExact(fd, payload.cmd.?);
+        try readExactBounded(fd, payload.cmd.?);
     }
     if (ev.cwd_len > 0) {
         payload.cwd = try allocator.alloc(u8, ev.cwd_len);
-        try wire.readExact(fd, payload.cwd.?);
+        try readExactBounded(fd, payload.cwd.?);
     }
 
     return payload;
@@ -289,7 +299,7 @@ pub fn readSendKeysPayload(
         return null;
     }
 
-    const sk = try wire.readStruct(wire.SendKeys, fd);
+    const sk = try readStructBounded(wire.SendKeys, fd);
     const remaining = payload_len - @sizeOf(wire.SendKeys);
     if (sk.data_len == 0 or sk.data_len != remaining or sk.data_len > wire.MAX_PAYLOAD_LEN) {
         try skipPayload(fd, remaining, scratch);
@@ -298,7 +308,7 @@ pub fn readSendKeysPayload(
 
     const data = try allocator.alloc(u8, sk.data_len);
     errdefer allocator.free(data);
-    try wire.readExact(fd, data);
+    try readExactBounded(fd, data);
     return .{ .uuid = sk.uuid, .data = data };
 }
 
@@ -313,7 +323,7 @@ pub fn readNotifyPayload(
         return null;
     }
 
-    const notify = try wire.readStruct(wire.Notify, fd);
+    const notify = try readStructBounded(wire.Notify, fd);
     const remaining = payload_len - @sizeOf(wire.Notify);
     if (notify.msg_len == 0 or notify.msg_len != remaining or notify.msg_len > wire.MAX_PAYLOAD_LEN) {
         try skipPayload(fd, remaining, scratch);
@@ -322,7 +332,7 @@ pub fn readNotifyPayload(
 
     const message = try allocator.alloc(u8, notify.msg_len);
     errdefer allocator.free(message);
-    try wire.readExact(fd, message);
+    try readExactBounded(fd, message);
     return .{ .message = message };
 }
 
@@ -337,7 +347,7 @@ pub fn readTargetedNotifyPayload(
         return null;
     }
 
-    const notify = try wire.readStruct(wire.TargetedNotify, fd);
+    const notify = try readStructBounded(wire.TargetedNotify, fd);
     const remaining = payload_len - @sizeOf(wire.TargetedNotify);
     if (notify.msg_len == 0 or notify.msg_len != remaining or notify.msg_len > wire.MAX_PAYLOAD_LEN) {
         try skipPayload(fd, remaining, scratch);
@@ -346,7 +356,7 @@ pub fn readTargetedNotifyPayload(
 
     const message = try allocator.alloc(u8, notify.msg_len);
     errdefer allocator.free(message);
-    try wire.readExact(fd, message);
+    try readExactBounded(fd, message);
     return .{
         .uuid = notify.uuid,
         .timeout_ms = if (notify.timeout_ms > 0) @as(i64, notify.timeout_ms) else null,
@@ -360,7 +370,7 @@ pub fn readFocusMovePayload(fd: posix.fd_t, payload_len: u32, scratch: []u8) !?F
         return null;
     }
 
-    const fm = try wire.readStruct(wire.FocusMove, fd);
+    const fm = try readStructBounded(wire.FocusMove, fd);
     const remaining = payload_len - @sizeOf(wire.FocusMove);
     if (remaining > 0) try skipPayload(fd, remaining, scratch);
 
@@ -381,7 +391,7 @@ pub fn readExitIntentPayload(fd: posix.fd_t, payload_len: u32, scratch: []u8) !?
         return null;
     }
 
-    const payload = try wire.readStruct(wire.ExitIntent, fd);
+    const payload = try readStructBounded(wire.ExitIntent, fd);
     const remaining = payload_len - @sizeOf(wire.ExitIntent);
     if (remaining > 0) try skipPayload(fd, remaining, scratch);
     return .{ .uuid = payload.uuid };
@@ -398,7 +408,7 @@ pub fn readPopConfirmPayload(
         return null;
     }
 
-    const pc = try wire.readStruct(wire.PopConfirm, fd);
+    const pc = try readStructBounded(wire.PopConfirm, fd);
     const remaining = payload_len - @sizeOf(wire.PopConfirm);
     if (pc.msg_len == 0 or pc.msg_len != remaining or pc.msg_len > wire.MAX_PAYLOAD_LEN) {
         try skipPayload(fd, remaining, scratch);
@@ -407,7 +417,7 @@ pub fn readPopConfirmPayload(
 
     const message = try allocator.alloc(u8, pc.msg_len);
     errdefer allocator.free(message);
-    try wire.readExact(fd, message);
+    try readExactBounded(fd, message);
 
     return .{
         .uuid = pc.uuid,
@@ -427,7 +437,7 @@ pub fn readPopChoosePayload(
         return null;
     }
 
-    const pc = try wire.readStruct(wire.PopChoose, fd);
+    const pc = try readStructBounded(wire.PopChoose, fd);
     const remaining_payload: usize = payload_len - @sizeOf(wire.PopChoose);
     var consumed: usize = 0;
 
@@ -443,7 +453,7 @@ pub fn readPopChoosePayload(
     }
     if (pc.title_len > 0) {
         payload.title = try allocator.alloc(u8, pc.title_len);
-        try wire.readExact(fd, payload.title.?);
+        try readExactBounded(fd, payload.title.?);
         consumed += pc.title_len;
     }
 
@@ -460,7 +470,7 @@ pub fn readPopChoosePayload(
             return null;
         }
 
-        const item_header = try wire.readStruct(ItemHeader, fd);
+        const item_header = try readStructBounded(ItemHeader, fd);
         consumed += @sizeOf(ItemHeader);
         const item_len: usize = item_header.len;
         if (item_len == 0 or item_len > wire.MAX_PAYLOAD_LEN or item_len > remaining_payload - consumed) {
@@ -470,7 +480,7 @@ pub fn readPopChoosePayload(
 
         const item = try allocator.alloc(u8, item_len);
         errdefer allocator.free(item);
-        try wire.readExact(fd, item);
+        try readExactBounded(fd, item);
         consumed += item_len;
         try items_list.append(allocator, item);
     }

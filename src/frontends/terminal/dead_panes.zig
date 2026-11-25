@@ -5,6 +5,8 @@ const core = @import("core");
 const State = @import("state.zig").State;
 const terminal_main = @import("main.zig");
 const float_completion = @import("float_completion.zig");
+const loop_actions = @import("loop_actions.zig");
+const state_tabs = @import("state_tabs.zig");
 
 pub fn cleanupDeadFloat(state: *State, index: usize) void {
     if (index >= state.view.float_views.items.len) return;
@@ -49,6 +51,11 @@ pub fn cleanupDeadFloat(state: *State, index: usize) void {
     state.force_full_render = true;
     state.renderer.invalidate();
     state.clearLocalFloatState(pane_uuid);
+    if (family_root == null) {
+        // Parent float died: SES cascades the kill to all sub-floats, so drop
+        // their local views immediately instead of leaving zombie chips behind.
+        loop_actions.cleanupLocalSubFloats(state, pane_uuid);
+    }
 
     if (state.config._lua_runtime) |rt| {
         lua_events.emit(state, rt, "pane_exited", &.{
@@ -73,6 +80,25 @@ pub fn cleanupDeadFloat(state: *State, index: usize) void {
         if (state.currentLayout().getFocusedPane()) |tiled| {
             state.syncPaneFocus(tiled, null);
         }
+    } else if (family_root) |root| {
+        // A background/hidden child died while selected as `family_shown`:
+        // point the family back to its lowest surviving chip so revealing the
+        // family later never tries to show a dead index.
+        var members_buf: [16]State.FamilyMember = undefined;
+        const members = state.familyMembers(root, &members_buf);
+        if (members.len > 0) {
+            const shown = state.family_shown.get(root) orelse 0;
+            var still_present = false;
+            for (members) |m| {
+                if (m.index == shown) {
+                    still_present = true;
+                    break;
+                }
+            }
+            if (!still_present) {
+                state.family_shown.put(root, members[0].index) catch {};
+            }
+        }
     }
 }
 
@@ -80,6 +106,10 @@ pub fn cleanupDeadFloats(state: *State) void {
     if (state.view.float_views.items.len > 0) {
         var fi: usize = state.view.float_views.items.len;
         while (fi > 0) {
+            if (fi > state.view.float_views.items.len) {
+                fi = state.view.float_views.items.len;
+                if (fi == 0) break;
+            }
             fi -= 1;
             if (!state.view.float_views.items[fi].isAlive()) {
                 cleanupDeadFloat(state, fi);
@@ -91,10 +121,7 @@ pub fn cleanupDeadFloats(state: *State) void {
     // Ensure active_floating is valid.
     if (state.activeFloatingIndex()) |af| {
         if (af >= state.view.float_views.items.len) {
-            state.setActiveFloatingIndex(if (state.view.float_views.items.len > 0)
-                state.view.float_views.items.len - 1
-            else
-                null);
+            state.setActiveFloatingIndex(null);
         }
     }
 }
@@ -109,7 +136,77 @@ pub fn handleDeferredRespawn(state: *State) void {
 pub fn cleanupDeadSplits(state: *State, dead_splits: *std.ArrayList([32]u8)) void {
     const allocator = state.allocator;
 
+    // Ensure active_floating is still valid.
+    if (state.activeFloatingIndex()) |af| {
+        if (af >= state.view.float_views.items.len) {
+            state.setActiveFloatingIndex(null);
+        }
+    }
+
+    // Remove dead splits (skip if just respawned a shell).
+    if (state.skip_dead_check) return;
+
+    // Sweep background tabs first (in reverse so closing a dead background tab
+    // does not shift unprocessed indices) so dead shells in unfocused tabs do
+    // not linger until switched to.
+    var bg_ti: usize = state.view.tab_views.items.len;
+    while (bg_ti > 0) {
+        bg_ti -= 1;
+        if (bg_ti >= state.view.tab_views.items.len) continue;
+        if (bg_ti == state.activeTabIndex()) continue;
+
+        dead_splits.clearRetainingCapacity();
+        {
+            var pane_it = state.view.tab_views.items[bg_ti].layout.splitIterator();
+            while (pane_it.next()) |pane| {
+                if (!pane.*.isAlive()) {
+                    dead_splits.append(allocator, pane.*.uuid) catch |err| {
+                        terminal_main.debugLogUuid(&pane.*.uuid, "main loop: failed to queue background dead split cleanup: {s}", .{@errorName(err)});
+                    };
+                }
+            }
+        }
+
+        for (dead_splits.items) |dead_uuid| {
+            if (bg_ti >= state.view.tab_views.items.len or bg_ti == state.activeTabIndex()) break;
+            const bg_layout = &state.view.tab_views.items[bg_ti].layout;
+            const dead_pane = bg_layout.splits.get(dead_uuid) orelse continue;
+            if (dead_pane.isAlive()) continue;
+
+            const exit_code = state.paneExitCode(dead_pane.uuid);
+            const closes_tab = bg_layout.splitCount() <= 1;
+            if (state.config._lua_runtime) |rt| {
+                lua_events.emit(state, rt, "pane_exited", &.{
+                    .{ .name = "pane_uuid", .value = .{ .uuid = dead_uuid } },
+                    .{ .name = "exit_status", .value = .{ .int = @intCast(exit_code) } },
+                    .{ .name = "was_focused", .value = .{ .boolean = false } },
+                    .{ .name = "is_float", .value = .{ .boolean = false } },
+                    .{ .name = "closes_tab", .value = .{ .boolean = closes_tab } },
+                });
+            }
+            if (bg_ti >= state.view.tab_views.items.len or bg_ti == state.activeTabIndex()) break;
+
+            if (state.view.tab_views.items[bg_ti].layout.splitCount() > 1) {
+                const rechecked = state.view.tab_views.items[bg_ti].layout.splits.get(dead_uuid) orelse continue;
+                state.clearTransientPaneState(rechecked);
+                _ = state.view.tab_views.items[bg_ti].layout.closePane(dead_uuid);
+                state.revalidateZoom();
+                if (exit_code != 0) {
+                    const msg = std.fmt.allocPrint(allocator, "Background pane exited with code {d}", .{exit_code}) catch "Background pane exited unexpectedly";
+                    defer if (!std.mem.eql(u8, msg, "Background pane exited unexpectedly")) allocator.free(msg);
+                    state.notifications.showFor(msg, 3000);
+                }
+                state.needs_render = true;
+            } else if (state.view.tab_views.items.len > 1) {
+                _ = state_tabs.closeTabAt(state, bg_ti);
+                state.needs_render = true;
+                break;
+            }
+        }
+    }
+
     dead_splits.clearRetainingCapacity();
+    if (state.view.tab_views.items.len == 0) return;
     {
         var pane_it = state.currentLayout().splitIterator();
         while (pane_it.next()) |pane| {
@@ -120,16 +217,6 @@ pub fn cleanupDeadSplits(state: *State, dead_splits: *std.ArrayList([32]u8)) voi
             }
         }
     }
-
-    // Ensure active_floating is still valid.
-    if (state.activeFloatingIndex()) |af| {
-        if (af >= state.view.float_views.items.len) {
-            state.setActiveFloatingIndex(null);
-        }
-    }
-
-    // Remove dead splits (skip if just respawned a shell).
-    if (state.skip_dead_check) return;
 
     var dead_idx: usize = 0;
     while (dead_idx < dead_splits.items.len) : (dead_idx += 1) {
@@ -178,8 +265,10 @@ pub fn cleanupDeadSplits(state: *State, dead_splits: *std.ArrayList([32]u8)) voi
                 state.notifications.showFor(msg, 3000);
             }
 
-            if (state.currentLayout().getFocusedPane()) |new_pane| {
-                state.syncPaneFocus(new_pane, null);
+            if (state.activeFloatingIndex() == null) {
+                if (state.currentLayout().getFocusedPane()) |new_pane| {
+                    state.syncPaneFocus(new_pane, null);
+                }
             }
             state.needs_render = true;
         } else if (state.view.tab_views.items.len > 1) {

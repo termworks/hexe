@@ -344,6 +344,11 @@ pub const SessionView = struct {
                 }
                 self.floats.items[float_idx].pane_uuid = new_pane_uuid;
             }
+            if (self.floats.items[float_idx].parent_float) |pf| {
+                if (std.mem.eql(u8, &pf, &old_pane_uuid)) {
+                    self.floats.items[float_idx].parent_float = new_pane_uuid;
+                }
+            }
             float_idx += 1;
         }
 
@@ -487,7 +492,22 @@ pub const SessionView = struct {
         }
 
         const requested = next_active_tab orelse if (tab_idx >= self.tabs.items.len) self.tabs.items.len - 1 else tab_idx;
-        try self.applyActiveTab(@min(requested, self.tabs.items.len - 1));
+        const next_tab = @min(requested, self.tabs.items.len - 1);
+        try self.applyActiveTab(next_tab);
+        if (self.active_float_uuid) |af_uuid| {
+            const still_visible = blk: {
+                const fl = self.findFloat(af_uuid) orelse break :blk false;
+                if (fl.parent_tab) |pt| break :blk pt == next_tab and fl.visible;
+                if (next_tab >= 64) break :blk false;
+                break :blk (fl.tab_visible & (@as(u64, 1) << @intCast(next_tab))) != 0;
+            };
+            if (!still_visible) {
+                self.active_float_uuid = null;
+                self.focused_pane_uuid = self.tabs.items[next_tab].focused_pane_uuid;
+            }
+        } else if (self.focused_pane_uuid == null or self.findPane(self.focused_pane_uuid.?) == null) {
+            self.focused_pane_uuid = self.tabs.items[next_tab].focused_pane_uuid;
+        }
     }
 
     /// Drain async runtime events into the shared frontend view.

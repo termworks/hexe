@@ -56,7 +56,7 @@ const LIVE_STATE_KEY = "_hexe_live_state";
 /// `pane_focus_changed`, which publishes state for the handler and then has to
 /// restore — not clear — or every accessor after that call in the OUTER
 /// callback goes dead. A plain set/clear pair silently broke exactly that.
-pub const Scope = struct { prev: ?*State, prev_kind: i64 };
+pub const Scope = struct { prev: ?*State, prev_kind: i64, state: *State, prev_in_lua: bool };
 
 /// Where the callback is running from.
 ///
@@ -72,14 +72,17 @@ const SCOPE_KIND_KEY = "_hexe_live_scope";
 pub fn pushLiveState(rt: *LuaRuntime, state: *State, kind: Kind) Scope {
     const prev = liveState(rt.lua);
     const prev_kind = scopeKind(rt.lua);
+    const prev_in_lua = state.in_lua_call;
+    state.in_lua_call = true;
     rt.lua.pushLightUserdata(state);
     rt.lua.setField(zlua.registry_index, LIVE_STATE_KEY);
     rt.lua.pushInteger(@intFromEnum(kind));
     rt.lua.setField(zlua.registry_index, SCOPE_KIND_KEY);
-    return .{ .prev = prev, .prev_kind = prev_kind };
+    return .{ .prev = prev, .prev_kind = prev_kind, .state = state, .prev_in_lua = prev_in_lua };
 }
 
 pub fn popLiveState(rt: *LuaRuntime, scope: Scope) void {
+    scope.state.in_lua_call = scope.prev_in_lua;
     if (scope.prev) |prev| {
         rt.lua.pushLightUserdata(prev);
     } else {
@@ -275,16 +278,23 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     // a global float is a per-tab bitmask and a plugin cycling floats needs to
     // know where else it is showing.
     if (is_float) {
-        if (state.paneFloatState(pane)) |fs| {
+        if (state.outerFloatState(pane)) |fs| {
             lua.createTable(8, 0);
             var n: i32 = 0;
-            var t: u6 = 0;
-            while (t < 63) : (t += 1) {
-                if (t >= state.view.tab_views.items.len) break;
-                if ((fs.tab_visible & (@as(u64, 1) << t)) != 0) {
+            if (fs.parent_tab) |pt| {
+                if (fs.visible and pt < state.view.tab_views.items.len) {
                     n += 1;
-                    lua.pushInteger(@as(i64, t) + 1);
+                    lua.pushInteger(@as(i64, @intCast(pt)) + 1);
                     lua.rawSetIndex(-2, n);
+                }
+            } else {
+                var t: usize = 0;
+                while (t < 64 and t < state.view.tab_views.items.len) : (t += 1) {
+                    if ((fs.tab_visible & (@as(u64, 1) << @intCast(t))) != 0) {
+                        n += 1;
+                        lua.pushInteger(@as(i64, @intCast(t)) + 1);
+                        lua.rawSetIndex(-2, n);
+                    }
                 }
             }
             lua.setField(-2, "visible_tabs");
@@ -294,13 +304,15 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     var exclusive = false;
     var isolated = false;
     var destroyable = false;
-    var global = state.paneParentTab(pane) == null;
+    var per_git = false;
+    var global = is_float and state.paneParentTab(pane) == null;
     var command: ?[]const u8 = null;
     if (float_key != 0) {
         if (state.getLayoutFloatByKey(float_key)) |fd| {
             exclusive = fd.attributes.exclusive;
             isolated = fd.attributes.isolated;
             destroyable = fd.attributes.destroy;
+            per_git = fd.attributes.per_git;
             global = global or fd.attributes.global;
             // Already looked up; discarding it was free information lost.
             command = fd.command;
@@ -310,6 +322,7 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     setBool(lua, "exclusive", exclusive);
     setBool(lua, "isolated", isolated);
     setBool(lua, "destroyable", destroyable);
+    setBool(lua, "per_git", per_git);
     setBool(lua, "global", global);
     setBool(lua, "adhoc", is_float and float_key == 0);
     // Geometry the bind actions can already CHANGE but Lua could not READ, so
@@ -396,9 +409,10 @@ fn paneIsVisible(state: *State, pane: *Pane, is_float: bool) bool {
         if (state.paneParentTab(pane)) |t| return t == active_tab;
         return true;
     }
-    if (state.paneFloatState(pane)) |fs| {
-        if (!fs.visible) return false;
-    } else return false;
+    if (!state.isCurrentFamilyMember(pane)) return false;
+    if (state.paneParentTab(pane)) |parent| {
+        if (parent != active_tab) return false;
+    }
     return state.paneVisibleOnTab(pane, active_tab);
 }
 
@@ -740,26 +754,38 @@ fn hexe_selection(lstate: ?*LuaState) callconv(.c) c_int {
     };
     const max_bytes = readMaxBytes(lua, 1);
     const tab = state.activeTabIndex();
-    var it = state.currentLayout().splitIterator();
-    while (it.next()) |p| {
-        const range = state.mouse_selection.bufRangeForPane(tab, p.*) orelse continue;
-        var clamped = range;
-        const budget_rows = rowsForBudget(p.*, max_bytes);
-        const top = @min(clamped.a.y, clamped.b.y);
-        const bottom = @max(clamped.a.y, clamped.b.y);
-        if (bottom - top + 1 > budget_rows) {
-            const new_bottom: u32 = top + @as(u32, @intCast(budget_rows - 1));
-            if (clamped.a.y <= clamped.b.y) clamped.b.y = new_bottom else clamped.a.y = new_bottom;
-        }
-        const text = mouse_selection.extractText(state.allocator, p.*, clamped) catch {
+    const sel_uuid = state.mouse_selection.pane_uuid orelse {
+        lua.pushNil();
+        return 1;
+    };
+    if (state.api_pane_scope) |scope_uuid| {
+        if (!std.mem.eql(u8, &sel_uuid, &scope_uuid)) {
             lua.pushNil();
             return 1;
-        };
-        defer state.allocator.free(text);
-        _ = lua.pushString(text[0..@min(text.len, max_bytes)]);
-        return 1;
+        }
     }
-    lua.pushNil();
+    const sel_pane = state.findPaneByUuid(sel_uuid) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const range = state.mouse_selection.bufRangeForPane(tab, sel_pane) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    var clamped = range;
+    const budget_rows = rowsForBudget(sel_pane, max_bytes);
+    const top = @min(clamped.a.y, clamped.b.y);
+    const bottom = @max(clamped.a.y, clamped.b.y);
+    if (bottom - top + 1 > budget_rows) {
+        const new_bottom: u32 = top + @as(u32, @intCast(budget_rows - 1));
+        if (clamped.a.y <= clamped.b.y) clamped.b.y = new_bottom else clamped.a.y = new_bottom;
+    }
+    const text = mouse_selection.extractText(state.allocator, sel_pane, clamped) catch {
+        lua.pushNil();
+        return 1;
+    };
+    defer state.allocator.free(text);
+    _ = lua.pushString(text[0..@min(text.len, max_bytes)]);
     return 1;
 }
 
@@ -1057,6 +1083,22 @@ fn hexe_focus(lstate: ?*LuaState) callconv(.c) c_int {
         return 1;
     };
     if (state.paneIsFloating(pane)) {
+        const active_tab = state.activeTabIndex();
+        if (!state.paneVisibleOnTab(pane, active_tab)) {
+            lua.pushBoolean(false);
+            return 1;
+        }
+        if (state.paneParentTab(pane)) |pt| {
+            if (pt != active_tab) {
+                lua.pushBoolean(false);
+                return 1;
+            }
+        }
+        if (!state.isCurrentFamilyMember(pane)) {
+            const ok = state.showFamilyMember(pane.uuid, true);
+            lua.pushBoolean(ok);
+            return 1;
+        }
         for (state.view.float_views.items, 0..) |fp, i| {
             if (fp == pane) {
                 state.setActiveFloatingIndex(i);
@@ -1067,6 +1109,7 @@ fn hexe_focus(lstate: ?*LuaState) callconv(.c) c_int {
         if (state.paneParentTab(pane)) |t| {
             if (t != state.activeTabIndex()) tab_switch.switchToTab(state, t);
         }
+        state.clearZoom();
         state.setActiveFloatingIndex(null);
         state.unfocusAllPanes();
         pane.focused = true;
@@ -1152,7 +1195,11 @@ fn hexe_geometry(lstate: ?*LuaState) callconv(.c) c_int {
         setInt(lua, "width", pane.width);
         setInt(lua, "height", pane.height);
         setBool(lua, "float", false);
-        if (state.currentLayout().splitContaining(pane.uuid)) |split| {
+        const split_layout = if (state.paneParentTab(pane)) |t|
+            (if (t < state.view.tab_views.items.len) &state.view.tab_views.items[t].layout else state.currentLayout())
+        else
+            state.currentLayout();
+        if (split_layout.splitContaining(pane.uuid)) |split| {
             lua.pushNumber(split.ratio);
             lua.setField(-2, "ratio");
         }
@@ -1167,14 +1214,15 @@ fn hexe_geometry(lstate: ?*LuaState) callconv(.c) c_int {
         const px = optPct(lua, idx, "pad_x", state.paneFloatPadX(pane));
         const py = optPct(lua, idx, "pad_y", state.paneFloatPadY(pane));
 
-        // Both halves, in this order, exactly as the nudge bind does: the UI
-        // copy is what gets drawn, the runtime copy is what SES persists, and
-        // setting only one leaves the float in a state that survives a redraw
-        // but not a reattach.
-        state.setPaneFloatGeometryUi(pane.uuid, w, h, x, y, px, py);
+        // Update family root UI + all family projection records and sync to SES.
         state.setPaneFloatGeometry(pane, w, h, x, y, px, py);
         state.applyFrontendFloatNudge(pane);
         state.resizeFloatingPanes();
+        const is_active = if (state.activeFloatingIndex()) |afi|
+            afi < state.view.float_views.items.len and state.view.float_views.items[afi] == pane
+        else
+            false;
+        _ = state.syncFamilyFloats(pane, is_active);
         state.needs_render = true;
     }
 
@@ -1217,7 +1265,11 @@ fn hexe_ratio(lstate: ?*LuaState) callconv(.c) c_int {
         lua.pushNil();
         return 1;
     };
-    const layout = state.currentLayout();
+    const owner_tab = state.paneParentTab(pane) orelse state.activeTabIndex();
+    const layout = if (owner_tab < state.view.tab_views.items.len)
+        &state.view.tab_views.items[owner_tab].layout
+    else
+        state.currentLayout();
     const split = layout.splitContaining(pane.uuid) orelse {
         lua.pushNil();
         return 1;
@@ -1498,7 +1550,13 @@ fn hexe_capture(lstate: ?*LuaState) callconv(.c) c_int {
 
     const on = lua.typeOf(1) != .boolean or lua.toBoolean(1);
     if (lua.typeOf(1) == .boolean and !on) {
-        capture_mod.release(state);
+        const allowed_release = if (state.api_pane_scope) |scope_uuid| blk: {
+            const cap_uuid = state.capture.pane orelse break :blk false;
+            break :blk std.mem.eql(u8, &cap_uuid, &scope_uuid);
+        } else true;
+        if (allowed_release) {
+            capture_mod.release(state);
+        }
     } else if (lua.typeOf(1) == .boolean) {
         const pane = (if (lua.typeOf(2) == .string or lua.typeOf(2) == .number)
             resolvePane(lua, state, 2)
@@ -1591,6 +1649,13 @@ fn hexe_rename_tab(lstate: ?*LuaState) callconv(.c) c_int {
         idx = @intCast(n - 1);
     }
     const ok = state.runtime.setTabName(idx, name);
+    if (ok and state.runtime.isConnected()) {
+        if (state.runtime.tabUuid(idx)) |tab_uuid| {
+            state.runtime.sessionRenameTab(tab_uuid, name) catch |err| {
+                core.logging.logError("terminal", "ctx.rename_tab: sessionRenameTab failed", err);
+            };
+        }
+    }
     state.needs_render = true;
     lua.pushBoolean(ok);
     return 1;
@@ -1647,13 +1712,36 @@ fn hexe_close(lstate: ?*LuaState) callconv(.c) c_int {
     // here does what closing one by hand does -- including sending the waiting
     // caller its result.
     if (isFloat(state, pane)) {
-        const tab = state.activeTabIndex();
+        const tab = state.paneParentTab(pane) orelse state.activeTabIndex();
         if (kill) {
             loop_actions.destroyFloatPane(state, pane);
         } else {
             // Respect what the float declared: sticky ones hide, transient ones
-            // are destroyed because leaving one alive strands its CLI caller.
+            // are destroyed (which uses blocking IPC, so refuse in predicates).
+            const may_destroy = state.paneCaptureOutput(pane) or blk: {
+                if (state.paneIsPwd(pane)) break :blk false;
+                const fk = state.paneFloatKey(pane);
+                if (fk == 0) break :blk false;
+                const fd = state.getLayoutFloatByKey(fk) orelse break :blk false;
+                break :blk fd.attributes.destroy;
+            };
+            if (may_destroy and !inHandlerScope(lua)) {
+                log.warn("ctx.close on a destroyable/capture float is not allowed in a predicate", .{});
+                lua.pushBoolean(false);
+                return 1;
+            }
+            const was_active = if (state.activeFloatingIndex()) |afi|
+                afi < state.view.float_views.items.len and state.view.float_views.items[afi] == pane
+            else
+                false;
             loop_actions.hideOrDestroyFloat(state, pane, tab);
+            if (was_active and !may_destroy and tab == state.activeTabIndex()) {
+                state.syncPaneUnfocus(pane);
+                state.setActiveFloatingIndex(null);
+                if (state.currentLayout().getFocusedPane()) |tiled| {
+                    state.syncPaneFocus(tiled, pane.uuid);
+                }
+            }
         }
         state.needs_render = true;
         lua.pushBoolean(true);
@@ -1661,7 +1749,11 @@ fn hexe_close(lstate: ?*LuaState) callconv(.c) c_int {
     }
 
     const uuid = pane.uuid;
-    const layout = state.currentLayout();
+    const owner_tab = state.paneParentTab(pane) orelse state.activeTabIndex();
+    const layout = if (owner_tab < state.view.tab_views.items.len)
+        &state.view.tab_views.items[owner_tab].layout
+    else
+        state.currentLayout();
     if (kill) {
         state.runtime.killPane(uuid) catch |err| {
             core.logging.logError("terminal", "ctx.close: killPane failed", err);
@@ -1672,13 +1764,19 @@ fn hexe_close(lstate: ?*LuaState) callconv(.c) c_int {
     state.clearTransientPaneState(pane);
     const ok = layout.closePaneLocal(uuid);
     if (ok) {
-        if (layout.getFocusedPane()) |new_pane| {
-            state.applyFrontendPaneRemoved(uuid, new_pane.uuid);
-            state.syncPaneFocus(new_pane, null);
+        if (owner_tab == state.activeTabIndex()) {
+            if (layout.getFocusedPane()) |new_pane| {
+                state.applyFrontendPaneRemoved(uuid, new_pane.uuid);
+                if (state.activeFloatingIndex() == null) {
+                    state.syncPaneFocus(new_pane, null);
+                }
+            } else {
+                state.applyFrontendPaneRemoved(uuid, null);
+            }
+            state.revalidateZoom();
         } else {
             state.applyFrontendPaneRemoved(uuid, null);
         }
-        state.revalidateZoom();
     }
     state.needs_render = true;
     lua.pushBoolean(ok);
@@ -1964,22 +2062,34 @@ fn hexe_selection_range(lstate: ?*LuaState) callconv(.c) c_int {
         return 1;
     };
     const tab = state.activeTabIndex();
-    var it = state.currentLayout().splitIterator();
-    while (it.next()) |p| {
-        const range = state.mouse_selection.bufRangeForPane(tab, p.*) orelse continue;
-        const top = @min(range.a.y, range.b.y);
-        const bottom = @max(range.a.y, range.b.y);
-        lua.createTable(0, 7);
-        setStr(lua, "pane_uuid", p.*.uuid[0..]);
-        setInt(lua, "start_x", range.a.x);
-        setInt(lua, "start_y", @intCast(range.a.y));
-        setInt(lua, "end_x", range.b.x);
-        setInt(lua, "end_y", @intCast(range.b.y));
-        setInt(lua, "rows", @intCast(bottom - top + 1));
-        setBool(lua, "dragging", state.mouse_selection.dragging);
+    const sel_uuid = state.mouse_selection.pane_uuid orelse {
+        lua.pushNil();
         return 1;
+    };
+    if (state.api_pane_scope) |scope_uuid| {
+        if (!std.mem.eql(u8, &sel_uuid, &scope_uuid)) {
+            lua.pushNil();
+            return 1;
+        }
     }
-    lua.pushNil();
+    const sel_pane = state.findPaneByUuid(sel_uuid) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const range = state.mouse_selection.bufRangeForPane(tab, sel_pane) orelse {
+        lua.pushNil();
+        return 1;
+    };
+    const top = @min(range.a.y, range.b.y);
+    const bottom = @max(range.a.y, range.b.y);
+    lua.createTable(0, 7);
+    setStr(lua, "pane_uuid", sel_pane.uuid[0..]);
+    setInt(lua, "start_x", range.a.x);
+    setInt(lua, "start_y", @intCast(range.a.y));
+    setInt(lua, "end_x", range.b.x);
+    setInt(lua, "end_y", @intCast(range.b.y));
+    setInt(lua, "rows", @intCast(bottom - top + 1));
+    setBool(lua, "dragging", state.mouse_selection.dragging);
     return 1;
 }
 
@@ -2057,6 +2167,10 @@ pub fn isPaneLocal(call: []const u8) bool {
 
 /// What `call` requires, or null if there is no such verb.
 pub fn accessFor(call: []const u8) ?core.access.Kind {
+    // `exec` is aliased directly from the core `hexe` table onto the live API
+    // table rather than living in ENTRIES; gate it at `.control` so read-only
+    // plugin sockets cannot execute arbitrary shell commands.
+    if (std.mem.eql(u8, call, "exec")) return .control;
     inline for (ENTRIES) |e| {
         if (std.mem.eql(u8, call, std.mem.span(e.name.ptr))) return e.needs;
     }
@@ -2066,6 +2180,7 @@ pub fn accessFor(call: []const u8) ?core.access.Kind {
 /// What `call` requires on a pane's own socket, where the selector cannot
 /// reach past the caller.
 pub fn scopedAccessFor(call: []const u8) ?core.access.Kind {
+    if (std.mem.eql(u8, call, "exec")) return .control;
     inline for (ENTRIES) |e| {
         if (std.mem.eql(u8, call, std.mem.span(e.name.ptr))) {
             return core.access.priceOf(e.needs, e.needs_scoped, true);

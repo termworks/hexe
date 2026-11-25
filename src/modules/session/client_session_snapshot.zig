@@ -52,7 +52,9 @@ pub fn updateFocus(
         }
     }
     if (active_tab == null) {
-        active_tab = pane.parent_tab;
+        if (pane.parent_tab) |pt| {
+            if (pt < snapshot.tabs.items.len) active_tab = pt;
+        }
     }
 
     snapshot.focused_pane_uuid = pane_uuid;
@@ -63,12 +65,15 @@ pub fn updateFocus(
     switch (pane.kind) {
         .split => {
             snapshot.active_float_uuid = null;
-            if (active_tab) |idx| {
+            // Write split focus to the split's own owning tab (falling back to
+            // active_tab only when parent_tab is absent) so a delayed aux frame
+            // never overwrites another tab's focused_pane_uuid.
+            const split_tab = if (pane.parent_tab) |pt|
+                (if (pt < snapshot.tabs.items.len) pt else active_tab)
+            else
+                active_tab;
+            if (split_tab) |idx| {
                 snapshot.tabs.items[idx].focused_pane_uuid = pane_uuid;
-            } else if (pane.parent_tab) |idx| {
-                if (idx < snapshot.tabs.items.len) {
-                    snapshot.tabs.items[idx].focused_pane_uuid = pane_uuid;
-                }
             }
         },
         .float => {
@@ -253,12 +258,24 @@ pub fn removeTab(
     if (active_tab_hint) |hint| {
         const new_active: usize = @intCast(hint);
         snapshot.active_tab = @min(new_active, snapshot.tabs.items.len - 1);
+    } else if (snapshot.active_tab > idx) {
+        snapshot.active_tab -= 1;
     } else if (snapshot.active_tab >= snapshot.tabs.items.len) {
         snapshot.active_tab = snapshot.tabs.items.len - 1;
     }
 
     if (snapshot.active_float_uuid) |active_float_uuid| {
-        if (!snapshot.panes.contains(active_float_uuid)) {
+        const keep = blk: {
+            if (!snapshot.panes.contains(active_float_uuid)) break :blk false;
+            for (snapshot.floats.items) |f| {
+                if (!std.mem.eql(u8, &f.pane_uuid, &active_float_uuid)) continue;
+                if (f.parent_tab) |pt| break :blk pt == snapshot.active_tab and f.visible;
+                if (snapshot.active_tab >= 64) break :blk false;
+                break :blk (f.tab_visible & (@as(u64, 1) << @intCast(snapshot.active_tab))) != 0;
+            }
+            break :blk false;
+        };
+        if (!keep) {
             snapshot.active_float_uuid = null;
         }
     }
@@ -460,7 +477,19 @@ pub fn syncFloat(
         try snapshot.floats.append(snapshot.allocator, float_state);
     }
 
-    if (active) {
+    const effective_tab: usize = if (active_tab_hint) |hint| blk: {
+        const tab_idx: usize = @intCast(hint);
+        break :blk if (tab_idx < snapshot.tabs.items.len) tab_idx else snapshot.active_tab;
+    } else snapshot.active_tab;
+
+    const visible_on_active_tab = if (parent_tab) |pt|
+        pt == effective_tab and visible
+    else if (effective_tab < 64)
+        (tab_visible & (@as(u64, 1) << @intCast(effective_tab))) != 0
+    else
+        false;
+
+    if (active and visible_on_active_tab) {
         if (active_tab_hint) |hint| {
             const tab_idx: usize = @intCast(hint);
             if (tab_idx < snapshot.tabs.items.len) {
@@ -469,12 +498,14 @@ pub fn syncFloat(
         }
         snapshot.active_float_uuid = pane_uuid;
         snapshot.focused_pane_uuid = pane_uuid;
-    } else if (!visible) {
+    } else if (!active or !visible_on_active_tab) {
         if (snapshot.active_float_uuid) |active_float_uuid| {
             if (std.mem.eql(u8, &active_float_uuid, &pane_uuid)) {
                 snapshot.active_float_uuid = null;
-                if (snapshot.active_tab < snapshot.tabs.items.len) {
-                    snapshot.focused_pane_uuid = snapshot.tabs.items[snapshot.active_tab].focused_pane_uuid;
+                if (effective_tab < snapshot.tabs.items.len) {
+                    snapshot.focused_pane_uuid = snapshot.tabs.items[effective_tab].focused_pane_uuid;
+                } else {
+                    snapshot.focused_pane_uuid = null;
                 }
             }
         }
@@ -492,23 +523,36 @@ pub fn removeFloat(self: anytype, client_id: usize, pane_uuid: [32]u8) void {
         return;
     };
 
-    var float_index: ?usize = null;
-    for (snapshot.floats.items, 0..) |float_state, idx| {
-        if (std.mem.eql(u8, &float_state.pane_uuid, &pane_uuid)) {
-            float_index = idx;
-            break;
+    // Cascade-remove any sub-floats whose parent_float is `pane_uuid`.
+    var fi: usize = snapshot.floats.items.len;
+    while (fi > 0) {
+        fi -= 1;
+        const f = snapshot.floats.items[fi];
+        const is_target = std.mem.eql(u8, &f.pane_uuid, &pane_uuid);
+        const is_child = if (f.parent_float) |pf| std.mem.eql(u8, &pf, &pane_uuid) else false;
+        if (!is_target and !is_child) continue;
+        const drop_uuid = f.pane_uuid;
+        _ = snapshot.floats.orderedRemove(fi);
+        if (snapshot.panes.get(drop_uuid)) |pane| {
+            if (pane.kind == .float) _ = snapshot.panes.remove(drop_uuid);
+        }
+        if (snapshot.active_float_uuid) |af| {
+            if (std.mem.eql(u8, &af, &drop_uuid)) snapshot.active_float_uuid = null;
+        }
+        if (snapshot.focused_pane_uuid) |fp| {
+            if (std.mem.eql(u8, &fp, &drop_uuid)) {
+                snapshot.focused_pane_uuid = if (snapshot.active_tab < snapshot.tabs.items.len)
+                    snapshot.tabs.items[snapshot.active_tab].focused_pane_uuid
+                else
+                    null;
+            }
         }
     }
-    if (float_index) |idx| {
-        _ = snapshot.floats.orderedRemove(idx);
-    }
-
     if (snapshot.panes.get(pane_uuid)) |pane| {
         if (pane.kind == .float) {
             _ = snapshot.panes.remove(pane_uuid);
         }
     }
-
     if (snapshot.active_float_uuid) |active_float_uuid| {
         if (std.mem.eql(u8, &active_float_uuid, &pane_uuid)) {
             snapshot.active_float_uuid = null;

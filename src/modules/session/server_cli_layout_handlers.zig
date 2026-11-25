@@ -263,6 +263,13 @@ pub fn buildLayoutExportJson(self: *Server, snapshot: *const state.SessionSnapsh
         if (float_state.parent_tab) |parent_tab| {
             try writer.print(",\"parent_tab\":{d}", .{parent_tab});
         }
+        if (float_state.parent_float) |parent_float| {
+            try writer.writeAll(",\"parent_float\":");
+            try writer.print("{f}", .{std.json.fmt(parent_float[0..], .{})});
+        }
+        if (float_state.family_index != 0) {
+            try writer.print(",\"family_index\":{d}", .{float_state.family_index});
+        }
         if (self.ses_state.getPane(float_state.pane_uuid)) |pane| {
             if (pane.cwd) |cwd| {
                 try writer.writeAll(",\"pwd_dir\":");
@@ -503,10 +510,22 @@ pub fn handleKillTarget(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []
         },
     }
     if (pane_match) |uuid| {
+        const owner_client_id: ?usize = if (self.ses_state.store.panes.getPtr(uuid)) |pane| pane.attached_to else null;
+        if (owner_client_id) |cid| {
+            if (self.ses_state.getClient(cid)) |client| {
+                if (client.mux_ctl_fd) |ctl_fd| {
+                    var msg = wire.PaneUuid{ .uuid = uuid };
+                    self.notifyOrClose(ctl_fd, .pane_exited, std.mem.asBytes(&msg));
+                }
+            }
+        }
         self.ses_state.killPane(uuid) catch {
             replyKillTarget(self, fd, .{ .success = 0, .kind = 0, .killed_panes = 0, .error_len = 0 }, "kill failed");
             return;
         };
+        if (owner_client_id) |cid| {
+            self.pushClientSessionSnapshot(cid);
+        }
         replyKillTarget(self, fd, .{ .success = 1, .kind = @intFromEnum(wire.KillTargetKind.pane), .killed_panes = 1, .error_len = 0 }, "");
         return;
     }

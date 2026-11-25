@@ -95,11 +95,21 @@ pub fn run(allocator: std.mem.Allocator, session_id: []const u8, output_path: []
         return error.SessionNotFound;
     }
 
+    // SES handles one request per CLI connection, so open a fresh connection
+    // for `.get_session_state`.
+    var state_client = core.ipc.Client.connect(ses_path) catch {
+        cli_ui.printErr("could not connect to ses daemon", .{});
+        return error.SesNotRunning;
+    };
+    defer state_client.close();
+    const state_fd = state_client.fd;
+    try wire.sendCliHandshake(state_fd);
+
     // Request full session state
-    try wire.writeControl(fd, .get_session_state, std.mem.asBytes(&target_session_id));
+    try wire.writeControl(state_fd, .get_session_state, std.mem.asBytes(&target_session_id));
 
     // Read session state response
-    const state_hdr = try wire.readControlHeader(fd);
+    const state_hdr = try wire.readControlHeader(state_fd);
     const state_msg_type: wire.MsgType = @enumFromInt(state_hdr.msg_type);
     if (state_msg_type != .session_state) {
         cli_ui.printErr("failed to retrieve session state", .{});
@@ -112,7 +122,7 @@ pub fn run(allocator: std.mem.Allocator, session_id: []const u8, output_path: []
 
     const state_payload = try allocator.alloc(u8, state_hdr.payload_len);
     defer allocator.free(state_payload);
-    try wire.readExact(fd, state_payload);
+    try wire.readExact(state_fd, state_payload);
 
     // Write to file or stdout
     if (output_path.len > 0) {

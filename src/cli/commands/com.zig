@@ -749,14 +749,20 @@ pub fn resolvePaneTarget(
     // that name a pane outright: `--uuid` beside it names which family, not
     // which pane.
     if (target.chip) |chip| {
-        const base = if (target.uuid.len == 32)
+        var resolved_buf: [32]u8 = undefined;
+        const base: []const u8 = if (target.uuid.len == 32)
             target.uuid
         else if (target.uuid.len > 0) blk: {
             const hit = askSesToResolve(allocator, target.session, target.uuid, true) catch |err| return err;
-            break :blk &hit.uuid;
+            resolved_buf = hit.uuid;
+            break :blk resolved_buf[0..];
+        } else if (target.pane.len > 0) blk: {
+            const hit = askSesToResolve(allocator, target.session, target.pane, false) catch |err| return err;
+            resolved_buf = hit.uuid;
+            break :blk resolved_buf[0..];
         } else std.posix.getenv("HEXE_PANE_UUID") orelse {
             cli_ui.printErr("--chip addresses this float's family, so it needs a pane", .{});
-            cli_ui.printErrHint("Run it inside a float, or name the family with --uuid.", .{});
+            cli_ui.printErrHint("Run it inside a float, or name the family with --uuid or --pane.", .{});
             return shared.ResolveError.NoTarget;
         };
         if (base.len != 32) return shared.ResolveError.NoTarget;
