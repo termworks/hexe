@@ -7,6 +7,7 @@ const Pane = @import("pane.zig").Pane;
 /// 2. Its parent_tab matches (if set), OR it has no parent_tab restriction
 pub fn isFloatRenderableOnTab(state: *State, pane: *Pane, tab_idx: usize) bool {
     if (!state.paneVisibleOnTab(pane, tab_idx)) return false;
+    if (!state.isCurrentFamilyMember(pane)) return false;
     if (state.paneParentTab(pane)) |parent| {
         return parent == tab_idx;
     }

@@ -24,6 +24,7 @@ const Renderer = @import("render_core.zig").Renderer;
 const region_render = @import("region_render.zig");
 const statusbar = @import("statusbar.zig");
 const borders = @import("borders.zig");
+const float_util = @import("float_util.zig");
 
 pub const Edge = enum { top, bottom, left, right };
 pub const Slot = enum { start, center, end };
@@ -324,15 +325,20 @@ pub fn hitTestAction(state: *State, pane: *Pane, px: u16, py: u16, button: u8) ?
 pub fn hitTestVisible(state: *State, px: u16, py: u16, button: u8) ?[]const u8 {
     if (!state.config.decor.any()) return null;
 
+    const active_tab = state.activeTabIndex();
     var fi: usize = state.view.float_views.items.len;
     while (fi > 0) {
         fi -= 1;
         const fp = state.view.float_views.items[fi];
+        if (!float_util.isFloatRenderableOnTab(state, fp, active_tab)) continue;
         if (hitTestAction(state, fp, px, py, button)) |a| return a;
     }
 
     var it = state.currentLayout().splits.valueIterator();
     while (it.next()) |pane_ptr| {
+        if (state.zoomed_pane_uuid) |zu| {
+            if (!std.mem.eql(u8, &pane_ptr.*.uuid, &zu)) continue;
+        }
         if (hitTestAction(state, pane_ptr.*, px, py, button)) |a| return a;
     }
     return null;

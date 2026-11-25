@@ -225,11 +225,37 @@ fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, ac
         if (self.floatUiConst(pane)) |ui| break :blk ui.navigatable;
         break :blk false;
     };
+    const keep_capture_output = blk: {
+        if (self.floatUiByUuid(float_state.pane_uuid)) |ui| break :blk ui.capture_output;
+        if (self.floatUiConst(pane)) |ui| break :blk ui.capture_output;
+        break :blk false;
+    };
+    const keep_retained = blk: {
+        if (self.floatUiByUuid(float_state.pane_uuid)) |ui| break :blk ui.retained_after_exit;
+        if (self.floatUiConst(pane)) |ui| break :blk ui.retained_after_exit;
+        break :blk false;
+    };
+    const keep_closed_by_exit_key = blk: {
+        if (self.floatUiByUuid(float_state.pane_uuid)) |ui| break :blk ui.closed_by_exit_key;
+        if (self.floatUiConst(pane)) |ui| break :blk ui.closed_by_exit_key;
+        break :blk false;
+    };
+    const keep_exit_key: ?[]u8 = blk: {
+        const src = (if (self.floatUiByUuid(float_state.pane_uuid)) |ui| ui.exit_key else null) orelse
+            (if (self.floatUiConst(pane)) |ui| ui.exit_key else null) orelse break :blk null;
+        break :blk self.allocator.dupe(u8, src) catch null;
+    };
+    defer if (keep_exit_key) |k| self.allocator.free(k);
+
     self.clearFloatUi(pane.uuid);
     pane.adoptIdentity(float_state.pane_uuid);
     pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid) else false;
     _ = self.setPaneFloatUi(float_state.pane_uuid, .{
         .navigatable = keep_navigatable,
+        .retained_after_exit = keep_retained,
+        .capture_output = keep_capture_output,
+        .closed_by_exit_key = keep_closed_by_exit_key,
+        .exit_key = keep_exit_key,
         .width_pct = float_state.width_pct,
         .height_pct = float_state.height_pct,
         .pos_x_pct = float_state.pos_x_pct,
@@ -537,6 +563,18 @@ fn restoreFloatPane(
     };
     defer if (preserved_title) |title| self.allocator.free(title);
 
+    const preserved_pwd_dir = blk: {
+        if (float_state.is_pwd) {
+            if (self.floatUiByUuid(float_state.pane_uuid)) |ui| {
+                if (ui.pwd_dir) |dir| {
+                    break :blk self.allocator.dupe(u8, dir) catch null;
+                }
+            }
+        }
+        break :blk null;
+    };
+    defer if (preserved_pwd_dir) |dir| self.allocator.free(dir);
+
     const pane = blk: {
         if (existing_views) |views| {
             if (views.fetchRemove(float_state.pane_uuid)) |entry| {
@@ -575,26 +613,24 @@ fn restoreFloatPane(
     if (float_state.is_pwd) {
         if (restored_sticky_pwd) |pwd| {
             _ = self.setPanePwdDir(float_state.pane_uuid, pwd);
+        } else if (preserved_pwd_dir) |pwd| {
+            _ = self.setPanePwdDir(float_state.pane_uuid, pwd);
         }
         // No live-cwd fallback: a per-CWD float's identity is the SES
         // sticky_pwd. If SES has not reported it during this hydration pass,
-        // leave pwd_dir empty so it is re-resolved authoritatively on the next
-        // toggle/adoption instead of being silently pinned to the float
-        // shell's (possibly cd'd) working directory.
+        // keep any previously known identity or leave pwd_dir empty so it is
+        // re-resolved authoritatively on the next toggle/adoption instead of
+        // being silently pinned to the float shell's (possibly cd'd) cwd.
     }
 
     const restored_title = blk: {
-        // A sub-float carries its parent's key, so the layout title under that
-        // key is the parent's name. The float's own title wins for a child.
-        if (session_model.isSubFloat(float_state)) {
-            if (preserved_title) |title| break :blk title;
-        }
+        // Preserve user-renamed titles and sub-float titles over config defaults.
+        if (preserved_title) |title| break :blk title;
         if (float_state.float_key != 0) {
             if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
                 if (float_def.title) |title| break :blk title;
             }
         }
-        if (preserved_title) |title| break :blk title;
         break :blk null;
     };
     const visuals = self.resolveFloatVisuals(if (float_state.float_key != 0) .named else .adhoc, restored_title);
@@ -781,13 +817,31 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
     } else {
         self.setActiveTabIndex(0);
     }
-    self.setActiveFloatingUuid(snapshot.active_float_uuid);
-    self.runtime.setFocusedPaneUuid(snapshot.focused_pane_uuid);
+    const wanted_active_float = snapshot.active_float_uuid;
+    const wanted_focused_pane = snapshot.focused_pane_uuid;
+    const restored_active_float: ?[32]u8 = blk: {
+        const active_uuid = wanted_active_float orelse break :blk null;
+        const active_pane = self.findPaneByUuid(active_uuid) orelse break :blk null;
+        const tab = self.activeTabIndex();
+        if (!self.paneVisibleOnTab(active_pane, tab)) break :blk null;
+        if (self.paneParentTab(active_pane)) |pt| {
+            if (pt != tab) break :blk null;
+        }
+        break :blk active_uuid;
+    };
+    self.setActiveFloatingUuid(restored_active_float);
+    const rejected_hidden_float = wanted_active_float != null and restored_active_float == null;
+    self.runtime.setFocusedPaneUuid(if (rejected_hidden_float) null else wanted_focused_pane);
 
     if (self.activeFloatingIndex()) |idx| {
         self.rememberFloatingFocus(self.view.float_views.items[idx]);
     } else if (self.view.tab_views.items.len > 0) {
         self.rememberSplitFocus();
+        if (self.currentLayout().getFocusedPane()) |tiled| {
+            self.runtime.setFocusedPaneUuid(tiled.uuid);
+        } else {
+            self.runtime.setFocusedPaneUuid(null);
+        }
     }
 
     self.renderer.invalidate();
@@ -884,7 +938,7 @@ pub fn reattachSessionDetailed(self: anytype, session_id_prefix: []const u8) Rea
     }
 
     const restored_name = normalizeRestoredSessionName(snapshot.session_name);
-    const wanted_active_tab = snapshot.active_tab;
+    var wanted_active_tab = snapshot.active_tab;
     if (!self.runtime.setSessionIdentity(snapshot.uuid, restored_name)) {
         terminal_main.debugLog("reattachSession: failed to set restored session identity before adoption", .{});
         return .failed;
@@ -1036,8 +1090,33 @@ pub fn reattachSessionDetailed(self: anytype, session_id_prefix: []const u8) Rea
                 // Don't remove the LAST tab - keep at least one tab always.
                 if (self.view.tab_views.items.len > 1) {
                     terminal_main.debugLog("reattachSession: removing empty tab at index {d}", .{i});
+                    // Remove tab-bound floats belonging to the dead tab before shifting indices.
+                    var fi: usize = self.view.float_views.items.len;
+                    while (fi > 0) {
+                        fi -= 1;
+                        const fp = self.view.float_views.items[fi];
+                        if (self.paneParentTab(fp)) |parent| {
+                            if (parent == i) {
+                                const fp_uuid = fp.uuid;
+                                self.runtime.killPane(fp_uuid) catch {};
+                                self.clearTransientPaneState(fp);
+                                self.clearFloatUi(fp_uuid);
+                                fp.deinit();
+                                self.allocator.destroy(fp);
+                                _ = self.view.float_views.orderedRemove(fi);
+                                self.clearLocalFloatState(fp_uuid);
+                            }
+                        }
+                    }
+                    if (self.runtime.tabUuid(i)) |dead_tab_uuid| {
+                        _ = self.syncSessionTabRemovedChecked(dead_tab_uuid, null);
+                    }
+                    self.reindexFloatParentTabsAfterRemovedTab(i);
                     var dead_tab = self.view.tab_views.orderedRemove(i);
                     dead_tab.deinit();
+                    self.runtime.removeTabMeta(i);
+                    self.runtime.removeTabFocusMemory(i);
+                    if (i < wanted_active_tab) wanted_active_tab -= 1;
                     removed_tabs += 1;
                     // Don't increment i, next tab shifted into this position
                 } else {
@@ -1103,17 +1182,32 @@ pub fn reattachSessionDetailed(self: anytype, session_id_prefix: []const u8) Rea
     } else {
         self.setActiveTabIndex(0);
     }
+    // Snapshot the desired active float UUID BEFORE calling setActiveFloatingIndex(null),
+    // because `snapshot` aliases `self.runtime`'s attached snapshot and clearing
+    // active float mutates `snapshot.active_float_uuid` in place.
+    const wanted_active_float = snapshot.active_float_uuid;
     self.setActiveFloatingIndex(null);
-    if (snapshot.active_float_uuid) |active_float_uuid| {
+    if (wanted_active_float) |active_float_uuid| {
+        const tab = self.activeTabIndex();
         for (self.view.float_views.items, 0..) |pane, idx| {
-            if (std.mem.eql(u8, &pane.uuid, &active_float_uuid)) {
-                self.setActiveFloatingIndex(idx);
-                break;
+            if (!std.mem.eql(u8, &pane.uuid, &active_float_uuid)) continue;
+            if (!self.paneVisibleOnTab(pane, tab)) break;
+            if (self.paneParentTab(pane)) |pt| {
+                if (pt != tab) break;
             }
+            self.setActiveFloatingIndex(idx);
+            self.runtime.setFocusedPaneUuid(active_float_uuid);
+            break;
         }
     }
     if (self.activeFloatingIndex()) |idx| {
         self.rememberFloatingFocus(self.view.float_views.items[idx]);
+    } else if (self.view.tab_views.items.len > 0) {
+        if (self.currentLayout().getFocusedPane()) |tiled| {
+            self.runtime.setFocusedPaneUuid(tiled.uuid);
+        } else {
+            self.runtime.setFocusedPaneUuid(null);
+        }
     }
 
     self.renderer.invalidate();
@@ -1204,6 +1298,10 @@ pub fn applySessionSnapshot(self: anytype) bool {
         });
     }
 
+    if (self.isSearchActive()) self.exitSearchMode();
+    if (self.isCopyModeActive()) self.exitCopyMode();
+    self.mouse_drag = .none;
+
     var existing_views = ExistingPaneViews.init(self.allocator);
     defer {
         destroyUnusedPaneViews(self, &existing_views);
@@ -1293,17 +1391,32 @@ pub fn applySessionSnapshot(self: anytype) bool {
     } else {
         self.setActiveTabIndex(0);
     }
+    // Snapshot the desired active float UUID BEFORE calling setActiveFloatingIndex(null),
+    // because `snapshot` aliases `self.runtime`'s attached snapshot and clearing
+    // active float mutates `snapshot.active_float_uuid` in place.
+    const wanted_active_float = snapshot.active_float_uuid;
     self.setActiveFloatingIndex(null);
-    if (snapshot.active_float_uuid) |active_float_uuid| {
+    if (wanted_active_float) |active_float_uuid| {
+        const tab = self.activeTabIndex();
         for (self.view.float_views.items, 0..) |pane, idx| {
-            if (std.mem.eql(u8, &pane.uuid, &active_float_uuid)) {
-                self.setActiveFloatingIndex(idx);
-                break;
+            if (!std.mem.eql(u8, &pane.uuid, &active_float_uuid)) continue;
+            if (!self.paneVisibleOnTab(pane, tab)) break;
+            if (self.paneParentTab(pane)) |pt| {
+                if (pt != tab) break;
             }
+            self.setActiveFloatingIndex(idx);
+            self.runtime.setFocusedPaneUuid(active_float_uuid);
+            break;
         }
     }
     if (self.activeFloatingIndex()) |idx| {
         self.rememberFloatingFocus(self.view.float_views.items[idx]);
+    } else if (self.view.tab_views.items.len > 0) {
+        if (self.currentLayout().getFocusedPane()) |tiled| {
+            self.runtime.setFocusedPaneUuid(tiled.uuid);
+        } else {
+            self.runtime.setFocusedPaneUuid(null);
+        }
     }
 
     self.renderer.invalidate();

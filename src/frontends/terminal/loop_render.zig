@@ -19,6 +19,7 @@ const pane_search = @import("pane_search.zig");
 const vt_bridge = @import("vt_bridge.zig");
 const region_render = @import("region_render.zig");
 const decor = @import("decor.zig");
+const float_util = @import("float_util.zig");
 const sanitizeLabelUtf8 = @import("text_width.zig").sanitizeLabelUtf8;
 const Pane = @import("pane.zig").Pane;
 
@@ -546,14 +547,16 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (state.activeFloatingIndex()) |idx| {
                 if (idx < state.view.float_views.items.len) {
                     const fp = state.view.float_views.items[idx];
-                    const has_shadow = state.paneFloatHasShadow(fp);
-                    const shadow_offset: u16 = if (has_shadow) 1 else 0;
-                    break :blk .{
-                        .x = state.paneBorderX(fp),
-                        .y = state.paneBorderY(fp),
-                        .w = state.paneBorderW(fp) + shadow_offset,
-                        .h = state.paneBorderH(fp) + shadow_offset,
-                    };
+                    if (float_util.isFloatRenderableOnTab(state, fp, state.activeTabIndex())) {
+                        const has_shadow = state.paneFloatHasShadow(fp);
+                        const shadow_offset: u16 = if (has_shadow) 1 else 0;
+                        break :blk .{
+                            .x = state.paneBorderX(fp),
+                            .y = state.paneBorderY(fp),
+                            .w = state.paneBorderW(fp) + shadow_offset,
+                            .h = state.paneBorderH(fp) + shadow_offset,
+                        };
+                    }
                 }
             }
             if (state.currentLayout().getFocusedPane()) |p| {
@@ -568,16 +571,21 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Draw TAB realm notifications (center of screen, below MUX).
     const current_tab = &state.view.tab_views.items[state.activeTabIndex()];
 
-    // Draw PANE-level blocking popups (for ALL panes with active popups).
-    // Check all splits in current tab.
+    // Draw PANE-level blocking popups (for visible panes with active popups).
+    // Check visible splits in current tab.
     var split_iter = current_tab.layout.splits.valueIterator();
     while (split_iter.next()) |pane| {
+        if (state.zoomed_pane_uuid) |zu| {
+            if (!std.mem.eql(u8, &pane.*.uuid, &zu)) continue;
+        }
         if (pane.*.popups.getActivePopup()) |popup| {
             popup_render.drawInBounds(renderer, popup, &state.pop_config.pane, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
         }
     }
-    // Check all floats.
+    // Check renderable floats on this tab.
+    const active_tab_for_pop = state.activeTabIndex();
     for (state.view.float_views.items) |fpane| {
+        if (!float_util.isFloatRenderableOnTab(state, fpane, active_tab_for_pop)) continue;
         if (fpane.popups.getActivePopup()) |popup| {
             popup_render.drawInBounds(renderer, popup, &state.pop_config.pane, fpane.x, fpane.y, fpane.width, fpane.height);
         }
@@ -609,15 +617,18 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     var cursor = CursorInfo{};
     var cursor_palette: ?core.palette.RGB = null;
 
-    if (state.activeFloatingIndex()) |idx| {
-        const pane = state.view.float_views.items[idx];
-        const pos = pane.getCursorPos();
-        cursor.x = stretchedCursorX(pane, pos.x, pos.y);
-        cursor.y = pos.y;
-        cursor.style = pane.getCursorStyle();
-        cursor.visible = pane.isCursorVisible();
-        cursor_palette = pane.vt.ns_table.cursorFor(pane.vt.cursorNamespace());
-    } else if (state.currentLayout().getFocusedPane()) |pane| {
+    const cursor_pane: ?*Pane = blk: {
+        if (state.activeFloatingIndex()) |idx| {
+            if (idx < state.view.float_views.items.len) {
+                const fp = state.view.float_views.items[idx];
+                if (float_util.isFloatRenderableOnTab(state, fp, state.activeTabIndex())) {
+                    break :blk fp;
+                }
+            }
+        }
+        break :blk state.currentLayout().getFocusedPane();
+    };
+    if (cursor_pane) |pane| {
         const pos = pane.getCursorPos();
         cursor.x = stretchedCursorX(pane, pos.x, pos.y);
         cursor.y = pos.y;

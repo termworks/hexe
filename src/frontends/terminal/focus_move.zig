@@ -1,6 +1,7 @@
 const frontend_core = @import("frontend_core");
 const layout_mod = @import("layout.zig");
 const focus_nav = @import("focus_nav.zig");
+const float_util = @import("float_util.zig");
 const State = @import("state.zig").State;
 const actions = @import("loop_actions.zig");
 
@@ -34,23 +35,24 @@ pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
     if (state.activeFloatingIndex()) |idx| {
         if (idx < state.view.float_views.items.len) {
             const fp = state.view.float_views.items[idx];
-            const navigable = if (state.floatUiConst(fp)) |ui| ui.navigatable else false;
-            if (navigable) {
-                origin_is_navigable_float = true;
-            } else {
-                state.cursor_needs_restore = true;
-                switch (dir) {
-                    .left => actions.switchToPrevTab(state),
-                    .right => actions.switchToNextTab(state),
-                    .up, .down => {},
+            if (float_util.isFloatRenderableOnTab(state, fp, state.activeTabIndex())) {
+                if (state.paneNavigatable(fp)) {
+                    origin_is_navigable_float = true;
+                } else {
+                    state.cursor_needs_restore = true;
+                    switch (dir) {
+                        .left => actions.switchToPrevTab(state),
+                        .right => actions.switchToNextTab(state),
+                        .up, .down => {},
+                    }
+                    state.needs_render = true;
+                    return true;
                 }
-                state.needs_render = true;
-                return true;
             }
         }
     }
 
-    // Split navigation
+    // Split + navigable float navigation
     const old_uuid = state.getCurrentFocusedUuid();
     const cursor = blk: {
         // Navigating FROM a float: let `focusDirectionAny` take the origin from
@@ -65,7 +67,11 @@ pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
     };
 
     if (focus_nav.focusDirectionAny(state, dir, cursor)) |target| {
-        state.setActiveFloatingIndex(null);
+        if (target.kind == .float) {
+            state.setActiveFloatingIndex(target.float_index);
+        } else {
+            state.setActiveFloatingIndex(null);
+        }
         state.applyFrontendFocusMove(coreDirectionFromLayout(dir), target.pane.uuid);
         state.syncPaneFocus(target.pane, old_uuid);
         state.renderer.invalidate();

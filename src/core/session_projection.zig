@@ -307,6 +307,13 @@ pub const SessionProjection = struct {
         return floatVisibleOnTab(float_state, tab);
     }
 
+    fn findOldTabIndexByUuid(self: *const SessionProjection, tab_uuid: [32]u8) ?usize {
+        for (self.tabs.items, 0..) |old_tab, old_idx| {
+            if (std.mem.eql(u8, &old_tab.uuid, &tab_uuid)) return old_idx;
+        }
+        return null;
+    }
+
     fn buildReplacementTabLastFloating(
         self: *const SessionProjection,
         snapshot: *const session_model.SessionSnapshot,
@@ -314,9 +321,10 @@ pub const SessionProjection = struct {
         var next_floating = try buildTabLastFloating(self.allocator, snapshot.tabs.items.len);
         errdefer next_floating.deinit(self.allocator);
 
-        const preserve_len = @min(next_floating.items.len, self.tab_last_floating_uuid.items.len);
-        for (0..preserve_len) |idx| {
-            const uuid = self.tab_last_floating_uuid.items[idx] orelse continue;
+        for (snapshot.tabs.items, 0..) |snap_tab, idx| {
+            const old_idx = self.findOldTabIndexByUuid(snap_tab.uuid) orelse continue;
+            if (old_idx >= self.tab_last_floating_uuid.items.len) continue;
+            const uuid = self.tab_last_floating_uuid.items[old_idx] orelse continue;
             if (!snapshot.panes.contains(uuid)) continue;
             if (!snapshotFloatVisibleOnTab(snapshot, uuid, idx)) continue;
             next_floating.items[idx] = uuid;
@@ -341,9 +349,10 @@ pub const SessionProjection = struct {
         var next_kind = try buildTabLastFocusKind(self.allocator, snapshot.tabs.items.len);
         errdefer next_kind.deinit(self.allocator);
 
-        const preserve_len = @min(next_kind.items.len, self.tab_last_focus_kind.items.len);
-        for (0..preserve_len) |idx| {
-            if (self.tab_last_focus_kind.items[idx] == .float and next_floating[idx] != null) {
+        for (snapshot.tabs.items, 0..) |snap_tab, idx| {
+            const old_idx = self.findOldTabIndexByUuid(snap_tab.uuid) orelse continue;
+            if (old_idx >= self.tab_last_focus_kind.items.len) continue;
+            if (self.tab_last_focus_kind.items[old_idx] == .float and next_floating[idx] != null) {
                 next_kind.items[idx] = .float;
             }
         }
@@ -510,6 +519,12 @@ pub const SessionProjection = struct {
                     float_state.parent_tab = parent - 1;
                 }
             }
+            // tab_visible is indexed by tab position, so removing a tab must
+            // drop its bit and shift higher tab bits down — matching SES's
+            // client_session_snapshot.removeTab. Leaving it unshifted causes
+            // per_cwd/global floats from closed or later tabs to appear on the
+            // wrong project's tab (and get synced back to SES corrupted).
+            float_state.tab_visible = session_model.shiftTabVisibleForRemove(float_state.tab_visible, removed_idx);
         }
         var pane_it = snapshot.panes.iterator();
         while (pane_it.next()) |entry| {
@@ -581,12 +596,18 @@ pub const SessionProjection = struct {
         uuid: [32]u8,
         name: []const u8,
     ) !void {
+        const insert_idx = self.tabs.items.len;
         const name_owned = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_owned);
         try self.tabs.append(self.allocator, .{
             .uuid = uuid,
             .name_owned = name_owned,
         });
+        if (self.attached_snapshot) |*snapshot| {
+            for (snapshot.floats.items) |*float_state| {
+                float_state.tab_visible = session_model.shiftTabVisibleForInsert(float_state.tab_visible, insert_idx);
+            }
+        }
     }
 
     pub fn removeTab(self: *SessionProjection, index: usize) void {

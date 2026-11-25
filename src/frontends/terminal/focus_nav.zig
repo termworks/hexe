@@ -80,8 +80,7 @@ pub fn focusDirectionAny(state: *State, dir: layout_mod.Layout.Direction, cursor
 
     const cur_rect = nav.pane_rect(state, current);
 
-    // Splits only — floats have dedicated toggle keys so directional
-    // navigation skips them.
+    // Splits + renderable navigable floats compete equally.
     var it = state.currentLayout().splitIterator();
     while (it.next()) |sp| {
         const p = sp.*;
@@ -91,6 +90,19 @@ pub fn focusDirectionAny(state: *State, dir: layout_mod.Layout.Direction, cursor
         if (s < best_score) {
             best_score = s;
             best = .{ .kind = .split, .pane = p, .float_index = null };
+        }
+    }
+
+    const active_tab = state.activeTabIndex();
+    for (state.view.float_views.items, 0..) |fp, fi| {
+        if (fp == current) continue;
+        if (!state.paneNavigatable(fp)) continue;
+        if (!isFloatRenderableOnTab(state, fp, active_tab)) continue;
+        const r = nav.pane_rect(state, fp);
+        const s = nav.score(dir, origin.x, origin.y, cur_rect, r) orelse continue;
+        if (s < best_score) {
+            best_score = s;
+            best = .{ .kind = .float, .pane = fp, .float_index = fi };
         }
     }
 
