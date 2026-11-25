@@ -61,7 +61,7 @@ pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, pars
     if (state.activeFloatingIndex()) |idx| {
         const fpane = state.view.float_views.items[idx];
         const can_interact = if (state.paneParentTab(fpane)) |parent| parent == state.activeTabIndex() else true;
-        if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) {
+        if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact and state.isCurrentFamilyMember(fpane)) {
             if (fpane.popups.isBlocked()) {
                 if (handleBlockedPopup(&fpane.popups, parsed_event)) {
                     loop_ipc.sendPopResponse(state);
@@ -91,10 +91,11 @@ pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, pars
             state.needs_render = true;
         }
         // Broadcast mode (pane.sync_toggle): fan the same input out to every
-        // split pane in the active tab, tmux `synchronize-panes` style.
+        // non-popup-blocked split pane in the active tab, tmux `synchronize-panes` style.
         if (state.sync_input) {
             var it = state.currentLayout().splitIterator();
             while (it.next()) |p| {
+                if (p.*.popups.isBlocked()) continue;
                 if (p.*.isScrolled()) p.*.scrollToBottom();
                 state.writePaneInput(p.*, bytes);
             }
@@ -159,7 +160,7 @@ pub fn keyTargetPane(state: *State) ?*Pane {
     if (state.activeFloatingIndex()) |idx| {
         const fpane = state.view.float_views.items[idx];
         const can_interact = if (state.paneParentTab(fpane)) |parent| parent == state.activeTabIndex() else true;
-        if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact) return fpane;
+        if (state.paneVisibleOnTab(fpane, state.activeTabIndex()) and can_interact and state.isCurrentFamilyMember(fpane)) return fpane;
     }
     return state.currentLayout().getFocusedPane();
 }
