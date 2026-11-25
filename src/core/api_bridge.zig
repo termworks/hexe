@@ -725,54 +725,63 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         _ = lua.getField(-1, "per_cwd");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.per_cwd = lua.toBoolean(-1);
+            float_def.attribute_overrides.per_cwd = true;
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "per_git");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.per_git = lua.toBoolean(-1);
+            float_def.attribute_overrides.per_git = true;
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "global");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.global = lua.toBoolean(-1);
+            float_def.attribute_overrides.global = true;
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "exclusive");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.exclusive = lua.toBoolean(-1);
+            float_def.attribute_overrides.exclusive = true;
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "sticky");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.sticky = lua.toBoolean(-1);
+            float_def.attribute_overrides.sticky = true;
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "destroy");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.destroy = lua.toBoolean(-1);
+            float_def.attribute_overrides.destroy = true;
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "navigatable");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.navigatable = lua.toBoolean(-1);
+            float_def.attribute_overrides.navigatable = true;
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "isolated");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.isolated = lua.toBoolean(-1);
+            float_def.attribute_overrides.isolated = true;
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "inherit_env");
         if (lua.typeOf(-1) == .boolean) {
             float_def.attributes.inherit_env = lua.toBoolean(-1);
+            float_def.attribute_overrides.inherit_env = true;
         }
         lua.pop(1);
     }

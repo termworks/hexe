@@ -384,6 +384,18 @@ pub const LayoutTabDef = struct {
     }
 };
 
+pub const FloatAttributeOverrides = packed struct {
+    exclusive: bool = false,
+    per_cwd: bool = false,
+    per_git: bool = false,
+    sticky: bool = false,
+    global: bool = false,
+    destroy: bool = false,
+    isolated: bool = false,
+    navigatable: bool = false,
+    inherit_env: bool = false,
+};
+
 /// Float in a layout (includes all FloatDef fields + enabled)
 pub const LayoutFloatDef = struct {
     enabled: bool = true,
@@ -396,6 +408,9 @@ pub const LayoutFloatDef = struct {
     title: ?[]const u8 = null,
     attributes: FloatAttributes = .{},
     has_custom_attributes: bool = false, // true if float has its own attributes table
+    /// Per-field mask tracking which booleans were explicitly set in `attrs`,
+    /// so `attrs = { sticky = false }` can override `defaults.attrs.sticky = true`.
+    attribute_overrides: FloatAttributeOverrides = .{},
     width_percent: ?u8 = null,
     height_percent: ?u8 = null,
     pos_x: ?u8 = null,
@@ -407,6 +422,52 @@ pub const LayoutFloatDef = struct {
     env: []const []const u8 = &.{},
     /// Directories prepended to PATH for the float's process, from `add_path`.
     path_add: []const []const u8 = &.{},
+
+    pub fn clone(self: *const LayoutFloatDef, allocator: std.mem.Allocator) !LayoutFloatDef {
+        var out: LayoutFloatDef = .{
+            .enabled = self.enabled,
+            .key = self.key,
+            .attributes = self.attributes,
+            .has_custom_attributes = self.has_custom_attributes,
+            .attribute_overrides = self.attribute_overrides,
+            .width_percent = self.width_percent,
+            .height_percent = self.height_percent,
+            .pos_x = self.pos_x,
+            .pos_y = self.pos_y,
+        };
+        errdefer out.deinit(allocator);
+        if (self.name) |n| out.name = try allocator.dupe(u8, n);
+        if (self.command) |c| out.command = try allocator.dupe(u8, c);
+        if (self.title) |t| out.title = try allocator.dupe(u8, t);
+        if (self.isolation) |iso| out.isolation = try iso.clone(allocator);
+        if (self.env.len > 0) {
+            const env_copy = try allocator.alloc([]const u8, self.env.len);
+            var env_built: usize = 0;
+            errdefer {
+                for (env_copy[0..env_built]) |e| allocator.free(e);
+                allocator.free(env_copy);
+            }
+            for (self.env) |e| {
+                env_copy[env_built] = try allocator.dupe(u8, e);
+                env_built += 1;
+            }
+            out.env = env_copy;
+        }
+        if (self.path_add.len > 0) {
+            const path_copy = try allocator.alloc([]const u8, self.path_add.len);
+            var path_built: usize = 0;
+            errdefer {
+                for (path_copy[0..path_built]) |p| allocator.free(p);
+                allocator.free(path_copy);
+            }
+            for (self.path_add) |p| {
+                path_copy[path_built] = try allocator.dupe(u8, p);
+                path_built += 1;
+            }
+            out.path_add = path_copy;
+        }
+        return out;
+    }
 
     pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
         if (self.name) |n| freeSlice(allocator, @constCast(n));
@@ -475,6 +536,18 @@ pub const IsolationConfig = struct {
     cpu: ?[]const u8 = null,
     /// Maximum PIDs
     pids: ?[]const u8 = null,
+
+    pub fn clone(self: *const IsolationConfig, allocator: std.mem.Allocator) !IsolationConfig {
+        var out: IsolationConfig = .{};
+        errdefer out.deinit(allocator);
+        if (!std.mem.eql(u8, self.profile, "default")) {
+            out.profile = try allocator.dupe(u8, self.profile);
+        }
+        if (self.memory) |m| out.memory = try allocator.dupe(u8, m);
+        if (self.cpu) |c| out.cpu = try allocator.dupe(u8, c);
+        if (self.pids) |p| out.pids = try allocator.dupe(u8, p);
+        return out;
+    }
 
     pub fn deinit(self: *IsolationConfig, allocator: std.mem.Allocator) void {
         freeOwnedStr(allocator, self.profile, "default");

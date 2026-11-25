@@ -201,8 +201,8 @@ pub fn runMuxFloat(
     try tw.writeAll(title);
     try tw.writeAll(cwd);
     try tw.writeAll(actual_result_path);
-    try tw.writeAll(exit_key);
-    try tw.writeAll(isolation_profile);
+    try tw.writeAll(exit_key[0..req.exit_key_len]);
+    try tw.writeAll(isolation_profile[0..req.isolation_profile_len]);
     for (env_list.items) |entry| {
         const entry_len: u16 = @intCast(entry.len);
         try tw.writeAll(std.mem.asBytes(&entry_len));
@@ -275,7 +275,7 @@ pub fn runMuxFloat(
             } else {
                 cli_ui.printErr("error from ses", .{});
             }
-            return;
+            std.process.exit(1);
         },
         // `--sub` does not wait, so the answer is the new float's identity
         // rather than its exit code. Printed on stdout so the caller can keep

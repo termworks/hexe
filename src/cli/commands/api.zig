@@ -80,6 +80,26 @@ fn answersTo(allocator: std.mem.Allocator, path: []const u8, wanted: []const u8)
     return false;
 }
 
+/// Whether the session listening on `path` owns pane `pane_uuid`.
+fn ownsPane(allocator: std.mem.Allocator, path: []const u8, pane_uuid: []const u8) bool {
+    if (pane_uuid.len != 32) return false;
+    for (pane_uuid) |ch| {
+        if (!std.ascii.isHex(ch)) return false;
+    }
+    var req_buf: [96]u8 = undefined;
+    const req = std.fmt.bufPrint(&req_buf, "{{\"call\":\"pane\",\"args\":[\"{s}\"]}}", .{pane_uuid}) catch return false;
+    const reply = request(allocator, path, path, req, true) catch return false;
+    defer allocator.free(reply);
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, reply, .{}) catch return false;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |o| o,
+        else => return false,
+    };
+    const res = root.get("result") orelse return false;
+    return res == .object;
+}
+
 /// The only session with a control socket, when the caller did not name one.
 ///
 /// Guessing among several would act on the wrong session sooner or later, so
@@ -177,6 +197,26 @@ pub fn resolveEndpoint(allocator: std.mem.Allocator, session_opt: ?[]const u8) !
                 print("\n", .{});
             }
             return error.NoSession;
+        }
+    }
+
+    // Inside a pod shell (e.g. a float), HEXE_PANE_UUID is always exported even
+    // when HEXE_SESSION / HEXE_API_SOCKET are unset. In multi-session setups,
+    // probe listening sockets to find the session owning our pane before falling
+    // back to soleSession (which would error as ambiguous).
+    if (session_opt == null) {
+        if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
+            if (pane_uuid.len == 32) {
+                const keys = listeningSessions(allocator) catch try allocator.alloc([]u8, 0);
+                defer freeKeys(allocator, keys);
+                for (keys) |key| {
+                    const candidate = try socketPath(allocator, key);
+                    if (ownsPane(allocator, candidate, pane_uuid)) {
+                        return .{ .label = try allocator.dupe(u8, key), .path = candidate };
+                    }
+                    allocator.free(candidate);
+                }
+            }
         }
     }
 

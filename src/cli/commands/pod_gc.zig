@@ -39,7 +39,11 @@ pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
             const uuid = extractUuidFromMetaFilename(entry.name) orelse continue;
             const sock = try ipc.getPodSocketPath(allocator, uuid);
             defer allocator.free(sock);
-            const alive = (ipc.Client.connect(sock) catch null) != null;
+            const alive = blk: {
+                var c = ipc.Client.connect(sock) catch break :blk false;
+                c.close();
+                break :blk true;
+            };
             if (!alive) {
                 if (dry_run) {
                     try out.print("  {s}○{s} {s}would delete{s} {s}/{s}\n", .{ p.warn, p.reset, p.dim, p.reset, dir, entry.name });
@@ -67,7 +71,11 @@ pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
             // Try connect to link path itself (more robust than resolving).
             const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, entry.name });
             defer allocator.free(full);
-            const alive = (ipc.Client.connect(full) catch null) != null;
+            const alive = blk: {
+                var c = ipc.Client.connect(full) catch break :blk false;
+                c.close();
+                break :blk true;
+            };
             if (!alive) {
                 if (dry_run) {
                     try out.print("  {s}○{s} {s}would delete{s} {s}\n", .{ p.warn, p.reset, p.dim, p.reset, full });

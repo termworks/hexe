@@ -276,9 +276,9 @@ fn writeLayoutTemplate(writer: anytype, value: std.json.Value, cwd_map: *std.Aut
         };
 
         if (cwd_map.get(id)) |cwd| {
-            try writer.writeAll("{\"type\": \"pane\", \"cwd\": \"");
-            try writer.writeAll(cwd);
-            try writer.writeAll("\"}");
+            try writer.writeAll("{\"type\": \"pane\", \"cwd\": ");
+            try writeJsonString(writer, cwd);
+            try writer.writeAll("}");
         } else {
             try writer.writeAll("{\"type\": \"pane\"}");
         }

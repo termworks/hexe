@@ -27,8 +27,19 @@ pub fn runMuxRecord(session: []const u8, out_path: []const u8, capture_input: bo
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = std.fs.selfExePath(&exe_buf) catch "hexe";
 
+    // Reject shell metacharacters / single quotes in session names before
+    // building the command line passed to /bin/sh -c.
+    for (session) |ch| {
+        const safe = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+            (ch >= '0' and ch <= '9') or ch == '-' or ch == '_' or ch == '.';
+        if (!safe) {
+            cli_ui.printErr("invalid session name: '{s}'", .{session});
+            std.process.exit(1);
+        }
+    }
+
     var cmd_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
-    const attach_cmd = std.fmt.bufPrint(&cmd_buf, "'{s}' terminal attach {s}", .{ exe, session }) catch {
+    const attach_cmd = std.fmt.bufPrint(&cmd_buf, "'{s}' terminal attach '{s}'", .{ exe, session }) catch {
         cli_ui.printErr("attach command too long", .{});
         std.process.exit(1);
     };

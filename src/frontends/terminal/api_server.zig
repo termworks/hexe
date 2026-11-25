@@ -402,8 +402,16 @@ pub const ApiServer = struct {
     /// `{"subscribe":true}` or `{"subscribe":[]}` takes every event;
     /// `{"subscribe":["pane_focus_changed"]}` takes only those named.
     fn subscribe(self: *ApiServer, c: *Conn, spec: std.json.Value) void {
+        if (self.pane_scope != null) {
+            return self.fail(c, "`subscribe` is about the whole session; this is a pane's socket", .{});
+        }
+        if (!self.granted.has(.read)) {
+            return self.fail(c, "`subscribe` needs `read` access, which this plugin was not granted", .{});
+        }
         switch (spec) {
-            .bool => {},
+            .bool => |b| {
+                if (!b) return self.fail(c, "`subscribe` must be true or a list of event names", .{});
+            },
             .array => |a| {
                 for (a.items) |item| {
                     const name = switch (item) {
@@ -487,6 +495,9 @@ pub const ApiServer = struct {
             .string => |s| s,
             else => return self.fail(c, "`call` must be a string", .{}),
         };
+        if (call.len == 0 or call.len >= name_buf.len or std.mem.indexOfScalar(u8, call, 0) != null) {
+            return self.fail(c, "invalid call name", .{});
+        }
 
         // Refused before the verb runs, and named precisely: a plugin author
         // reading "needs typing access" knows exactly what to add to their
@@ -606,6 +617,7 @@ var name_buf: [64:0]u8 = undefined;
 
 fn callName(call: []const u8) [:0]const u8 {
     if (call.len >= name_buf.len) return "";
+    if (std.mem.indexOfScalar(u8, call, 0) != null) return "";
     @memcpy(name_buf[0..call.len], call);
     name_buf[call.len] = 0;
     return name_buf[0..call.len :0];
