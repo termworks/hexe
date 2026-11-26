@@ -611,7 +611,10 @@ pub fn main() !void {
     try layout_save.addArg(Arg.singleValueOption("name", 'n', "Layout name (skips interactive prompt)"));
     try layout_save.addArg(Arg.singleValueOption("scope", null, "Where to save: local, global, or both (default: both)"));
 
-    try layout_cmd.addSubcommands(&[_]yazap.Command{ layout_list, layout_open, layout_save });
+    var layout_delete = app.createCommand("delete", "Remove a saved session layout from the registry");
+    try layout_delete.addArg(Arg.positional("name", "Saved layout name", null));
+
+    try layout_cmd.addSubcommands(&[_]yazap.Command{ layout_list, layout_open, layout_save, layout_delete });
 
     // POD subcommands
     var pod_daemon = app.createCommand("daemon", "Start a per-pane pod daemon");
@@ -1311,6 +1314,10 @@ pub fn main() !void {
                 return;
             };
             try cli_cmds.runSesFreeze(allocator, scope, m.getSingleValue("name") orelse "");
+            return;
+        }
+        if (layout_matches.subcommandMatches("delete")) |m| {
+            try cli_cmds.runSessionLayoutDelete(allocator, m.getSingleValue("name") orelse "");
             return;
         }
     } else if (matches.subcommandMatches("pod")) |pod_matches| {

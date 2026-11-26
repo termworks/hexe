@@ -21,7 +21,9 @@ pub const PendingAction = enum {
     adopt_choose, // Choosing which orphaned pane to adopt
     adopt_confirm, // Confirming destroy vs swap
     layout_save_choose, // Choosing local/global/both for layout save
-    layout_load_choose, // Choosing detach/replace for local layout load
+    layout_load_picker, // Choosing which saved layout to load in-mux
+    layout_load_choose, // Choosing replace/detach for selected saved layout
+    layout_delete_confirm, // Confirming removal of a saved layout in-mux
     /// Bare `hexe` startup, level 1: exactly one session rooted at this cwd.
     startup_attach_confirm,
     /// Bare `hexe` startup, level 1: several sessions rooted at this cwd (or all).
@@ -32,6 +34,10 @@ pub const PendingAction = enum {
     attach_choose,
     /// Confirmation before killing a session from the startup or attach picker.
     chooser_kill_confirm,
+    /// Startup / attach saved-layouts picker (toggled with 'l').
+    startup_saved_layouts_choose,
+    /// Confirmation before removing a saved layout from startup / attach picker.
+    startup_layout_delete_confirm,
 };
 
 /// Post-teardown summary printed to the user's normal terminal screen once

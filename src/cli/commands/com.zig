@@ -435,8 +435,7 @@ pub fn runSessionLayoutList(allocator: std.mem.Allocator, json_output: bool) !vo
             try writeJsonStr(stdout, entry.path);
             try stdout.writeAll("\"");
 
-            if (std.mem.eql(u8, cwd, entry.path)) {
-                const config_path = try std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{entry.path});
+            if (session_config.resolveRegistryEntryPath(allocator, entry)) |config_path| {
                 defer allocator.free(config_path);
                 if (session_config.parseSessionLua(allocator, config_path)) |cfg| {
                     var owned_cfg = cfg;
@@ -457,7 +456,7 @@ pub fn runSessionLayoutList(allocator: std.mem.Allocator, json_output: bool) !vo
                     try stdout.writeAll(floats_s);
                     try stdout.writeAll("}");
                 } else |_| {}
-            }
+            } else |_| {}
             try stdout.writeAll("}");
         }
         try stdout.writeAll("\n]\n");
@@ -481,18 +480,36 @@ pub fn runSessionLayoutList(allocator: std.mem.Allocator, json_output: bool) !vo
         try out.print("  {s}{s}{s} {s}{s:<16}{s}  {s}{s}{s}\n", .{
             mark_col, mark, p.reset, p.bold, entry.name, p.reset, p.dim, path_disp, p.reset,
         });
-        if (is_cwd) {
-            const config_path = std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{entry.path}) catch continue;
+        if (session_config.resolveRegistryEntryPath(allocator, entry)) |config_path| {
             defer allocator.free(config_path);
             if (session_config.parseSessionLua(allocator, config_path)) |cfg| {
                 var owned_cfg = cfg;
                 defer owned_cfg.deinit(allocator);
                 try out.print("      {s}tabs={d}  floats={d}", .{ p.dim, owned_cfg.tabs.len, owned_cfg.floats.len });
-                if (owned_cfg.root) |r| try out.print("  root={s}", .{r});
+                if (owned_cfg.root) |r| {
+                    var root_buf: [256]u8 = undefined;
+                    try out.print("  root={s}", .{core.cli_ui.compactHome(r, &root_buf)});
+                }
                 try out.print("{s}\n", .{p.reset});
             } else |_| {}
-        }
+        } else |_| {}
     }
+}
+
+pub fn runSessionLayoutDelete(allocator: std.mem.Allocator, name: []const u8) !void {
+    if (name.len == 0) {
+        cli_ui.printErr("layout name required", .{});
+        cli_ui.printErrHint("Usage: hexe layout delete <name>", .{});
+        std.process.exit(1);
+    }
+    const removed = try session_config.removeLayoutRegistryEntry(allocator, name);
+    if (!removed) {
+        cli_ui.printErr("saved layout '{s}' not found", .{name});
+        std.process.exit(1);
+    }
+    var out = std.fs.File.stdout().deprecatedWriter();
+    const p = core.cli_ui.Palette.forStdout();
+    try out.print("{s}✓{s} Removed saved layout: {s}{s}{s}\n", .{ p.success, p.reset, p.bold, name, p.reset });
 }
 
 pub fn runInfo(allocator: std.mem.Allocator, target: shared.PaneTarget) !void {

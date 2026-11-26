@@ -371,25 +371,11 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             return focus_move.perform(state, layoutDirectionFromCore(dir));
         },
         .layout_save => {
-            _ = state.showPickerOrNotify(
-                .layout_save_choose,
-                &.{ "local", "global", "both" },
-                "Save layout scope",
-            );
+            @import("layout_picker.zig").openSaveScopePicker(state);
             return true;
         },
         .layout_load => {
-            if (std.fs.cwd().access(".hexe.lua", .{})) |_| {} else |_| {
-                state.notifications.showFor("No local .hexe.lua", 1400);
-                state.needs_render = true;
-                return true;
-            }
-
-            _ = state.showPickerOrNotify(
-                .layout_load_choose,
-                &.{ "detach", "replace" },
-                "Load local layout: detach or replace",
-            );
+            @import("layout_picker.zig").openInMuxPicker(state);
             return true;
         },
         .invalid_direction => return true,

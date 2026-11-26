@@ -189,11 +189,11 @@ fn openSessionPicker(state: *State, candidates: []const Candidate, is_attach_mod
         "Sessions rooted here";
 
     const hint: []const u8 = if (is_attach_mode)
-        "↑↓/jk move · / filter · Enter attach · x kill · n new · r refresh · Esc cancel"
+        "↑↓/jk move · / filter · l layouts · Enter attach · x kill · n new · r refresh · Esc cancel"
     else if (state.startup_show_all)
-        "↑↓/jk move · / filter · a here · n new · x kill · Enter attach · q quit"
+        "↑↓/jk move · / filter · l layouts · a here · n new · x kill · Enter attach · q quit"
     else
-        "↑↓/jk move · / filter · a all · n new · x kill · Enter attach · Esc skip";
+        "↑↓/jk move · / filter · l layouts · a all · n new · x kill · Enter attach · Esc skip";
 
     const initial_filter: ?[]const u8 = if (state.startup_initial_filter_len > 0)
         state.startup_initial_filter[0..state.startup_initial_filter_len]
@@ -212,7 +212,7 @@ fn openSessionPicker(state: *State, candidates: []const Candidate, is_attach_mod
         .hint = hint,
         .filterable = true,
         .initial_filter = initial_filter,
-        .action_keys = "anxr",
+        .action_keys = "anxrl",
     });
 
     if (!ok) {
@@ -310,6 +310,9 @@ pub fn handlePickerAction(state: *State, act: pop.PickerAction) void {
             state.startup_show_all = !state.startup_show_all;
             state.startup_initial_filter_len = 0;
             refreshPicker(state);
+        },
+        'l' => {
+            @import("layout_picker.zig").openStartupPicker(state);
         },
         'r' => {
             refreshPicker(state);

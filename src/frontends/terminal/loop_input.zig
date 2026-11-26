@@ -460,53 +460,6 @@ fn refreshAllHostColors(state: *State) void {
     };
 }
 
-fn runLayoutSaveWithScope(state: *State, scope: []const u8) void {
-    const pane = resolveFocusedPaneForInput(state) orelse {
-        state.notifications.showFor("no focused pane for layout save", 1400);
-        return;
-    };
-
-    const cmd = std.fmt.allocPrint(state.allocator, "hexe lay save --scope {s}", .{scope}) catch {
-        state.notifications.showFor("layout save alloc failed", 1400);
-        return;
-    };
-    defer state.allocator.free(cmd);
-
-    pane.write(cmd) catch {
-        state.notifications.showFor("layout save send failed", 1400);
-        return;
-    };
-    pane.write("\n") catch {
-        state.notifications.showFor("layout save send failed", 1400);
-        return;
-    };
-    state.notifications.showFor("layout save command sent", 1200);
-}
-
-fn runLayoutOpenDetached(state: *State) void {
-    var env_map_opt = std.process.getEnvMap(state.allocator) catch |err| blk: {
-        core.logging.logError("terminal", "layout open helper failed to copy environment", err);
-        break :blk null;
-    };
-    defer if (env_map_opt) |*m| m.deinit();
-
-    if (env_map_opt) |*env_map| {
-        env_map.remove("HEXE_PANE_UUID");
-        env_map.remove("HEXE_FOCUSED_PANE_UUID");
-        env_map.remove("HEXE_STATUS_FOCUSED_PANE_UUID");
-    }
-
-    // Fire and forget: the helper is already backgrounded by the shell, and the
-    // loop must not block waiting for `bash -lc` to come up. poll() reaps it.
-    const argv = [_][]const u8{ "/bin/bash", "-lc", "(hexe lay open .) >/dev/null 2>&1 &" };
-    const env: ?*const std.process.EnvMap = if (env_map_opt) |*m| m else null;
-    if (!state.async_cmds.spawnDetached(&argv, env)) {
-        state.notifications.showFor("layout open spawn failed", 1400);
-        return;
-    }
-    actions.performDetach(state);
-}
-
 fn replaceFromLocalLayout(state: *State) void {
     // Single-execution parse: the old canonical-then-legacy fallback ran the
     // .hexe.lua file twice, so its Lua side effects fired twice.
@@ -621,27 +574,37 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                 },
                 .layout_save_choose => {
                     if (state.popups.getPickerResult()) |selected| {
-                        const scope = switch (selected) {
-                            0 => "local",
-                            1 => "global",
-                            2 => "both",
-                            else => "both",
+                        const scope: core.session_freeze.SaveScope = switch (selected) {
+                            0 => .both,
+                            1 => .global,
+                            2 => .local,
+                            else => .both,
                         };
-                        runLayoutSaveWithScope(state, scope);
+                        @import("layout_picker.zig").saveCurrentSession(state, scope);
                     }
                     state.pending_action = null;
                     state.popups.clearResults();
                 },
-                .layout_load_choose => {
-                    if (state.popups.getPickerResult()) |selected| {
-                        switch (selected) {
-                            0 => runLayoutOpenDetached(state),
-                            1 => replaceFromLocalLayout(state),
-                            else => {},
-                        }
-                    }
+                .layout_load_picker => {
+                    const selected = state.popups.getPickerResult();
+                    const act = state.popups.getPickerAction();
                     state.pending_action = null;
                     state.popups.clearResults();
+                    @import("layout_picker.zig").handleInMuxPicker(state, selected, act);
+                },
+                .layout_load_choose => {
+                    const selected = state.popups.getPickerResult();
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    if (selected) |choice| {
+                        @import("layout_picker.zig").executeInMuxLoadChoice(state, choice);
+                    }
+                },
+                .layout_delete_confirm => {
+                    const confirmed = state.popups.getConfirmResult() orelse false;
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    @import("layout_picker.zig").confirmDelete(state, confirmed, false);
                 },
                 .startup_attach_confirm => {
                     // Bare `hexe`, level 1 with a single same-cwd session.
@@ -690,6 +653,19 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                     state.pending_action = null;
                     state.popups.clearResults();
                     startup_chooser.confirmKillSelected(state, confirmed);
+                },
+                .startup_saved_layouts_choose => {
+                    const selected = state.popups.getPickerResult();
+                    const act = state.popups.getPickerAction();
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    @import("layout_picker.zig").handleStartupPicker(state, selected, act);
+                },
+                .startup_layout_delete_confirm => {
+                    const confirmed = state.popups.getConfirmResult() orelse false;
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    @import("layout_picker.zig").confirmDelete(state, confirmed, true);
                 },
                 .startup_layout_confirm => {
                     // Bare `hexe`, level 2: local .hexe.lua.
