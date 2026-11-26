@@ -44,6 +44,7 @@ pub const constants = @import("constants.zig");
 pub const resource_limits = @import("resource_limits.zig");
 pub const isolation_voidbox = @import("isolation_voidbox.zig");
 pub const session_config = @import("session_config.zig");
+pub const session_freeze = @import("session_freeze.zig");
 pub const session_model = @import("session_model.zig");
 pub const trust = @import("trust.zig");
 pub const session_projection = @import("session_projection.zig");
@@ -123,6 +124,7 @@ test {
     _ = @import("config_v2.zig");
     _ = @import("names.zig");
     _ = @import("session_config.zig");
+    _ = @import("session_freeze.zig");
     _ = @import("lua_runtime.zig");
     _ = @import("lua_api_exec.zig");
     _ = @import("api_bridge.zig");

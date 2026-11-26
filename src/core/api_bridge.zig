@@ -937,6 +937,15 @@ pub fn parseLayoutDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) !config
     const name = try allocator.dupe(u8, name_str);
     errdefer allocator.free(name);
 
+    // Parse optional root directory
+    _ = lua.getField(idx, "root");
+    const root: ?[]const u8 = if (lua.typeOf(-1) == .string) blk: {
+        const rs = lua.toString(-1) catch break :blk null;
+        break :blk if (rs.len > 0) try allocator.dupe(u8, rs) else null;
+    } else null;
+    lua.pop(1);
+    errdefer if (root) |r| allocator.free(r);
+
     // Parse enabled
     _ = lua.getField(idx, "enabled");
     const enabled = if (lua.typeOf(-1) == .boolean)
@@ -972,13 +981,13 @@ pub fn parseLayoutDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) !config
 
                 // Parse root split
                 _ = lua.getField(-1, "root");
-                const root = if (lua.typeOf(-1) == .table)
+                const tab_root = if (lua.typeOf(-1) == .table)
                     parseLayoutSplit(lua, -1, allocator)
                 else
                     null;
                 lua.pop(1); // pop root
 
-                const root_value: ?config.LayoutSplitDef = if (root) |r| blk: {
+                const root_value: ?config.LayoutSplitDef = if (tab_root) |r| blk: {
                     const value = r.*;
                     allocator.destroy(r);
                     break :blk value;
@@ -1026,6 +1035,7 @@ pub fn parseLayoutDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) !config
     // Create layout
     const layout = config.LayoutDef{
         .name = name,
+        .root = root,
         .enabled = enabled,
         .tabs = try tabs.toOwnedSlice(allocator),
         .floats = try floats.toOwnedSlice(allocator),

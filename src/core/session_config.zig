@@ -248,6 +248,74 @@ pub fn saveLayoutRegistry(allocator: std.mem.Allocator, registry: LayoutRegistry
     try std.fs.cwd().rename(tmp_path, index_path);
 }
 
+/// Get the global saved-layouts directory (~/.local/share/hexe/layouts).
+pub fn getGlobalLayoutsDir(allocator: std.mem.Allocator) ![]u8 {
+    if (posix.getenv("XDG_DATA_HOME")) |xdg| {
+        if (xdg.len > 0) return std.fmt.allocPrint(allocator, "{s}/hexe/layouts", .{xdg});
+    }
+    const home = posix.getenv("HOME") orelse return error.NoHome;
+    return std.fmt.allocPrint(allocator, "{s}/.local/share/hexe/layouts", .{home});
+}
+
+/// Get the file path for a globally stored layout (~/.local/share/hexe/layouts/<name>.lua).
+pub fn getGlobalLayoutPath(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    const dir = try getGlobalLayoutsDir(allocator);
+    defer allocator.free(dir);
+    return std.fmt.allocPrint(allocator, "{s}/{s}.lua", .{ dir, name });
+}
+
+/// Resolve a registry entry's `.lua` file path.
+///
+/// Entries saved with `--scope global` store the `.lua` path directly; entries
+/// saved with `--scope both` store the project directory and resolve to
+/// `{entry.path}/.hexe.lua`.
+pub fn resolveRegistryEntryPath(allocator: std.mem.Allocator, entry: LayoutRegistryEntry) ![]u8 {
+    if (std.mem.endsWith(u8, entry.path, ".lua")) {
+        return allocator.dupe(u8, entry.path);
+    }
+    return std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{entry.path});
+}
+
+/// Remove a saved layout entry from sessions.json. If the entry pointed to a
+/// globally stored file inside `getGlobalLayoutsDir`, that `.lua` file is also
+/// removed (project-local `.hexe.lua` files are never deleted).
+pub fn removeLayoutRegistryEntry(allocator: std.mem.Allocator, name: []const u8) !bool {
+    var registry = try loadLayoutRegistry(allocator);
+    defer deinitLayoutRegistry(allocator, &registry);
+
+    var found_idx: ?usize = null;
+    for (registry.entries, 0..) |entry, i| {
+        if (std.mem.eql(u8, entry.name, name)) {
+            found_idx = i;
+            break;
+        }
+    }
+    const idx = found_idx orelse return false;
+
+    const removed_path = registry.entries[idx].path;
+    if (getGlobalLayoutsDir(allocator)) |global_dir| {
+        defer allocator.free(global_dir);
+        if (std.mem.startsWith(u8, removed_path, global_dir) and std.mem.endsWith(u8, removed_path, ".lua")) {
+            std.fs.cwd().deleteFile(removed_path) catch {};
+        }
+    } else |_| {}
+
+    var list = try std.ArrayList(LayoutRegistryEntry).initCapacity(allocator, registry.entries.len - 1);
+    defer list.deinit(allocator);
+    for (registry.entries, 0..) |entry, i| {
+        if (i == idx) continue;
+        try list.append(allocator, .{
+            .name = try allocator.dupe(u8, entry.name),
+            .path = try allocator.dupe(u8, entry.path),
+        });
+    }
+
+    var next = LayoutRegistry{ .entries = try list.toOwnedSlice(allocator) };
+    defer deinitLayoutRegistry(allocator, &next);
+    try saveLayoutRegistry(allocator, next);
+    return true;
+}
+
 pub fn upsertLayoutRegistryEntry(allocator: std.mem.Allocator, name: []const u8, path: []const u8) !void {
     var registry = try loadLayoutRegistry(allocator);
     defer deinitLayoutRegistry(allocator, &registry);
@@ -354,7 +422,7 @@ pub fn resolveConfigPath(allocator: std.mem.Allocator, arg: []const u8) !?Resolv
     defer deinitLayoutRegistry(allocator, &registry);
     for (registry.entries) |entry| {
         if (!std.mem.eql(u8, entry.name, target)) continue;
-        const path = try std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{entry.path});
+        const path = try resolveRegistryEntryPath(allocator, entry);
         std.fs.cwd().access(path, .{}) catch {
             allocator.free(path);
             return null;

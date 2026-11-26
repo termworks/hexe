@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.12] - 2026-11-26
+
+### <!-- 0 -->⛰️  Features
+
+- Add native session save, saved-layout picker, and layout delete
+
 ## [0.5.11] - 2026-11-25
 
 ### <!-- 1 -->🐛 Bug Fixes

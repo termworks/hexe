@@ -487,6 +487,7 @@ pub const LayoutFloatDef = struct {
 /// Full layout definition
 pub const LayoutDef = struct {
     name: []const u8,
+    root: ?[]const u8 = null,
     enabled: bool = false,
     tabs: []LayoutTabDef = &[_]LayoutTabDef{},
     floats: []LayoutFloatDef = &[_]LayoutFloatDef{},
@@ -503,6 +504,7 @@ pub const LayoutDef = struct {
 
     pub fn deinit(self: *LayoutDef, allocator: std.mem.Allocator) void {
         freeSlice(allocator, @constCast(self.name));
+        if (self.root) |r| freeSlice(allocator, @constCast(r));
         for (self.on_start) |cmd| freeSlice(allocator, cmd);
         if (self.on_start.len > 0) freeSlice(allocator, self.on_start);
         for (self.on_stop) |cmd| freeSlice(allocator, cmd);

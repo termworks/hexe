@@ -388,6 +388,11 @@ pub const State = struct {
     startup_attach_names: [64][64]u8,
     startup_attach_name_lens: [64]usize,
     startup_attach_count: usize,
+    /// Saved-layout picker entries (shared by in-mux layout.load and startup chooser).
+    saved_layouts: [64]@import("layout_picker.zig").SavedLayoutItem = undefined,
+    saved_layout_count: usize = 0,
+    saved_layout_selected: ?usize = null,
+    saved_layout_delete_idx: ?usize = null,
     /// Recorded before teardown so `main.zig` can print a styled banner to
     /// `real_stderr` after restoring the terminal screen.
     exit_summary: state_types.ExitSummary,

@@ -95,56 +95,42 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope, name_o
     }
     const default_name = std.fs.path.basename(cwd);
     const layout_name = if (name_override.len > 0)
-        try validateLayoutName(allocator, name_override, used_names)
+        try validateLayoutName(allocator, name_override)
     else
         try promptLayoutName(allocator, used_names, default_name);
     defer allocator.free(layout_name);
 
-    const write_local = scope == .local or scope == .both;
-    const output_path = ".hexe.lua";
-    const tmp_path = ".hexe.lua.tmp";
-    const file = if (write_local)
-        (std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch {
-            cli_ui.printErr("cannot create {s}", .{tmp_path});
-            std.process.exit(1);
-        })
-    else
-        (std.fs.cwd().createFile("/dev/null", .{ .truncate = true }) catch {
-            cli_ui.printErr("cannot open /dev/null", .{});
-            std.process.exit(1);
-        });
-    defer file.close();
+    const freeze_scope: core.session_freeze.SaveScope = switch (scope) {
+        .local => .local,
+        .global => .global,
+        .both => .both,
+    };
 
-    file.writeAll("local hexe = require(\"hexe\")\n\n") catch |err| {
-        cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
-        std.process.exit(1);
-    };
-    writeLuaString(file, "hexe.layout(\"", layout_name, "\", {\n") catch |err| {
-        cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
-        std.process.exit(1);
-    };
-    writeLuaString(file, "  root = \"", cwd, "\",\n") catch |err| {
-        cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
-        std.process.exit(1);
-    };
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(allocator);
+    const out_writer = out_buf.writer(allocator);
+
+    try out_writer.writeAll("local hexe = require(\"hexe\")\n\n");
+    try writeLuaStringBuf(out_writer, "hexe.layout(\"", layout_name, "\", {\n");
+    try writeLuaStringBuf(out_writer, "  root = \"", cwd, "\",\n");
 
     // Tabs
     const tabs_val = root_obj.get("tabs") orelse {
-        try file.writeAll("})\n");
-        try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
+        try out_writer.writeAll("})\n");
+        try finalizeSave(allocator, freeze_scope, layout_name, cwd, out_buf.items);
         return;
     };
     const tabs_arr = switch (tabs_val) {
         .array => |a| a,
         else => {
-            try file.writeAll("})\n");
-            try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
+            try out_writer.writeAll("})\n");
+            try finalizeSave(allocator, freeze_scope, layout_name, cwd, out_buf.items);
             return;
         },
     };
 
     // Build a CWD map for all panes across all tabs
-    try file.writeAll("  tabs = {\n");
+    try out_writer.writeAll("  tabs = {\n");
 
     for (tabs_arr.items, 0..) |tab_val, ti| {
         const tab = switch (tab_val) {
@@ -189,10 +175,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope, name_o
             }
         }
 
-        writeLuaString(file, "    hexe.tab(\"", tab_name, "\", {\n") catch |err| {
-            cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
+        try writeLuaStringBuf(out_writer, "    hexe.tab(\"", tab_name, "\", {\n");
         var wrote_root = false;
 
         // Check if there's a tree (split structure)
@@ -212,9 +195,9 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope, name_o
 
                 if (type_str) |ts| {
                     if (std.mem.eql(u8, ts, "split")) {
-                        try file.writeAll("      root = ");
-                        try writeLuaSplitTree(file, tree, &cwd_map, cwd, 3);
-                        try file.writeAll(",\n");
+                        try out_writer.writeAll("      root = ");
+                        try writeLuaSplitTree(out_writer, tree, &cwd_map, cwd, 3);
+                        try out_writer.writeAll(",\n");
                         wrote_root = true;
                     } else if (std.mem.eql(u8, ts, "pane")) {
                         // Single pane — check for cmd/cwd
@@ -228,10 +211,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope, name_o
                         if (pane_id) |pid| {
                             if (cwd_map.get(pid)) |pane_cwd| {
                                 if (!std.mem.eql(u8, pane_cwd, cwd)) {
-                                    writeLuaString(file, "      root = hexe.pane({ cwd = \"", pane_cwd, "\" }),\n") catch |err| {
-                                        cli_ui.printErr("failed to write layout: {s}", .{@errorName(err)});
-                                        std.process.exit(1);
-                                    };
+                                    try writeLuaStringBuf(out_writer, "      root = hexe.pane({ cwd = \"", pane_cwd, "\" }),\n");
                                     wrote_root = true;
                                 }
                             }
@@ -241,81 +221,100 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope, name_o
             }
         }
 
-        if (!wrote_root) try file.writeAll("      root = hexe.pane(),\n");
-        try file.writeAll("    })");
-        if (ti + 1 < tabs_arr.items.len) try file.writeAll(",");
-        try file.writeAll("\n");
+        if (!wrote_root) try out_writer.writeAll("      root = hexe.pane(),\n");
+        try out_writer.writeAll("    })");
+        if (ti + 1 < tabs_arr.items.len) try out_writer.writeAll(",");
+        try out_writer.writeAll("\n");
     }
 
-    try file.writeAll("  },\n");
+    try out_writer.writeAll("  },\n");
 
-    // Floats
+    // Floats (top-level roots only; skip transient sub-float children)
     const floats_val = root_obj.get("floats");
     if (floats_val) |fv| {
         switch (fv) {
             .array => |floats_arr| {
-                if (floats_arr.items.len > 0) {
-                    try file.writeAll("  floats = {\n");
-                    for (floats_arr.items, 0..) |float_val, fi| {
-                        const float = switch (float_val) {
-                            .object => |o| o,
-                            else => continue,
-                        };
+                var emitted: usize = 0;
+                for (floats_arr.items) |float_val| {
+                    const float = switch (float_val) {
+                        .object => |o| o,
+                        else => continue,
+                    };
+                    if (float.get("parent_float") != null) continue;
 
-                        try w(file, "    hexe.float(\"float-{d}\", {{", .{fi + 1});
+                    if (emitted == 0) try out_writer.writeAll("  floats = {\n");
+                    if (emitted > 0) try out_writer.writeAll(",\n");
+                    emitted += 1;
 
-                        if (float.get("float_key")) |key_val| {
-                            switch (key_val) {
-                                .integer => |k| {
-                                    if (k > 0 and k < 128) {
-                                        const key_char: u8 = @intCast(k);
-                                        try w(file, " key = \"{c}\",", .{key_char});
-                                    }
-                                },
-                                else => {},
-                            }
+                    try out_writer.print("    hexe.float(\"float-{d}\", {{", .{emitted});
+
+                    if (float.get("float_key")) |key_val| {
+                        switch (key_val) {
+                            .integer => |k| {
+                                if (k >= 32 and k < 127) {
+                                    const key_char: u8 = @intCast(k);
+                                    const key_slice = [_]u8{key_char};
+                                    try writeLuaStringBuf(out_writer, " key = \"", &key_slice, "\",");
+                                }
+                            },
+                            else => {},
                         }
-
-                        const width_pct: ?i64 = if (float.get("float_width_pct")) |wv| switch (wv) {
-                            .integer => |v| v,
-                            else => null,
-                        } else null;
-                        const height_pct: ?i64 = if (float.get("float_height_pct")) |hv| switch (hv) {
-                            .integer => |v| v,
-                            else => null,
-                        } else null;
-                        if (width_pct != null or height_pct != null) {
-                            try file.writeAll(" size = {");
-                            if (width_pct) |v| try w(file, " width = {d},", .{v});
-                            if (height_pct) |v| try w(file, " height = {d},", .{v});
-                            try file.writeAll(" },");
-                        }
-
-                        try file.writeAll(" })");
-                        if (fi + 1 < floats_arr.items.len) try file.writeAll(",");
-                        try file.writeAll("\n");
                     }
-                    try file.writeAll("  },\n");
+
+                    const width_pct: ?i64 = if (float.get("float_width_pct")) |wv| switch (wv) {
+                        .integer => |v| v,
+                        else => null,
+                    } else null;
+                    const height_pct: ?i64 = if (float.get("float_height_pct")) |hv| switch (hv) {
+                        .integer => |v| v,
+                        else => null,
+                    } else null;
+                    if (width_pct != null or height_pct != null) {
+                        try out_writer.writeAll(" size = {");
+                        if (width_pct) |v| try out_writer.print(" width = {d},", .{v});
+                        if (height_pct) |v| try out_writer.print(" height = {d},", .{v});
+                        try out_writer.writeAll(" },");
+                    }
+
+                    const pos_x: i64 = if (float.get("float_pos_x_pct")) |xv| switch (xv) {
+                        .integer => |v| v,
+                        else => 50,
+                    } else 50;
+                    const pos_y: i64 = if (float.get("float_pos_y_pct")) |yv| switch (yv) {
+                        .integer => |v| v,
+                        else => 50,
+                    } else 50;
+                    if (pos_x != 50 or pos_y != 50) {
+                        try out_writer.print(" position = {{ x = {d}, y = {d} }},", .{ pos_x, pos_y });
+                    }
+
+                    const is_pwd = if (float.get("is_pwd")) |v| (v == .bool and v.bool) else false;
+                    const sticky = if (float.get("sticky")) |v| (v == .bool and v.bool) else false;
+                    const is_global = float.get("parent_tab") == null and !is_pwd;
+                    if (is_pwd or sticky or is_global) {
+                        try out_writer.writeAll(" attrs = {");
+                        if (is_pwd) try out_writer.writeAll(" per_cwd = true,");
+                        if (is_global) try out_writer.writeAll(" global = true,");
+                        if (sticky) try out_writer.writeAll(" sticky = true,");
+                        try out_writer.writeAll(" },");
+                    }
+
+                    try out_writer.writeAll(" })");
                 }
+                if (emitted > 0) try out_writer.writeAll("\n  },\n");
             },
             else => {},
         }
     }
 
-    try file.writeAll("})\n");
-    try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
+    try out_writer.writeAll("})\n");
+    try finalizeSave(allocator, freeze_scope, layout_name, cwd, out_buf.items);
 }
 
-fn validateLayoutName(allocator: std.mem.Allocator, raw: []const u8, used_names: []const []const u8) ![]u8 {
+fn validateLayoutName(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     for (raw) |ch| {
         if (ch == '/' or ch == '\\') {
             cli_ui.printErr("layout name cannot contain '/' or '\\'", .{});
-            std.process.exit(1);
-        }
-    }
-    for (used_names) |used| {
-        if (std.ascii.eqlIgnoreCase(used, raw)) {
-            cli_ui.printErr("layout name '{s}' is already in use", .{raw});
             std.process.exit(1);
         }
     }
@@ -456,41 +455,35 @@ fn collectUsedLayoutNames(allocator: std.mem.Allocator) ![][]u8 {
     return names.toOwnedSlice(allocator);
 }
 
-fn finalizeSave(allocator: std.mem.Allocator, scope: LayoutSaveScope, output_path: []const u8, tmp_path: []const u8, layout_name: []const u8, cwd: []const u8) !void {
-    if (scope == .local or scope == .both) {
-        std.fs.cwd().rename(tmp_path, output_path) catch {
-            cli_ui.printErr("cannot write {s}", .{output_path});
-            return;
-        };
-    }
-
-    if (scope == .global or scope == .both) {
-        try session_config.upsertLayoutRegistryEntry(allocator, layout_name, cwd);
-    }
+fn finalizeSave(
+    allocator: std.mem.Allocator,
+    scope: core.session_freeze.SaveScope,
+    layout_name: []const u8,
+    cwd: []const u8,
+    lua_content: []const u8,
+) !void {
+    var saved = core.session_freeze.saveSessionLayout(allocator, scope, layout_name, cwd, lua_content) catch |err| {
+        cli_ui.printErr("failed to save layout: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer saved.deinit(allocator);
 
     var out = std.fs.File.stdout().deprecatedWriter();
     const p = cli_ui.Palette.forStdout();
-    var cwd_buf: [512]u8 = undefined;
-    const cwd_disp = cli_ui.compactHome(cwd, &cwd_buf);
+    var path_buf: [512]u8 = undefined;
+    const path_disp = cli_ui.compactHome(saved.written_path, &path_buf);
     switch (scope) {
-        .local => try out.print("{s}✓{s} Saved local layout: {s}{s}{s}\n", .{ p.success, p.reset, p.bold, output_path, p.reset }),
-        .global => try out.print("{s}✓{s} Saved global layout: {s}{s}{s} {s}→ {s}{s}\n", .{ p.success, p.reset, p.bold, layout_name, p.reset, p.dim, cwd_disp, p.reset }),
-        .both => try out.print("{s}✓{s} Saved layout {s}{s}{s} {s}({s}){s}\n", .{ p.success, p.reset, p.bold, layout_name, p.reset, p.dim, output_path, p.reset }),
+        .local => try out.print("{s}✓{s} Saved local layout: {s}{s}{s}\n", .{ p.success, p.reset, p.bold, path_disp, p.reset }),
+        .global => try out.print("{s}✓{s} Saved global layout: {s}{s}{s} {s}→ {s}{s}\n", .{ p.success, p.reset, p.bold, layout_name, p.reset, p.dim, path_disp, p.reset }),
+        .both => try out.print("{s}✓{s} Saved layout {s}{s}{s} {s}({s}){s}\n", .{ p.success, p.reset, p.bold, layout_name, p.reset, p.dim, path_disp, p.reset }),
     }
 }
 
-/// Helper: formatted write to a File using a stack buffer.
-fn w(file: std.fs.File, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [4096]u8 = undefined;
-    const str = std.fmt.bufPrint(&buf, fmt, args) catch return error.NoSpaceLeft;
-    try file.writeAll(str);
+fn writeLuaSplitTree(writer: anytype, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, indent: usize) anyerror!void {
+    try writeLuaSplitTreeSized(writer, obj, cwd_map, root_cwd, indent, null);
 }
 
-fn writeLuaSplitTree(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, indent: usize) anyerror!void {
-    try writeLuaSplitTreeSized(file, obj, cwd_map, root_cwd, indent, null);
-}
-
-fn writeLuaSplitTreeSized(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, indent: usize, size: ?u8) anyerror!void {
+fn writeLuaSplitTreeSized(writer: anytype, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, indent: usize, size: ?u8) anyerror!void {
     const type_str = if (obj.get("type")) |t|
         switch (t) {
             .string => |s| s,
@@ -500,8 +493,8 @@ fn writeLuaSplitTreeSized(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *
         return;
 
     if (std.mem.eql(u8, type_str, "pane")) {
-        try file.writeAll("hexe.pane({");
-        if (size) |s| try w(file, " size = {d},", .{s});
+        try writer.writeAll("hexe.pane({");
+        if (size) |s| try writer.print(" size = {d},", .{s});
 
         const pane_id = if (obj.get("id")) |id_val|
             switch (id_val) {
@@ -514,11 +507,11 @@ fn writeLuaSplitTreeSized(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *
         if (pane_id) |pid| {
             if (cwd_map.get(pid)) |pane_cwd| {
                 if (!std.mem.eql(u8, pane_cwd, root_cwd)) {
-                    try writeLuaString(file, " cwd = \"", pane_cwd, "\",");
+                    try writeLuaStringBuf(writer, " cwd = \"", pane_cwd, "\",");
                 }
             }
         }
-        try file.writeAll(" })");
+        try writer.writeAll(" })");
     } else if (std.mem.eql(u8, type_str, "split")) {
         const dir_str = if (obj.get("dir")) |d|
             switch (d) {
@@ -527,7 +520,7 @@ fn writeLuaSplitTreeSized(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *
             }
         else
             "horizontal";
-        try w(file, "hexe.split(\"{s}\", {{\n", .{dir_str});
+        try writer.print("hexe.split(\"{s}\", {{\n", .{dir_str});
 
         // Ratio — calculate sizes from it
         const ratio: f64 = if (obj.get("ratio")) |r|
@@ -539,16 +532,16 @@ fn writeLuaSplitTreeSized(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *
         else
             0.5;
 
-        const size_first: u8 = @intFromFloat(@round(ratio * 100.0));
+        const size_first: u8 = @intFromFloat(@round(std.math.clamp(ratio, 0.05, 0.95) * 100.0));
         const size_second: u8 = 100 - size_first;
 
         // Emit first child with size
         if (obj.get("first")) |f_val| {
             switch (f_val) {
                 .object => |f| {
-                    try writeIndent(file, indent + 1);
-                    try writeLuaSplitChildWithSize(file, f, cwd_map, root_cwd, size_first, indent + 1);
-                    try file.writeAll(",\n");
+                    try writeIndent(writer, indent + 1);
+                    try writeLuaSplitChildWithSize(writer, f, cwd_map, root_cwd, size_first, indent + 1);
+                    try writer.writeAll(",\n");
                 },
                 else => {},
             }
@@ -558,24 +551,24 @@ fn writeLuaSplitTreeSized(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *
         if (obj.get("second")) |s_val| {
             switch (s_val) {
                 .object => |s| {
-                    try writeIndent(file, indent + 1);
-                    try writeLuaSplitChildWithSize(file, s, cwd_map, root_cwd, size_second, indent + 1);
-                    try file.writeAll(",\n");
+                    try writeIndent(writer, indent + 1);
+                    try writeLuaSplitChildWithSize(writer, s, cwd_map, root_cwd, size_second, indent + 1);
+                    try writer.writeAll(",\n");
                 },
                 else => {},
             }
         }
 
-        try writeIndent(file, indent);
+        try writeIndent(writer, indent);
         if (size) |s| {
-            try w(file, "}}, {{ size = {d} }})", .{s});
+            try writer.print("}}, {{ size = {d} }})", .{s});
         } else {
-            try file.writeAll("})");
+            try writer.writeAll("})");
         }
     }
 }
 
-fn writeLuaSplitChildWithSize(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, size: u8, indent: usize) anyerror!void {
+fn writeLuaSplitChildWithSize(writer: anytype, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, size: u8, indent: usize) anyerror!void {
     const type_str = if (obj.get("type")) |t|
         switch (t) {
             .string => |s| s,
@@ -585,7 +578,7 @@ fn writeLuaSplitChildWithSize(file: std.fs.File, obj: std.json.ObjectMap, cwd_ma
         return;
 
     if (std.mem.eql(u8, type_str, "pane")) {
-        try w(file, "hexe.pane({{ size = {d},", .{size});
+        try writer.print("hexe.pane({{ size = {d},", .{size});
 
         const pane_id = if (obj.get("id")) |id_val|
             switch (id_val) {
@@ -598,34 +591,34 @@ fn writeLuaSplitChildWithSize(file: std.fs.File, obj: std.json.ObjectMap, cwd_ma
         if (pane_id) |pid| {
             if (cwd_map.get(pid)) |pane_cwd| {
                 if (!std.mem.eql(u8, pane_cwd, root_cwd)) {
-                    try writeLuaString(file, " cwd = \"", pane_cwd, "\",");
+                    try writeLuaStringBuf(writer, " cwd = \"", pane_cwd, "\",");
                 }
             }
         }
-        try file.writeAll(" })");
+        try writer.writeAll(" })");
     } else if (std.mem.eql(u8, type_str, "split")) {
-        try writeLuaSplitTreeSized(file, obj, cwd_map, root_cwd, indent, size);
+        try writeLuaSplitTreeSized(writer, obj, cwd_map, root_cwd, indent, size);
     }
 }
 
-fn writeIndent(file: std.fs.File, level: usize) std.fs.File.WriteError!void {
+fn writeIndent(writer: anytype, level: usize) !void {
     var i: usize = 0;
     while (i < level) : (i += 1) {
-        try file.writeAll("  ");
+        try writer.writeAll("  ");
     }
 }
 
-fn writeLuaString(file: std.fs.File, prefix: []const u8, value: []const u8, suffix: []const u8) !void {
-    try file.writeAll(prefix);
+fn writeLuaStringBuf(writer: anytype, prefix: []const u8, value: []const u8, suffix: []const u8) !void {
+    try writer.writeAll(prefix);
     for (value) |ch| {
         switch (ch) {
-            '\\' => try file.writeAll("\\\\"),
-            '"' => try file.writeAll("\\\""),
-            '\n' => try file.writeAll("\\n"),
-            '\r' => try file.writeAll("\\r"),
-            '\t' => try file.writeAll("\\t"),
-            else => try file.writeAll(&[_]u8{ch}),
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => try writer.writeByte(ch),
         }
     }
-    try file.writeAll(suffix);
+    try writer.writeAll(suffix);
 }
