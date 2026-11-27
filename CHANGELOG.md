@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.15] - 2026-11-27
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Dismiss active float on active tab statusbar click, add run-span tab hit-testing fallback, guard wheel/right-click on statusbar, and use `/bin/sh` for status actions
+
 ## [0.5.14] - 2026-11-27
 
 ### <!-- 1 -->🐛 Bug Fixes
