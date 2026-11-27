@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.14] - 2026-11-27
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Fix sub-float rendering, stuck backlog replay, and hidden sync-output stalls
+
+## [0.5.13] - 2026-11-27
+
 ## [0.5.13] - 2026-11-27
 
 ### <!-- 0 -->⛰️  Features
