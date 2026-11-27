@@ -988,18 +988,30 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         };
     }
 
-    // Determine spawn cwd - use explicit cwd if provided, else try focused pane, else the terminal process cwd.
+    const zero_parent: [32]u8 = .{0} ** 32;
+    const is_sub = !std.mem.eql(u8, &fr.parent_pane, &zero_parent);
+
+    // Determine spawn cwd - use explicit cwd if provided, else for `--sub`
+    // inherit the calling parent float's cwd (not the active tab's focused
+    // pane, which may be a completely different project!), else focused pane.
     var spawn_cwd: ?[]const u8 = null;
     var mux_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (cwd_slice.len > 0) {
         spawn_cwd = cwd_slice;
     } else {
-        const focused_pane = if (state.activeFloatingIndex()) |idx| blk: {
-            if (idx < state.view.float_views.items.len) break :blk state.view.float_views.items[idx];
-            break :blk @as(?*Pane, null);
-        } else state.currentLayout().getFocusedPane();
-        if (focused_pane) |pane| {
-            spawn_cwd = state.getReliableCwd(pane);
+        if (is_sub) {
+            if (state.findPaneByUuid(fr.parent_pane)) |parent_pane| {
+                spawn_cwd = state.getReliableCwd(parent_pane);
+            }
+        }
+        if (spawn_cwd == null) {
+            const focused_pane = if (state.activeFloatingIndex()) |idx| blk: {
+                if (idx < state.view.float_views.items.len) break :blk state.view.float_views.items[idx];
+                break :blk @as(?*Pane, null);
+            } else state.currentLayout().getFocusedPane();
+            if (focused_pane) |pane| {
+                spawn_cwd = state.getReliableCwd(pane);
+            }
         }
         // Fallback to the terminal process CWD.
         if (spawn_cwd == null) {
@@ -1031,10 +1043,13 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         }
     }
 
-    const zero_parent: [32]u8 = .{0} ** 32;
-    const is_sub = !std.mem.eql(u8, &fr.parent_pane, &zero_parent);
     const old_active_float = state.runtime.activeFloatUuid();
-    const parent_visible_here: bool = blk: {
+    // Only focus and reveal a `--sub` float immediately if its parent family is
+    // actually the currently focused float on the active tab (and matches the
+    // active tab's directory for per_cwd/per_git floats). Otherwise it joins
+    // its parent's family quietly in the background without popping onto the
+    // tab the user is currently working in or stealing keyboard focus.
+    const parent_focused_here: bool = blk: {
         if (!is_sub) break :blk true;
         const parent_pane = state.findPaneByUuid(fr.parent_pane) orelse break :blk false;
         const tab = state.activeTabIndex();
@@ -1042,12 +1057,45 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         if (state.paneParentTab(parent_pane)) |pt| {
             if (pt != tab) break :blk false;
         }
+        const active_float_uuid = old_active_float orelse break :blk false;
+        const parent_root = state.familyRootOf(parent_pane) orelse parent_pane.uuid;
+        const active_pane = state.findPaneByUuid(active_float_uuid) orelse break :blk false;
+        const active_root = state.familyRootOf(active_pane) orelse active_float_uuid;
+        if (!std.mem.eql(u8, &parent_root, &active_root)) break :blk false;
+        // Double-check per_cwd / per_git directory affinity against active tab.
+        if (state.paneIsPwd(parent_pane)) {
+            if (@import("state_tabs.zig").ensureStickyFloatDir(state, parent_pane)) |fdir| {
+                if (state.currentLayout().getFocusedPane()) |tiled| {
+                    if (state.paneRealCwd(tiled)) |tab_cwd| {
+                        const fkey = state.paneFloatKey(parent_pane);
+                        const is_git = if (fkey != 0)
+                            (if (state.getLayoutFloatByKey(fkey)) |fdef| fdef.attributes.per_git else false)
+                        else
+                            false;
+                        var git_buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const tab_key_dir: []const u8 = if (is_git)
+                            (core.config.gitRootOf(tab_cwd, &git_buf) orelse tab_cwd)
+                        else
+                            tab_cwd;
+                        if (!std.mem.eql(u8, fdir, tab_key_dir)) break :blk false;
+                    }
+                }
+            }
+        }
         break :blk true;
     };
 
+    // If `--sub` came from a non-float pane on another tab, keep the fallback
+    // float on that pane's tab instead of popping onto the user's active tab.
+    const sub_source_tab: ?usize = if (is_sub) blk: {
+        const parent_pane = state.findPaneByUuid(fr.parent_pane) orelse break :blk null;
+        break :blk state.paneParentTab(parent_pane);
+    } else null;
+    const should_activate = !is_sub or parent_focused_here;
+
     // Unfocus current pane (only if the new float will actually take focus here).
     const old_uuid = state.getCurrentFocusedUuid();
-    if (!is_sub or parent_visible_here) {
+    if (should_activate) {
         if (state.activeFloatingIndex()) |idx| {
             if (idx < state.view.float_views.items.len) state.syncPaneUnfocus(state.view.float_views.items[idx]);
         } else if (state.currentLayout().getFocusedPane()) |tiled| {
@@ -1093,7 +1141,19 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         .exit_key = if (exit_key_slice.len > 0) exit_key_slice else null,
     };
 
-    const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {
+    const new_uuid = actions.createAdhocFloatWithOptions(
+        state,
+        command,
+        title,
+        spawn_cwd,
+        env_items,
+        extra_items,
+        use_pod,
+        float_size,
+        isolation_profile,
+        should_activate,
+        if (!should_activate) sub_source_tab else null,
+    ) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
             sendFailedFloatResult(state, request_id, 127, "failed to send failed float result");
@@ -1105,15 +1165,22 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
     // creation rather than during, so the adhoc path stays one thing and a
     // parent that turns out not to be a float leaves an ordinary float behind
     // instead of failing the request.
-    var stole_focus = true;
+    var stole_focus = should_activate;
     if (is_sub) {
-        if (!state.adoptIntoFloatFamily(new_uuid, fr.parent_pane)) {
+        if (!state.adoptIntoFloatFamily(new_uuid, fr.parent_pane, parent_focused_here)) {
             terminal_main.debugLogUuid(
                 &fr.parent_pane,
                 "float --sub: parent is not a float; left the new float top-level",
                 .{},
             );
-        } else if (parent_visible_here) {
+            if (!should_activate) {
+                // Keep the fallback float on the caller's tab without stealing focus.
+                if (state.findPaneByUuid(new_uuid)) |new_pane| {
+                    new_pane.focused = false;
+                    _ = state.syncSessionFloatChecked(new_pane, false);
+                }
+            }
+        } else if (parent_focused_here) {
             // A family shows one member at a time, and the one just asked for
             // is the one to show -- which also pushes the family to SES, so a
             // reattach finds the child under its parent rather than as a
@@ -1121,21 +1188,13 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
             // Local-only for the siblings: this is inside the request handler.
             _ = state.showFamilyMember(new_uuid, false);
         } else {
-            // Parent is hidden or lives on another tab: join the family
-            // quietly without popping it onto the active tab or stealing focus.
+            // Parent is hidden, unfocused, or lives on another tab: join the
+            // family quietly without popping it onto the active tab or stealing
+            // focus.
             stole_focus = false;
             if (state.findPaneByUuid(new_uuid)) |new_pane| {
                 new_pane.focused = false;
                 _ = state.syncSessionFloatChecked(new_pane, false);
-            }
-            state.setActiveFloatingUuid(old_active_float);
-            if (old_active_float) |af_uuid| {
-                if (state.findPaneByUuid(af_uuid)) |af_pane| {
-                    _ = state.syncSessionFloatChecked(af_pane, true);
-                    state.syncPaneFocus(af_pane, null);
-                }
-            } else if (state.currentLayout().getFocusedPane()) |tiled| {
-                state.syncPaneFocus(tiled, null);
             }
         }
     }

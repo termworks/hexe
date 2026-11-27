@@ -1224,6 +1224,22 @@ pub fn createAdhocFloatWithSize(
     size: FloatSize,
     isolation_profile: ?[]const u8,
 ) ![32]u8 {
+    return createAdhocFloatWithOptions(state, command, title, cwd, env, extra_env, use_pod, size, isolation_profile, true, null);
+}
+
+pub fn createAdhocFloatWithOptions(
+    state: *State,
+    command: []const u8,
+    title: ?[]const u8,
+    cwd: ?[]const u8,
+    env: ?[]const []const u8,
+    extra_env: ?[]const []const u8,
+    use_pod: bool,
+    size: FloatSize,
+    isolation_profile: ?[]const u8,
+    activate: bool,
+    target_tab_override: ?usize,
+) ![32]u8 {
     _ = use_pod;
     const pane = try state.allocator.create(Pane);
     errdefer state.allocator.destroy(pane);
@@ -1261,7 +1277,7 @@ pub fn createAdhocFloatWithSize(
     const vt_fd = state.runtime.getVtFd() orelse return error.SesUnavailable;
     try pane.initWithPod(state.allocator, id, frame.content_x, frame.content_y, frame.content_w, frame.content_h, result.pane_id, vt_fd, result.uuid);
 
-    pane.focused = true;
+    pane.focused = activate;
     if (!state.setPaneFloatUi(result.uuid, .{
         .border_x = frame.outer_x,
         .border_y = frame.outer_y,
@@ -1283,11 +1299,14 @@ pub fn createAdhocFloatWithSize(
     pane.configureNotificationsFromPop(&state.pop_config.pane.notification);
 
     try state.view.float_views.append(state.allocator, pane);
-    state.setActiveFloatingIndex(state.view.float_views.items.len - 1);
+    const parent_tab = target_tab_override orelse state.activeTabIndex();
+    if (activate) {
+        state.setActiveFloatingIndex(state.view.float_views.items.len - 1);
+    }
     state.setLocalFloatState(
         pane.uuid,
-        state.activeTabIndex(),
-        true,
+        parent_tab,
+        activate,
         0,
         false,
         false,
@@ -1298,10 +1317,10 @@ pub fn createAdhocFloatWithSize(
         pos_y_pct_u8,
         @intCast(pad_x_cfg),
         @intCast(pad_y_cfg),
-        true,
+        activate,
     );
     state.syncPaneAux(pane, null);
-    if (!state.syncSessionFloatChecked(pane, true)) {
+    if (!state.syncSessionFloatChecked(pane, activate)) {
         rollbackCreatedFloat(state, pane);
         return error.SesUnavailable;
     }

@@ -123,6 +123,8 @@ pub fn removePaneFromSessionSnapshot(
 
     switch (pane_state.kind) {
         .float => {
+            var dead_family_root: ?[32]u8 = null;
+            var was_active_float = false;
             var fi: usize = snapshot.floats.items.len;
             while (fi > 0) {
                 fi -= 1;
@@ -130,17 +132,42 @@ pub fn removePaneFromSessionSnapshot(
                 const is_target = std.mem.eql(u8, &f.pane_uuid, &pane_uuid);
                 const is_child = if (f.parent_float) |pf| std.mem.eql(u8, &pf, &pane_uuid) else false;
                 if (!is_target and !is_child) continue;
+                if (is_target) dead_family_root = f.parent_float;
                 const drop_uuid = f.pane_uuid;
                 _ = snapshot.floats.orderedRemove(fi);
                 _ = snapshot.panes.remove(drop_uuid);
                 if (snapshot.active_float_uuid) |af| {
-                    if (std.mem.eql(u8, &af, &drop_uuid)) snapshot.active_float_uuid = null;
+                    if (std.mem.eql(u8, &af, &drop_uuid)) {
+                        snapshot.active_float_uuid = null;
+                        if (is_target) was_active_float = true;
+                    }
                 }
                 if (snapshot.focused_pane_uuid) |fp| {
                     if (std.mem.eql(u8, &fp, &drop_uuid)) snapshot.focused_pane_uuid = null;
                 }
             }
             _ = snapshot.panes.remove(pane_uuid);
+            // If an active sub-float died, hand focus back to the lowest
+            // surviving member of its family (normally chip 0, the parent)
+            // instead of dropping to the tiled pane behind it.
+            if (was_active_float) {
+                if (dead_family_root) |root| {
+                    var best_uuid: ?[32]u8 = null;
+                    var best_idx: u8 = std.math.maxInt(u8);
+                    for (snapshot.floats.items) |cand| {
+                        const cand_root = session_model.familyRoot(cand);
+                        if (!std.mem.eql(u8, &cand_root, &root)) continue;
+                        if (best_uuid == null or cand.family_index < best_idx) {
+                            best_uuid = cand.pane_uuid;
+                            best_idx = cand.family_index;
+                        }
+                    }
+                    if (best_uuid) |survivor| {
+                        snapshot.active_float_uuid = survivor;
+                        snapshot.focused_pane_uuid = survivor;
+                    }
+                }
+            }
         },
         .split => {
             var removed_tab_idx: ?usize = null;

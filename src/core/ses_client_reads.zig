@@ -13,6 +13,7 @@ const posix = std.posix;
 const logging = @import("logging.zig");
 const wire = @import("wire.zig");
 const frontend_client = @import("frontend_client.zig");
+const ses_client_responses = @import("ses_client_responses.zig");
 
 const SesClient = frontend_client.SesClient;
 const PaneInfoRead = SesClient.PaneInfoRead;
@@ -106,6 +107,14 @@ pub fn readExpectedPaneInfoResponse(self: *SesClient, fd: posix.fd_t, expected_u
                 continue;
             },
             else => {
+                // Server-initiated pushes (notably float_request / exit_intent,
+                // which carry SES-assigned non-zero request_ids) belong to the
+                // replay queue — never to pending_control_responses and never
+                // matched against the frontend's own expected_request_id.
+                if (ses_client_responses.isReplayablePush(msg_type) or msg_type == .session_stolen) {
+                    self.consumeQueuedControlResponse(fd, hdr);
+                    continue;
+                }
                 if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
                     try self.queuePendingControlResponseBody(fd, hdr);
                     continue;
@@ -170,6 +179,10 @@ pub fn readExpectedPaneCwdResponse(self: *SesClient, fd: posix.fd_t, expected_uu
                 continue;
             },
             else => {
+                if (ses_client_responses.isReplayablePush(msg_type) or msg_type == .session_stolen) {
+                    self.consumeQueuedControlResponse(fd, hdr);
+                    continue;
+                }
                 self.skipPayload(fd, hdr.payload_len);
                 return error.UnexpectedResponse;
             },
@@ -247,6 +260,10 @@ pub fn readSyncResponseUntilForRequest(self: *SesClient, fd: posix.fd_t, expecte
                 continue;
             },
             else => {
+                if (ses_client_responses.isReplayablePush(msg_type) or msg_type == .session_stolen) {
+                    self.consumeQueuedControlResponse(fd, hdr);
+                    continue;
+                }
                 if (!matches_request) {
                     if (hdr.request_id != 0) {
                         try self.queuePendingControlResponseBody(fd, hdr);
@@ -339,6 +356,10 @@ pub fn readCommandAckUntilForRequest(self: *SesClient, fd: posix.fd_t, expected_
                 continue;
             },
             else => {
+                if (ses_client_responses.isReplayablePush(msg_type) or msg_type == .session_stolen) {
+                    self.consumeQueuedControlResponse(fd, hdr);
+                    continue;
+                }
                 if (!matches_request) {
                     if (hdr.request_id != 0) {
                         try self.queuePendingControlResponseBody(fd, hdr);
