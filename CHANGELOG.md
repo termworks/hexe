@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.13] - 2026-11-27
+
+### <!-- 0 -->⛰️  Features
+
+- Add pane status, OSC 1333, attention queue, and terminal wait
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Isolate background sub-floats across tabs and fix CTL push races
+
+## [0.5.12] - 2026-11-26
+
 ## [0.5.12] - 2026-11-26
 
 ### <!-- 0 -->⛰️  Features
