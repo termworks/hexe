@@ -79,11 +79,12 @@ pub const Pane = struct {
     id: u16 = 0,
     vt: core.VT = .{},
     backend: Backend = undefined,
-    /// True while the pod's backlog replay is in flight (cleared by the
-    /// backlog_end frame). Replay chunks feed the VT without scheduling a
-    /// render each — repainting per chunk is what made reattaching to a
-    /// large-history pane feel stuck.
+    /// True while an adopted/reattached pod's backlog replay is in flight
+    /// (cleared by the backlog_end frame or a bounded timeout). Freshly
+    /// created pods start false so a raced/dropped backlog_end can never
+    /// leave a new pane permanently suppressed from rendering.
     backlog_replaying: bool = false,
+    backlog_replay_started_ms: i64 = 0,
 
     // UUID for tracking (32 hex chars)
     uuid: [32]u8 = undefined,
@@ -215,13 +216,19 @@ pub const Pane = struct {
         return v;
     }
 
+    pub fn beginBacklogReplay(self: *Pane) void {
+        self.backlog_replaying = true;
+        self.backlog_replay_started_ms = std.time.milliTimestamp();
+    }
+
     /// Initialize a pane backed by a per-pane pod process.
     /// VT data is routed through the SES VT channel.
     pub fn initWithPod(self: *Pane, allocator: std.mem.Allocator, id: u16, x: u16, y: u16, width: u16, height: u16, pane_id: u16, vt_fd: posix.fd_t, uuid: [32]u8) !void {
         self.* = .{ .allocator = allocator, .id = id, .x = x, .y = y, .width = width, .height = height, .uuid = uuid };
 
         self.backend = .{ .pod = .{ .pane_id = pane_id, .vt_fd = vt_fd } };
-        self.backlog_replaying = true;
+        self.backlog_replaying = false;
+        self.backlog_replay_started_ms = 0;
 
         try self.vt.init(allocator, width, height);
         errdefer self.vt.deinit();
@@ -275,7 +282,7 @@ pub const Pane = struct {
 
     /// Replace backend with a pod (used during reattach to adopt panes).
     pub fn replaceWithPod(self: *Pane, pane_id: u16, vt_fd: posix.fd_t, uuid: [32]u8) !void {
-        self.backlog_replaying = true;
+        self.beginBacklogReplay();
         self.uuid = uuid;
         self.backend = .{ .pod = .{ .pane_id = pane_id, .vt_fd = vt_fd } };
 

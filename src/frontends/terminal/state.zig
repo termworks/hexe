@@ -3477,6 +3477,7 @@ pub const State = struct {
         }
         self.rememberFloatingFocus(target);
         self.syncPaneFocus(target, old_uuid);
+        self.renderer.invalidate();
         self.needs_render = true;
         self.force_full_render = true;
         return true;

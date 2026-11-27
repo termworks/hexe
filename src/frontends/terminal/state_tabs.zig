@@ -491,6 +491,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     // Initialize pane with the adopted pod — VT routed through SES.
     const vt_fd = self.runtime.getVtFd() orelse return error.NoVtChannel;
     try pane.initWithPod(self.allocator, id, frame.content_x, frame.content_y, frame.content_w, frame.content_h, pane_id, vt_fd, uuid);
+    pane.beginBacklogReplay();
 
     if (self.runtime.getPaneInfoSnapshot(uuid)) |snap| {
         defer if (snap.cwd) |snap_cwd| self.allocator.free(snap_cwd);

@@ -10,6 +10,7 @@ const loop_watchers = @import("loop_watchers.zig");
 const loop_input = @import("loop_input.zig");
 const loop_mouse = @import("loop_mouse.zig");
 const loop_render = @import("loop_render.zig");
+const float_util = @import("float_util.zig");
 const terminal = @import("terminal.zig");
 const terminal_main = @import("main.zig");
 
@@ -204,8 +205,12 @@ fn outputHeld(state: *State) bool {
             if (pane.*.vt.outputSynchronized()) return true;
         }
     }
-    for (state.view.float_views.items) |pane| {
-        if (pane.vt.outputSynchronized()) return true;
+    if (state.view.tab_views.items.len > 0) {
+        const active_tab = state.activeTabIndex();
+        for (state.view.float_views.items) |pane| {
+            if (!float_util.isFloatRenderableOnTab(state, pane, active_tab)) continue;
+            if (pane.vt.outputSynchronized()) return true;
+        }
     }
     return false;
 }
