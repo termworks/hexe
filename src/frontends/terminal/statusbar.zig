@@ -144,17 +144,22 @@ pub fn buildContext(
         }
     }
 
+    ctx.attention_count = @import("attention.zig").countAttention(state);
     if (state.activeFloatingIndex()) |idx| {
         if (idx < state.view.float_views.items.len) {
             const fp = state.view.float_views.items[idx];
             ctx.alt_screen = fp.vt.inAltScreen();
             ctx.title = state.paneFloatTitle(fp) orelse state.paneName(fp.uuid);
             ctx.adhoc_float = state.paneFloatKey(fp) == 0;
+            ctx.pane_status = fp.status_state.status.toString();
+            ctx.pane_status_note = fp.status_state.note();
             applyProgress(&ctx, fp);
         }
     } else if (state.currentLayout().getFocusedPane()) |pane| {
         ctx.alt_screen = pane.vt.inAltScreen();
         ctx.title = state.paneName(pane.uuid);
+        ctx.pane_status = pane.status_state.status.toString();
+        ctx.pane_status_note = pane.status_state.note();
         applyProgress(&ctx, pane);
     }
 

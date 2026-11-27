@@ -55,6 +55,8 @@ hexe terminal float --command <cmd> [--title …] [--size w,h,x,y] [--isolation 
 hexe terminal float --sub --command <cmd>            # a sub-float of the calling float
 hexe terminal send <text> [--pane <n>|--uuid <u>|--last|--creator|--broadcast] [--enter] [--ctrl <key>]
 hexe terminal read [--pane <n>|--uuid <u>] [-n <lines>|-c <commands>]
+hexe terminal status [<idle|working|blocked|done>] [--pane <n>|--uuid <u>|--chip <n>] [--note <text>] [--clear] [--attention] [--json]
+hexe terminal wait [--pane <n>|--uuid <u>|--chip <n>] [--until exit|idle|done|blocked|attention|status:<s>|pattern:<t>] [--pattern <t>] [--idle-ms <ms>] [--timeout <ms>] [--print] [--json]
 hexe terminal notify <msg> [--uuid <u>|--last|--broadcast]
 hexe terminal info [--uuid <u>|--last|--creator]
 hexe terminal focus left|right|up|down
@@ -250,7 +252,7 @@ dir=$(hexe terminal float --title picker --size 60,40 \
 - **`hexe session stats` prints nothing** and exits non-zero.
 - **`--json` is not everywhere.** `session list`, `pod list` and `layout list` have it; most others
   print for humans.
-- **`terminal send` is not `expect`.** It writes bytes to a pane; nothing waits for a result.
+- **`terminal send` is not `expect`.** It writes bytes to a pane; use `hexe terminal wait` to block event-driven on `exit`, output `idle`, rendered `--pattern`, or lifecycle status (`done`, `blocked`, `attention`, exit `124` on timeout).
 - **The web and syslink adapters are not user interfaces.** They are probes and serving loops
   against the same runtime.
 

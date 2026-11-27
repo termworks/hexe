@@ -24,6 +24,7 @@ pub const PendingAction = enum {
     layout_load_picker, // Choosing which saved layout to load in-mux
     layout_load_choose, // Choosing replace/detach for selected saved layout
     layout_delete_confirm, // Confirming removal of a saved layout in-mux
+    attention_choose, // Choosing a pane needing attention to jump to or clear
     /// Bare `hexe` startup, level 1: exactly one session rooted at this cwd.
     startup_attach_confirm,
     /// Bare `hexe` startup, level 1: several sessions rooted at this cwd (or all).

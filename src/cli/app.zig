@@ -800,6 +800,33 @@ pub fn main() !void {
     try mux_info.addArg(Arg.booleanOption("last", 'l', "Target the previously focused pane"));
     try addProfileArgs(&mux_info);
 
+    var mux_status = app.createCommand("status", "Read or set pane lifecycle status (idle|working|blocked|done)");
+    try mux_status.addArg(Arg.singleValueOption("uuid", 'u', "Target pane UUID or unique prefix"));
+    try addPaneTargetArgs(&mux_status);
+    try mux_status.addArg(Arg.booleanOption("creator", 'c', "Target the pane that created this one"));
+    try mux_status.addArg(Arg.booleanOption("last", 'l', "Target the previously focused pane"));
+    try mux_status.addArg(Arg.singleValueOption("note", 'm', "Optional single-line status note"));
+    try mux_status.addArg(Arg.booleanOption("clear", null, "Reset pane status and attention back to idle"));
+    try mux_status.addArg(Arg.booleanOption("attention", 'a', "List all panes currently needing attention"));
+    try mux_status.addArg(Arg.booleanOption("json", 'j', "Emit machine-readable JSON"));
+    try mux_status.addArg(Arg.positional("status", "New status: idle, working, blocked, done, or clear", null));
+    try addProfileArgs(&mux_status);
+
+    var mux_wait = app.createCommand("wait", "Wait until a pane exits, goes idle, matches text, or changes status");
+    try mux_wait.addArg(Arg.singleValueOption("uuid", 'u', "Target pane UUID or unique prefix"));
+    try addPaneTargetArgs(&mux_wait);
+    try mux_wait.addArg(Arg.booleanOption("creator", 'c', "Target the pane that created this one"));
+    try mux_wait.addArg(Arg.booleanOption("last", 'l', "Target the previously focused pane"));
+    try mux_wait.addArg(Arg.singleValueOption("until", null, "Condition: exit, idle, done, blocked, attention, status:<state>, pattern:<text>"));
+    try mux_wait.addArg(Arg.singleValueOption("pattern", null, "Wait until substring appears in recent pane output"));
+    try mux_wait.addArg(Arg.singleValueOption("lines", 'n', "Trailing lines to scan for --pattern or --print (default: 40)"));
+    try mux_wait.addArg(Arg.singleValueOption("idle-ms", null, "Quiet window in ms for --until idle (default: 1500)"));
+    try mux_wait.addArg(Arg.singleValueOption("timeout", 't', "Maximum wait duration in ms (0 = unlimited; exits 124 on timeout)"));
+    try mux_wait.addArg(Arg.singleValueOption("interval", null, "Minimum check interval in ms for pattern mode (default: 100)"));
+    try mux_wait.addArg(Arg.booleanOption("print", null, "Print recent pane text (or status note) once condition is met"));
+    try mux_wait.addArg(Arg.booleanOption("json", 'j', "Emit structured JSON result"));
+    try addProfileArgs(&mux_wait);
+
     var mux_layout = app.createCommand("layout", "Save and restore layouts");
     mux_layout.setProperty(.help_on_empty_args);
 
@@ -816,7 +843,7 @@ pub fn main() !void {
     var mux_focus = app.createCommand("focus", "Move focus to adjacent pane");
     try mux_focus.addArg(Arg.positional("dir", "Direction: left, right, up, or down", null));
 
-    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_detach, mux_list, mux_kill, mux_close, mux_record, mux_float, mux_notify, mux_send, mux_read, mux_info, mux_layout, mux_focus });
+    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_detach, mux_list, mux_kill, mux_close, mux_record, mux_float, mux_notify, mux_send, mux_read, mux_info, mux_status, mux_wait, mux_layout, mux_focus });
 
     var web_inspect = app.createCommand("inspect-snapshot", "Load a session snapshot through the web adapter");
     try web_inspect.addArg(Arg.positional("snapshot", "Path to snapshot JSON file", null));
@@ -1606,6 +1633,57 @@ pub fn main() !void {
             const instance = profileArg(m);
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runInfo(allocator, try paneTargetOf(m));
+            return;
+        }
+        if (mux_matches.subcommandMatches("status")) |m| {
+            const instance = profileArg(m);
+            if (instance.len > 0) setInstanceFromCli(instance);
+            try commands.mux_status.runStatus(allocator, .{
+                .target = try paneTargetOf(m),
+                .status = m.getSingleValue("status") orelse "",
+                .note = m.getSingleValue("note") orelse "",
+                .clear = m.containsArg("clear"),
+                .attention = m.containsArg("attention"),
+                .json = m.containsArg("json"),
+            });
+            return;
+        }
+        if (mux_matches.subcommandMatches("wait")) |m| {
+            const instance = profileArg(m);
+            if (instance.len > 0) setInstanceFromCli(instance);
+            const lines_val = try parseCountArg(m.getSingleValue("lines"), "lines");
+            const idle_ms: u64 = if (m.getSingleValue("idle-ms")) |raw|
+                std.fmt.parseInt(u64, raw, 10) catch {
+                    cli_ui.printErr("--idle-ms wants a non-negative integer, not '{s}'", .{raw});
+                    return error.InvalidArgument;
+                }
+            else
+                1500;
+            const timeout_ms: u64 = if (m.getSingleValue("timeout")) |raw|
+                std.fmt.parseInt(u64, raw, 10) catch {
+                    cli_ui.printErr("--timeout wants a non-negative integer in ms, not '{s}'", .{raw});
+                    return error.InvalidArgument;
+                }
+            else
+                0;
+            const interval_ms: u64 = if (m.getSingleValue("interval")) |raw|
+                @max(std.fmt.parseInt(u64, raw, 10) catch {
+                    cli_ui.printErr("--interval wants a positive integer in ms, not '{s}'", .{raw});
+                    return error.InvalidArgument;
+                }, 10)
+            else
+                100;
+            try commands.mux_wait.runWait(allocator, .{
+                .target = try paneTargetOf(m),
+                .until = m.getSingleValue("until") orelse "",
+                .pattern = m.getSingleValue("pattern") orelse "",
+                .lines = if (lines_val > 0) lines_val else 40,
+                .idle_ms = idle_ms,
+                .timeout_ms = timeout_ms,
+                .interval_ms = interval_ms,
+                .print_output = m.containsArg("print"),
+                .json = m.containsArg("json"),
+            });
             return;
         }
     } else if (matches.subcommandMatches("web")) |web_matches| {

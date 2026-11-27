@@ -24,6 +24,7 @@ pub const segment_render = @import("segment_render.zig");
 pub const palette = @import("palette.zig");
 pub const blend = @import("blend.zig");
 pub const stretch = @import("stretch.zig");
+pub const pane_status = @import("pane_status.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
 pub const regions = @import("regions.zig");
 pub const pod_protocol = @import("pod_protocol.zig");
@@ -119,6 +120,7 @@ test {
     _ = @import("palette.zig");
     _ = @import("blend.zig");
     _ = @import("stretch.zig");
+    _ = @import("pane_status.zig");
     _ = @import("config.zig");
     _ = @import("logging.zig");
     _ = @import("config_v2.zig");

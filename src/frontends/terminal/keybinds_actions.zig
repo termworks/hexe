@@ -557,6 +557,22 @@ fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAct
             state.toggleZoom();
             return true;
         },
+        .pane_attention_next => {
+            @import("attention.zig").jumpNext(state);
+            return true;
+        },
+        .pane_attention_list => {
+            @import("attention.zig").openPicker(state);
+            return true;
+        },
+        .pane_status_clear => {
+            if (focusedPane(state)) |pane| {
+                const cleared = @import("attention.zig").clearPaneStatus(state, pane);
+                state.notifications.showFor(if (cleared) "Pane status cleared" else "Pane status already idle", 1200);
+                state.needs_render = true;
+            }
+            return true;
+        },
         .config_reload => {
             performConfigReload(state);
             return true;

@@ -791,6 +791,9 @@ pub const Config = struct {
         sync_toggle,
         tab_rename,
         pane_zoom,
+        pane_attention_next,
+        pane_attention_list,
+        pane_status_clear,
         config_reload,
         copy_enter,
         search_enter,
@@ -839,6 +842,9 @@ pub const Config = struct {
         sync_toggle, // toggle broadcasting input to all panes in the tab
         tab_rename, // inline-rename the active tab
         pane_zoom, // toggle zoom/maximize of the focused tiled pane
+        pane_attention_next, // jump to the next pane needing attention
+        pane_attention_list, // open picker of panes needing attention
+        pane_status_clear, // reset focused pane status/attention to idle
         config_reload, // re-read the Lua config and hot-swap it
         copy_enter, // enter keyboard copy-mode
         search_enter, // enter scrollback text search
@@ -1149,6 +1155,9 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "pane.sync_toggle")) return .sync_toggle;
     if (std.mem.eql(u8, action_type, "tab.rename")) return .tab_rename;
     if (std.mem.eql(u8, action_type, "pane.zoom")) return .pane_zoom;
+    if (std.mem.eql(u8, action_type, "pane.attention_next")) return .pane_attention_next;
+    if (std.mem.eql(u8, action_type, "pane.attention_list")) return .pane_attention_list;
+    if (std.mem.eql(u8, action_type, "pane.status_clear")) return .pane_status_clear;
     if (std.mem.eql(u8, action_type, "config.reload")) return .config_reload;
     if (std.mem.eql(u8, action_type, "copy.enter")) return .copy_enter;
     if (std.mem.eql(u8, action_type, "search.enter")) return .search_enter;
@@ -1215,6 +1224,9 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "pane.sync_toggle")) return .sync_toggle;
     if (std.mem.eql(u8, action, "tab.rename")) return .tab_rename;
     if (std.mem.eql(u8, action, "pane.zoom")) return .pane_zoom;
+    if (std.mem.eql(u8, action, "pane.attention_next")) return .pane_attention_next;
+    if (std.mem.eql(u8, action, "pane.attention_list")) return .pane_attention_list;
+    if (std.mem.eql(u8, action, "pane.status_clear")) return .pane_status_clear;
     if (std.mem.eql(u8, action, "config.reload")) return .config_reload;
     if (std.mem.eql(u8, action, "copy.enter")) return .copy_enter;
     if (std.mem.eql(u8, action, "search.enter")) return .search_enter;

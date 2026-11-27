@@ -393,6 +393,9 @@ pub const State = struct {
     saved_layout_count: usize = 0,
     saved_layout_selected: ?usize = null,
     saved_layout_delete_idx: ?usize = null,
+    /// Attention picker entries (pane UUIDs listed in the open attention picker).
+    attention_uuids: [64][32]u8 = undefined,
+    attention_count: usize = 0,
     /// Recorded before teardown so `main.zig` can print a styled banner to
     /// `real_stderr` after restoring the terminal screen.
     exit_summary: state_types.ExitSummary,

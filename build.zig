@@ -563,6 +563,16 @@ pub fn build(b: *std.Build) void {
     const palette_cli_tests = b.addTest(.{ .root_module = palette_cli_test_module });
     const run_palette_cli_tests = b.addRunArtifact(palette_cli_tests);
 
+    const mux_wait_cli_test_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/commands/mux_wait.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mux_wait_cli_test_module.addImport("core", core_module);
+    const mux_wait_cli_tests = b.addTest(.{ .root_module = mux_wait_cli_test_module });
+    const run_mux_wait_cli_tests = b.addRunArtifact(mux_wait_cli_tests);
+
     const statusbar_layout_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/frontends/terminal/statusbar_layout.zig"),
@@ -750,6 +760,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_keypad_tests.step);
     test_step.dependOn(&run_statusbar_layout_tests.step);
     test_step.dependOn(&run_palette_cli_tests.step);
+    test_step.dependOn(&run_mux_wait_cli_tests.step);
     test_step.dependOn(&run_prompt_navigation_tests.step);
     test_step.dependOn(&run_pane_output_tests.step);
     test_step.dependOn(&run_pane_search_tests.step);

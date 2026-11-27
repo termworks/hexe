@@ -139,6 +139,11 @@ pub const RequestContext = struct {
     /// State is the OSC's own vocabulary: inactive/in_progress/error/indeterminate/paused.
     progress_state: []const u8 = "inactive",
     progress_pct: ?u8 = null,
+    /// Per-pane agent/lifecycle status (`idle`, `working`, `blocked`, `done`)
+    /// and total unfocused panes currently needing attention.
+    pane_status: []const u8 = "idle",
+    pane_status_note: ?[]const u8 = null,
+    attention_count: u16 = 0,
     active: bool = true,
     /// Interaction state the painter styles: which region the pointer is over,
     /// and which is held down by which button.
@@ -980,6 +985,15 @@ pub const Registry = struct {
         } else {
             try w.writeAll(",\"progress_pct\":null");
         }
+        try w.writeAll(",\"pane_status\":");
+        try writeJsonString(w, ctx.pane_status);
+        if (ctx.pane_status_note) |note| {
+            try w.writeAll(",\"pane_status_note\":");
+            try writeJsonString(w, note);
+        } else {
+            try w.writeAll(",\"pane_status_note\":null");
+        }
+        try w.print(",\"attention_count\":{d}", .{ctx.attention_count});
         try w.writeAll(",\"tabs\":[");
         for (ctx.tabs, 0..) |t, i| {
             if (i != 0) try w.writeAll(",");

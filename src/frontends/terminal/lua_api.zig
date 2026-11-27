@@ -267,6 +267,17 @@ pub fn pushPaneTable(lua: *Lua, state: *State, pane: *Pane, pane_index: usize) v
     });
     setOptInt(lua, "progress_pct", if (prog.percentage) |p| @intCast(p) else null);
 
+    // Per-pane agent/lifecycle status & activity timestamp
+    setStr(lua, "status", pane.status_state.status.toString());
+    setOptStr(lua, "status_note", pane.status_state.note());
+    setOptInt(lua, "status_updated_at_ms", if (pane.status_state.updated_at_ms != 0) pane.status_state.updated_at_ms else null);
+    setBool(lua, "attention", pane.status_state.needsAttentionNow(focused));
+    setOptInt(lua, "last_output_ms", if (pane.last_output_ms != 0) pane.last_output_ms else null);
+    setOptInt(lua, "idle_ms", if (pane.last_output_ms != 0)
+        @max(std.time.milliTimestamp() - pane.last_output_ms, 0)
+    else
+        null);
+
     // Float-only attributes. Present as false/nil on splits so a predicate can
     // read them unconditionally.
     const float_key = state.paneFloatKey(pane);
@@ -666,13 +677,18 @@ fn hexe_tabs(lstate: ?*LuaState) callconv(.c) c_int {
         return 1;
     };
     const active = state.activeTabIndex();
+    const attention = @import("attention.zig");
     lua.createTable(@intCast(state.view.tab_views.items.len), 0);
     for (state.view.tab_views.items, 0..) |*tab, i| {
-        lua.createTable(0, 6);
+        const rollup = attention.tabRollup(state, i);
+        lua.createTable(0, 9);
         setInt(lua, "index", @intCast(i + 1));
         setOptStr(lua, "name", state.runtime.tabName(i));
         setBool(lua, "active", i == active);
         setInt(lua, "pane_count", @intCast(tab.layout.splitCount()));
+        setStr(lua, "status", rollup.status.toString());
+        setBool(lua, "attention", rollup.attention_count > 0);
+        setInt(lua, "attention_count", @intCast(rollup.attention_count));
         if (tab.layout.getFocusedPane()) |fp| {
             setStr(lua, "focused_uuid", fp.uuid[0..]);
         } else {
@@ -690,7 +706,7 @@ fn hexe_session(lstate: ?*LuaState) callconv(.c) c_int {
         lua.pushNil();
         return 1;
     };
-    lua.createTable(0, 8);
+    lua.createTable(0, 9);
     setStr(lua, "name", state.runtime.sessionName());
     // The socket this session is reachable on. Not derivable from `name`: the
     // path is fixed when the control socket binds, and a session that is later
@@ -707,6 +723,7 @@ fn hexe_session(lstate: ?*LuaState) callconv(.c) c_int {
     setBool(lua, "connected", state.runtime.isConnected());
     setInt(lua, "tab_count", @intCast(state.view.tab_views.items.len));
     setInt(lua, "active_tab", @intCast(state.activeTabIndex() + 1));
+    setInt(lua, "attention_count", @intCast(@import("attention.zig").countAttention(state)));
     return 1;
 }
 
@@ -1117,6 +1134,136 @@ fn hexe_focus(lstate: ?*LuaState) callconv(.c) c_int {
     state.syncPaneFocus(pane, null);
     state.needs_render = true;
     lua.pushBoolean(true);
+    return 1;
+}
+
+fn pushPaneStatusTable(lua: *Lua, state: *State, pane: *Pane) void {
+    const focused = if (state.getCurrentFocusedUuid()) |fu|
+        std.mem.eql(u8, &fu, &pane.uuid)
+    else
+        pane.focused;
+    lua.createTable(0, 6);
+    setStr(lua, "uuid", pane.uuid[0..]);
+    setStr(lua, "status", pane.status_state.status.toString());
+    setOptStr(lua, "note", pane.status_state.note());
+    setBool(lua, "attention", pane.status_state.needsAttentionNow(focused));
+    setOptInt(lua, "updated_at_ms", if (pane.status_state.updated_at_ms != 0) pane.status_state.updated_at_ms else null);
+}
+
+/// `ctx.status([selector] [, status_str | { status=, note=, clear= }])`
+///
+/// Reads a pane's lifecycle status, or updates it when given a status string or
+/// table. Follows `geometry`'s convention: a table in arg 1 targets the focused
+/// (or pane-scoped) pane without needing a placeholder selector.
+fn hexe_status(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    const arg1_is_table = lua.typeOf(1) == .table;
+    const has_arg2 = lua.getTop() >= 2 and lua.typeOf(2) != .nil;
+    const sel_idx: i32 = if (arg1_is_table) 3 else 1;
+    const spec_idx: ?i32 = if (arg1_is_table) 1 else if (has_arg2) 2 else null;
+
+    const pane = resolvePane(lua, state, sel_idx) orelse {
+        lua.pushNil();
+        return 1;
+    };
+
+    if (spec_idx) |idx| {
+        const attention = @import("attention.zig");
+        switch (lua.typeOf(idx)) {
+            .string => {
+                const raw = lua.toString(idx) catch {
+                    lua.pushNil();
+                    return 1;
+                };
+                if (std.ascii.eqlIgnoreCase(raw, "clear") or std.ascii.eqlIgnoreCase(raw, "none")) {
+                    _ = attention.clearPaneStatus(state, pane);
+                } else {
+                    const next = core.pane_status.Status.fromString(raw) orelse {
+                        lua.pushNil();
+                        return 1;
+                    };
+                    attention.setPaneStatus(state, pane, next, null);
+                }
+            },
+            .table => {
+                var do_clear = false;
+                if (lua.getField(idx, "clear") == .boolean) {
+                    do_clear = lua.toBoolean(-1);
+                }
+                lua.pop(1);
+
+                if (do_clear) {
+                    _ = attention.clearPaneStatus(state, pane);
+                } else {
+                    const st_ty = lua.getField(idx, "status");
+                    const next_opt: ?core.pane_status.Status = if (st_ty == .string) blk: {
+                        const raw = lua.toString(-1) catch break :blk null;
+                        break :blk core.pane_status.Status.fromString(raw);
+                    } else null;
+                    lua.pop(1);
+
+                    const next = next_opt orelse {
+                        lua.pushNil();
+                        return 1;
+                    };
+
+                    var note_buf: [core.pane_status.MAX_NOTE_LEN]u8 = undefined;
+                    var note_slice: ?[]const u8 = null;
+                    const note_ty = lua.getField(idx, "note");
+                    if (note_ty == .string) {
+                        if (lua.toString(-1)) |raw_note| {
+                            const n = @min(raw_note.len, note_buf.len);
+                            @memcpy(note_buf[0..n], raw_note[0..n]);
+                            note_slice = note_buf[0..n];
+                        } else |_| {}
+                    }
+                    lua.pop(1);
+
+                    attention.setPaneStatus(state, pane, next, note_slice);
+                }
+            },
+            else => {
+                lua.pushNil();
+                return 1;
+            },
+        }
+    }
+
+    pushPaneStatusTable(lua, state, pane);
+    return 1;
+}
+
+/// `ctx.attention()` — prioritized list of unfocused panes needing attention.
+fn hexe_attention(lstate: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(lstate orelse return 0);
+    const state = liveState(lua) orelse {
+        lua.createTable(0, 0);
+        return 1;
+    };
+    const attention = @import("attention.zig");
+    var items: [attention.MAX_ATTENTION_ITEMS]attention.AttentionItem = undefined;
+    const count = attention.collect(state, &items);
+
+    lua.createTable(@intCast(count), 0);
+    for (items[0..count], 0..) |item, i| {
+        const pane = item.pane;
+        lua.createTable(0, 9);
+        setStr(lua, "uuid", item.uuid[0..]);
+        setOptStr(lua, "name", state.paneName(item.uuid));
+        setOptStr(lua, "title", if (item.is_float) state.paneFloatTitle(pane) else null);
+        setStr(lua, "status", pane.status_state.status.toString());
+        setOptStr(lua, "note", pane.status_state.note());
+        setBool(lua, "attention", true);
+        setBool(lua, "is_float", item.is_float);
+        setOptInt(lua, "tab", if (item.tab_idx) |t| @intCast(t + 1) else null);
+        setOptInt(lua, "updated_at_ms", if (item.updated_at_ms != 0) item.updated_at_ms else null);
+        lua.rawSetIndex(-2, @intCast(i + 1));
+    }
     return 1;
 }
 
@@ -2229,6 +2376,8 @@ const ENTRIES = [_]Entry{
     .{ .name = "screen_text", .func = hexe_screen_text, .about = "a pane's visible text", .needs = .screen, .pane_local = true },
     .{ .name = "find", .func = hexe_find, .about = "search a pane's scrollback", .needs = .screen, .pane_local = true },
     .{ .name = "selection_range", .func = hexe_selection_range, .about = "where the selection is", .needs = .screen, .pane_local = true },
+    .{ .name = "status", .func = hexe_status, .about = "read or set a pane's lifecycle status (idle|working|blocked|done)", .pane_local = true, .needs_scoped = .read },
+    .{ .name = "attention", .func = hexe_attention, .about = "list unfocused panes currently needing attention, prioritized", .needs = .read },
 };
 
 /// Registry slot holding the accessor table, so a callback invocation can push

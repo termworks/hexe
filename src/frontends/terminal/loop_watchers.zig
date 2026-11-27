@@ -79,8 +79,29 @@ fn presentPaneNotification(state: *State, pane: *Pane, notification: anytype) vo
 }
 
 fn drainPaneOscEvents(state: *State, pane: *Pane, present: bool) void {
+    const attention = @import("attention.zig");
     while (pane.takeOscNotification()) |notification| {
-        if (present) presentPaneNotification(state, pane, &notification);
+        if (present) {
+            presentPaneNotification(state, pane, &notification);
+            const focused = if (state.getCurrentFocusedUuid()) |fu|
+                std.mem.eql(u8, &fu, &pane.uuid)
+            else
+                pane.focused;
+            if (!focused) {
+                const summary = if (notification.body().len > 0)
+                    notification.body()
+                else if (notification.title().len > 0)
+                    notification.title()
+                else
+                    null;
+                if (pane.status_state.markNotificationAttention(summary, std.time.milliTimestamp())) {
+                    attention.emitStatusChanged(state, pane);
+                }
+            }
+        }
+    }
+    if (pane.takeStatusChanged()) {
+        attention.handleOscStatusChanged(state, pane, present);
     }
     if (pane.takeOscProgressChanged()) state.needs_render = true;
 }
