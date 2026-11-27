@@ -1141,6 +1141,12 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         .exit_key = if (exit_key_slice.len > 0) exit_key_slice else null,
     };
 
+    const parent_float_pane: ?*const Pane = if (is_sub) blk: {
+        const parent_pane = state.findPaneByUuid(fr.parent_pane) orelse break :blk null;
+        if (!state.paneIsFloating(parent_pane)) break :blk null;
+        break :blk parent_pane;
+    } else null;
+
     const new_uuid = actions.createAdhocFloatWithOptions(
         state,
         command,
@@ -1153,6 +1159,8 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         isolation_profile,
         should_activate,
         if (!should_activate) sub_source_tab else null,
+        parent_float_pane,
+        is_sub,
     ) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
@@ -1161,11 +1169,11 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
         return;
     };
 
-    // `--sub`: join the family of the float that asked for this one. After
-    // creation rather than during, so the adhoc path stays one thing and a
-    // parent that turns out not to be a float leaves an ordinary float behind
-    // instead of failing the request.
+    // `--sub`: join the family of the float that asked for this one BEFORE
+    // syncing to SES so SES never broadcasts an intermediate un-adopted adhoc
+    // snapshot (and never triggers an extra full rebuild + SIGWINCH storm).
     var stole_focus = should_activate;
+    var focus_synced = false;
     if (is_sub) {
         if (!state.adoptIntoFloatFamily(new_uuid, fr.parent_pane, parent_focused_here)) {
             terminal_main.debugLogUuid(
@@ -1173,12 +1181,9 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
                 "float --sub: parent is not a float; left the new float top-level",
                 .{},
             );
-            if (!should_activate) {
-                // Keep the fallback float on the caller's tab without stealing focus.
-                if (state.findPaneByUuid(new_uuid)) |new_pane| {
-                    new_pane.focused = false;
-                    _ = state.syncSessionFloatChecked(new_pane, false);
-                }
+            if (state.findPaneByUuid(new_uuid)) |new_pane| {
+                if (!should_activate) new_pane.focused = false;
+                _ = state.syncSessionFloatChecked(new_pane, should_activate);
             }
         } else if (parent_focused_here) {
             // A family shows one member at a time, and the one just asked for
@@ -1187,6 +1192,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
             // second top-level float.
             // Local-only for the siblings: this is inside the request handler.
             _ = state.showFamilyMember(new_uuid, false);
+            focus_synced = true;
         } else {
             // Parent is hidden, unfocused, or lives on another tab: join the
             // family quietly without popping it onto the active tab or stealing
@@ -1200,10 +1206,14 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, request_id: u32, payload_le
     }
 
     if (stole_focus and state.view.float_views.items.len > 0) {
-        state.syncPaneFocus(state.view.float_views.items[state.view.float_views.items.len - 1], old_uuid);
+        if (!focus_synced) {
+            state.syncPaneFocus(state.view.float_views.items[state.view.float_views.items.len - 1], old_uuid);
+        }
         // Only swallow input that is already in flight with the float request
         // (the trigger key's leftover bytes). See State.drop_input_until_ms.
         state.drop_input_until_ms = std.time.milliTimestamp() + TRIGGER_KEY_DROP_WINDOW_MS;
+        state.renderer.invalidate();
+        state.force_full_render = true;
     }
     state.needs_render = true;
 

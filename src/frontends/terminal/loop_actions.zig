@@ -1224,7 +1224,7 @@ pub fn createAdhocFloatWithSize(
     size: FloatSize,
     isolation_profile: ?[]const u8,
 ) ![32]u8 {
-    return createAdhocFloatWithOptions(state, command, title, cwd, env, extra_env, use_pod, size, isolation_profile, true, null);
+    return createAdhocFloatWithOptions(state, command, title, cwd, env, extra_env, use_pod, size, isolation_profile, true, null, null, false);
 }
 
 pub fn createAdhocFloatWithOptions(
@@ -1239,22 +1239,40 @@ pub fn createAdhocFloatWithOptions(
     isolation_profile: ?[]const u8,
     activate: bool,
     target_tab_override: ?usize,
+    parent_float_pane: ?*const Pane,
+    defer_ses_sync: bool,
 ) ![32]u8 {
     _ = use_pod;
     const pane = try state.allocator.create(Pane);
     errdefer state.allocator.destroy(pane);
 
     const visuals = state.resolveFloatVisuals(.adhoc, title);
-    const style = visuals.float_style;
+    const style = if (parent_float_pane) |pf| state.paneFloatStyle(pf) else visuals.float_style;
     const shadow_enabled = if (style) |s| s.shadow_color != null else false;
-    const width_pct: u16 = if (size.width > 0) size.width else visuals.width_pct;
-    const height_pct: u16 = if (size.height > 0) size.height else visuals.height_pct;
-    // Base position at center (50%), then apply shift
-    const pos_x_pct: u16 = @intCast(std.math.clamp(@as(i32, 50) + @as(i32, size.shift_x), 0, 100));
-    const pos_y_pct: u16 = @intCast(std.math.clamp(@as(i32, 50) + @as(i32, size.shift_y), 0, 100));
-    const pad_x_cfg: u16 = visuals.pad_x;
-    const pad_y_cfg: u16 = visuals.pad_y;
-    const border_color = visuals.border_color;
+    const width_pct: u16 = if (parent_float_pane) |pf|
+        state.paneFloatWidthPct(pf)
+    else if (size.width > 0)
+        size.width
+    else
+        visuals.width_pct;
+    const height_pct: u16 = if (parent_float_pane) |pf|
+        state.paneFloatHeightPct(pf)
+    else if (size.height > 0)
+        size.height
+    else
+        visuals.height_pct;
+    // Base position at center (50%), then apply shift (or inherit family frame for --sub).
+    const pos_x_pct: u16 = if (parent_float_pane) |pf|
+        state.paneFloatPosXPct(pf)
+    else
+        @intCast(std.math.clamp(@as(i32, 50) + @as(i32, size.shift_x), 0, 100));
+    const pos_y_pct: u16 = if (parent_float_pane) |pf|
+        state.paneFloatPosYPct(pf)
+    else
+        @intCast(std.math.clamp(@as(i32, 50) + @as(i32, size.shift_y), 0, 100));
+    const pad_x_cfg: u16 = if (parent_float_pane) |pf| state.paneFloatPadX(pf) else visuals.pad_x;
+    const pad_y_cfg: u16 = if (parent_float_pane) |pf| state.paneFloatPadY(pf) else visuals.pad_y;
+    const border_color = if (parent_float_pane) |pf| state.paneBorderColor(pf) else visuals.border_color;
 
     const frame = state.floatFrameFromValues(width_pct, height_pct, pos_x_pct, pos_y_pct, pad_x_cfg, pad_y_cfg, shadow_enabled);
     const width_pct_u8: u8 = @intCast(@min(width_pct, 100));
@@ -1320,9 +1338,11 @@ pub fn createAdhocFloatWithOptions(
         activate,
     );
     state.syncPaneAux(pane, null);
-    if (!state.syncSessionFloatChecked(pane, activate)) {
-        rollbackCreatedFloat(state, pane);
-        return error.SesUnavailable;
+    if (!defer_ses_sync) {
+        if (!state.syncSessionFloatChecked(pane, activate)) {
+            rollbackCreatedFloat(state, pane);
+            return error.SesUnavailable;
+        }
     }
     pane_registered = true;
 
@@ -1576,6 +1596,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
 
     const vt_fd = state.runtime.getVtFd() orelse return error.SesUnavailable;
     try pane.initWithPod(state.allocator, id, frame.content_x, frame.content_y, frame.content_w, frame.content_h, result.pane_id, vt_fd, result.uuid);
+    if (result.reused) pane.beginBacklogReplay();
 
     // Persist sticky affinity metadata for better reclaim preference.
     if (!result.reused) {

@@ -408,6 +408,7 @@ fn ensureSplitPaneView(
             self.allocator.destroy(pane);
             return false;
         };
+        pane.beginBacklogReplay();
         recyclePaneForSplit(self, tab, pane, view_id, pane_uuid, actual_focus_uuid);
         pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
         break :blk pane;
@@ -602,6 +603,7 @@ fn restoreFloatPane(
             self.allocator.destroy(pane);
             return null;
         };
+        pane.beginBacklogReplay();
         pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
         break :blk pane;
     };
@@ -1489,6 +1491,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
                 };
                 return false;
             };
+            pane.beginBacklogReplay();
 
             if (self.runtime.getPaneInfoSnapshot(result.uuid)) |snap| {
                 defer if (snap.cwd) |cwd| self.allocator.free(cwd);

@@ -464,10 +464,14 @@ fn dispatchSesVtFrame(ctx: SesVtDispatchContext, vt_event: frontend_core.VtFrame
                 // During backlog replay, feed the VT silently: scheduling a
                 // render per 16K chunk repainted the whole UI hundreds of
                 // times and made reattaching to a large history feel stuck.
-                // backlog_end triggers the single full repaint. If the end
-                // frame is ever lost, any other render trigger (statusbar
-                // tick, input) still paints the current VT state — the
-                // suppression only skips per-chunk scheduling.
+                // backlog_end triggers the single full repaint. Auto-clear
+                // after a short timeout so a raced/dropped backlog_end can
+                // never leave a pane permanently suppressed from rendering.
+                if (pane.backlog_replaying and pane.backlog_replay_started_ms > 0 and
+                    (now_ms - pane.backlog_replay_started_ms) > 1500)
+                {
+                    pane.backlog_replaying = false;
+                }
                 if (!pane.backlog_replaying) {
                     pane.vt.invalidateRenderState();
                     state.needs_render = true;
