@@ -57,9 +57,10 @@ fn runStatusbarAction(state: *State, command: []const u8) void {
     }
 
     // Fire and forget. The loop must not wait here: a click on a statusbar
-    // segment would otherwise freeze the UI for however long `bash -lc` takes
-    // to start (it sources the login profile), and forever if bash hangs.
-    const argv = [_][]const u8{ "/bin/bash", "-lc", wrapped };
+    // segment would otherwise freeze the UI while the shell starts, and
+    // forever if it hangs. Use `/bin/sh -c` (not `/bin/bash`, which does not
+    // exist on minimal/NixOS systems).
+    const argv = [_][]const u8{ "/bin/sh", "-c", wrapped };
     const env: ?*const std.process.EnvMap = if (env_map_opt) |*m| m else null;
     if (!state.async_cmds.spawnDetached(&argv, env)) {
         state.notifications.showFor("status action spawn failed", 1400);
@@ -165,6 +166,59 @@ fn shouldForwardToPane(pane: *const Pane, ev: MouseEvent, override_active: bool)
         .{ .button_code = ev.btn, .is_release = ev.is_release },
         override_active,
     );
+}
+
+fn dismissFloatsForActiveTabClick(state: *State) void {
+    const tab = state.activeTabIndex();
+    const old_uuid = state.getCurrentFocusedUuid();
+    var changed = false;
+
+    if (state.activeFloatingIndex()) |afi| {
+        if (afi < state.view.float_views.items.len) {
+            state.syncPaneUnfocus(state.view.float_views.items[afi]);
+        }
+        state.setActiveFloatingIndex(null);
+        state.cursor_needs_restore = true;
+        changed = true;
+    }
+
+    for (state.view.float_views.items) |fp| {
+        if (!isFloatRenderableOnTab(state, fp, tab)) continue;
+        // Hide toggleable named floats on this tab so the tab's tiled panes
+        // are revealed immediately; leave keyless adhoc, blocking CLI, or
+        // destroy-on-hide floats alive (just unfocused above).
+        if (state.paneCaptureOutput(fp)) continue;
+        const fkey = state.paneFloatKey(fp);
+        if (fkey == 0) continue;
+        if (!state.paneIsPwd(fp)) {
+            if (state.getLayoutFloatByKey(fkey)) |def| {
+                if (def.attributes.destroy) continue;
+            }
+        }
+        const was_visible = state.paneVisibleOnTab(fp, tab);
+        state.setPaneVisibleOnTab(fp, tab, false);
+        if (!state.syncFamilyFloats(fp, false)) {
+            if (!state.paneSticky(fp) and !state.paneIsPwd(fp)) {
+                state.setPaneVisibleOnTab(fp, tab, was_visible);
+                continue;
+            }
+        }
+        changed = true;
+    }
+
+    if (!changed) return;
+
+    if (state.isSearchActive()) state.exitSearchMode();
+    if (state.isCopyModeActive()) state.exitCopyMode();
+    state.mouse_selection.clear();
+    state.clearFloatRename();
+    state.mouse_drag = .none;
+    if (state.currentLayout().getFocusedPane()) |tiled| {
+        state.syncPaneFocus(tiled, old_uuid);
+    }
+    state.renderer.invalidate();
+    state.force_full_render = true;
+    state.needs_render = true;
 }
 
 fn focusTarget(state: *State, target: FocusTarget) void {
@@ -758,13 +812,17 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
     }
 
     // Status bar tab switching and actions should only fire on actual button
-    // presses, not hover/motion events.
-    if (!ev.is_release and !is_motion and state.config.tabs.status.enabled and ev.y == state.term_height - 1) {
-        if (statusbar.hitTestTab(state, state.allocator, &state.config, state.term_width, state.term_height, state.view.tab_views, state.activeTabIndex(), state.runtime.sessionName(), ev.x, ev.y)) |ti| {
-            if (ti != state.activeTabIndex()) {
-                @import("tab_switch.zig").switchToTab(state, ti);
+    // presses, not hover/motion or wheel events.
+    if (!ev.is_release and !is_motion and !is_wheel and state.config.tabs.status.enabled and ev.y == state.term_height - 1) {
+        if (is_left_btn) {
+            if (statusbar.hitTestTab(state, state.allocator, &state.config, state.term_width, state.term_height, state.view.tab_views, state.activeTabIndex(), state.runtime.sessionName(), ev.x, ev.y)) |ti| {
+                if (ti != state.activeTabIndex()) {
+                    @import("tab_switch.zig").switchToTab(state, ti);
+                } else {
+                    dismissFloatsForActiveTabClick(state);
+                }
+                return true;
             }
-            return true;
         }
 
         if (statusbar.hitTestAction(

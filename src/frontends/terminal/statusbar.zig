@@ -391,7 +391,98 @@ fn currentHits(state: *State, config: *const core.Config, term_width: u16, tabs:
     return iter;
 }
 
+const TabSpan = struct {
+    x: u16 = 0,
+    w: u16 = 0,
+};
+
+fn matchTabRunSpans(
+    runs: []const regions.Run,
+    slot_origin: u16,
+    slot_width: u16,
+    tab_names: []const []const u8,
+    spans_out: []TabSpan,
+) bool {
+    if (tab_names.len == 0 or tab_names.len > spans_out.len) return false;
+    var rx: u16 = 0;
+    var matched: usize = 0;
+    for (runs) |run| {
+        const run_w = countDisplayWidth(run.text);
+        if (rx < slot_width and matched < tab_names.len) {
+            const trimmed = std.mem.trim(u8, run.text, " \t");
+            if (trimmed.len > 0 and std.mem.eql(u8, trimmed, tab_names[matched])) {
+                const clamped_w = @min(run_w, slot_width - rx);
+                spans_out[matched] = .{ .x = slot_origin +| rx, .w = clamped_w };
+                matched += 1;
+            }
+        }
+        rx +|= run_w;
+    }
+    return matched == tab_names.len;
+}
+
+fn hitTestTabByRuns(
+    state: *State,
+    config: *const core.Config,
+    term_width: u16,
+    tabs: anytype,
+    active_tab: usize,
+    session_name: []const u8,
+    x: u16,
+) ?usize {
+    const registry = regions.active orelse return null;
+    const cfg = &config.tabs.status;
+    var tab_names: [16][]const u8 = undefined;
+    var tab_indices: [16]usize = undefined;
+    var count: usize = 0;
+    for (tabs.items, 0..) |*tab, ti| {
+        const name = tabTitleForDisplay(state, ti, tab, true);
+        if (count < tab_names.len) {
+            tab_names[count] = name;
+            tab_indices[count] = ti;
+            count += 1;
+        } else if (ti == active_tab) {
+            tab_names[tab_names.len - 1] = name;
+            tab_indices[tab_indices.len - 1] = ti;
+        }
+    }
+    if (count == 0) return null;
+
+    var ctx_tabs: [16][]const u8 = undefined;
+    const ctx = buildContext(state, tabs, active_tab, session_name, &ctx_tabs);
+
+    var spans: [16]TabSpan = undefined;
+    if (!cfg.zonesEnabled()) {
+        const snap = registry.snapshot(specFor(cfg, cfg.view, term_width, 1), ctx);
+        if (!snap.done or snap.runs.len == 0) return null;
+        if (!matchTabRunSpans(snap.runs, 0, term_width, tab_names[0..count], spans[0..count])) return null;
+        for (0..count) |k| {
+            if (x >= spans[k].x and x < spans[k].x +| spans[k].w) return tab_indices[k];
+        }
+        return null;
+    }
+
+    // Check center first (where tabs conventionally live), then left and right.
+    const order = [_]usize{ 1, 0, 2 };
+    for (order) |zi| {
+        const slot = drawn_slots[zi];
+        if (!slot.drawn or slot.width == 0) continue;
+        const zone: layout.Zone = @enumFromInt(zi);
+        const view = zoneView(cfg, zone) orelse continue;
+        const snap = registry.snapshot(zoneSpec(cfg, zone, view, term_width), ctx);
+        if (!snap.done or snap.runs.len == 0) continue;
+        if (!matchTabRunSpans(snap.runs, slot.x, slot.width, tab_names[0..count], spans[0..count])) continue;
+        for (0..count) |k| {
+            if (x >= spans[k].x and x < spans[k].x +| spans[k].w) return tab_indices[k];
+        }
+        return null;
+    }
+    return null;
+}
+
 /// A click on a region whose action is `tab.select.<n>` selects that tab.
+/// When a painter renders the tab list without explicit interactive regions,
+/// falls back to matching the rendered tab-title runs in the drawn bar.
 pub fn hitTestTab(
     state: *State,
     allocator: std.mem.Allocator,
@@ -412,12 +503,16 @@ pub fn hitTestTab(
     while (hits.next()) |hit| {
         if (!hit.contains(x, 0)) continue;
         const action = hit.actionFor(0);
-        if (!std.mem.startsWith(u8, action, TAB_SELECT_PREFIX)) continue;
-        const n = std.fmt.parseInt(usize, action[TAB_SELECT_PREFIX.len..], 10) catch continue;
-        if (n == 0 or n > tabs.items.len) continue;
-        return n - 1;
+        if (std.mem.startsWith(u8, action, TAB_SELECT_PREFIX)) {
+            const n = std.fmt.parseInt(usize, action[TAB_SELECT_PREFIX.len..], 10) catch continue;
+            if (n == 0 or n > tabs.items.len) continue;
+            return n - 1;
+        }
+        // An explicit non-tab button claimed this column; let hitTestAction run it.
+        if (action.len > 0) return null;
     }
-    return null;
+
+    return hitTestTabByRuns(state, config, term_width, tabs, active_tab, session_name, x);
 }
 
 /// Any other action name is handed back for the caller to run.
@@ -603,4 +698,34 @@ pub fn runsWidth(runs: []const regions.Run) u16 {
     var width: usize = 0;
     for (runs) |run| width += vaxis.gwidth.gwidth(run.text, .unicode);
     return @intCast(@min(width, std.math.maxInt(u16)));
+}
+
+test "matchTabRunSpans resolves tab pills with zone offset and duplicates" {
+    const runs = [_]regions.Run{
+        .{ .text = " hexe ", .style = .{} },
+        .{ .text = "|", .style = .{} },
+        .{ .text = " docs ", .style = .{} },
+        .{ .text = "|", .style = .{} },
+        .{ .text = " hexe ", .style = .{} },
+    };
+    const names = [_][]const u8{ "hexe", "docs", "hexe" };
+    var spans: [3]TabSpan = undefined;
+
+    try std.testing.expect(matchTabRunSpans(&runs, 40, 20, &names, &spans));
+    try std.testing.expectEqual(@as(u16, 40), spans[0].x);
+    try std.testing.expectEqual(@as(u16, 6), spans[0].w);
+    try std.testing.expectEqual(@as(u16, 47), spans[1].x);
+    try std.testing.expectEqual(@as(u16, 6), spans[1].w);
+    try std.testing.expectEqual(@as(u16, 54), spans[2].x);
+    try std.testing.expectEqual(@as(u16, 6), spans[2].w);
+}
+
+test "matchTabRunSpans rejects zones without full tab sequence" {
+    const runs = [_]regions.Run{
+        .{ .text = "| main |", .style = .{} },
+        .{ .text = " ~d/c/t/hexe ", .style = .{} },
+    };
+    const names = [_][]const u8{"hexe"};
+    var spans: [1]TabSpan = undefined;
+    try std.testing.expect(!matchTabRunSpans(&runs, 0, 80, &names, &spans));
 }
