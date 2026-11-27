@@ -300,6 +300,9 @@ fn parseSimpleAction(action_str: []const u8) ?config.Config.BindAction {
     if (std.mem.eql(u8, action_str, "pane.sync_toggle")) return .sync_toggle;
     if (std.mem.eql(u8, action_str, "tab.rename")) return .tab_rename;
     if (std.mem.eql(u8, action_str, "pane.zoom")) return .pane_zoom;
+    if (std.mem.eql(u8, action_str, "pane.attention_next")) return .pane_attention_next;
+    if (std.mem.eql(u8, action_str, "pane.attention_list")) return .pane_attention_list;
+    if (std.mem.eql(u8, action_str, "pane.status_clear")) return .pane_status_clear;
     if (std.mem.eql(u8, action_str, "config.reload")) return .config_reload;
     if (std.mem.eql(u8, action_str, "copy.enter")) return .copy_enter;
     if (std.mem.eql(u8, action_str, "search.enter")) return .search_enter;

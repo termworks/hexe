@@ -267,6 +267,12 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
 
     if (focused_from) |prev| self.prev_focused_pane_uuid = prev;
 
+    // Focusing a pane acknowledges any pending `done` / notification attention.
+    if (pane.status_state.acknowledgeOnFocus(std.time.milliTimestamp())) {
+        @import("attention.zig").emitStatusChanged(self, pane);
+        self.needs_render = true;
+    }
+
     if (self.config._lua_runtime) |rt| {
         rt.lua.createTable(0, 8);
         _ = rt.lua.pushString("pane_focus_changed");

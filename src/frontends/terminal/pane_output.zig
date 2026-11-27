@@ -80,6 +80,9 @@ fn sendImageResponses(self: *Pane) void {
 /// using `❯` loses everything printed after it. C1 controls are unreachable in a
 /// UTF-8 stream, which is why the VT parser does not honour them either.
 pub fn feedOutput(self: *Pane, data: []const u8) void {
+    if (data.len > 0 and !self.backlog_replaying) {
+        self.last_output_ms = std.time.milliTimestamp();
+    }
     const ESC: u8 = 0x1b;
 
     var plain_start: usize = 0;
@@ -423,6 +426,10 @@ fn finishOsc(self: *Pane) void {
         consumeStretchOsc(self, self.osc_buf.items);
         return;
     }
+    if (code == core.pane_status.OSC) {
+        consumeStatusOsc(self, self.osc_buf.items);
+        return;
+    }
     if (isConsumedOscCode(code)) {
         consumeOsc(self, self.osc_buf.items);
         return;
@@ -496,6 +503,18 @@ fn consumeStretchOsc(self: *Pane, seq: []const u8) void {
         .begin => self.vt.stretchBegin(),
         .end => self.vt.stretchEnd(),
         .fill => |id| self.vt.printStretchFill(id),
+    }
+}
+
+/// OSC 1333 — per-pane lifecycle status (`idle`, `working`, `blocked`, `done`).
+fn consumeStatusOsc(self: *Pane, seq: []const u8) void {
+    const params = oscParams(seq) orelse return;
+    switch (self.status_state.applyOsc(params, self.focused, std.time.milliTimestamp())) {
+        .ignore => {},
+        .have => writeResponse(self, "\x1b]1333;have;1\x1b\\", "OSC 1333 capability response write failed"),
+        .changed => {
+            self.status_changed = true;
+        },
     }
 }
 
@@ -1031,6 +1050,46 @@ test "OSC 1331 refresh is queued across every split" {
         try std.testing.expect(pane.takeHostColorRefresh());
         try std.testing.expect(!pane.takeHostColorRefresh());
     }
+}
+
+test "OSC 1333 pane status updates and capability replies survive every split" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    try std.testing.expectEqual(@as(usize, 0), rc);
+    defer std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var pane: Pane = undefined;
+    try pane.initWithPod(std.testing.allocator, 1, 0, 0, 80, 24, 7, fds[0], @splat('0'));
+    defer pane.deinit();
+
+    var frame_buf: [256]u8 = undefined;
+    _ = try readTestFrame(fds[1], &frame_buf);
+
+    const query = "\x1b]1333;have\x1b\\";
+    for (0..query.len + 1) |split| {
+        pane.feedPodOutput(query[0..split]);
+        pane.feedPodOutput(query[split..]);
+        const frame = try readTestFrame(fds[1], &frame_buf);
+        try std.testing.expectEqualStrings("\x1b]1333;have;1\x1b\\", frame.payload[16..]);
+    }
+
+    const set_seq = "\x1b]1333;set;blocked;Approve deploy?\x1b\\";
+    for (0..set_seq.len + 1) |split| {
+        _ = pane.status_state.clear(0);
+        pane.status_changed = false;
+        pane.feedPodOutput(set_seq[0..split]);
+        pane.feedPodOutput(set_seq[split..]);
+        try std.testing.expect(pane.takeStatusChanged());
+        try std.testing.expectEqual(core.pane_status.Status.blocked, pane.status_state.status);
+        try std.testing.expectEqualStrings("Approve deploy?", pane.status_state.note().?);
+        try std.testing.expect(pane.status_state.attention);
+    }
+
+    pane.feedPodOutput("\x1b]1333;clear\x07");
+    try std.testing.expect(pane.takeStatusChanged());
+    try std.testing.expectEqual(core.pane_status.Status.idle, pane.status_state.status);
+    try std.testing.expect(pane.status_state.note() == null);
 }
 
 fn containsClearSeq(tail: []const u8, data: []const u8) bool {

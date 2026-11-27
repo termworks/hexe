@@ -606,6 +606,13 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                     state.popups.clearResults();
                     @import("layout_picker.zig").confirmDelete(state, confirmed, false);
                 },
+                .attention_choose => {
+                    const selected = state.popups.getPickerResult();
+                    const act = state.popups.getPickerAction();
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                    @import("attention.zig").handlePickerResult(state, selected, act);
+                },
                 .startup_attach_confirm => {
                     // Bare `hexe`, level 1 with a single same-cwd session.
                     const attach = state.popups.getConfirmResult() orelse false;

@@ -393,6 +393,9 @@ pub const State = struct {
     saved_layout_count: usize = 0,
     saved_layout_selected: ?usize = null,
     saved_layout_delete_idx: ?usize = null,
+    /// Attention picker entries (pane UUIDs listed in the open attention picker).
+    attention_uuids: [64][32]u8 = undefined,
+    attention_count: usize = 0,
     /// Recorded before teardown so `main.zig` can print a styled banner to
     /// `real_stderr` after restoring the terminal screen.
     exit_summary: state_types.ExitSummary,
@@ -3515,7 +3518,7 @@ pub const State = struct {
     /// A sub-float opened BY a sub-float joins the same family rather than
     /// nesting a level deeper: the design is one row of chips per float, and a
     /// tree of unbounded depth has no way to show itself in a title row.
-    pub fn adoptIntoFloatFamily(self: *State, child: [32]u8, parent: [32]u8) bool {
+    pub fn adoptIntoFloatFamily(self: *State, child: [32]u8, parent: [32]u8, switch_shown: bool) bool {
         const parent_state = self.runtime.floatState(parent) orelse {
             core.logging.warn("terminal", "adopt: no float record for the parent", .{});
             return false;
@@ -3554,7 +3557,9 @@ pub const State = struct {
         }
 
         self.runtime.syncFloatState(child_state, false);
-        self.setFamilyShown(root, child_state.family_index);
+        if (switch_shown) {
+            self.setFamilyShown(root, child_state.family_index);
+        }
         self.resizeFloatingPanes();
         return true;
     }

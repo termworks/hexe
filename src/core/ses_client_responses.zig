@@ -134,9 +134,8 @@ comptime {
     }
 }
 
-pub fn queuePendingPush(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) void {
-    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-    const replayable = switch (msg_type) {
+pub fn isReplayablePush(msg_type: wire.MsgType) bool {
+    return switch (msg_type) {
         .float_request,
         .notify,
         .targeted_notify,
@@ -153,6 +152,7 @@ pub fn queuePendingPush(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeade
         // of the time, since the frontend polls pane_info every tick.
         .cwd_changed,
         .fg_changed,
+        .observers_changed,
         // The parked-palette answer. Requested fire-and-forget, so no reader
         // is waiting on it: dropped here, a reattached pane silently comes
         // back with its colours missing.
@@ -160,6 +160,11 @@ pub fn queuePendingPush(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeade
         => true,
         else => false,
     };
+}
+
+pub fn queuePendingPush(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) void {
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    const replayable = isReplayablePush(msg_type);
     if (!replayable or hdr.payload_len > MAX_QUEUED_PUSH_PAYLOAD or
         self.pending_pushes.items.len >= MAX_QUEUED_PUSHES)
     {

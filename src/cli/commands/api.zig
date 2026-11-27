@@ -232,6 +232,37 @@ pub fn resolveEndpoint(allocator: std.mem.Allocator, session_opt: ?[]const u8) !
     return .{ .label = sole, .path = try socketPath(allocator, sole) };
 }
 
+pub fn resolveEndpointForPane(
+    allocator: std.mem.Allocator,
+    session_opt: ?[]const u8,
+    pane_uuid: []const u8,
+) !Endpoint {
+    if (session_opt == null and pane_uuid.len == 32) {
+        if (std.posix.getenv("HEXE_PANE_API_SOCKET")) |psock| {
+            if (psock.len > 0) {
+                if (std.posix.getenv("HEXE_PANE_UUID")) |self_uuid| {
+                    if (std.mem.eql(u8, self_uuid, pane_uuid)) {
+                        return .{
+                            .label = try allocator.dupe(u8, "HEXE_PANE_API_SOCKET"),
+                            .path = try allocator.dupe(u8, psock),
+                        };
+                    }
+                }
+            }
+        }
+        const keys = listeningSessions(allocator) catch try allocator.alloc([]u8, 0);
+        defer freeKeys(allocator, keys);
+        for (keys) |key| {
+            const candidate = try socketPath(allocator, key);
+            if (ownsPane(allocator, candidate, pane_uuid)) {
+                return .{ .label = try allocator.dupe(u8, key), .path = candidate };
+            }
+            allocator.free(candidate);
+        }
+    }
+    return resolveEndpoint(allocator, session_opt);
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     call: []const u8,
@@ -318,7 +349,7 @@ pub fn run(
 /// `quiet` is for probing: working out which of several sessions answers to a
 /// name means connecting to each, and reporting every miss would bury the one
 /// message the caller needs.
-fn request(
+pub fn request(
     allocator: std.mem.Allocator,
     label: []const u8,
     path: []const u8,

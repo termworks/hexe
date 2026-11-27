@@ -73,7 +73,14 @@ pub fn cleanupDeadFloat(state: *State, index: usize) void {
         if (family_root) |root| {
             var members_buf: [16]State.FamilyMember = undefined;
             const members = state.familyMembers(root, &members_buf);
-            if (members.len > 0 and state.showFamilyMember(members[0].uuid, true)) return;
+            if (members.len > 0) {
+                if (state.findPaneByUuid(members[0].uuid)) |survivor| {
+                    const tab = state.activeTabIndex();
+                    const visible_here = state.paneVisibleOnTab(survivor, tab) and
+                        (state.paneParentTab(survivor) orelse tab) == tab;
+                    if (visible_here and state.showFamilyMember(members[0].uuid, true)) return;
+                }
+            }
         }
         state.setActiveFloatingIndex(null);
         state.cursor_needs_restore = true;

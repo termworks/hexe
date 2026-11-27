@@ -92,13 +92,13 @@ of it.
 
 | access | verbs |
 | --- | --- |
-| `read` | `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `config`, `capture`, `client`, `verbs` |
+| `read` | `pane`, `panes`, `floats`, `splits`, `tabs`, `session`, `ui`, `count`, `config`, `capture`, `client`, `verbs`, `attention`, `status` (query/pane-local) |
 | `screen` | `env`, `line`, `cursor_line`, `screen_text`, `find`, `selection`, `selection_range` |
 | `typing` | `send` |
 | `keyboard` | `keys` |
 | `popup` | `notify`, `popup`, `draw`, `undraw` |
 | `stream` | `stream` |
-| `control` | `act`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`, `rename`, `share`, `geometry`, `ratio` |
+| `control` | `act`, `focus`, `close`, `scroll`, `tab_select`, `rename_tab`, `rename`, `share`, `geometry`, `ratio`, `status` (cross-pane) |
 
 `control` is the default: a verb that changes the session's shape needs the
 whole session, and there is no smaller honest name for that.
@@ -164,9 +164,25 @@ never interprets; see [access.md](access.md) for why they are separate powers.
 
 A pane record carries what you would expect to have to ask several commands
 for: `uuid`, `name`, geometry, `cwd`, `process`, `alive`, `alt_screen`, cursor
-position and shape, `scrolled`, `last_command`, `jobs`, plus float attributes
-(`per_cwd`, `sticky`, `visible`, `visible_tabs`, size percentages), and who is
-watching it (`observers`, `shared`, `share_blocked`).
+position and shape, `scrolled`, `last_command`, `jobs`, lifecycle status
+(`status`, `status_note`, `attention`, `status_updated_at_ms`, `last_output_ms`,
+`idle_ms`), plus float attributes (`per_cwd`, `sticky`, `visible`,
+`visible_tabs`, size percentages), and who is watching it (`observers`,
+`shared`, `share_blocked`). Tab records carry rolled-up `status`, `attention`,
+and `attention_count`; `session()` reports the session-wide `attention_count`.
+
+`status([selector] [, state] [, note])` reads or sets a pane's lifecycle status
+(`idle`, `working`, `blocked`, `done`). Passing `""` or `false` clears back to
+`idle`. Over `$HEXE_PANE_API_SOCKET`, a program may report its own status without
+needing session-wide `control`. Programs can also emit the private **OSC 1333**
+sequence (`\x1b]1333;have\x1b\\` probes support, `\x1b]1333;set;<status>[;<note>]\x1b\\`
+or `\x1b]1333;<status>[;<note>]\x1b\\` sets status, `\x1b]1333;clear\x1b\\` clears).
+
+`attention()` returns all unfocused live panes needing attention ordered by
+urgency (`blocked` > `done` > notice), then oldest update first. Keybind actions
+`pane.attention_next`, `pane.attention_list`, and `pane.status_clear` jump, pick,
+and clear across tabs, hidden floats, and sub-float chips (focusing a `done` pane
+auto-acknowledges it to `idle`).
 
 `share([selector] [, enable])` reads whether a pane is being watched, and cuts
 it off when given `false`:
@@ -461,8 +477,8 @@ the one place every event already passes through — so this list grows with tha
 one rather than beside it.
 
 Currently emitted: `pane_focus_changed`, `pane_cwd_changed`, `pane_process_changed`,
-`pane_shell_running_changed`, `pane_exited`, `command_finished`, `tab_created`,
-`tab_changed`, `tab_closed`, `statusbar_redraw`.
+`pane_shell_running_changed`, `pane_status_changed`, `pane_exited`, `command_finished`,
+`tab_created`, `tab_changed`, `tab_closed`, `statusbar_redraw`.
 
 A subscriber that stops reading is disconnected once its undelivered backlog
 passes 1 MiB. A phone on a bad link must not be able to grow the mux's memory,

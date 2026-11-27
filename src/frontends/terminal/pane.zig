@@ -113,6 +113,12 @@ pub const Pane = struct {
     osc_notifications: std.ArrayList(pane_osc.Notification) = .empty,
     osc_progress: pane_osc.Progress = .{},
     osc_progress_changed: bool = false,
+    /// Per-pane agent/lifecycle status (`idle`, `working`, `blocked`, `done`)
+    /// updated via OSC 1333, `hexe api status`, or background notifications.
+    status_state: core.pane_status.State = .{},
+    status_changed: bool = false,
+    /// Monotonic-ish wall timestamp (ms) of the last non-replay VT output chunk.
+    last_output_ms: i64 = 0,
     /// A whole palette plus the two dynamic colours, because programs ask for all of them in one
     /// burst and the overflow used to be relayed to the host instead of answered from cache.
     host_color_queries: [260]host_colors.QueryKey = undefined,
@@ -162,6 +168,12 @@ pub const Pane = struct {
     pub fn takeOscProgressChanged(self: *Pane) bool {
         const changed = self.osc_progress_changed;
         self.osc_progress_changed = false;
+        return changed;
+    }
+
+    pub fn takeStatusChanged(self: *Pane) bool {
+        const changed = self.status_changed;
+        self.status_changed = false;
         return changed;
     }
 
